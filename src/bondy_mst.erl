@@ -214,7 +214,7 @@ Dump Merkle search tree structure.
 -spec dump(t()) -> undefined.
 
 dump(#?MODULE{store = Store, root = R}) ->
-    dump(Store, R, <<>>).
+    dump(Store, R).
 
 
 %% =============================================================================
@@ -785,23 +785,27 @@ diff_to_list_rec(T, Store1_0, Low1, List1, Store2_0, Low2, List2) ->
     end.
 
 
+%% @private
+dump(Store, R) ->
+    dump(Store, R, "").
 
+
+%% @private
 dump(_, undefined, _) ->
     undefined;
 
-dump(Store, Root, Bin) ->
+dump(Store, Root, Space) ->
     Page = bondy_mst_store:get(Store, Root),
     Low = bondy_mst_page:low(Page),
     List = bondy_mst_page:list(Page),
     Level = bondy_mst_page:level(Page),
 
-    IOList = [Bin, binary:encode_hex(Root), $(, integer_to_binary(Level)],
-    io:format("~s~n", [IOList]),
-    dump(Store, Low, [Bin, "  "]),
+    io:format("~s~s (~p)~n", [Space, binary:encode_hex(Root), Level]),
+    dump(Store, Low, Space ++ [$\s, $\s]),
     [
         begin
-            io:format("~s- ~p => ~p~n", [Bin, K, V]),
-            dump(Store, R, [Bin, "  "])
+            io:format("~s- ~p => ~p~n", [Space, K, V]),
+            dump(Store, R, Space ++ [$\s, $\s])
         end
         || {K, V, R} <- List
     ].
