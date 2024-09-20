@@ -1,0 +1,15 @@
+{application, bondy_mst,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {bondy_mst_app, []}},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache-2.0"]},
+  {links, []}
+ ]}.
