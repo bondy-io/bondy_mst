@@ -101,9 +101,9 @@ copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
 
 -spec free(t(), Hash :: binary()) -> t().
 
-free(#?MODULE{} = T, _Hash) ->
-    %% Do nothing, we GC instead
-    T.
+free(#?MODULE{pages = Pages0} = T, Hash) ->
+    Pages = maps:remove(Hash, Pages0),
+    T#?MODULE{pages = Pages}.
 
 
 -spec gc(t(), KeepRoots :: [list()]) -> t().
