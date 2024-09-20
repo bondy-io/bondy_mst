@@ -44,6 +44,7 @@ Local store backend implementation.
 -export([page_refs/1]).
 -export([free/2]).
 -export([gc/2]).
+-export([delete/1]).
 
 
 
@@ -52,6 +53,9 @@ Local store backend implementation.
 %% =============================================================================
 
 
+
+-doc """
+""".
 -spec new(Opts :: map() | list()) -> t().
 
 new(Opts) when is_list(Opts) ->
@@ -61,18 +65,24 @@ new(Opts) when is_map(Opts) ->
     #?MODULE{}.
 
 
+-doc """
+""".
 -spec get(t(), page()) -> page() | undefined.
 
 get(#?MODULE{pages = Pages}, Hash) ->
     maps:get(Hash, Pages, undefined).
 
 
+-doc """
+""".
 -spec has(t(), page()) -> boolean().
 
 has(#?MODULE{pages = Pages}, Hash) ->
     maps:is_key(Hash, Pages).
 
 
+-doc """
+""".
 -spec put(t(), page()) -> {Hash :: binary(), t()}.
 
 put(#?MODULE{pages = Pages} = T0, Page) ->
@@ -81,6 +91,8 @@ put(#?MODULE{pages = Pages} = T0, Page) ->
     {Hash, T}.
 
 
+-doc """
+""".
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().
 
 copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
@@ -98,7 +110,8 @@ copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
     end.
 
 
-
+-doc """
+""".
 -spec free(t(), Hash :: binary()) -> t().
 
 free(#?MODULE{pages = Pages0} = T, Hash) ->
@@ -106,6 +119,8 @@ free(#?MODULE{pages = Pages0} = T, Hash) ->
     T#?MODULE{pages = Pages}.
 
 
+-doc """
+""".
 -spec gc(t(), KeepRoots :: [list()]) -> t().
 
 gc(#?MODULE{pages = Pages0} = T, KeepRoots) ->
@@ -118,17 +133,19 @@ gc(#?MODULE{pages = Pages0} = T, KeepRoots) ->
     T#?MODULE{pages = Pages}.
 
 
+-doc """
+""".
 -spec missing_set(t(), Root :: binary()) -> [Pages :: list()].
 
 missing_set(#?MODULE{pages = Pages} = T, Root) ->
     case maps:get(Root, Pages, undefined) of
         undefined ->
-            sets:new([Root]);
+            sets:from_list([Root], [{version, 2}]);
 
         Page ->
             lists:foldl(
                 fun(X, Acc) -> sets:union(Acc, missing_set(T, X)) end,
-                sets:new(),
+                sets:new([{version, 2}]),
                 page_refs(Page)
             )
     end.
@@ -138,6 +155,13 @@ missing_set(#?MODULE{pages = Pages} = T, Root) ->
 
 page_refs(Page) ->
     bondy_mst_page:refs(Page).
+
+
+-spec delete(t()) -> ok.
+
+delete(#?MODULE{}) ->
+    %% We cannot delete, this is an in-memory map, we do nothing.
+    ok.
 
 
 

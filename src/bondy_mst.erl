@@ -75,6 +75,7 @@ A node of the tree is:
 -export([dump/1]).
 -export([gc/1]).
 -export([gc/2]).
+-export([delete/1]).
 
 
 
@@ -236,6 +237,15 @@ gc(#?MODULE{root = R} = T) ->
 gc(#?MODULE{store = Store0} = T, KeepRoots) ->
     Store = bondy_mst_store:gc(Store0, KeepRoots),
     T#?MODULE{store = Store}.
+
+
+-doc """
+Deletes the tree (by deleting its backend store).
+""".
+-spec delete(t()) -> ok.
+
+delete(#?MODULE{store = Val}) ->
+    bondy_mst_store:delete(Val).
 
 
 %% =============================================================================

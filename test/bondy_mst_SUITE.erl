@@ -8,11 +8,40 @@
 -compile(export_all).
 
 %% All test cases to be run
-all() -> 
+
+all() ->
     [
-        basic_test,
-        large_test
+        {group, local_store, []},
+        {group, ets_store, []}
     ].
+
+groups() ->
+    [
+        {local_store, [], [
+            basic_test,
+            large_test
+        ]},
+        {ets_store, [], [
+            basic_test,
+            large_test
+        ]}
+    ].
+
+
+init_per_group(local_store, Config) ->
+    Fun = fun(_) -> bondy_mst_store:new(bondy_mst_local_store, []) end,
+    [{store_fun, Fun}] ++ Config;
+
+init_per_group(ets_store, Config) ->
+    Fun = fun(Name) ->
+        bondy_mst_store:new(bondy_mst_ets_store, [{name, Name}])
+    end,
+    [{store_fun, Fun}] ++ Config.
+
+
+end_per_group(_, _Config) ->
+    ok.
+
 
 %% Setup and teardown functions
 
@@ -34,11 +63,26 @@ end_per_testcase(_TestCase, _Config) ->
     ok.
 
 
-basic_test(_Config) ->
+
+basic_test(Config) ->
+    Fun = ?config(store_fun, Config),
+
     %% Test for basic MST operations
-    A = lists:foldl(fun(N, Acc) -> ?MST:insert(Acc, N) end, ?MST:new(), lists:seq(1, 10)),
-    B = lists:foldl(fun(N, Acc) -> ?MST:insert(Acc, N) end, ?MST:new(), lists:seq(5, 15)),
-    Z = lists:foldl(fun(N, Acc) -> ?MST:insert(Acc, N) end, ?MST:new(), lists:seq(1, 15)),
+    A = lists:foldl(
+        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        ?MST:new(#{store => Fun(bondy_mst_a)}),
+        lists:seq(1, 10)
+    ),
+    B = lists:foldl(
+        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        ?MST:new(#{store => Fun(bondy_mst_b)}),
+        lists:seq(5, 15)
+    ),
+    Z = lists:foldl(
+        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        ?MST:new(#{store => Fun(bondy_mst_z)}),
+        lists:seq(1, 15)
+    ),
     C = ?MST:merge(A, B),
     D = ?MST:merge(B, A),
 
@@ -58,15 +102,34 @@ basic_test(_Config) ->
     DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
     ?assertEqual(lists:seq(11, 15), lists:sort(DBA)),
     DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
-    ?assertEqual(lists:seq(1, 4), lists:sort(DAB)).
+    ?assertEqual(lists:seq(1, 4), lists:sort(DAB)),
 
-large_test(_Config) ->
+    ok = bondy_mst:delete(A),
+    ok = bondy_mst:delete(B),
+    ok = bondy_mst:delete(Z).
+
+
+large_test(Config) ->
+    Fun = ?config(store_fun, Config),
+
     %% Test for large MST operations
     ShuffledA = list_shuffle(lists:seq(1, 1000)),
     ShuffledB = list_shuffle(lists:seq(550, 1500)),
-    A = lists:foldl(fun(N, Acc) -> ?MST:insert(Acc, N) end, ?MST:new(), ShuffledA),
-    B = lists:foldl(fun(N, Acc) -> ?MST:insert(Acc, N) end, ?MST:new(), ShuffledB),
-    Z = lists:foldl(fun(N, Acc) -> ?MST:insert(Acc, N) end, ?MST:new(), lists:seq(1, 1500)),
+     A = lists:foldl(
+        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        ?MST:new(#{store => Fun(bondy_mst_a)}),
+        ShuffledA
+    ),
+    B = lists:foldl(
+        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        ?MST:new(#{store => Fun(bondy_mst_b)}),
+        ShuffledB
+    ),
+    Z = lists:foldl(
+        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        ?MST:new(#{store => Fun(bondy_mst_z)}),
+        lists:seq(1, 1500)
+    ),
     C = ?MST:merge(A, B),
     D = ?MST:merge(B, A),
 
@@ -87,7 +150,11 @@ large_test(_Config) ->
     DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
     ?assertEqual(lists:seq(1001, 1500), DBA),
     DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
-    ?assertEqual(lists:seq(1, 549), DAB).
+    ?assertEqual(lists:seq(1, 549), DAB),
+
+    ok = bondy_mst:delete(A),
+    ok = bondy_mst:delete(B),
+    ok = bondy_mst:delete(Z).
 
 
 %% =============================================================================

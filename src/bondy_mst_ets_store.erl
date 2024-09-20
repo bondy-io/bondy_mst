@@ -45,12 +45,14 @@ ETS-based store backend implementation.
 -export([page_refs/1]).
 -export([free/2]).
 -export([gc/2]).
+-export([delete/1]).
 
 
 
 %% =============================================================================
 %% BONDY_MST_STORE CALLBACKS
 %% =============================================================================
+
 
 
 -doc """
@@ -60,7 +62,6 @@ ETS-based store backend implementation.
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
-
 new(#{name := Name} = Opts) ->
     Tab = ets:new(Name, [ordered_set, named_table, public]),
     #?MODULE{tab = Tab}.
@@ -68,7 +69,7 @@ new(#{name := Name} = Opts) ->
 
 -doc """
 """.
--spec get(Store :: t(), Hash :: binary()) -> Page :: page() | no_return().
+-spec get(T :: t(), Hash :: binary()) -> Page :: page() | undefined.
 
 get(#?MODULE{tab = Tab}, Hash) ->
     do_get(Tab, Hash).
@@ -76,37 +77,81 @@ get(#?MODULE{tab = Tab}, Hash) ->
 
 -doc """
 """.
--spec has(Store :: t(), Hash :: binary()) -> boolean().
+-spec has(T :: t(), Hash :: binary()) -> boolean().
 
 has(#?MODULE{tab = Tab}, Hash) ->
-    MS = [ {{Hash, '_'}, [], [true]} ],
-    1 == ets:select_count(Tab, MS).
+    ets:member(Tab, Hash).
 
 
 -doc """
 """.
--spec put(Store :: t(), Page :: page()) -> {Hash :: binary(), Store :: t()}.
+-spec put(T :: t(), Page :: page()) -> {Hash :: binary(), T :: t()}.
 
-put(#?MODULE{tab = Tab} = Store, Page) ->
+put(#?MODULE{tab = Tab} = T, Page) ->
     Hash = bondy_mst_utils:hash(Page),
     true = ets:insert(Tab, {Hash, Page}),
-    {Hash, Store}.
+    {Hash, T}.
 
 
 -doc """
 """.
--spec missing_set(Store :: t(), Root :: binary()) -> sets:set(page()).
+-spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().
 
-missing_set(Store, Root) ->
-    try
-        Page = get(Store, Root),
-        Refs = page_refs(Page),
-        Fun = fun(P, Acc) -> sets:union(Acc, missing_set(Store, P)) end,
-        Acc0 = sets:new([{version, 2}]),
-        lists:foldl(Fun, Acc0, Refs)
-    catch
-        error:badarg ->
-            sets:from_list([Root], [{version, 2}])
+copy(#?MODULE{tab = Tab} = T, OtherStore, Hash) ->
+
+    case bondy_mst_store:get(OtherStore, Hash) of
+        undefined ->
+            T;
+
+        Page ->
+            Refs = bondy_mst_store:page_refs(OtherStore, Page),
+            T = lists:foldl(
+                fun(Ref, Acc) -> copy(Acc, OtherStore, Ref) end,
+                T,
+                Refs
+            ),
+            true = ets:insert(Tab, {Hash, Page}),
+            T
+    end.
+
+
+-doc """
+""".
+-spec free(T :: t(), Hash :: binary()) -> T :: t().
+
+free(#?MODULE{tab = Tab} = T, Hash) ->
+    true = ets:delete(Tab, Hash),
+    T.
+
+
+-doc """
+""".
+-spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
+
+gc(#?MODULE{tab = Tab} = T, KeepRoots) ->
+    lists:foldl(
+        fun(X, Acc) -> gc_aux(Acc, Tab, X) end,
+        ok,
+        KeepRoots
+    ),
+    T.
+
+
+-doc """
+""".
+-spec missing_set(T :: t(), Root :: binary()) -> sets:set(page()).
+
+missing_set(T, Root) ->
+    case get(T, Root) of
+        undefined ->
+            sets:from_list([Root], [{version, 2}]);
+
+        Page ->
+            lists:foldl(
+                fun(P, Acc) -> sets:union(Acc, missing_set(T, P)) end,
+                sets:new([{version, 2}]),
+                page_refs(Page)
+            )
     end.
 
 
@@ -118,55 +163,11 @@ page_refs(Page) ->
     bondy_mst_page:refs(Page).
 
 
--doc """
-""".
--spec copy(Store :: t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) ->
-    Store :: t().
+-spec delete(t()) -> ok.
 
-copy(#?MODULE{tab = Tab} = Store, OtherStore, Hash) ->
-    %% Store is always the same
-    try
-        case bondy_mst_store:get(OtherStore, Hash) of
-            nil ->
-                Store;
-
-            Page ->
-                Refs = bondy_mst_store:page_refs(OtherStore, Page),
-                Store = lists:foldl(
-                    fun(Ref, Acc) -> copy(Acc, OtherStore, Ref) end,
-                    Store,
-                    Refs
-                ),
-                true = ets:insert(Tab, {Hash, Page}),
-                Store
-        end
-    catch
-        error:badarg ->
-            Store
-    end.
-
-
--doc """
-""".
--spec free(Store :: t(), Hash :: binary()) -> Store :: t().
-
-free(Store, _Hash) ->
-    %% Do nothing
-    Store.
-
-
--doc """
-""".
--spec gc(Store :: t(), KeepRoots :: [list()]) -> Store :: t().
-
-gc(#?MODULE{tab = Tab} = Store, KeepRoots) ->
-    Pages = lists:foldl(
-        fun(X, Acc) -> gc_aux(Acc, Tab, X) end,
-        #{},
-        KeepRoots
-    ),
-    Store.
-
+delete(#?MODULE{tab = Tab}) ->
+    ets:delete(Tab),
+    ok.
 
 
 
@@ -178,25 +179,32 @@ gc(#?MODULE{tab = Tab} = Store, KeepRoots) ->
 
 %% @private
 do_get(Tab, Hash) ->
-    ets:lookup_element(Tab, Hash, 1).
+    case ets:lookup_element(Tab, Hash, 2, undefined) of
+        undefined ->
+            undefined;
+
+        [Page] ->
+            %% bag and duplicate bag tables
+            Page;
+
+        Page ->
+            %%  set and ordered_set tables
+            Page
+    end.
 
 
 %% @private
 gc_aux(Acc0, Tab, Root) when not is_map_key(Root, Acc0) ->
-    try
-        Page = do_get(Tab, Root),
-        Acc1 = maps:put(Root, Page, Acc0),
-        Refs = page_refs(Page),
-
-        lists:foldl(
-            fun(Ref, IAcc) -> gc_aux(IAcc, Tab, Ref) end,
-            Acc1,
-            Refs
-        )
-
-    catch
-        error:badarg ->
-            Acc0
+    case do_get(Tab, Root) of
+        undefined ->
+            ok;
+        Page ->
+            Acc = maps:put(Root, Page, Acc0),
+            lists:foldl(
+                fun(X, IAcc) -> gc_aux(IAcc, Tab, X) end,
+                ok,
+                page_refs(Page)
+            )
     end;
 
 gc_aux(Acc, _, _) ->

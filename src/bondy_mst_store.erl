@@ -31,7 +31,8 @@ operations and implement different synchronization or caching mechanisms.
 -export([page_refs/2]).
 -export([free/2]).
 -export([gc/2]).
-
+-export([is_type/1]).
+-export([delete/1]).
 
 
 %% =============================================================================
@@ -56,6 +57,8 @@ operations and implement different synchronization or caching mechanisms.
 -callback missing_set(backend(), Root :: binary()) -> [Pages :: list()].
 
 -callback page_refs(Page :: page()) -> Refs :: [binary()].
+
+-callback delete(backend()) -> ok.
 
 
 %% =============================================================================
@@ -139,4 +142,11 @@ Get the list of pages we know we are missing starting at this root.
 missing_set(#?MODULE{mod = Mod, state = State}, Root) ->
     Mod:missing_set(State, Root).
 
+
+-doc """
+""".
+-spec delete(Store :: t()) -> ok.
+
+delete(#?MODULE{mod = Mod, state = State}) ->
+    Mod:delete(State).
 
