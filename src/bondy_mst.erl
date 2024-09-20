@@ -73,6 +73,8 @@ A node of the tree is:
 -export([to_list/1]).
 -export([diff_to_list/2]).
 -export([dump/1]).
+-export([gc/1]).
+-export([gc/2]).
 
 
 
@@ -215,6 +217,25 @@ Dump Merkle search tree structure.
 
 dump(#?MODULE{store = Store, root = R}) ->
     dump(Store, R).
+
+
+-doc """
+
+""".
+-spec gc(t()) -> t().
+
+gc(#?MODULE{root = R} = T) ->
+    gc(T, [R]).
+
+
+-doc """
+
+""".
+-spec gc(t(), [binary()]) -> t().
+
+gc(#?MODULE{store = Store0} = T, KeepRoots) ->
+    Store = bondy_mst_store:gc(Store0, KeepRoots),
+    T#?MODULE{store = Store}.
 
 
 %% =============================================================================
