@@ -107,12 +107,10 @@ put(#?MODULE{mod = Mod, state = State0} = T, Page) ->
     {Hash, T#?MODULE{state = State}}.
 
 
-
 -spec copy(Store :: t(), OtherStore :: t(), Hash :: binary()) -> Store :: t().
 
 copy(#?MODULE{mod = Mod, state = State0} = T, OtherStore, Hash) ->
     T#?MODULE{state = Mod:copy(State0, OtherStore, Hash)}.
-
 
 
 -spec free(Store :: t(), Hash :: binary()) -> Store :: t().
@@ -121,12 +119,10 @@ free(#?MODULE{mod = Mod, state = State0} = T, Hash) ->
     T#?MODULE{state = Mod:free(State0, Hash)}.
 
 
-
 -spec gc(Store :: t(), KeepRoots :: [list()]) -> Store :: t().
 
 gc(#?MODULE{mod = Mod, state = State0} = T, KeepRoots) ->
     T#?MODULE{state = Mod:gc(State0, KeepRoots)}.
-
 
 
 -spec page_refs(Store :: t(), Page :: page()) -> Refs :: [binary()].
