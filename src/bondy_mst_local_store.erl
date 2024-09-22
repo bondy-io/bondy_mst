@@ -19,7 +19,7 @@
 
 -module(bondy_mst_local_store).
 -moduledoc """
-Local store backend implementation.
+MST backend using `maps`.
 """.
 
 -behaviour(bondy_mst_store).

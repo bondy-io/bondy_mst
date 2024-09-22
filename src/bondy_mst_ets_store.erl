@@ -19,7 +19,7 @@
 
 -module(bondy_mst_ets_store).
 -moduledoc """
-ETS-based store backend implementation.
+Non-concurrent, MST backend using `ets`.
 """.
 
 -behaviour(bondy_mst_store).
