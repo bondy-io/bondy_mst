@@ -24,15 +24,24 @@ Module that represents objects that are used as data pages in a pagestore and
 that may reference other data pages by their hash.
 """.
 
+-include("bondy_mst.hrl").
+
 -record(?MODULE, {
-    level,
-    low,
-    list
+    level       ::  level(),
+    low         ::  bondy_mst_utils:hash() | undefined,
+    list        ::  [entry()]
 }).
 
--type t() ::  #?MODULE{}.
+-type t()       ::  #?MODULE{}.
+-type entry()   ::  {key(), value(), hash() | undefined}.
 
 -export_type([t/0]).
+-export_type([entry/0]).
+%% Defined in bondy_mst.hrl
+-export_type([level/0]).
+-export_type([key/0]).
+-export_type([value/0]).
+-export_type([hash/0]).
 
 -export([new/3]).
 -export([refs/1]).
@@ -46,6 +55,7 @@ that may reference other data pages by their hash.
 %% =============================================================================
 
 
+-spec new(level(), hash(), [entry()]) -> t().
 
 new(Level, Low, List) ->
     #?MODULE{
@@ -55,11 +65,17 @@ new(Level, Low, List) ->
     }.
 
 
+-spec level(t()) -> level().
+
 level(#?MODULE{level = Val}) -> Val.
 
 
+-spec low(t()) -> hash().
+
 low(#?MODULE{low = Val}) -> Val.
 
+
+-spec low(t()) -> [entry()].
 
 list(#?MODULE{list = Val}) -> Val.
 

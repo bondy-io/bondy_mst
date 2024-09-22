@@ -22,6 +22,10 @@
 -moduledoc """
 """.
 
+-type hash()    ::  binary().
+
+-export_type([hash/0]).
+
 -export([hash/1]).
 -export([hash/2]).
 
