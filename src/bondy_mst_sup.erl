@@ -13,23 +13,62 @@
 
 -define(SERVER, ?MODULE).
 
-start_link() ->
-    supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
-%% sup_flags() = #{strategy => strategy(),         % optional
-%%                 intensity => non_neg_integer(), % optional
-%%                 period => pos_integer()}        % optional
-%% child_spec() = #{id => child_id(),       % mandatory
-%%                  start => mfargs(),      % mandatory
-%%                  restart => restart(),   % optional
-%%                  shutdown => shutdown(), % optional
-%%                  type => worker(),       % optional
-%%                  modules => modules()}   % optional
+
+
+%% =============================================================================
+%% API
+%% =============================================================================
+
+
+
+start_link() ->
+    case supervisor:start_link({local, ?SERVER}, ?MODULE, []) of
+        {ok, _} = OK ->
+            Children = supervisor:which_children(?MODULE),
+            case lists:keyfind(leveled, 1, Children) of
+                {leveled, Pid, worker, _} ->
+                    _ = persistent_term:put({bondy_mst, leveled}, Pid),
+                    OK;
+                false ->
+                    OK
+            end;
+        Error ->
+            Error
+    end.
+
+
+
+
+%% =============================================================================
+%% SUPERVISOR CALLBACKS
+%% =============================================================================
+
+
+
+
 init([]) ->
-    SupFlags = #{strategy => one_for_all,
-                 intensity => 0,
-                 period => 1},
-    ChildSpecs = [],
+    ok = bondy_mst_config:init(),
+    SupFlags = #{
+        strategy => one_for_all,
+        intensity => 0,
+        period => 1
+    },
+    ChildSpecs =
+        case bondy_mst_config:get([store, leveled], []) of
+            [] ->
+                [];
+            Opts ->
+                [
+                    #{
+                        id => leveled,
+                        start => {leveled_bookie, book_start, [Opts]},
+                        restart => permanent,
+                        shutdown => 5_000,
+                        type => worker,
+                        modules => [leveled_bookie]
+                    }
+                ]
+        end,
     {ok, {SupFlags, ChildSpecs}}.
 
-%% internal functions

@@ -28,7 +28,7 @@ that may reference other data pages by their hash.
 
 -record(?MODULE, {
     level       ::  level(),
-    low         ::  bondy_mst_utils:hash() | undefined,
+    low         ::  hash() | undefined,
     list        ::  [entry()]
 }).
 
@@ -48,6 +48,7 @@ that may reference other data pages by their hash.
 -export([level/1]).
 -export([low/1]).
 -export([list/1]).
+
 
 
 %% =============================================================================
@@ -75,7 +76,7 @@ level(#?MODULE{level = Val}) -> Val.
 low(#?MODULE{low = Val}) -> Val.
 
 
--spec low(t()) -> [entry()].
+-spec list(t()) -> [entry()].
 
 list(#?MODULE{list = Val}) -> Val.
 
@@ -90,3 +91,5 @@ refs(#?MODULE{list = List, low = Low}) ->
         false ->
             Refs
     end.
+
+

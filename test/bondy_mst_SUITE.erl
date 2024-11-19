@@ -12,17 +12,25 @@
 all() ->
     [
         {group, local_store, []},
-        {group, ets_store, []}
+        {group, ets_store, []},
+        {group, leveled_store, []}
     ].
 
 groups() ->
     [
         {local_store, [], [
             basic_test,
+            first_last_test,
             large_test
         ]},
         {ets_store, [], [
             basic_test,
+            first_last_test,
+            large_test
+        ]},
+        {leveled_store, [], [
+            basic_test,
+            first_last_test,
             large_test
         ]}
     ].
@@ -35,6 +43,16 @@ init_per_group(local_store, Config) ->
 init_per_group(ets_store, Config) ->
     Fun = fun(Name) ->
         bondy_mst_store:new(bondy_mst_ets_store, [{name, Name}])
+    end,
+    [{store_fun, Fun}] ++ Config;
+
+
+init_per_group(leveled_store, Config) ->
+    _ = file:delete("/tmp/bondy_mst"),
+    {ok, _} = application:ensure_all_started(bondy_mst),
+
+    Fun = fun(Name) ->
+        bondy_mst_store:new(bondy_mst_leveled_store, [{name, Name}])
     end,
     [{store_fun, Fun}] ++ Config.
 
@@ -155,6 +173,20 @@ large_test(Config) ->
     ok = bondy_mst:delete(A),
     ok = bondy_mst:delete(B),
     ok = bondy_mst:delete(Z).
+
+
+first_last_test(Config) ->
+    Fun = ?config(store_fun, Config),
+
+    %% Test for basic MST operations
+    A = lists:foldl(
+        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        ?MST:new(#{store => Fun(bondy_mst_a)}),
+        lists:seq(1, 10)
+    ),
+    ?assertEqual({1, true}, bondy_mst:first(A)),
+    ?assertEqual({10, true}, bondy_mst:last(A)).
+
 
 
 %% =============================================================================

@@ -17,15 +17,18 @@
 %% ===========================================================================
 
 
--module(bondy_mst_ets_store).
+-module(bondy_mst_leveled_store).
 -moduledoc """
 Non-concurrent, MST backend using `ets`.
 """.
 
 -behaviour(bondy_mst_store).
 
+-include_lib("leveled/include/leveled.hrl").
+
 -record(?MODULE, {
-    tab         :: ets:tid()
+    pid         :: pid(),
+    name        :: atom() | binary()
 }).
 
 -type t()       ::  #?MODULE{}.
@@ -63,33 +66,33 @@ new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
 new(#{name := Name} = _Opts) ->
-    Tab = ets:new(Name, [ordered_set, named_table, public]),
-    #?MODULE{tab = Tab}.
+    Pid = persistent_term:get({bondy_mst, leveled}),
+    #?MODULE{pid = Pid, name = Name}.
 
 
 -doc """
 """.
 -spec get(T :: t(), Hash :: binary()) -> Page :: page() | undefined.
 
-get(#?MODULE{tab = Tab}, Hash) ->
-    do_get(Tab, Hash).
+get(#?MODULE{pid = Pid, name = Name}, Hash) ->
+    do_get(Pid, Name, Hash).
 
 
 -doc """
 """.
 -spec has(T :: t(), Hash :: binary()) -> boolean().
 
-has(#?MODULE{tab = Tab}, Hash) ->
-    ets:member(Tab, Hash).
+has(#?MODULE{pid = Pid, name = Name}, Hash) ->
+    leveled_bookie:book_head(Pid, Name, Hash) /= not_found.
 
 
 -doc """
 """.
 -spec put(T :: t(), Page :: page()) -> {Hash :: binary(), T :: t()}.
 
-put(#?MODULE{tab = Tab} = T, Page) ->
+put(#?MODULE{pid = Pid, name = Name} = T, Page) ->
     Hash = bondy_mst_utils:hash(Page),
-    true = ets:insert(Tab, {Hash, Page}),
+    ok = leveled_bookie:book_put(Pid, Name, Hash, Page, []),
     {Hash, T}.
 
 
@@ -97,7 +100,7 @@ put(#?MODULE{tab = Tab} = T, Page) ->
 """.
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().
 
-copy(#?MODULE{tab = Tab} = T, OtherStore, Hash) ->
+copy(#?MODULE{pid = Pid, name = Name} = T, OtherStore, Hash) ->
 
     case bondy_mst_store:get(OtherStore, Hash) of
         undefined ->
@@ -110,7 +113,7 @@ copy(#?MODULE{tab = Tab} = T, OtherStore, Hash) ->
                 T,
                 Refs
             ),
-            true = ets:insert(Tab, {Hash, Page}),
+            ok = leveled_bookie:book_put(Pid, Name, Hash, Page, []),
             T
     end.
 
@@ -119,8 +122,8 @@ copy(#?MODULE{tab = Tab} = T, OtherStore, Hash) ->
 """.
 -spec free(T :: t(), Hash :: binary()) -> T :: t().
 
-free(#?MODULE{tab = Tab} = T, Hash) ->
-    true = ets:delete(Tab, Hash),
+free(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
+    ok = leveled_bookie:book_delete(Pid, Name, Hash, []),
     T.
 
 
@@ -128,10 +131,10 @@ free(#?MODULE{tab = Tab} = T, Hash) ->
 """.
 -spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
 
-gc(#?MODULE{tab = Tab} = T, KeepRoots) ->
+gc(#?MODULE{pid = Pid, name = Name} = T, KeepRoots) ->
     lists:foldl(
-        fun(X, Acc) -> gc_aux(Acc, Tab, X) end,
-        #{},
+        fun(X, Acc) -> gc_aux(Acc, Pid, Name, X) end,
+        ok,
         KeepRoots
     ),
     T.
@@ -165,8 +168,8 @@ page_refs(Page) ->
 
 -spec delete(t()) -> ok.
 
-delete(#?MODULE{tab = Tab}) ->
-    ets:delete(Tab),
+delete(#?MODULE{pid = Pid, name = Name}) ->
+    %% TODO fold over bucket (name) elements and delete them
     ok.
 
 
@@ -178,36 +181,36 @@ delete(#?MODULE{tab = Tab}) ->
 
 
 %% @private
-do_get(Tab, Hash) ->
-    case ets:lookup_element(Tab, Hash, 2, undefined) of
-        undefined ->
-            undefined;
-
-        [Page] ->
+do_get(Pid, Name, Hash) ->
+    case leveled_bookie:book_get(Pid, Name, Hash) of
+        {ok, [Page]} ->
             %% bag and duplicate bag tables
             Page;
 
-        Page ->
+        {ok, Page} ->
             %%  set and ordered_set tables
-            Page
+            Page;
+
+        not_found ->
+            undefined
     end.
 
 
 %% @private
-gc_aux(Acc0, Tab, Root) when not is_map_key(Root, Acc0) ->
-    case do_get(Tab, Root) of
+gc_aux(Acc0, Pid, Name, Root) when not is_map_key(Root, Acc0) ->
+    case do_get(Pid, Name, Root) of
         undefined ->
-            Acc0;
+            ok;
         Page ->
             Acc = maps:put(Root, Page, Acc0),
             lists:foldl(
-                fun(X, IAcc) -> gc_aux(IAcc, Tab, X) end,
-                Acc,
+                fun(X, IAcc) -> gc_aux(IAcc, Pid, Name, X) end,
+                ok,
                 page_refs(Page)
             )
     end;
 
-gc_aux(Acc, _, _) ->
+gc_aux(Acc, _, _, _) ->
     Acc.
 
 

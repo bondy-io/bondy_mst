@@ -14,9 +14,11 @@
 %%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %%  See the License for the specific language governing permissions and
 %%  limitations under the License.
+%%
+%%  This repository contains a port the code written in Elixir for the
+%%  simulations shown in the paper: Merkle Search Trees: Efficient State-Based
+%%  CRDTs in Open Networks by Alex Auvolat, François Taïani
 %% ===========================================================================
-
-
 
 -module(bondy_mst).
 -moduledoc """
@@ -50,33 +52,52 @@ A node of the tree is:
 
 -type t()           ::  #bondy_mst{}.
 -type opts()        ::  list() | map().
--type key()         ::  any().
--type value()       ::  any().
 -type comparator()  ::  fun((key(), key()) -> eq | lt | gt).
 -type merger()      ::  fun((value(), value()) -> value()).
+-type key_range()   ::  {key(), key()}
+                        | {first, key()}
+                        | {key(), undefined}.
+%% Fold
+-type fold_fun()    ::  fun(({key(), value()}, any()) -> any()).
+-type fold_opts()   ::  [fold_opt()].
+-type fold_opt()    ::  {first, key()}
+                        | {match_spec, term()}
+                        | {stop, key()}
+                        | {keys_only, boolean()}
+                        | {limit, pos_integer() | infinity}.
+
 
 -export_type([t/0]).
+
 -export_type([opts/0]).
--export_type([key/0]).
--export_type([value/0]).
 -export_type([comparator/0]).
 -export_type([merger/0]).
+%% Defined in bondy_mst.hrl
+-export_type([level/0]).
+-export_type([key/0]).
+-export_type([value/0]).
+-export_type([hash/0]).
 
 -export([new/0]).
 -export([new/1]).
+-export([delete/1]).
+
 -export([root/1]).
 -export([store/1]).
 -export([insert/2]).
+-export([insert/3]).
 -export([merge/2]).
 -export([get/2]).
--export([last/3]).
+-export([get_range/2]).
+-export([last_n/3]).
 -export([to_list/1]).
 -export([diff_to_list/2]).
 -export([dump/1]).
 -export([gc/1]).
 -export([gc/2]).
--export([delete/1]).
-
+-export([fold/4]).
+-export([first/1]).
+-export([last/1]).
 
 
 %% =============================================================================
@@ -124,6 +145,15 @@ new(Opts) when is_map(Opts) ->
 
 
 -doc """
+Deletes the tree (by deleting its backend store).
+""".
+-spec delete(t()) -> ok.
+
+delete(#?MODULE{store = Val}) ->
+    bondy_mst_store:delete(Val).
+
+
+-doc """
 Returns the tree's root hash.
 """.
 -spec root(t()) -> binary().
@@ -151,11 +181,76 @@ get(#?MODULE{root = R} = T, Key) ->
 
 
 -doc """
+Returns the first entry.
+""".
+-spec first(T :: t()) -> Value :: {key(), value()} | undefined.
+
+first(#?MODULE{} = T) ->
+    first(T, T#?MODULE.root).
+
+
+-doc """
+Returns the last entry.
+""".
+-spec last(T :: t()) -> Value :: {key(), value()} | undefined.
+
+last(#?MODULE{} = T) ->
+    last(T, T#?MODULE.root).
+
+
+-doc """
+""".
+-spec get_range(T :: t(), Range :: key_range()) -> Value :: any().
+
+get_range(#?MODULE{root = R} = T, {From, To}) ->
+    Opts = [{first, From}, {stop, To}],
+    fold(
+        T,
+        fun(K, V, Acc) -> [{K, V} | Acc] end,
+        [],
+        Opts
+    ).
+
+
+-doc """
+List all items.
+""".
+-spec to_list(t()) -> [{key(), value()}].
+
+to_list(#?MODULE{store = Store, root = R}) ->
+    to_list(Store, R).
+
+
+-doc """
+
+""".
+-spec fold(t(), fold_fun(), any(), fold_opts()) -> [{key(), value()}].
+
+fold(#?MODULE{} = _T, _Fun, _Acc, _Opts) ->
+    error(not_implemented).
+
+
+-doc """
+
+""".
+-spec diff_to_list(t(), t()) -> list().
+
+diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
+    diff_to_list(
+        T1,
+        T1#?MODULE.store,
+        T1#?MODULE.root,
+        T2#?MODULE.store,
+        T2#?MODULE.root
+    ).
+
+
+-doc """
 Get the last `N` items of the tree, or the last `N` items strictly before given
 upper bound `TopBound` if non `undefined`.
 """.
-last(#?MODULE{root = R} = T, TopBound, N) ->
-    last(T, TopBound, N, R).
+last_n(#?MODULE{root = R} = T, TopBound, N) ->
+    last_n(T, TopBound, N, R).
 
 
 -doc """
@@ -188,30 +283,6 @@ merge(#?MODULE{} = T1, #?MODULE{} = T2) ->
 
 
 -doc """
-List all items.
-""".
--spec to_list(t()) -> list().
-
-to_list(#?MODULE{store = Store, root = R}) ->
-    to_list(Store, R).
-
-
--doc """
-
-""".
--spec diff_to_list(t(), t()) -> list().
-
-diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
-    diff_to_list(
-        T1,
-        T1#?MODULE.store,
-        T1#?MODULE.root,
-        T2#?MODULE.store,
-        T2#?MODULE.root
-    ).
-
-
--doc """
 Dump Merkle search tree structure.
 """.
 -spec dump(t()) -> undefined.
@@ -238,14 +309,6 @@ gc(#?MODULE{store = Store0} = T, KeepRoots) ->
     Store = bondy_mst_store:gc(Store0, KeepRoots),
     T#?MODULE{store = Store}.
 
-
--doc """
-Deletes the tree (by deleting its backend store).
-""".
--spec delete(t()) -> ok.
-
-delete(#?MODULE{store = Val}) ->
-    bondy_mst_store:delete(Val).
 
 
 %% =============================================================================
@@ -336,10 +399,14 @@ get(#?MODULE{}, _, undefined) ->
     undefined;
 
 get(#?MODULE{} = T, Key, Root) ->
-    Page = bondy_mst_store:get(T#?MODULE.store, Root),
-    Low = bondy_mst_page:low(Page),
-    List = bondy_mst_page:list(Page),
-    do_get(T, Key, Low, List).
+    case bondy_mst_store:get(T#?MODULE.store, Root) of
+        undefined ->
+            undefined;
+        Page ->
+            Low = bondy_mst_page:low(Page),
+            List = bondy_mst_page:list(Page),
+            do_get(T, Key, Low, List)
+    end.
 
 
 %% @private
@@ -357,29 +424,69 @@ do_get(T, Key, Low, [{K, V, Low2} | Rest]) ->
     end.
 
 
+first(#?MODULE{}, undefined) ->
+    undefined;
+
+first(#?MODULE{} = T, Root) ->
+    Page = bondy_mst_store:get(T#?MODULE.store, Root),
+    case bondy_mst_page:low(Page) of
+        undefined ->
+            case bondy_mst_page:list(Page) of
+                [] ->
+                    undefined;
+
+                [{K, V, undefined} | _] ->
+                    {K, V}
+            end;
+
+        Low ->
+            first(T, Low)
+    end.
+
+
+last(#?MODULE{}, undefined) ->
+    undefined;
+
+last(#?MODULE{} = T, Root) ->
+    Page = bondy_mst_store:get(T#?MODULE.store, Root),
+    case bondy_mst_page:list(Page) of
+        [] ->
+            undefined;
+
+        L ->
+            case lists:last(L) of
+                {K, V, undefined} ->
+                    {K, V};
+
+                {_, _, Next} ->
+                    last(T, Next)
+            end
+    end.
+
+
 %% @private
-last(#?MODULE{}, _, _, undefined) ->
+last_n(#?MODULE{}, _, _, undefined) ->
     [];
 
-last(#?MODULE{} = T, TopBound, N, Root) ->
+last_n(#?MODULE{} = T, TopBound, N, Root) ->
     case bondy_mst_store:get(T#?MODULE.store, Root) of
         undefined ->
             [];
         Page ->
             Low = bondy_mst_page:low(Page),
             List = bondy_mst_page:list(Page),
-            do_last(T, TopBound, N, Low, List)
+            do_last_n(T, TopBound, N, Low, List)
     end.
 
 
 %% @private
-do_last(T, TopBound, N, Low, []) ->
-    last(T, TopBound, N, Low);
+do_last_n(T, TopBound, N, Low, []) ->
+    last_n(T, TopBound, N, Low);
 
-do_last(T, TopBound, N, Low, [{K, V, Low2} | Rest]) ->
+do_last_n(T, TopBound, N, Low, [{K, V, Low2} | Rest]) ->
     case TopBound == undefined orelse compare(T, TopBound, K) == gt of
         true ->
-            Items0 = do_last(T, TopBound, N, Low2, Rest),
+            Items0 = do_last_n(T, TopBound, N, Low2, Rest),
             Items =
                 case length(Items0) < N of
                     true ->
@@ -390,12 +497,12 @@ do_last(T, TopBound, N, Low, [{K, V, Low2} | Rest]) ->
             Cnt = length(Items),
             case Cnt < N of
                 true ->
-                    last(T, TopBound, N - Cnt, Low) ++ Items;
+                    last_n(T, TopBound, N - Cnt, Low) ++ Items;
                 false ->
                     Items
             end;
         false ->
-            last(T, TopBound, N, Low)
+            last_n(T, TopBound, N, Low)
     end.
 
 

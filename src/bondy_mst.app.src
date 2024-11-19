@@ -5,7 +5,9 @@
   {mod, {bondy_mst_app, []}},
   {applications,
    [kernel,
-    stdlib
+    stdlib,
+    app_config,
+    leveled
    ]},
   {env,[]},
   {modules, []},

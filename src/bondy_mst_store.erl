@@ -8,6 +8,8 @@ This behaviour may also be implemented by store proxies that track
 operations and implement different synchronization or caching mechanisms.
 """.
 
+-include("bondy_mst.hrl").
+
 -record(?MODULE, {
     mod :: module(),
     state :: backend()
@@ -82,13 +84,12 @@ is_type(#?MODULE{}) -> false.
 -doc """
 Get a page referenced by its hash.
 
-Returns page
+Returns page or `undefined`.
 """.
--spec get(Store :: t(), Page :: page()) -> Page :: page().
+-spec get(Store :: t(), Page :: page()) -> Page :: page() | undefined.
 
 get(#?MODULE{mod = Mod, state = State}, Page) ->
     Mod:get(State, Page).
-
 
 
 -spec has(Store :: t(), Page :: page()) -> boolean().
