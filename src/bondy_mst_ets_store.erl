@@ -149,12 +149,8 @@ free(#?MODULE{tab = Tab} = T, Hash) ->
 """.
 -spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
 
-gc(#?MODULE{tab = Tab} = T, KeepRoots) ->
-    lists:foldl(
-        fun(X, Acc) -> gc_aux(Acc, Tab, X) end,
-        #{},
-        KeepRoots
-    ),
+gc(#?MODULE{} = T, _KeepRoots) ->
+    %% Do nothing, we free instead
     T.
 
 
@@ -204,32 +200,15 @@ do_get(Tab, Hash) ->
         undefined ->
             undefined;
 
-        [Page] ->
+        [Value] ->
             %% bag and duplicate bag tables
-            Page;
+            Value;
 
-        Page ->
+        Value ->
             %%  set and ordered_set tables
-            Page
+            Value
     end.
 
-
-%% @private
-gc_aux(Acc0, Tab, Root) when not is_map_key(Root, Acc0) ->
-    case do_get(Tab, Root) of
-        undefined ->
-            Acc0;
-        Page ->
-            Acc = maps:put(Root, Page, Acc0),
-            lists:foldl(
-                fun(X, IAcc) -> gc_aux(IAcc, Tab, X) end,
-                Acc,
-                page_refs(Page)
-            )
-    end;
-
-gc_aux(Acc, _, _) ->
-    Acc.
 
 
 

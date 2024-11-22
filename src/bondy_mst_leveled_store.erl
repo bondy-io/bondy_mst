@@ -153,12 +153,8 @@ free(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
 """.
 -spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
 
-gc(#?MODULE{pid = Pid, name = Name} = T, KeepRoots) ->
-    lists:foldl(
-        fun(X, Acc) -> gc_aux(Acc, Pid, Name, X) end,
-        ok,
-        KeepRoots
-    ),
+gc(#?MODULE{} = T, _KeepRoots) ->
+    %% Do nothing, we free instead
     T.
 
 
@@ -211,24 +207,5 @@ do_get(Pid, Name, Hash) when is_binary(Hash) orelse Hash =:= ?ROOT_KEY ->
         not_found ->
             undefined
     end.
-
-
-%% @private
-gc_aux(Acc0, Pid, Name, Root) when not is_map_key(Root, Acc0) ->
-    case do_get(Pid, Name, Root) of
-        undefined ->
-            Acc0;
-        Page ->
-            Acc = maps:put(Root, Page, Acc0),
-            lists:foldl(
-                fun(X, IAcc) -> gc_aux(IAcc, Pid, Name, X) end,
-                Acc,
-                page_refs(Page)
-            )
-    end;
-
-gc_aux(Acc, _, _, _) ->
-    Acc.
-
 
 

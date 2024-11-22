@@ -190,12 +190,8 @@ free(#?MODULE{name = Name} = T, Hash) ->
 """.
 -spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
 
-gc(#?MODULE{} = T, KeepRoots) ->
-    lists:foldl(
-        fun(X, Acc) -> gc_aux(T, X, Acc) end,
-        ok,
-        KeepRoots
-    ),
+gc(#?MODULE{} = T, _KeepRoots) ->
+    %% Do nothing, we free instead
     T.
 
 
@@ -330,25 +326,6 @@ when is_binary(Hash) orelse Hash =:= ?ROOT_KEY ->
         end
     end,
     transaction(T, Fun).
-
-
-%% @private
-gc_aux(T, Root, Acc0) when not is_map_key(Root, Acc0) ->
-    case do_get(T, Root) of
-        undefined ->
-            Acc0;
-
-        Page ->
-            Acc = maps:put(Root, Page, Acc0),
-            lists:foldl(
-                fun(X, IAcc) -> gc_aux(T, X, IAcc) end,
-                Acc,
-                page_refs(Page)
-            )
-    end;
-
-gc_aux(_, _, Acc) ->
-    Acc.
 
 
 encode_key(Name, Key) when is_binary(Name) andalso is_binary(Key) ->
