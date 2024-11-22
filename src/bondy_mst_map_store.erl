@@ -1,5 +1,5 @@
 %% ===========================================================================
-%%  bondy_mst_local_store.erl -
+%%  bondy_mst_map_store.erl -
 %%
 %%  Copyright (c) 2023-2024 Leapsight. All rights reserved.
 %%
@@ -17,7 +17,7 @@
 %% ===========================================================================
 
 
--module(bondy_mst_local_store).
+-module(bondy_mst_map_store).
 -moduledoc """
 MST backend using `maps`.
 """.

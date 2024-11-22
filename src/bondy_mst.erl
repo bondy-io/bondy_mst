@@ -130,7 +130,7 @@ new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
 new(Opts) when is_map(Opts) ->
-    DefaultStore = fun() -> bondy_mst_store:new(bondy_mst_local_store, []) end,
+    DefaultStore = fun() -> bondy_mst_store:new(bondy_mst_map_store, []) end,
     Store = get_option(store, Opts, DefaultStore),
     Comparator = get_option(comparator, Opts, fun comparator/2),
     Merger = get_option(merger, Opts, fun merger/2),

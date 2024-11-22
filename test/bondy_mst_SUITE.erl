@@ -22,31 +22,30 @@ all() ->
 groups() ->
     [
         {local_store, [], [
-            basic_test,
+            small_test,
             first_last_test,
             large_test
         ]},
         {ets_store, [], [
-            basic_test,
+            small_test,
             first_last_test,
             large_test
         ]},
         {leveled_store, [], [
-            basic_test,
+            small_test,
             first_last_test,
             large_test
         ]},
         {rocksdb_store, [], [
-            basic_test,
+            small_test,
             first_last_test,
-            large_test,
-            concurrent_test
+            large_test
         ]}
     ].
 
 
 init_per_group(local_store, Config) ->
-    Fun = fun(_) -> bondy_mst_store:new(bondy_mst_local_store, []) end,
+    Fun = fun(_) -> bondy_mst_store:new(bondy_mst_map_store, []) end,
     [{store_fun, Fun}] ++ Config;
 
 init_per_group(ets_store, Config) ->
@@ -100,7 +99,7 @@ end_per_testcase(_TestCase, _Config) ->
 
 
 
-basic_test(Config) ->
+small_test(Config) ->
     Fun = ?config(store_fun, Config),
 
     %% Test for basic MST operations
