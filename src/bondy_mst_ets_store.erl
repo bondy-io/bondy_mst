@@ -26,7 +26,8 @@ Non-concurrent, MST backend using `ets`.
 -include("bondy_mst.hrl").
 
 -record(?MODULE, {
-    tab         :: ets:tid()
+    name        ::  binary(),
+    tab         ::  ets:tid()
 }).
 
 -type t()       ::  #?MODULE{}.
@@ -65,9 +66,9 @@ Non-concurrent, MST backend using `ets`.
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
-new(#{} = _Opts) ->
+new(#{name := Name} = _Opts) when is_binary(Name) ->
     Tab = ets:new(undefined, [ordered_set, public]),
-    #?MODULE{tab = Tab}.
+    #?MODULE{name = Name, tab = Tab}.
 
 
 -doc """

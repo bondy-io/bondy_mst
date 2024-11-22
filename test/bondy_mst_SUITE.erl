@@ -56,7 +56,6 @@ init_per_group(ets_store, Config) ->
 
 
 init_per_group(leveled_store, Config) ->
-    ok = file:del_dir_r("/tmp/bondy_mst/leveled"),
     {ok, _} = application:ensure_all_started(bondy_mst),
 
     Fun = fun(Name) ->
@@ -65,7 +64,6 @@ init_per_group(leveled_store, Config) ->
     [{store_fun, Fun}] ++ Config;
 
 init_per_group(rocksdb_store, Config) ->
-    ok = file:del_dir_r("/tmp/bondy_mst/rocksdb"),
     {ok, _} = application:ensure_all_started(bondy_mst),
 
     Fun = fun(Name) ->
@@ -75,6 +73,7 @@ init_per_group(rocksdb_store, Config) ->
 
 
 end_per_group(_, _Config) ->
+    catch file:del_dir_r("/tmp/bondy_mst/"),
     ok.
 
 
@@ -95,6 +94,7 @@ init_per_testcase(_TestCase, Config) ->
 
 %% Called after each test case
 end_per_testcase(_TestCase, _Config) ->
+    catch file:del_dir_r("/tmp/bondy_mst/"),
     ok.
 
 
@@ -127,23 +127,54 @@ small_test(Config) ->
     C = ?MST:merge(A, B),
     D = ?MST:merge(B, A),
 
+    ?assertNotEqual(undefined, ?MST:root(C)),
+    ?assertNotEqual(undefined, ?MST:root(D)),
+
     ?assertEqual(?MST:root(C), ?MST:root(D)),
     ?assertEqual(?MST:root(C), ?MST:root(Z)),
+    ?assertEqual(?MST:to_list(C), ?MST:to_list(Z)),
 
-    ?MST:dump(C),
+    case C =/= A of
+        true ->
+            %% Only true for map store
+            DA = [K || {K, true} <- ?MST:diff_to_list(C, A)],
+            ?assertEqual(
+                ?ISET(lists:sort(lists:seq(11, 15))),
+                ?ISET(lists:sort(DA))
+            ),
+            ?assertEqual(
+                [],
+                ?MST:diff_to_list(A, C)
+            ),
 
-    DA = [K || {K, _} <- ?MST:diff_to_list(C, A)],
-    ?assertEqual(lists:sort(DA), lists:sort(lists:seq(11, 15))),
-    DB = [K || {K, _} <- ?MST:diff_to_list(C, B)],
-    ?assertEqual(lists:sort(DB), lists:sort(lists:seq(1, 4))),
+            DB = [K || {K, true} <- ?MST:diff_to_list(C, B)],
+            ?assertEqual(
+                ?ISET(lists:sort(lists:seq(1, 4))),
+                ?ISET(lists:sort(DB))
+            ),
 
-    ?assertEqual([], ?MST:diff_to_list(A, C)),
-    ?assertEqual([], ?MST:diff_to_list(B, C)),
+            ?assertEqual(
+                [],
+                ?MST:diff_to_list(B, C)
+            ),
 
-    DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
-    ?assertEqual(lists:seq(11, 15), lists:sort(DBA)),
-    DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
-    ?assertEqual(lists:seq(1, 4), lists:sort(DAB)),
+            DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
+            ?assertEqual(
+                ?ISET(lists:seq(11, 15)),
+                ?ISET(lists:sort(DBA))
+            ),
+
+            DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
+            ?assertEqual(
+                ?ISET(lists:seq(1, 4)),
+                ?ISET(lists:sort(DAB))
+            );
+
+        false ->
+            ?assertEqual(A, C),
+            ?assertEqual(D, B)
+    end,
+
 
     ok = bondy_mst:delete(A),
     ok = bondy_mst:delete(B),
@@ -174,24 +205,32 @@ large_test(Config) ->
     C = ?MST:merge(A, B),
     D = ?MST:merge(B, A),
 
-    ?assertEqual(?MST:root(C), ?MST:root(D)),
-    ?assertEqual(?MST:root(C), ?MST:root(Z)),
+    case C =/= A of
+        true ->
 
-    FullList = [K || {K, _} <- ?MST:to_list(C)],
-    ?assertEqual(?ISET(lists:seq(1, 1500)), ?ISET(lists:sort(FullList))),
+            ?assertEqual(?MST:root(C), ?MST:root(D)),
+            ?assertEqual(?MST:root(C), ?MST:root(Z)),
 
-    DCA = [K || {K, _} <- ?MST:diff_to_list(C, A)],
-    ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DCA)),
-    DCB = [K || {K, _} <- ?MST:diff_to_list(C, B)],
-    ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DCB)),
+            FullList = [K || {K, _} <- ?MST:to_list(C)],
+            ?assertEqual(?ISET(lists:seq(1, 1500)), ?ISET(lists:sort(FullList))),
 
-    ?assertEqual([], ?MST:diff_to_list(A, C)),
-    ?assertEqual([], ?MST:diff_to_list(B, C)),
+            DCA = [K || {K, _} <- ?MST:diff_to_list(C, A)],
+            ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DCA)),
+            DCB = [K || {K, _} <- ?MST:diff_to_list(C, B)],
+            ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DCB)),
 
-    DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
-    ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DBA)),
-    DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
-    ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DAB)),
+            ?assertEqual([], ?MST:diff_to_list(A, C)),
+            ?assertEqual([], ?MST:diff_to_list(B, C)),
+
+            DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
+            ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DBA)),
+            DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
+            ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DAB));
+
+        false ->
+            ?assertEqual(A, C),
+            ?assertEqual(D, B)
+    end,
 
     ok = bondy_mst:delete(A),
     ok = bondy_mst:delete(B),
@@ -204,7 +243,7 @@ first_last_test(Config) ->
     %% Test for basic MST operations
     A = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
-        ?MST:new(#{store => Fun(~"bondy_mst_a")}),
+        ?MST:new(#{store => Fun(~"first_last_test")}),
         lists:seq(1, 10)
     ),
     ?assertEqual({1, true}, bondy_mst:first(A)),

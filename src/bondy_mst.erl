@@ -220,6 +220,15 @@ to_list(#?MODULE{store = Store} = T) ->
 
 
 -doc """
+List all items.
+""".
+-spec keys(t()) -> [{key(), value()}].
+
+keys(#?MODULE{store = Store} = T) ->
+    to_list(Store, root(T), fun(K, _) -> K end).
+
+
+-doc """
 
 """.
 -spec fold(t(), fold_fun(), any(), fold_opts()) -> [{key(), value()}].
@@ -732,6 +741,13 @@ get_page(Store, Hash, T) ->
 
 
 %% @private
+-spec merge_aux(
+    T1 :: t(),
+    T2 :: t(),
+    T1Store :: bondy_mst_store:t(),
+    T1Root :: hash(),
+    T2Root :: hash()) -> NewT1 :: t().
+
 merge_aux(_, _, Store0, R, R) ->
     {R, Store0};
 
@@ -828,10 +844,15 @@ merge_aux_rec(
 
 
 %% @private
-to_list(_, undefined) ->
+to_list(Store, Root) ->
+    to_list(Store, Root, fun(K, V) -> {K, V} end).
+
+
+%% @private
+to_list(_, undefined, _) ->
     [];
 
-to_list(Store, Root) ->
+to_list(Store, Root, Fun) ->
     case bondy_mst_store:get(Store, Root) of
         undefined ->
             [];
@@ -839,9 +860,9 @@ to_list(Store, Root) ->
         Page ->
             Low = bondy_mst_page:low(Page),
             List = bondy_mst_page:list(Page),
-            L1 = to_list(Store, Low),
+            L1 = to_list(Store, Low, Fun),
             Acc = lists:flatmap(
-                fun({K, V, R}) -> [{K, V} | to_list(Store, R)] end,
+                fun({K, V, R}) -> [Fun(K, V) | to_list(Store, R, Fun)] end,
                 List
             ),
             L1 ++ Acc

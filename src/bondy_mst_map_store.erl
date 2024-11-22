@@ -124,7 +124,7 @@ copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
         Page ->
             Refs = bondy_mst_store:page_refs(OtherStore, Page),
             T = lists:foldl(
-                fun(X, Acc) -> copy(Acc, OtherStore, X) end,
+                fun(Ref, Acc) -> copy(Acc, OtherStore, Ref) end,
                 T0,
                 Refs
             ),
