@@ -1,5 +1,5 @@
 %% ===========================================================================
-%%  bondy_mst_ets_store.erl -
+%%  bondy_mst_leveled_store.erl -
 %%
 %%  Copyright (c) 2023-2024 Leapsight. All rights reserved.
 %%
@@ -19,12 +19,14 @@
 
 -module(bondy_mst_leveled_store).
 -moduledoc """
-Non-concurrent, MST backend using `ets`.
+Non-concurrent, MST backend using `leveled`.
 """.
 
 -behaviour(bondy_mst_store).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("leveled/include/leveled.hrl").
+-include("bondy_mst.hrl").
 
 -record(?MODULE, {
     pid         :: pid(),
@@ -39,16 +41,18 @@ Non-concurrent, MST backend using `ets`.
 
 
 %% API
--export([new/1]).
--export([get/2]).
--export([has/2]).
--export([put/2]).
 -export([copy/3]).
--export([missing_set/2]).
--export([page_refs/1]).
+-export([delete/1]).
 -export([free/2]).
 -export([gc/2]).
--export([delete/1]).
+-export([get/2]).
+-export([get_root/1]).
+-export([has/2]).
+-export([missing_set/2]).
+-export([new/1]).
+-export([page_refs/1]).
+-export([put/2]).
+-export([set_root/2]).
 
 
 
@@ -68,6 +72,23 @@ new(Opts) when is_list(Opts) ->
 new(#{name := Name} = _Opts) ->
     Pid = persistent_term:get({bondy_mst, leveled}),
     #?MODULE{pid = Pid, name = Name}.
+
+
+-doc """
+""".
+-spec get_root(T :: t()) -> Root :: hash() | undefined.
+
+get_root(#?MODULE{pid = Pid, name = Name}) ->
+    do_get(Pid, Name, ?ROOT_KEY).
+
+
+-doc """
+""".
+-spec set_root(T :: t(), Hash :: hash()) -> t().
+
+set_root(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
+    ok = leveled_bookie:book_put(Pid, Name, ?ROOT_KEY, Hash, []),
+    T.
 
 
 -doc """
@@ -93,6 +114,7 @@ has(#?MODULE{pid = Pid, name = Name}, Hash) ->
 put(#?MODULE{pid = Pid, name = Name} = T, Page) ->
     Hash = bondy_mst_utils:hash(Page),
     ok = leveled_bookie:book_put(Pid, Name, Hash, Page, []),
+    ok = leveled_bookie:book_put(Pid, Name, ?ROOT_KEY, Hash, []),
     {Hash, T}.
 
 
@@ -168,7 +190,7 @@ page_refs(Page) ->
 
 -spec delete(t()) -> ok.
 
-delete(#?MODULE{pid = Pid, name = Name}) ->
+delete(#?MODULE{pid = _Pid, name = _Name}) ->
     %% TODO fold over bucket (name) elements and delete them
     ok.
 
@@ -181,14 +203,9 @@ delete(#?MODULE{pid = Pid, name = Name}) ->
 
 
 %% @private
-do_get(Pid, Name, Hash) ->
+do_get(Pid, Name, Hash) when is_binary(Hash) orelse Hash =:= ?ROOT_KEY ->
     case leveled_bookie:book_get(Pid, Name, Hash) of
-        {ok, [Page]} ->
-            %% bag and duplicate bag tables
-            Page;
-
         {ok, Page} ->
-            %%  set and ordered_set tables
             Page;
 
         not_found ->
@@ -200,12 +217,12 @@ do_get(Pid, Name, Hash) ->
 gc_aux(Acc0, Pid, Name, Root) when not is_map_key(Root, Acc0) ->
     case do_get(Pid, Name, Root) of
         undefined ->
-            ok;
+            Acc0;
         Page ->
             Acc = maps:put(Root, Page, Acc0),
             lists:foldl(
                 fun(X, IAcc) -> gc_aux(IAcc, Pid, Name, X) end,
-                ok,
+                Acc,
                 page_refs(Page)
             )
     end;

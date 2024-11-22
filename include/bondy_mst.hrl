@@ -1,3 +1,6 @@
+-define(ROOT_KEY, root).
+-define(T2B_OPTS, [{minor_version, 2}]).
+
 -type optional(T)   ::  T | undefined.
 
 -type hash()        ::  binary().

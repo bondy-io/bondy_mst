@@ -24,8 +24,12 @@ MST backend using `maps`.
 
 -behaviour(bondy_mst_store).
 
+-include_lib("kernel/include/logger.hrl").
+-include("bondy_mst.hrl").
+
 -record(?MODULE, {
-    pages = #{} :: map()
+    root        ::  hash() | undefined,
+    pages = #{} ::  map()
 }).
 
 -type t()       ::  #?MODULE{}.
@@ -35,16 +39,18 @@ MST backend using `maps`.
 -export_type([page/0]).
 
 
--export([new/1]).
--export([get/2]).
--export([has/2]).
--export([put/2]).
 -export([copy/3]).
--export([missing_set/2]).
--export([page_refs/1]).
+-export([delete/1]).
 -export([free/2]).
 -export([gc/2]).
--export([delete/1]).
+-export([get/2]).
+-export([get_root/1]).
+-export([has/2]).
+-export([missing_set/2]).
+-export([new/1]).
+-export([page_refs/1]).
+-export([put/2]).
+-export([set_root/2]).
 
 
 
@@ -63,6 +69,22 @@ new(Opts) when is_list(Opts) ->
 
 new(Opts) when is_map(Opts) ->
     #?MODULE{}.
+
+
+-doc """
+""".
+-spec get_root(T :: t()) -> Root :: hash() | undefined.
+
+get_root(#?MODULE{root = Root}) ->
+    Root.
+
+
+-doc """
+""".
+-spec set_root(T :: t(), Hash :: hash()) -> t().
+
+set_root(#?MODULE{} = T, Hash) ->
+    T#?MODULE{root = Hash}.
 
 
 -doc """
@@ -88,7 +110,7 @@ has(#?MODULE{pages = Pages}, Hash) ->
 put(#?MODULE{pages = Pages} = T0, Page) ->
     Hash = bondy_mst_utils:hash(Page),
     T = T0#?MODULE{pages = maps:put(Hash, Page, Pages)},
-    {Hash, T}.
+    {Hash, set_root(T, Hash)}.
 
 
 -doc """

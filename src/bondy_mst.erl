@@ -39,11 +39,11 @@ A node of the tree is:
 ```
 """.
 
+-include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 
 -record(bondy_mst, {
     store           ::  bondy_mst_store:t(),
-    root            ::  optional(any()),
     %% `comparator` is a compare function for keys
     comparator      ::  comparator(),
     %% `merger` is a function for merging two items that have the same key
@@ -78,26 +78,26 @@ A node of the tree is:
 -export_type([value/0]).
 -export_type([hash/0]).
 
--export([new/0]).
--export([new/1]).
--export([delete/1]).
 
--export([root/1]).
--export([store/1]).
--export([insert/2]).
--export([insert/3]).
--export([merge/2]).
--export([get/2]).
--export([get_range/2]).
--export([last_n/3]).
--export([to_list/1]).
+-export([delete/1]).
 -export([diff_to_list/2]).
 -export([dump/1]).
+-export([first/1]).
+-export([fold/4]).
 -export([gc/1]).
 -export([gc/2]).
--export([fold/4]).
--export([first/1]).
+-export([get/2]).
+-export([get_range/2]).
+-export([insert/2]).
+-export([insert/3]).
 -export([last/1]).
+-export([last_n/3]).
+-export([merge/2]).
+-export([new/0]).
+-export([new/1]).
+-export([root/1]).
+-export([store/1]).
+-export([to_list/1]).
 
 
 %% =============================================================================
@@ -132,13 +132,11 @@ new(Opts) when is_list(Opts) ->
 new(Opts) when is_map(Opts) ->
     DefaultStore = fun() -> bondy_mst_store:new(bondy_mst_local_store, []) end,
     Store = get_option(store, Opts, DefaultStore),
-    Root = get_option(root, Opts, undefined),
     Comparator = get_option(comparator, Opts, fun comparator/2),
     Merger = get_option(merger, Opts, fun merger/2),
 
     #?MODULE{
         store = Store,
-        root = Root,
         comparator = Comparator,
         merger = Merger
     }.
@@ -158,8 +156,8 @@ Returns the tree's root hash.
 """.
 -spec root(t()) -> binary().
 
-root(#?MODULE{root = Val}) ->
-    Val.
+root(#?MODULE{store = Store}) ->
+    bondy_mst_store:get_root(Store).
 
 
 -doc """
@@ -176,8 +174,8 @@ Returns the value for key `Key`.
 """.
 -spec get(T :: t(), Key :: key()) -> Value :: any().
 
-get(#?MODULE{root = R} = T, Key) ->
-    get(T, Key, R).
+get(#?MODULE{} = T, Key) ->
+    get(T, Key, root(T)).
 
 
 -doc """
@@ -186,7 +184,7 @@ Returns the first entry.
 -spec first(T :: t()) -> Value :: {key(), value()} | undefined.
 
 first(#?MODULE{} = T) ->
-    first(T, T#?MODULE.root).
+    first(T, root(T)).
 
 
 -doc """
@@ -195,14 +193,14 @@ Returns the last entry.
 -spec last(T :: t()) -> Value :: {key(), value()} | undefined.
 
 last(#?MODULE{} = T) ->
-    last(T, T#?MODULE.root).
+    last(T, root(T)).
 
 
 -doc """
 """.
 -spec get_range(T :: t(), Range :: key_range()) -> Value :: any().
 
-get_range(#?MODULE{root = R} = T, {From, To}) ->
+get_range(#?MODULE{} = T, {From, To}) ->
     Opts = [{first, From}, {stop, To}],
     fold(
         T,
@@ -217,8 +215,8 @@ List all items.
 """.
 -spec to_list(t()) -> [{key(), value()}].
 
-to_list(#?MODULE{store = Store, root = R}) ->
-    to_list(Store, R).
+to_list(#?MODULE{store = Store} = T) ->
+    to_list(Store, root(T)).
 
 
 -doc """
@@ -239,9 +237,9 @@ diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
     diff_to_list(
         T1,
         T1#?MODULE.store,
-        T1#?MODULE.root,
+        root(T1),
         T2#?MODULE.store,
-        T2#?MODULE.root
+        root(T2)
     ).
 
 
@@ -249,8 +247,8 @@ diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
 Get the last `N` items of the tree, or the last `N` items strictly before given
 upper bound `TopBound` if non `undefined`.
 """.
-last_n(#?MODULE{root = R} = T, TopBound, N) ->
-    last_n(T, TopBound, N, R).
+last_n(#?MODULE{} = T, TopBound, N) ->
+    last_n(T, TopBound, N, root(T)).
 
 
 -doc """
@@ -265,21 +263,26 @@ insert(#?MODULE{} = T, Key) ->
 """.
 -spec insert(t(), key(), value()) -> t().
 
-insert(#?MODULE{} = T, Key, Value) ->
-    Level = calc_level(Key),
-    {Hash, Store} = insert_at(T, Key, Value, Level),
-    T#?MODULE{root = Hash, store = Store}.
+insert(#?MODULE{store = Store0} = T, Key, Value) ->
+    Fun = fun() ->
+        Level = calc_level(Key),
+        {_Root, Store} = insert_at(T, Key, Value, Level),
+        T#?MODULE{store = Store}
+    end,
+    bondy_mst_store:transaction(Store0, Fun).
 
 
 -doc """
 """.
 -spec merge(T1 :: t(), T2 :: t()) -> NewT1 :: t().
 
-merge(#?MODULE{} = T1, #?MODULE{} = T2) ->
-    {Root, Store} = merge_aux(
-        T1, T2, T1#?MODULE.store, T1#?MODULE.root, T2#?MODULE.root
-    ),
-    T1#?MODULE{store = Store, root = Root}.
+merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2) ->
+    Fun = fun() ->
+        {Root, Store1} = merge_aux(T1, T2, Store0, root(T1), root(T2)),
+        Store = bondy_mst_store:set_root(Store1, Root),
+        T1#?MODULE{store = Store}
+    end,
+    bondy_mst_store:transaction(Store0, Fun).
 
 
 -doc """
@@ -287,8 +290,8 @@ Dump Merkle search tree structure.
 """.
 -spec dump(t()) -> undefined.
 
-dump(#?MODULE{store = Store, root = R}) ->
-    dump(Store, R).
+dump(#?MODULE{store = Store} = T) ->
+    dump(Store, root(T)).
 
 
 -doc """
@@ -296,8 +299,8 @@ dump(#?MODULE{store = Store, root = R}) ->
 """.
 -spec gc(t()) -> t().
 
-gc(#?MODULE{root = R} = T) ->
-    gc(T, [R]).
+gc(#?MODULE{} = T) ->
+    gc(T, [root(T)]).
 
 
 -doc """
@@ -306,8 +309,11 @@ gc(#?MODULE{root = R} = T) ->
 -spec gc(t(), [binary()]) -> t().
 
 gc(#?MODULE{store = Store0} = T, KeepRoots) ->
-    Store = bondy_mst_store:gc(Store0, KeepRoots),
-    T#?MODULE{store = Store}.
+    Fun = fun() ->
+        Store = bondy_mst_store:gc(Store0, KeepRoots),
+        T#?MODULE{store = Store}
+    end,
+    bondy_mst_store:transaction(Store0, Fun).
 
 
 
@@ -321,12 +327,6 @@ get_option(store, #{store := Store}, _) ->
     Store;
 
 get_option(store, _, Default) ->
-    apply_default(Default);
-
-get_option(root, #{root := Root}, _) ->
-    Root;
-
-get_option(root, _, Default) ->
     apply_default(Default);
 
 get_option(comparator, #{comparator := Fun}, _) when is_function(Fun, 2) ->
@@ -508,7 +508,7 @@ do_last_n(T, TopBound, N, Low, [{K, V, Low2} | Rest]) ->
 
 %% @private
 insert_at(T, Key, Value, Level) ->
-    insert_at(T, Key, Value, Level, T#?MODULE.store, T#?MODULE.root).
+    insert_at(T, Key, Value, Level, T#?MODULE.store, root(T)).
 
 
 %% @private
@@ -832,15 +832,20 @@ to_list(_, undefined) ->
     [];
 
 to_list(Store, Root) ->
-    Page = bondy_mst_store:get(Store, Root),
-    Low = bondy_mst_page:low(Page),
-    List = bondy_mst_page:list(Page),
-    L1 = to_list(Store, Low),
-    Acc = lists:flatmap(
-        fun({K, V, R}) -> [{K, V} | to_list(Store, R)] end,
-        List
-    ),
-    L1 ++ Acc.
+    case bondy_mst_store:get(Store, Root) of
+        undefined ->
+            [];
+
+        Page ->
+            Low = bondy_mst_page:low(Page),
+            List = bondy_mst_page:list(Page),
+            L1 = to_list(Store, Low),
+            Acc = lists:flatmap(
+                fun({K, V, R}) -> [{K, V} | to_list(Store, R)] end,
+                List
+            ),
+            L1 ++ Acc
+    end.
 
 
 %% @private

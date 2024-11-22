@@ -7,7 +7,11 @@
    [kernel,
     stdlib,
     app_config,
-    leveled
+    utils,
+    resulto,
+    memory,
+    leveled,
+    rocksdb
    ]},
   {env,[]},
   {modules, []},

@@ -23,6 +23,7 @@ Non-concurrent, MST backend using `ets`.
 """.
 
 -behaviour(bondy_mst_store).
+-include("bondy_mst.hrl").
 
 -record(?MODULE, {
     tab         :: ets:tid()
@@ -36,16 +37,18 @@ Non-concurrent, MST backend using `ets`.
 
 
 %% API
--export([new/1]).
--export([get/2]).
--export([has/2]).
--export([put/2]).
 -export([copy/3]).
--export([missing_set/2]).
--export([page_refs/1]).
+-export([delete/1]).
 -export([free/2]).
 -export([gc/2]).
--export([delete/1]).
+-export([get/2]).
+-export([get_root/1]).
+-export([has/2]).
+-export([missing_set/2]).
+-export([new/1]).
+-export([page_refs/1]).
+-export([put/2]).
+-export([set_root/2]).
 
 
 
@@ -62,9 +65,26 @@ Non-concurrent, MST backend using `ets`.
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
-new(#{name := Name} = _Opts) ->
-    Tab = ets:new(Name, [ordered_set, named_table, public]),
+new(#{} = _Opts) ->
+    Tab = ets:new(undefined, [ordered_set, public]),
     #?MODULE{tab = Tab}.
+
+
+-doc """
+""".
+-spec get_root(T :: t()) -> Root :: hash() | undefined.
+
+get_root(#?MODULE{tab = Tab}) ->
+    do_get(Tab, ?ROOT_KEY).
+
+
+-doc """
+""".
+-spec set_root(T :: t(), Hash :: hash()) -> t().
+
+set_root(#?MODULE{tab = Tab} = T, Hash) ->
+    true = ets:insert(Tab, {?ROOT_KEY, Hash}),
+    T.
 
 
 -doc """
@@ -85,11 +105,12 @@ has(#?MODULE{tab = Tab}, Hash) ->
 
 -doc """
 """.
--spec put(T :: t(), Page :: page()) -> {Hash :: binary(), T :: t()}.
+-spec put(T :: t(), Page :: page()) -> {Root :: binary(), T :: t()}.
 
 put(#?MODULE{tab = Tab} = T, Page) ->
     Hash = bondy_mst_utils:hash(Page),
-    true = ets:insert(Tab, {Hash, Page}),
+    %% We insert both atomically
+    true = ets:insert(Tab, [{Hash, Page}, {?ROOT_KEY, Hash}]),
     {Hash, T}.
 
 

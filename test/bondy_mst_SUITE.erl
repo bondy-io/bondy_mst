@@ -5,6 +5,8 @@
 
 -define(MST, bondy_mst).
 
+-define(ISET(L), interval_sets:from_list(L)).
+
 -compile(export_all).
 
 %% All test cases to be run
@@ -13,7 +15,8 @@ all() ->
     [
         {group, local_store, []},
         {group, ets_store, []},
-        {group, leveled_store, []}
+        {group, leveled_store, []},
+        {group, rocksdb_store, []}
     ].
 
 groups() ->
@@ -32,6 +35,12 @@ groups() ->
             basic_test,
             first_last_test,
             large_test
+        ]},
+        {rocksdb_store, [], [
+            basic_test,
+            first_last_test,
+            large_test,
+            concurrent_test
         ]}
     ].
 
@@ -48,11 +57,20 @@ init_per_group(ets_store, Config) ->
 
 
 init_per_group(leveled_store, Config) ->
-    _ = file:delete("/tmp/bondy_mst"),
+    _ = file:delete("/tmp/bondy_mst/leveled"),
     {ok, _} = application:ensure_all_started(bondy_mst),
 
     Fun = fun(Name) ->
         bondy_mst_store:new(bondy_mst_leveled_store, [{name, Name}])
+    end,
+    [{store_fun, Fun}] ++ Config;
+
+init_per_group(rocksdb_store, Config) ->
+    _ = file:delete("/tmp/bondy_mst/rocksdb"),
+    {ok, _} = application:ensure_all_started(bondy_mst),
+
+    Fun = fun(Name) ->
+        bondy_mst_store:new(bondy_mst_rocksdb_store, [{name, Name}])
     end,
     [{store_fun, Fun}] ++ Config.
 
@@ -132,7 +150,7 @@ large_test(Config) ->
 
     %% Test for large MST operations
     ShuffledA = list_shuffle(lists:seq(1, 1000)),
-    ShuffledB = list_shuffle(lists:seq(550, 1500)),
+    ShuffledB = list_shuffle(lists:seq(550, 15_000)),
      A = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
         ?MST:new(#{store => Fun(bondy_mst_a)}),
@@ -146,7 +164,7 @@ large_test(Config) ->
     Z = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
         ?MST:new(#{store => Fun(bondy_mst_z)}),
-        lists:seq(1, 1500)
+        lists:seq(1, 15_000)
     ),
     C = ?MST:merge(A, B),
     D = ?MST:merge(B, A),
@@ -155,20 +173,20 @@ large_test(Config) ->
     ?assertEqual(?MST:root(C), ?MST:root(Z)),
 
     FullList = [K || {K, _} <- ?MST:to_list(C)],
-    ?assertEqual(lists:seq(1, 1500), lists:sort(FullList)),
+    ?assertEqual(?ISET(lists:seq(1, 15_000)), ?ISET(lists:sort(FullList))),
 
     DCA = [K || {K, _} <- ?MST:diff_to_list(C, A)],
-    ?assertEqual(lists:seq(1001, 1500), DCA),
+    ?assertEqual(?ISET(lists:seq(1001, 15_000)), ?ISET(DCA)),
     DCB = [K || {K, _} <- ?MST:diff_to_list(C, B)],
-    ?assertEqual(lists:seq(1, 549), DCB),
+    ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DCB)),
 
     ?assertEqual([], ?MST:diff_to_list(A, C)),
     ?assertEqual([], ?MST:diff_to_list(B, C)),
 
     DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
-    ?assertEqual(lists:seq(1001, 1500), DBA),
+    ?assertEqual(?ISET(lists:seq(1001, 15_000)), ?ISET(DBA)),
     DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
-    ?assertEqual(lists:seq(1, 549), DAB),
+    ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DAB)),
 
     ok = bondy_mst:delete(A),
     ok = bondy_mst:delete(B),
@@ -187,6 +205,62 @@ first_last_test(Config) ->
     ?assertEqual({1, true}, bondy_mst:first(A)),
     ?assertEqual({10, true}, bondy_mst:last(A)).
 
+
+concurrent_test(Config) ->
+    Fun = ?config(store_fun, Config),
+
+    %% Test for large MST operations
+    ShuffledA = list_shuffle(lists:seq(1, 1000)),
+    ShuffledB = list_shuffle(lists:seq(550, 15_000)),
+     A = lists:foldl(
+        fun(N, Acc) ->
+            spawn(fun() -> ?MST:insert(Acc, N) end),
+            Acc
+        end,
+        ?MST:new(#{store => Fun(bondy_mst_a)}),
+        ShuffledA
+    ),
+    B = lists:foldl(
+        fun(N, Acc) ->
+            spawn(fun() -> ?MST:insert(Acc, N) end),
+            Acc
+        end,
+        ?MST:new(#{store => Fun(bondy_mst_b)}),
+        ShuffledB
+    ),
+    Z = lists:foldl(
+        fun(N, Acc) ->
+            spawn(fun() -> ?MST:insert(Acc, N) end),
+            Acc
+        end,
+        ?MST:new(#{store => Fun(bondy_mst_z)}),
+        lists:seq(1, 15_000)
+    ),
+    C = ?MST:merge(A, B),
+    D = ?MST:merge(B, A),
+
+    ?assertEqual(?MST:root(C), ?MST:root(D)),
+    ?assertEqual(?MST:root(C), ?MST:root(Z)),
+
+    FullList = [K || {K, _} <- ?MST:to_list(C)],
+    ?assertEqual(?ISET(lists:seq(1, 15_000)), ?ISET(lists:sort(FullList))),
+
+    DCA = [K || {K, _} <- ?MST:diff_to_list(C, A)],
+    ?assertEqual(?ISET(lists:seq(1001, 15_000)), ?ISET(DCA)),
+    DCB = [K || {K, _} <- ?MST:diff_to_list(C, B)],
+    ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DCB)),
+
+    ?assertEqual([], ?MST:diff_to_list(A, C)),
+    ?assertEqual([], ?MST:diff_to_list(B, C)),
+
+    DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
+    ?assertEqual(?ISET(lists:seq(1001, 15_000)), ?ISET(DBA)),
+    DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
+    ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DAB)),
+
+    ok = bondy_mst:delete(A),
+    ok = bondy_mst:delete(B),
+    ok = bondy_mst:delete(Z).
 
 
 %% =============================================================================
