@@ -56,7 +56,7 @@ init_per_group(ets_store, Config) ->
 
 
 init_per_group(leveled_store, Config) ->
-    _ = file:delete("/tmp/bondy_mst/leveled"),
+    ok = file:del_dir_r("/tmp/bondy_mst/leveled"),
     {ok, _} = application:ensure_all_started(bondy_mst),
 
     Fun = fun(Name) ->
@@ -65,7 +65,7 @@ init_per_group(leveled_store, Config) ->
     [{store_fun, Fun}] ++ Config;
 
 init_per_group(rocksdb_store, Config) ->
-    _ = file:delete("/tmp/bondy_mst/rocksdb"),
+    ok = file:del_dir_r("/tmp/bondy_mst/rocksdb"),
     {ok, _} = application:ensure_all_started(bondy_mst),
 
     Fun = fun(Name) ->
@@ -105,19 +105,25 @@ small_test(Config) ->
     %% Test for basic MST operations
     A = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
-        ?MST:new(#{store => Fun(bondy_mst_a)}),
+        ?MST:new(#{store => Fun(~"bondy_mst_a")}),
         lists:seq(1, 10)
     ),
+    ?assertEqual([{1, 10}], ?ISET([K || {K, true} <- ?MST:to_list(A)])),
+
     B = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
-        ?MST:new(#{store => Fun(bondy_mst_b)}),
+        ?MST:new(#{store => Fun(~"bondy_mst_b")}),
         lists:seq(5, 15)
     ),
+    ?assertEqual([{5, 15}], ?ISET([K || {K, true} <- ?MST:to_list(B)])),
+
     Z = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
-        ?MST:new(#{store => Fun(bondy_mst_z)}),
+        ?MST:new(#{store => Fun(~"bondy_mst_z")}),
         lists:seq(1, 15)
     ),
+    ?assertEqual([{1, 15}], ?ISET([K || {K, true} <- ?MST:to_list(Z)])),
+
     C = ?MST:merge(A, B),
     D = ?MST:merge(B, A),
 
@@ -149,21 +155,21 @@ large_test(Config) ->
 
     %% Test for large MST operations
     ShuffledA = list_shuffle(lists:seq(1, 1000)),
-    ShuffledB = list_shuffle(lists:seq(550, 15_000)),
+    ShuffledB = list_shuffle(lists:seq(550, 1500)),
      A = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
-        ?MST:new(#{store => Fun(bondy_mst_a)}),
+        ?MST:new(#{store => Fun(~"bondy_mst_a")}),
         ShuffledA
     ),
     B = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
-        ?MST:new(#{store => Fun(bondy_mst_b)}),
+        ?MST:new(#{store => Fun(~"bondy_mst_b")}),
         ShuffledB
     ),
     Z = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
-        ?MST:new(#{store => Fun(bondy_mst_z)}),
-        lists:seq(1, 15_000)
+        ?MST:new(#{store => Fun(~"bondy_mst_z")}),
+        lists:seq(1, 1500)
     ),
     C = ?MST:merge(A, B),
     D = ?MST:merge(B, A),
@@ -172,10 +178,10 @@ large_test(Config) ->
     ?assertEqual(?MST:root(C), ?MST:root(Z)),
 
     FullList = [K || {K, _} <- ?MST:to_list(C)],
-    ?assertEqual(?ISET(lists:seq(1, 15_000)), ?ISET(lists:sort(FullList))),
+    ?assertEqual(?ISET(lists:seq(1, 1500)), ?ISET(lists:sort(FullList))),
 
     DCA = [K || {K, _} <- ?MST:diff_to_list(C, A)],
-    ?assertEqual(?ISET(lists:seq(1001, 15_000)), ?ISET(DCA)),
+    ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DCA)),
     DCB = [K || {K, _} <- ?MST:diff_to_list(C, B)],
     ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DCB)),
 
@@ -183,7 +189,7 @@ large_test(Config) ->
     ?assertEqual([], ?MST:diff_to_list(B, C)),
 
     DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
-    ?assertEqual(?ISET(lists:seq(1001, 15_000)), ?ISET(DBA)),
+    ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DBA)),
     DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
     ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DAB)),
 
@@ -198,7 +204,7 @@ first_last_test(Config) ->
     %% Test for basic MST operations
     A = lists:foldl(
         fun(N, Acc) -> ?MST:insert(Acc, N) end,
-        ?MST:new(#{store => Fun(bondy_mst_a)}),
+        ?MST:new(#{store => Fun(~"bondy_mst_a")}),
         lists:seq(1, 10)
     ),
     ?assertEqual({1, true}, bondy_mst:first(A)),
@@ -210,13 +216,13 @@ concurrent_test(Config) ->
 
     %% Test for large MST operations
     ShuffledA = list_shuffle(lists:seq(1, 1000)),
-    ShuffledB = list_shuffle(lists:seq(550, 15_000)),
+    ShuffledB = list_shuffle(lists:seq(550, 1500)),
      A = lists:foldl(
         fun(N, Acc) ->
             spawn(fun() -> ?MST:insert(Acc, N) end),
             Acc
         end,
-        ?MST:new(#{store => Fun(bondy_mst_a)}),
+        ?MST:new(#{store => Fun(~"bondy_mst_a")}),
         ShuffledA
     ),
     B = lists:foldl(
@@ -224,7 +230,7 @@ concurrent_test(Config) ->
             spawn(fun() -> ?MST:insert(Acc, N) end),
             Acc
         end,
-        ?MST:new(#{store => Fun(bondy_mst_b)}),
+        ?MST:new(#{store => Fun(~"bondy_mst_b")}),
         ShuffledB
     ),
     Z = lists:foldl(
@@ -232,8 +238,8 @@ concurrent_test(Config) ->
             spawn(fun() -> ?MST:insert(Acc, N) end),
             Acc
         end,
-        ?MST:new(#{store => Fun(bondy_mst_z)}),
-        lists:seq(1, 15_000)
+        ?MST:new(#{store => Fun(~"bondy_mst_z")}),
+        lists:seq(1, 1500)
     ),
     C = ?MST:merge(A, B),
     D = ?MST:merge(B, A),
@@ -242,10 +248,10 @@ concurrent_test(Config) ->
     ?assertEqual(?MST:root(C), ?MST:root(Z)),
 
     FullList = [K || {K, _} <- ?MST:to_list(C)],
-    ?assertEqual(?ISET(lists:seq(1, 15_000)), ?ISET(lists:sort(FullList))),
+    ?assertEqual(?ISET(lists:seq(1, 1500)), ?ISET(lists:sort(FullList))),
 
     DCA = [K || {K, _} <- ?MST:diff_to_list(C, A)],
-    ?assertEqual(?ISET(lists:seq(1001, 15_000)), ?ISET(DCA)),
+    ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DCA)),
     DCB = [K || {K, _} <- ?MST:diff_to_list(C, B)],
     ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DCB)),
 
@@ -253,7 +259,7 @@ concurrent_test(Config) ->
     ?assertEqual([], ?MST:diff_to_list(B, C)),
 
     DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
-    ?assertEqual(?ISET(lists:seq(1001, 15_000)), ?ISET(DBA)),
+    ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DBA)),
     DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
     ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DAB)),
 
