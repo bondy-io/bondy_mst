@@ -40,7 +40,7 @@ Non-concurrent, MST backend using `ets`.
 %% API
 -export([copy/3]).
 -export([delete/1]).
--export([free/2]).
+-export([free/3]).
 -export([gc/2]).
 -export([get/2]).
 -export([get_root/1]).
@@ -139,9 +139,9 @@ copy(#?MODULE{tab = Tab} = T, OtherStore, Hash) ->
 
 -doc """
 """.
--spec free(T :: t(), Hash :: binary()) -> T :: t().
+-spec free(T :: t(), Hash :: binary(), Page :: page()) -> T :: t().
 
-free(#?MODULE{tab = Tab} = T, Hash) ->
+free(#?MODULE{tab = Tab} = T, Hash, _Page) ->
     true = ets:delete(Tab, Hash),
     T.
 

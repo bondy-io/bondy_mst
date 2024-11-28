@@ -15,7 +15,7 @@ operations and implement different synchronization or caching mechanisms.
 -record(?MODULE, {
     mod                 ::  module(),
     state               ::  backend(),
-    tx_supported        ::  boolean()
+    transactions        ::  boolean()
 }).
 
 -type t()               ::  #?MODULE{}.
@@ -29,7 +29,7 @@ operations and implement different synchronization or caching mechanisms.
 %% API
 -export([copy/3]).
 -export([delete/1]).
--export([free/2]).
+-export([free/3]).
 -export([gc/2]).
 -export([get/2]).
 -export([get_root/1]).
@@ -58,11 +58,11 @@ operations and implement different synchronization or caching mechanisms.
 
 -callback has(backend(), page()) -> boolean().
 
--callback put(backend(), page()) -> {Hash :: binary(), backend()}.
+-callback put(backend(), page()) -> {Hash :: hash(), backend()}.
 
--callback copy(backend(), OtherStore :: t(), Hash :: binary()) -> backend().
+-callback copy(backend(), OtherStore :: t(), Hash :: hash()) -> backend().
 
--callback free(backend(), Hash :: binary()) -> backend().
+-callback free(backend(), hash(), page()) -> backend().
 
 -callback gc(backend(), KeepRoots :: [list()]) -> backend().
 
@@ -75,7 +75,10 @@ operations and implement different synchronization or caching mechanisms.
 -callback transaction(backend(), Fun :: fun(() -> any())) ->
     any() | no_return().
 
+
 -optional_callbacks([transaction/2]).
+
+
 
 %% =============================================================================
 %% API
@@ -89,7 +92,7 @@ new(Mod, Opts) when is_atom(Mod) andalso (is_map(Opts) orelse is_list(Opts)) ->
     #?MODULE{
         mod = Mod,
         state = Mod:new(Opts),
-        tx_supported = supports_transactions(Mod)
+        transactions = supports_transactions(Mod)
     }.
 
 
@@ -115,7 +118,7 @@ Get the root page.
 
 Returns page or `undefined`.
 """.
--spec set_root(Store :: t(), Hash :: binary()) -> ok.
+-spec set_root(Store :: t(), Hash :: hash()) -> ok.
 
 set_root(#?MODULE{mod = Mod, state = State0} = T, Hash) when is_binary(Hash) ->
     State = Mod:set_root(State0, Hash),
@@ -147,7 +150,7 @@ hash that the store has associated to it.
 
 Returns {hash, store}
 """.
--spec put(Store :: t(), Page :: page()) -> {Hash :: binary(), Store :: t()}.
+-spec put(Store :: t(), Page :: page()) -> {Hash :: hash(), Store :: t()}.
 
 put(#?MODULE{mod = Mod, state = State0} = T, Page) ->
     {Hash, State} = Mod:put(State0, Page),
@@ -156,7 +159,7 @@ put(#?MODULE{mod = Mod, state = State0} = T, Page) ->
 
 -doc """
 """.
--spec copy(Store :: t(), OtherStore :: t(), Hash :: binary()) -> Store :: t().
+-spec copy(Store :: t(), OtherStore :: t(), Hash :: hash()) -> Store :: t().
 
 copy(#?MODULE{mod = Mod, state = State0} = T, OtherStore, Hash) ->
     T#?MODULE{state = Mod:copy(State0, OtherStore, Hash)}.
@@ -164,10 +167,10 @@ copy(#?MODULE{mod = Mod, state = State0} = T, OtherStore, Hash) ->
 
 -doc """
 """.
--spec free(Store :: t(), Hash :: binary()) -> Store :: t().
+-spec free(Store :: t(), Hash :: hash(), Page :: page()) -> Store :: t().
 
-free(#?MODULE{mod = Mod, state = State0} = T, Hash) ->
-    T#?MODULE{state = Mod:free(State0, Hash)}.
+free(#?MODULE{mod = Mod, state = State0} = T, Hash, Page) ->
+    T#?MODULE{state = Mod:free(State0, Hash, Page)}.
 
 
 -doc """
@@ -215,10 +218,10 @@ delete(#?MODULE{mod = Mod, state = State}) ->
 -spec transaction(Store :: t(), Fun :: fun(() -> any())) ->
     any() | {error, Reason :: any()}.
 
-transaction(#?MODULE{tx_supported = true, mod = Mod, state = State}, Fun) ->
+transaction(#?MODULE{transactions = true, mod = Mod, state = State}, Fun) ->
     Mod:transaction(State, Fun);
 
-transaction(#?MODULE{tx_supported = false}, Fun) ->
+transaction(#?MODULE{transactions = false}, Fun) ->
     Fun().
 
 
@@ -230,8 +233,11 @@ transaction(#?MODULE{tx_supported = false}, Fun) ->
 
 
 supports_transactions(Mod) ->
-    erlang:function_exported(Mod, module_info, 0)
-        orelse code:ensure_loaded(Mod),
-
+    ok = ensure_loaded(Mod),
     erlang:function_exported(Mod, transaction, 2).
 
+
+ensure_loaded(Mod) ->
+    erlang:function_exported(Mod, module_info, 0)
+        orelse code:ensure_loaded(Mod),
+    ok.

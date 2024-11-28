@@ -19,7 +19,16 @@
 
 -module(bondy_mst_map_store).
 -moduledoc """
-MST backend using `maps`.
+This module implements the `bondy_mst_store` behaviour using an in-process
+`map`.
+
+As opposed to other backend stores, this module does not offer support for read
+concurrency, and as a result:
+
+* Versioning is not implemented, every mutating operation returns a copy of the
+map; and
+* All calls to `free/3` are made effective immediately by removing the pages
+from the map.
 """.
 
 -behaviour(bondy_mst_store).
@@ -41,7 +50,7 @@ MST backend using `maps`.
 
 -export([copy/3]).
 -export([delete/1]).
--export([free/2]).
+-export([free/3]).
 -export([gc/2]).
 -export([get/2]).
 -export([get_root/1]).
@@ -60,8 +69,7 @@ MST backend using `maps`.
 
 
 
--doc """
-""".
+-doc false.
 -spec new(Opts :: map() | list()) -> t().
 
 new(Opts) when is_list(Opts) ->
@@ -71,40 +79,35 @@ new(Opts) when is_map(Opts) ->
     #?MODULE{}.
 
 
--doc """
-""".
+-doc false.
 -spec get_root(T :: t()) -> Root :: hash() | undefined.
 
 get_root(#?MODULE{root = Root}) ->
     Root.
 
 
--doc """
-""".
+-doc false.
 -spec set_root(T :: t(), Hash :: hash()) -> t().
 
 set_root(#?MODULE{} = T, Hash) ->
     T#?MODULE{root = Hash}.
 
 
--doc """
-""".
+-doc false.
 -spec get(t(), page()) -> page() | undefined.
 
 get(#?MODULE{pages = Pages}, Hash) ->
     maps:get(Hash, Pages, undefined).
 
 
--doc """
-""".
+-doc false.
 -spec has(t(), page()) -> boolean().
 
 has(#?MODULE{pages = Pages}, Hash) ->
     maps:is_key(Hash, Pages).
 
 
--doc """
-""".
+-doc false.
 -spec put(t(), page()) -> {Hash :: binary(), t()}.
 
 put(#?MODULE{pages = Pages} = T0, Page) ->
@@ -113,8 +116,7 @@ put(#?MODULE{pages = Pages} = T0, Page) ->
     {Hash, set_root(T, Hash)}.
 
 
--doc """
-""".
+-doc false.
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().
 
 copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
@@ -132,17 +134,15 @@ copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
     end.
 
 
--doc """
-""".
--spec free(t(), Hash :: binary()) -> t().
+-doc false.
+-spec free(t(), Hash :: binary(), Page :: page()) -> t().
 
-free(#?MODULE{pages = Pages0} = T, Hash) ->
+free(#?MODULE{pages = Pages0} = T, Hash, _Page) ->
     Pages = maps:remove(Hash, Pages0),
     T#?MODULE{pages = Pages}.
 
 
--doc """
-""".
+-doc false.
 -spec gc(t(), KeepRoots :: [list()]) -> t().
 
 gc(#?MODULE{pages = Pages0} = T, KeepRoots) ->
@@ -155,8 +155,7 @@ gc(#?MODULE{pages = Pages0} = T, KeepRoots) ->
     T#?MODULE{pages = Pages}.
 
 
--doc """
-""".
+-doc false.
 -spec missing_set(t(), Root :: binary()) -> [Pages :: list()].
 
 missing_set(#?MODULE{pages = Pages} = T, Root) ->

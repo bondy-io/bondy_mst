@@ -43,7 +43,7 @@ Non-concurrent, MST backend using `leveled`.
 %% API
 -export([copy/3]).
 -export([delete/1]).
--export([free/2]).
+-export([free/3]).
 -export([gc/2]).
 -export([get/2]).
 -export([get_root/1]).
@@ -142,9 +142,9 @@ copy(#?MODULE{pid = Pid, name = Name} = T, OtherStore, Hash) ->
 
 -doc """
 """.
--spec free(T :: t(), Hash :: binary()) -> T :: t().
+-spec free(T :: t(), Hash :: binary(), Page :: page()) -> T :: t().
 
-free(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
+free(#?MODULE{pid = Pid, name = Name} = T, Hash, _Page) ->
     ok = leveled_bookie:book_delete(Pid, Name, Hash, []),
     T.
 

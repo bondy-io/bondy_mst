@@ -90,6 +90,7 @@ A node of the tree is:
 -export([get_range/2]).
 -export([insert/2]).
 -export([insert/3]).
+-export([keys/1]).
 -export([last/1]).
 -export([last_n/3]).
 -export([merge/2]).
@@ -98,6 +99,7 @@ A node of the tree is:
 -export([root/1]).
 -export([store/1]).
 -export([to_list/1]).
+-export([to_list/2]).
 
 
 %% =============================================================================
@@ -215,8 +217,18 @@ List all items.
 """.
 -spec to_list(t()) -> [{key(), value()}].
 
-to_list(#?MODULE{store = Store} = T) ->
-    to_list(Store, root(T)).
+to_list(#?MODULE{} = T) ->
+    to_list(T, root(T)).
+
+
+-doc """
+List all items.
+""".
+-spec to_list(t(), hash()) -> [{key(), value()}].
+
+to_list(#?MODULE{store = Store}, Root) when is_binary(Root) ->
+    do_to_list(Store, Root).
+
 
 
 -doc """
@@ -225,7 +237,7 @@ List all items.
 -spec keys(t()) -> [{key(), value()}].
 
 keys(#?MODULE{store = Store} = T) ->
-    to_list(Store, root(T), fun(K, _) -> K end).
+    do_to_list(Store, root(T), fun(K, _) -> K end).
 
 
 -doc """
@@ -535,11 +547,11 @@ insert_at(T, Key, Value, Level, Store0, Root) ->
             insert_at_higher_level(T, Key, Value, Level, Root, Store0);
 
         PageLevel when PageLevel == Level ->
-            Store = bondy_mst_store:free(Store0, Root),
+            Store = bondy_mst_store:free(Store0, Root, Page),
             insert_at_same_level(T, Key, Value, Level, First, Store, Page);
 
         PageLevel when PageLevel > Level ->
-            Store = bondy_mst_store:free(Store0, Root),
+            Store = bondy_mst_store:free(Store0, Root, Page),
             insert_at_lower_level(T, Key, Value, Level, First, Store, Page)
     end.
 
@@ -679,7 +691,7 @@ split(T, Store0, Hash, Key) ->
     Level = bondy_mst_page:level(Page),
     Low = bondy_mst_page:low(Page),
 
-    Store1 = bondy_mst_store:free(Store0, Hash),
+    Store1 = bondy_mst_store:free(Store0, Hash, Page),
 
     case compare(T, Key, K0) of
         lt ->
@@ -844,15 +856,15 @@ merge_aux_rec(
 
 
 %% @private
-to_list(Store, Root) ->
-    to_list(Store, Root, fun(K, V) -> {K, V} end).
+do_to_list(Store, Root) ->
+    do_to_list(Store, Root, fun(K, V) -> {K, V} end).
 
 
 %% @private
-to_list(_, undefined, _) ->
+do_to_list(_, undefined, _) ->
     [];
 
-to_list(Store, Root, Fun) ->
+do_to_list(Store, Root, Fun) ->
     case bondy_mst_store:get(Store, Root) of
         undefined ->
             [];
@@ -860,9 +872,9 @@ to_list(Store, Root, Fun) ->
         Page ->
             Low = bondy_mst_page:low(Page),
             List = bondy_mst_page:list(Page),
-            L1 = to_list(Store, Low, Fun),
+            L1 = do_to_list(Store, Low, Fun),
             Acc = lists:flatmap(
-                fun({K, V, R}) -> [Fun(K, V) | to_list(Store, R, Fun)] end,
+                fun({K, V, R}) -> [Fun(K, V) | do_to_list(Store, R, Fun)] end,
                 List
             ),
             L1 ++ Acc
@@ -877,7 +889,7 @@ diff_to_list(_, _, undefined, _, _) ->
     [];
 
 diff_to_list(_, Store1, R1, _, undefined) ->
-    to_list(Store1, R1);
+    do_to_list(Store1, R1);
 
 diff_to_list(T, Store1, R1, Store2, R2) ->
     Page1 = bondy_mst_store:get(Store1, R1),

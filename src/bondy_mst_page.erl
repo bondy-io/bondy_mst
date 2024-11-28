@@ -27,13 +27,14 @@ that may reference other data pages by their hash.
 -include("bondy_mst.hrl").
 
 -record(?MODULE, {
-    level       ::  level(),
-    low         ::  hash() | undefined,
-    list        ::  [entry()]
+    level           ::  level(),
+    low             ::  hash() | undefined,
+    list            ::  [entry()],
+    freed_at        ::  epoch() | undefined
 }).
 
--type t()       ::  #?MODULE{}.
--type entry()   ::  {key(), value(), hash() | undefined}.
+-type t()           ::  #?MODULE{}.
+-type entry()       ::  {key(), value(), hash() | undefined}.
 
 -export_type([t/0]).
 -export_type([entry/0]).
@@ -43,11 +44,14 @@ that may reference other data pages by their hash.
 -export_type([value/0]).
 -export_type([hash/0]).
 
+-export([freed_at/1]).
+-export([is_referenced_at/2]).
+-export([level/1]).
+-export([list/1]).
+-export([low/1]).
 -export([new/3]).
 -export([refs/1]).
--export([level/1]).
--export([low/1]).
--export([list/1]).
+-export([set_freed_at/2]).
 
 
 
@@ -56,35 +60,74 @@ that may reference other data pages by their hash.
 %% =============================================================================
 
 
+-doc "Creates a new page".
 -spec new(level(), hash(), [entry()]) -> t().
 
 new(Level, Low, List) ->
     #?MODULE{
         level = Level,
         low = Low,
-        list = List
+        list = List,
+        freed_at = undefined
     }.
 
 
+-doc """
+Returns the level of this page in the tree i.e. the logical height.
+""".
 -spec level(t()) -> level().
 
 level(#?MODULE{level = Val}) -> Val.
 
 
+-doc "".
 -spec low(t()) -> hash().
 
 low(#?MODULE{low = Val}) -> Val.
 
 
+-doc """
+Returns the epoch number at which this page has been freed or `undefined` if
+it hasn't i.e. it is still active.
+""".
+-spec freed_at(t()) -> epoch() | undefined.
+
+freed_at(#?MODULE{freed_at = Val}) -> Val.
+
+
+-doc """
+Sets the version number at which this page has been freed.
+""".
+-spec set_freed_at(t(), epoch()) -> t().
+
+set_freed_at(#?MODULE{} = T, Epoch) when is_integer(Epoch) andalso Epoch > 0 ->
+    T#?MODULE{freed_at = Epoch}.
+
+
+-doc """
+Returns `true` if the page is referenced at `Epoch`. Otherwise, returns `false`.
+""".
+-spec is_referenced_at(t(), epoch()) -> boolean().
+
+is_referenced_at(#?MODULE{freed_at = undefined}, _) ->
+    true;
+
+is_referenced_at(#?MODULE{freed_at = LastEpoch}, Epoch) ->
+    LastEpoch >= Epoch.
+
+
+-doc "Returns the list of entries in this page.".
 -spec list(t()) -> [entry()].
 
 list(#?MODULE{list = Val}) -> Val.
 
 
--doc "Get hashes of all pages referenced by this page.".
+-doc "Returns the hashes of all pages referenced by this page.".
+-spec refs(t()) -> [hash()].
 
 refs(#?MODULE{list = List, low = Low}) ->
     Refs = [H || {_, _, H} <- List, H =/= undefined],
+
     case Low =/= undefined of
         true ->
             [Low | Refs];
