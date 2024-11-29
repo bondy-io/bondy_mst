@@ -39,6 +39,7 @@ groups() ->
         {rocksdb_store, [], [
             small_test,
             first_last_test,
+            read_concurrency_test,
             large_test
         ]}
     ].
@@ -249,62 +250,39 @@ first_last_test(Config) ->
     ?assertEqual({1, true}, bondy_mst:first(A)),
     ?assertEqual({10, true}, bondy_mst:last(A)).
 
-
-concurrent_test(Config) ->
+read_concurrency_test(Config) ->
     Fun = ?config(store_fun, Config),
 
-    %% Test for large MST operations
-    ShuffledA = list_shuffle(lists:seq(1, 1000)),
-    ShuffledB = list_shuffle(lists:seq(550, 1500)),
-     A = lists:foldl(
-        fun(N, Acc) ->
-            spawn(fun() -> ?MST:insert(Acc, N) end),
-            Acc
-        end,
-        ?MST:new(#{store => Fun(~"bondy_mst_a")}),
-        ShuffledA
-    ),
-    B = lists:foldl(
-        fun(N, Acc) ->
-            spawn(fun() -> ?MST:insert(Acc, N) end),
-            Acc
-        end,
-        ?MST:new(#{store => Fun(~"bondy_mst_b")}),
-        ShuffledB
-    ),
-    Z = lists:foldl(
-        fun(N, Acc) ->
-            spawn(fun() -> ?MST:insert(Acc, N) end),
-            Acc
-        end,
-        ?MST:new(#{store => Fun(~"bondy_mst_z")}),
-        lists:seq(1, 1500)
-    ),
-    C = ?MST:merge(A, B),
-    D = ?MST:merge(B, A),
+    T0 = ?MST:new(#{store => Fun(~"read_concurrency_test")}),
 
-    ?assertEqual(?MST:root(C), ?MST:root(D)),
-    ?assertEqual(?MST:root(C), ?MST:root(Z)),
+    T1 = ?MST:insert(T0, 1),
+    R1 = ?MST:root(T1),
 
-    FullList = [K || {K, _} <- ?MST:to_list(C)],
-    ?assertEqual(?ISET(lists:seq(1, 1500)), ?ISET(lists:sort(FullList))),
+    T2 = ?MST:insert(T1, 2),
+    E2 = erlang:monotonic_time(),
+    R2 = ?MST:root(T2),
 
-    DCA = [K || {K, _} <- ?MST:diff_to_list(C, A)],
-    ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DCA)),
-    DCB = [K || {K, _} <- ?MST:diff_to_list(C, B)],
-    ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DCB)),
+    T3 = ?MST:insert(T2, 3),
+    E3 = erlang:monotonic_time(),
+    R3 = ?MST:root(T3),
 
-    ?assertEqual([], ?MST:diff_to_list(A, C)),
-    ?assertEqual([], ?MST:diff_to_list(B, C)),
 
-    DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
-    ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DBA)),
-    DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
-    ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DAB)),
+    ?assertEqual([{1, true}], bondy_mst:to_list(T1, R1)),
+    ?assertEqual([{1, true}, {2, true}], bondy_mst:to_list(T2, R2)),
+    ?assertEqual([{1, true}, {2, true}, {3, true}], bondy_mst:to_list(T3, R3)),
+    ?assertEqual(bondy_mst:to_list(T3, R3), bondy_mst:to_list(T3)),
 
-    ok = bondy_mst:delete(A),
-    ok = bondy_mst:delete(B),
-    ok = bondy_mst:delete(Z).
+    %% GC
+    T4 = bondy_mst:gc(T3, E2),
+    ?assertEqual([], bondy_mst:to_list(T4, R1)),
+    ?assertEqual([{1, true}, {2, true}], bondy_mst:to_list(T4, R2)),
+
+    T5 = bondy_mst:gc(T4, E3),
+    ?assertEqual([], bondy_mst:to_list(T5, R2)),
+
+    ?assertEqual([{1, true}, {2, true}, {3, true}], bondy_mst:to_list(T5, R3)),
+    ?assertEqual(bondy_mst:to_list(T5, R3), bondy_mst:to_list(T5)).
+
 
 
 %% =============================================================================

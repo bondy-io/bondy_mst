@@ -21,6 +21,13 @@ operations and implement different synchronization or caching mechanisms.
 -type t()               ::  #?MODULE{}.
 -type page()            ::  any().
 -type backend()         ::  any().
+-type iterator_action() ::  first
+                            | last
+                            | next
+                            | prev
+                            | binary()
+                            | {seek, binary()}
+                            | {seek_for_prev, binary()}.
 
 -export_type([t/0]).
 -export_type([backend/0]).
@@ -74,6 +81,14 @@ operations and implement different synchronization or caching mechanisms.
 
 -callback transaction(backend(), Fun :: fun(() -> any())) ->
     any() | no_return().
+
+-callback iterator(backend()) -> {ok, NewIter :: any()} | {error, any()}.
+
+-callback iterator_move(Iter :: any(), iterator_action()) ->
+    {ok, {K :: any(), V :: any()}, NewIter :: any()}
+    | {error, any()}.
+
+-callback iterator_close(Iter :: any()) -> ok | {error, any()}.
 
 
 -optional_callbacks([transaction/2]).

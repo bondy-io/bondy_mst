@@ -8,4 +8,4 @@
 -type key()         ::  any().
 -type value()       ::  any().
 -type level()       ::  non_neg_integer().
--type epoch()       ::  non_neg_integer().
+-type epoch()       ::  integer().

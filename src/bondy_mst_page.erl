@@ -100,7 +100,7 @@ Sets the version number at which this page has been freed.
 """.
 -spec set_freed_at(t(), epoch()) -> t().
 
-set_freed_at(#?MODULE{} = T, Epoch) when is_integer(Epoch) andalso Epoch > 0 ->
+set_freed_at(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
     T#?MODULE{freed_at = Epoch}.
 
 

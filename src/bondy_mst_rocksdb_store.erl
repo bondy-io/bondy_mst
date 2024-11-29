@@ -227,12 +227,15 @@ Can only be called within a transaction.
 -spec free(T :: t(), Hash :: hash(), Page :: page()) -> T :: t() | no_return().
 
 free(#?MODULE{opts = #{read_concurrency := true}} = T, Hash, Page0) ->
+    %% We keep the hash and page, marking it free. We then gc/2 to actually
+    %% delete them.
     is_in_tx(T) orelse error(not_in_transaction),
     Page = bondy_mst_page:set_freed_at(Page0, tx_epoch(T)),
     ok = do_put(T, prefixed_key(T#?MODULE.name, Hash), encode_value(Page)),
     T;
 
 free(#?MODULE{opts = #{read_concurrency := false}} = T, Hash, _Page) ->
+    %% We immidiately delete
     Fun = fun() ->
         TxRef = tx_ref(T),
         Key = prefixed_key(T#?MODULE.name, Hash),
@@ -249,6 +252,8 @@ free(#?MODULE{opts = #{read_concurrency := false}} = T, Hash, _Page) ->
 
 
 -doc """
+This call can be made concurrently i.e. in a different process than the owner
+of the tree.
 """.
 -spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
 
@@ -260,17 +265,20 @@ when is_integer(Epoch) ->
     IterAction = {seek, <<Name/binary, 0>>},
 
     try
-        gc_aux(rocksdb:iterator_move(Itr, IterAction), T, Itr, BatchRef, Epoch),
+        ok = gc_batch_delete(
+            rocksdb:iterator_move(Itr, IterAction), T, Itr, BatchRef, Epoch
+        ),
+
         case rocksdb:write_batch(Ref, BatchRef, []) of
             ok ->
-                ok;
+                T;
 
             {error, Reason} ->
                 ?LOG_ERROR(#{
                     message => "Error while writing batch to store",
                     reason => Reason
                 }),
-                ok
+                T
         end
     after
         rocksdb:iterator_close(Itr),
@@ -278,8 +286,8 @@ when is_integer(Epoch) ->
     end;
 
 gc(#?MODULE{opts = #{read_concurrency := true}} = T, KeepRoots)
-when is_list(KeepRoots)->
-    %% TODO GC
+when is_list(KeepRoots) ->
+    %% Review
     T;
 
 gc(#?MODULE{opts = #{read_concurrency := false}} = T, _KeepRoots) ->
@@ -320,7 +328,6 @@ delete(#?MODULE{ref = _Ref, name = _Name}) ->
     ok.
 
 
-
 -doc """
 """.
 -spec transaction(t(), fun(() -> any())) -> any() | no_return().
@@ -359,7 +366,6 @@ transaction(#?MODULE{} = T, Fun) ->
     after
         ok = maybe_release_tx(T)
     end.
-
 
 
 
@@ -428,7 +434,6 @@ encode_value(Value)->
 
 
 
-
 %% ============================================================================
 %% PRIVATE: TRANSACTIONS
 %% ============================================================================
@@ -453,7 +458,7 @@ maybe_begin_tx(T) ->
 begin_tx(#?MODULE{ref = Ref}) ->
     case rocksdb:transaction(Ref, []) of
         {ok, TxRef} ->
-            Epoch = erlang:system_time(millisecond),
+            Epoch = erlang:monotonic_time(),
             undefined = erlang:put(?TX_REF_KEY(Ref), TxRef),
             undefined = erlang:put(?TX_EPOCH_KEY(Ref), Epoch),
             ok;
@@ -482,7 +487,6 @@ maybe_commit_tx(T) ->
         false ->
             commit_tx(T)
     end.
-
 
 
 %% @private
@@ -608,15 +612,14 @@ format_reason(Term) ->
     Term.
 
 
-
 %% @private
-gc_aux({error, iterator_closed}, _T, _Itr, _BatchRef, _Epoch) ->
+gc_batch_delete({error, iterator_closed}, _T, _Itr, _BatchRef, _Epoch) ->
   throw(iterator_closed);
 
-gc_aux({error, invalid_iterator}, _T, _Itr, _BatchRef, _Epoch) ->
+gc_batch_delete({error, invalid_iterator}, _T, _Itr, _BatchRef, _Epoch) ->
   ok;
 
-gc_aux({ok, K, V}, T, Itr, BatchRef, Epoch) ->
+gc_batch_delete({ok, K, V}, T, Itr, BatchRef, Epoch) ->
     Page = binary_to_term(V),
     _ = case bondy_mst_page:freed_at(Page) =< Epoch of
         true ->
@@ -625,7 +628,5 @@ gc_aux({ok, K, V}, T, Itr, BatchRef, Epoch) ->
         false ->
             ok
     end,
-    gc_aux(rocksdb:iterator_move(Itr, next), T, Itr, BatchRef, Epoch).
-
-
+    gc_batch_delete(rocksdb:iterator_move(Itr, next), T, Itr, BatchRef, Epoch).
 
