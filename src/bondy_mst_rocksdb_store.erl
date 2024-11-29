@@ -623,7 +623,6 @@ gc_aux({ok, K, V}, T, Itr, BatchRef, Epoch) ->
     Page = binary_to_term(V),
     _ = case bondy_mst_page:freed_at(Page) =< Epoch of
         true ->
-            io:format(">>>>>>>> will delete ~p~n", [K]),
             ok = rocksdb:batch_delete(BatchRef, K);
 
         false ->
