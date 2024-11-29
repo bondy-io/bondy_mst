@@ -35,7 +35,6 @@ from the map.
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 
--define(HEADER_KEY, '$header').
 -define(TX_REF_KEY(DBRef), {?MODULE, DBRef, tx_ref}).
 -define(TX_DEPTH_KEY(DBRef), {?MODULE, DBRef, tx_depth}).
 -define(TX_EPOCH_KEY(DBRef), {?MODULE, DBRef, tx_epoch}).
@@ -44,7 +43,8 @@ from the map.
 -record(?MODULE, {
     ref             ::  rocksdb:db_handle(),
     name            ::  binary(),
-    transactions    ::  tx_kind()
+    opts            ::  opts_map(),
+    root_key        ::  binary()
 }).
 
 -type t()           ::  #?MODULE{}.
@@ -93,17 +93,38 @@ from the map.
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
-new(#{name := Name} = Opts) when is_binary(Name) ->
-    Ref = persistent_term:get({bondy_mst, rocksdb}),
-    Transactions = maps:get(transactions, Opts, optimistic),
+new(#{name := Name} = Opts0) when is_binary(Name) ->
+    DefaultOpts = #{
+        name => undefined,
+        transactions => optimistic,
+        read_concurrency => true
+    },
+
+    Opts = maps:merge(DefaultOpts, Opts0),
 
     %% Only optimistic for the time being
-    Transactions =:= optimistic orelse error({badarg, Opts}),
+    ok = maps:foreach(
+        fun
+            (name, undefined = V) ->
+                error({badarg, [{name, V}]});
+
+            (transactions, V) ->
+                V =:= optimistic orelse error({badarg, [{transactions, V}]});
+
+            (_, _) ->
+                ok
+        end,
+        Opts
+    ),
+
+
+    Ref = persistent_term:get({bondy_mst, rocksdb}),
 
     #?MODULE{
         ref = Ref,
         name = Name,
-        transactions = Transactions
+        opts = Opts,
+        root_key = prefixed_key(Name, ?ROOT_KEY)
     }.
 
 
@@ -111,17 +132,17 @@ new(#{name := Name} = Opts) when is_binary(Name) ->
 """.
 -spec get_root(T :: t()) -> Root :: hash() | undefined.
 
-get_root(#?MODULE{} = T) ->
-    do_get(T, ?ROOT_KEY).
+get_root(#?MODULE{root_key = RootKey} = T) ->
+    do_get(T, RootKey).
 
 
 -doc """
 """.
 -spec set_root(T :: t(), Hash :: hash()) -> t().
 
-set_root(#?MODULE{} = T, Hash) ->
+set_root(#?MODULE{root_key = RootKey} = T, Hash) ->
      Fun = fun() ->
-        ok = do_put(T, ?ROOT_KEY, Hash),
+        ok = do_put(T, RootKey, Hash),
         T
     end,
     transaction(T, Fun).
@@ -131,16 +152,16 @@ set_root(#?MODULE{} = T, Hash) ->
 """.
 -spec get(T :: t(), Hash :: hash()) -> Page :: page() | undefined.
 
-get(#?MODULE{} = T, Hash) ->
-    do_get(T, Hash).
+get(#?MODULE{name = Name} = T, Hash) ->
+    do_get(T, prefixed_key(Name, Hash)).
 
 
 -doc """
 """.
 -spec has(T :: t(), Hash :: hash()) -> boolean().
 
-has(#?MODULE{} = T, Hash) when is_binary(Hash) ->
-    case do_get(T, Hash) of
+has(#?MODULE{name = Name} = T, Hash) when is_binary(Hash) ->
+    case do_get(T, prefixed_key(Name, Hash)) of
         {ok, _} ->
             true;
 
@@ -156,12 +177,12 @@ has(#?MODULE{} = T, Hash) when is_binary(Hash) ->
 """.
 -spec put(T :: t(), Page :: page()) -> {Hash :: hash(), T :: t()}.
 
-put(#?MODULE{} = T, Page) ->
+put(#?MODULE{name = Name, root_key = RootKey} = T, Page) ->
     %% We put and update root atomically
     Fun = fun() ->
         Hash = bondy_mst_utils:hash(Page),
-        ok = do_put(T, Hash, Page),
-        ok = do_put(T, ?ROOT_KEY, Hash),
+        ok = do_put(T, RootKey, Hash),
+        ok = do_put(T, prefixed_key(Name, Hash), encode_value(Page)),
         {Hash, T}
     end,
     transaction(T, Fun).
@@ -187,7 +208,7 @@ copy(#?MODULE{name = Name} = T, Target, Hash) ->
             Value = encode_value(Page),
             Fun = fun() ->
                 TxRef = tx_ref(T),
-                Key = encode_key(Name, Hash),
+                Key = prefixed_key(Name, Hash),
                 case rocksdb:transaction_put(TxRef, Key, Value) of
                     ok ->
                         T;
@@ -205,18 +226,63 @@ Can only be called within a transaction.
 """.
 -spec free(T :: t(), Hash :: hash(), Page :: page()) -> T :: t() | no_return().
 
-free(#?MODULE{} = T, Hash, Page) ->
+free(#?MODULE{opts = #{read_concurrency := true}} = T, Hash, Page0) ->
     is_in_tx(T) orelse error(not_in_transaction),
-    Freed = bondy_mst_page:set_freed_at(Page, tx_epoch(T)),
-    ok = do_put(T, Hash, Freed),
-    T.
+    Page = bondy_mst_page:set_freed_at(Page0, tx_epoch(T)),
+    ok = do_put(T, prefixed_key(T#?MODULE.name, Hash), encode_value(Page)),
+    T;
+
+free(#?MODULE{opts = #{read_concurrency := false}} = T, Hash, _Page) ->
+    Fun = fun() ->
+        TxRef = tx_ref(T),
+        Key = prefixed_key(T#?MODULE.name, Hash),
+        case rocksdb:transaction_delete(TxRef, Key) of
+            ok ->
+                T;
+
+            {error, Reason} ->
+                error(format_reason(Reason))
+        end
+    end,
+    transaction(T, Fun).
+
 
 
 -doc """
 """.
 -spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
 
-gc(#?MODULE{} = T, _KeepRoots) ->
+gc(#?MODULE{ref = Ref, opts = #{read_concurrency := true}} = T, Epoch)
+when is_integer(Epoch) ->
+    {ok, Itr} = rocksdb:iterator(Ref, []),
+    {ok, BatchRef} = rocksdb:batch(),
+    Name = T#?MODULE.name,
+    IterAction = {seek, <<Name/binary, 0>>},
+
+    try
+        gc_aux(rocksdb:iterator_move(Itr, IterAction), T, Itr, BatchRef, Epoch),
+        case rocksdb:write_batch(Ref, BatchRef, []) of
+            ok ->
+                ok;
+
+            {error, Reason} ->
+                ?LOG_ERROR(#{
+                    message => "Error while writing batch to store",
+                    reason => Reason
+                }),
+                ok
+        end
+    after
+        rocksdb:iterator_close(Itr),
+        rocksdb:release_batch(BatchRef)
+    end;
+
+gc(#?MODULE{opts = #{read_concurrency := true}} = T, KeepRoots)
+when is_list(KeepRoots)->
+    %% TODO GC
+    T;
+
+gc(#?MODULE{opts = #{read_concurrency := false}} = T, _KeepRoots) ->
     %% Do nothing, we free instead
     T.
 
@@ -272,7 +338,7 @@ transaction(#?MODULE{} = T, Fun) ->
             %% We force a rollback
             ok = maybe_rollback(T),
             ?LOG_ERROR(#{
-                message => "Transaction error",
+                message => "Transaction rollback",
                 reason => Reason,
                 stacktrace => Stacktrace
             }),
@@ -309,19 +375,19 @@ do_get(T, Key) ->
 
 
 %% @private
-do_get(#?MODULE{ref = Ref, name = Name} = T, Key, Default)
-when is_binary(Key); Key == ?ROOT_KEY; Key == ?HEADER_KEY ->
+do_get(#?MODULE{ref = Ref, root_key = RootKey} = T, Key, Default)
+when is_binary(Key) ->
 
     Result = case is_in_tx(T) of
         true ->
-            rocksdb:transaction_get(tx_ref(T), encode_key(Name, Key), []);
+            rocksdb:transaction_get(tx_ref(T), Key, []);
 
         false ->
-            rocksdb:get(Ref, encode_key(Name, Key), [])
+            rocksdb:get(Ref, Key, [])
     end,
 
     case Result of
-        {ok, Hash} when Key == ?ROOT_KEY ->
+        {ok, Hash} when Key == RootKey ->
             Hash;
 
         {ok, Bin} ->
@@ -336,21 +402,7 @@ when is_binary(Key); Key == ?ROOT_KEY; Key == ?HEADER_KEY ->
 
 
 %% @private
-do_put(#?MODULE{name = Name} = T, ?ROOT_KEY = Key, Hash)
-when is_binary(Hash) ->
-    do_put_aux(T, encode_key(Name, Key), Hash);
-
-do_put(#?MODULE{name = Name} = T, ?HEADER_KEY = Key, Header)
-when is_map(Header) ->
-    do_put_aux(T, encode_key(Name, Key), encode_value(Header));
-
-do_put(#?MODULE{name = Name} = T, Hash, Value)
-when is_binary(Hash) ->
-    do_put_aux(T, encode_key(Name, Hash), encode_value(Value)).
-
-
-%% @private
-do_put_aux(#?MODULE{} = T, Key, Value) when is_binary(Key), is_binary(Value) ->
+do_put(#?MODULE{} = T, Key, Value) when is_binary(Key), is_binary(Value) ->
     TxRef = tx_ref(T),
 
     case rocksdb:transaction_put(TxRef, Key, Value) of
@@ -363,11 +415,11 @@ do_put_aux(#?MODULE{} = T, Key, Value) when is_binary(Key), is_binary(Value) ->
 
 
 %% @private
-encode_key(Name, Hash) when is_binary(Name) andalso is_binary(Hash) ->
-    <<Name/binary, 0, Hash/binary>>;
+prefixed_key(Name, ?ROOT_KEY) ->
+    <<?ROOT_KEY/binary, 0, Name/binary>>;
 
-encode_key(Name, Key) when is_atom(Key) ->
-    <<Name/binary, 0, (term_to_binary(Key, ?T2B_OPTS))/binary>>.
+prefixed_key(Name, Hash) when is_binary(Name) andalso is_binary(Hash) ->
+    <<Name/binary, 0, Hash/binary>>.
 
 
 %% @private
@@ -554,4 +606,30 @@ format_reason("Resource busy: ") ->
 
 format_reason(Term) ->
     Term.
+
+
+
+%% @private
+gc_aux({error, iterator_closed}, _T, _Itr, _BatchRef, _Epoch) ->
+  throw(iterator_closed);
+
+gc_aux({error, invalid_iterator}, _T, _Itr, _BatchRef, _Epoch) ->
+  ok;
+
+%% gc_aux({ok, K, _}, Itr, #?MODULE{root_key = K} = T, BatchRef, Epoch) ->
+%%     gc_aux(rocksdb:iterator_move(Itr, next), T, Itr, BatchRef, Epoch);
+
+gc_aux({ok, K, V}, T, Itr, BatchRef, Epoch) ->
+    Page = binary_to_term(V),
+    _ = case bondy_mst_page:freed_at(Page) =< Epoch of
+        true ->
+            io:format(">>>>>>>> will delete ~p~n", [K]),
+            ok = rocksdb:batch_delete(BatchRef, K);
+
+        false ->
+            ok
+    end,
+    gc_aux(rocksdb:iterator_move(Itr, next), T, Itr, BatchRef, Epoch).
+
+
 

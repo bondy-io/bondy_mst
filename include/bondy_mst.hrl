@@ -1,5 +1,5 @@
 
--define(ROOT_KEY, '$root').
+-define(ROOT_KEY, ~"$root").
 
 -define(T2B_OPTS, [{minor_version, 2}]).
 

@@ -38,7 +38,8 @@ from the map.
 
 -record(?MODULE, {
     root        ::  hash() | undefined,
-    pages = #{} ::  map()
+    pages = #{} ::  map(),
+    opts        ::  map()
 }).
 
 -type t()       ::  #?MODULE{}.
@@ -76,7 +77,11 @@ new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
 new(Opts) when is_map(Opts) ->
-    #?MODULE{}.
+    Default = #{read_concurrency => false},
+
+    #?MODULE{
+        opts = maps:merge(Default, Opts)
+    }.
 
 
 -doc false.

@@ -327,11 +327,11 @@ gc(#?MODULE{} = T) ->
 -doc """
 
 """.
--spec gc(t(), [binary()]) -> t().
+-spec gc(t(), KeepRoots :: [binary()] | Epoch :: non_neg_integer()) -> t().
 
-gc(#?MODULE{store = Store0} = T, KeepRoots) ->
+gc(#?MODULE{store = Store0} = T, Arg) when is_list(Arg) orelse is_integer(Arg) ->
     Fun = fun() ->
-        Store = bondy_mst_store:gc(Store0, KeepRoots),
+        Store = bondy_mst_store:gc(Store0, Arg),
         T#?MODULE{store = Store}
     end,
     bondy_mst_store:transaction(Store0, Fun).

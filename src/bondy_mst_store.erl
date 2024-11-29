@@ -64,7 +64,7 @@ operations and implement different synchronization or caching mechanisms.
 
 -callback free(backend(), hash(), page()) -> backend().
 
--callback gc(backend(), KeepRoots :: [list()]) -> backend().
+-callback gc(backend(), KeepRoots :: [list()] | Epoch :: epoch()) -> backend().
 
 -callback missing_set(backend(), Root :: binary()) -> [Pages :: list()].
 
