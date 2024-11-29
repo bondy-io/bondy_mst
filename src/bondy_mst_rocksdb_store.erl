@@ -616,9 +616,6 @@ gc_aux({error, iterator_closed}, _T, _Itr, _BatchRef, _Epoch) ->
 gc_aux({error, invalid_iterator}, _T, _Itr, _BatchRef, _Epoch) ->
   ok;
 
-%% gc_aux({ok, K, _}, Itr, #?MODULE{root_key = K} = T, BatchRef, Epoch) ->
-%%     gc_aux(rocksdb:iterator_move(Itr, next), T, Itr, BatchRef, Epoch);
-
 gc_aux({ok, K, V}, T, Itr, BatchRef, Epoch) ->
     Page = binary_to_term(V),
     _ = case bondy_mst_page:freed_at(Page) =< Epoch of
