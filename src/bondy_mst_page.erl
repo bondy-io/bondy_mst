@@ -50,6 +50,7 @@ that may reference other data pages by their hash.
 -export([list/1]).
 -export([low/1]).
 -export([new/3]).
+-export([pattern/0]).
 -export([refs/1]).
 -export([set_freed_at/2]).
 
@@ -63,12 +64,24 @@ that may reference other data pages by their hash.
 -doc "Creates a new page".
 -spec new(level(), hash(), [entry()]) -> t().
 
-new(Level, Low, List) ->
+new(Level, Low, List) when is_integer(Level), is_list(List) ->
     #?MODULE{
         level = Level,
         low = Low,
         list = List,
         freed_at = undefined
+    }.
+
+
+-doc "Creates a new page".
+-spec pattern() -> t().
+
+pattern() ->
+    #?MODULE{
+        level = '$1',
+        low = '$2',
+        list = '$3',
+        freed_at = '$4'
     }.
 
 

@@ -29,17 +29,18 @@ groups() ->
         {ets_store, [], [
             small_test,
             first_last_test,
-            large_test
-        ]},
-        {leveled_store, [], [
-            small_test,
-            first_last_test,
+            persistent_test,
             large_test
         ]},
         {rocksdb_store, [], [
             small_test,
             first_last_test,
-            read_concurrency_test,
+            persistent_test,
+            large_test
+        ]},
+        {leveled_store, [], [
+            small_test,
+            first_last_test,
             large_test
         ]}
     ].
@@ -250,10 +251,10 @@ first_last_test(Config) ->
     ?assertEqual({1, true}, bondy_mst:first(A)),
     ?assertEqual({10, true}, bondy_mst:last(A)).
 
-read_concurrency_test(Config) ->
+persistent_test(Config) ->
     Fun = ?config(store_fun, Config),
 
-    T0 = ?MST:new(#{store => Fun(~"read_concurrency_test")}),
+    T0 = ?MST:new(#{store => Fun(~"persistent_test")}),
 
     T1 = ?MST:insert(T0, 1),
     R1 = ?MST:root(T1),
@@ -271,6 +272,7 @@ read_concurrency_test(Config) ->
     ?assertEqual([{1, true}, {2, true}], bondy_mst:to_list(T2, R2)),
     ?assertEqual([{1, true}, {2, true}, {3, true}], bondy_mst:to_list(T3, R3)),
     ?assertEqual(bondy_mst:to_list(T3, R3), bondy_mst:to_list(T3)),
+
 
     %% GC
     T4 = bondy_mst:gc(T3, E2),

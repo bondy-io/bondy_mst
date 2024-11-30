@@ -41,19 +41,21 @@ from the map.
 
 
 -record(?MODULE, {
-    ref             ::  rocksdb:db_handle(),
     name            ::  binary(),
+    ref             ::  rocksdb:db_handle(),
     opts            ::  opts_map(),
     root_key        ::  binary()
 }).
 
 -type t()           ::  #?MODULE{}.
 -type opt()         ::  {name, binary()}
-                        | {transactions, tx_kind()}.
+                        | {transactions, tx_kind()}
+                        | {persistent, boolean()}.
 -type opts()        ::  [opt()] | opts_map().
 -type opts_map()    ::  #{
                             name := binary(),
-                            transactions => tx_kind()
+                            transactions => tx_kind(),
+                            persistent => boolean()
                         }.
 -type tx_kind()     ::  pessimistic | optimistic.
 -type page()        ::  bondy_mst_page:t().
@@ -93,36 +95,40 @@ from the map.
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
-new(#{name := Name} = Opts0) when is_binary(Name) ->
+new(Opts0) when is_map(Opts0) ->
     DefaultOpts = #{
         name => undefined,
         transactions => optimistic,
-        read_concurrency => true
+        persistent => true
     },
 
     Opts = maps:merge(DefaultOpts, Opts0),
 
-    %% Only optimistic for the time being
     ok = maps:foreach(
         fun
-            (name, undefined = V) ->
-                error({badarg, [{name, V}]});
+            (name, V) ->
+                is_binary(V)
+                orelse error({badarg, [{name, V}]});
 
             (transactions, V) ->
-                V =:= optimistic orelse error({badarg, [{transactions, V}]});
+                %% Only optimistic for the time being
 
-            (_, _) ->
-                ok
+                V =:= optimistic
+                orelse error({badarg, [{transactions, V}]});
+
+            (persistent, V) ->
+                is_boolean(V)
+                orelse error({badarg, [{persistent, V}]})
         end,
         Opts
     ),
 
-
+    Name = maps:get(name, Opts),
     Ref = persistent_term:get({bondy_mst, rocksdb}),
 
     #?MODULE{
-        ref = Ref,
         name = Name,
+        ref = Ref,
         opts = Opts,
         root_key = prefixed_key(Name, ?ROOT_KEY)
     }.
@@ -226,7 +232,7 @@ Can only be called within a transaction.
 """.
 -spec free(T :: t(), Hash :: hash(), Page :: page()) -> T :: t() | no_return().
 
-free(#?MODULE{opts = #{read_concurrency := true}} = T, Hash, Page0) ->
+free(#?MODULE{opts = #{persistent := true}} = T, Hash, Page0) ->
     %% We keep the hash and page, marking it free. We then gc/2 to actually
     %% delete them.
     is_in_tx(T) orelse error(not_in_transaction),
@@ -234,7 +240,7 @@ free(#?MODULE{opts = #{read_concurrency := true}} = T, Hash, Page0) ->
     ok = do_put(T, prefixed_key(T#?MODULE.name, Hash), encode_value(Page)),
     T;
 
-free(#?MODULE{opts = #{read_concurrency := false}} = T, Hash, _Page) ->
+free(#?MODULE{opts = #{persistent := false}} = T, Hash, _Page) ->
     %% We immidiately delete
     Fun = fun() ->
         TxRef = tx_ref(T),
@@ -257,7 +263,7 @@ of the tree.
 """.
 -spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
 
-gc(#?MODULE{ref = Ref, opts = #{read_concurrency := true}} = T, Epoch)
+gc(#?MODULE{ref = Ref, opts = #{persistent := true}} = T, Epoch)
 when is_integer(Epoch) ->
     {ok, Itr} = rocksdb:iterator(Ref, []),
     {ok, BatchRef} = rocksdb:batch(),
@@ -285,13 +291,13 @@ when is_integer(Epoch) ->
         rocksdb:release_batch(BatchRef)
     end;
 
-gc(#?MODULE{opts = #{read_concurrency := true}} = T, KeepRoots)
+gc(#?MODULE{opts = #{persistent := true}} = T, KeepRoots)
 when is_list(KeepRoots) ->
-    %% Review
+    %% Review: not supported yet
     T;
 
-gc(#?MODULE{opts = #{read_concurrency := false}} = T, _KeepRoots) ->
-    %% Do nothing, we free instead
+gc(#?MODULE{opts = #{persistent := false}} = T, _KeepRoots) ->
+    %% No garbage as free/3 deletes immediately
     T.
 
 
