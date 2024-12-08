@@ -44,6 +44,7 @@ that may reference other data pages by their hash.
 -export_type([value/0]).
 -export_type([hash/0]).
 
+-export([fold/3]).
 -export([freed_at/1]).
 -export([is_referenced_at/2]).
 -export([level/1]).
@@ -133,6 +134,16 @@ is_referenced_at(#?MODULE{freed_at = LastEpoch}, Epoch) ->
 -spec list(t()) -> [entry()].
 
 list(#?MODULE{list = Val}) -> Val.
+
+
+
+-doc """
+Calls `Fun(Entry, AccIn)` on successive entries of the page, starting with `AccIn == Acc0`. `Fun/2` must return a new accumulator, which is passed to the next call. The function returns the final value of the accumulator. `Acc0` is returned if the tree is empty.
+""".
+-spec fold(t(), fun((entry(), any()) -> any()), any()) -> any().
+
+fold(#?MODULE{list = List}, Fun, Acc) ->
+    lists:foldl(Fun, Acc, List).
 
 
 -doc "Returns the hashes of all pages referenced by this page.".
