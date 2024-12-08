@@ -303,7 +303,7 @@ gc(#?MODULE{opts = #{persistent := false}} = T, _KeepRoots) ->
 
 -doc """
 """.
--spec missing_set(T :: t(), Root :: binary()) -> sets:set(page()).
+-spec missing_set(T :: t(), Root :: binary()) -> sets:set(hash()).
 
 missing_set(T, Root) ->
     case get(T, Root) of
@@ -312,7 +312,7 @@ missing_set(T, Root) ->
 
         Page ->
             lists:foldl(
-                fun(P, Acc) -> sets:union(Acc, missing_set(T, P)) end,
+                fun(Hash, Acc) -> sets:union(Acc, missing_set(T, Hash)) end,
                 sets:new([{version, 2}]),
                 page_refs(Page)
             )
@@ -321,7 +321,7 @@ missing_set(T, Root) ->
 
 -doc """
 """.
--spec page_refs(Page :: page()) -> [binary()].
+-spec page_refs(Page :: page()) -> [hash()].
 
 page_refs(Page) ->
     bondy_mst_page:refs(Page).

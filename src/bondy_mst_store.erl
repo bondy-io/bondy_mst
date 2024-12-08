@@ -3,9 +3,7 @@
 -module(bondy_mst_store).
 -moduledoc """
 Behaviour to be implemented for page stores to allow their manipulation.
-
-This behaviour may also be implemented by store proxies that track
-operations and implement different synchronization or caching mechanisms.
+This behaviour may also be implemented by store proxies that track operations and implement different synchronization or caching mechanisms.
 """.
 
 -include_lib("kernel/include/logger.hrl").
@@ -73,7 +71,7 @@ operations and implement different synchronization or caching mechanisms.
 
 -callback gc(backend(), KeepRoots :: [list()] | Epoch :: epoch()) -> backend().
 
--callback missing_set(backend(), Root :: binary()) -> [Pages :: list()].
+-callback missing_set(backend(), Root :: binary()) -> sets:set(hash()).
 
 -callback page_refs(Page :: page()) -> Refs :: [binary()].
 
@@ -196,9 +194,10 @@ page_refs(#?MODULE{mod = Mod}, Page) ->
 
 
 -doc """
-Get the list of pages we know we are missing starting at this root.
+Returns the hashes of the pages identified by root hash that are missing from
+the store.
 """.
--spec missing_set(Store :: t(), Root :: binary()) -> [Pages :: list()].
+-spec missing_set(Store :: t(), Root :: binary()) -> [hash()].
 
 missing_set(#?MODULE{mod = Mod, state = State}, Root) ->
     Mod:missing_set(State, Root).
