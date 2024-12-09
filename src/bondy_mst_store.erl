@@ -134,18 +134,18 @@ Get a page referenced by its hash.
 
 Returns page or `undefined`.
 """.
--spec get(Store :: t(), Page :: page()) -> Page :: page() | undefined.
+-spec get(Store :: t(), Hash :: hash()) -> Page :: page() | undefined.
 
-get(#?MODULE{mod = Mod, state = State}, Page) ->
-    Mod:get(State, Page).
+get(#?MODULE{mod = Mod, state = State}, Hash) ->
+    Mod:get(State, Hash).
 
 
 -doc """
 """.
--spec has(Store :: t(), Page :: page()) -> boolean().
+-spec has(Store :: t(), Hash :: hash()) -> boolean().
 
-has(#?MODULE{mod = Mod, state = State}, Page) ->
-    Mod:has(State, Page).
+has(#?MODULE{mod = Mod, state = State}, Hash) ->
+    Mod:has(State, Hash).
 
 
 -doc """
@@ -238,11 +238,6 @@ transaction(#?MODULE{transactions = false}, Fun) ->
 
 
 supports_transactions(Mod) ->
-    ok = ensure_loaded(Mod),
+    ok = bondy_mst_utils:ensure_loaded(Mod),
     erlang:function_exported(Mod, transaction, 2).
 
-
-ensure_loaded(Mod) ->
-    erlang:function_exported(Mod, module_info, 0)
-        orelse code:ensure_loaded(Mod),
-    ok.

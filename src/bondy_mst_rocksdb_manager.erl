@@ -140,14 +140,14 @@ handle_continue({init_config, Opts0}, #state{} = State0) ->
             fun ({K, V}, Acc) -> key_value:put(K, V, Acc) end,
             Opts,
             [
-                {[block_based_table_options, block_cache], BlockCache},
                 {write_buffer_manager, WriteBuffer},
+                {[block_based_table_options, block_cache], BlockCache},
                 {max_write_buffer_number, 4},
                 {statistics, State#state.stats}
             ]
         ),
 
-    {noreply, State, {continue, {open, Opts}}};
+    {noreply, State, {continue, {open, OpenOpts}}};
 
 handle_continue({open, Opts0}, State) ->
     DataDir = key_value:get(root_path, Opts0, "/tmp/bondy_mst/rocksdb"),
@@ -205,10 +205,11 @@ handle_info(Event, State) ->
 -spec terminate(term(), state()) -> term().
 
 terminate(_Reason, State) ->
-    rocksdb:release_cache(State#state.block_cache),
+    Ref = persistent_term:erase({bondy_mst, rocksdb}),
+    rocksdb:close(Ref),
     rocksdb:release_write_buffer_manager(State#state.write_buffer),
+    rocksdb:release_cache(State#state.block_cache),
     rocksdb:release_statistics(State#state.stats),
-
     ok.
 
 

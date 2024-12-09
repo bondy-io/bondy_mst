@@ -60,7 +60,8 @@ A node of the tree is:
 %% Fold
 -type fold_fun()    ::  fun(({key(), value()}, any()) -> any()).
 -type fold_opts()   ::  [fold_opt()].
--type fold_opt()    ::  {first, key()}
+-type fold_opt()    ::  {root, hash()}
+                        | {first, key()}
                         | {match_spec, term()}
                         | {stop, key()}
                         | {keys_only, boolean()}
@@ -83,7 +84,10 @@ A node of the tree is:
 -export([diff_to_list/2]).
 -export([dump/1]).
 -export([first/1]).
+-export([fold/3]).
 -export([fold/4]).
+-export([foreach/1]).
+-export([foreach/2]).
 -export([gc/1]).
 -export([gc/2]).
 -export([get/2]).
@@ -94,8 +98,10 @@ A node of the tree is:
 -export([last/1]).
 -export([last_n/3]).
 -export([merge/2]).
+-export([missing_set/2]).
 -export([new/0]).
 -export([new/1]).
+-export([put/2]).
 -export([root/1]).
 -export([store/1]).
 -export([to_list/1]).
@@ -226,9 +232,55 @@ List all items.
 """.
 -spec to_list(t(), hash()) -> [{key(), value()}].
 
-to_list(#?MODULE{store = Store}, Root) when is_binary(Root) ->
-    do_to_list(Store, Root).
+to_list(#?MODULE{} = T, Root) when is_binary(Root) ->
+    lists:reverse(
+        fold(T, fun(E, Acc) -> [E | Acc] end, [], [{root, Root}])
+    ).
 
+
+-doc """
+Calls `Fun(Elem)` for each element `Elem` in the tree, starting from its current root.
+This function is used for its side effects and the evaluation order is defined to be the same as the order of the elements in the tree.
+
+The same as calling `foreach(T, root(T))`.
+""".
+-spec foreach(t()) -> [{key(), value()}].
+
+foreach(#?MODULE{} = T) ->
+    foreach(T, root(T)).
+
+
+-doc """
+Calls `Fun(Elem)` for each element `Elem` in the tree, starting from `Root`.
+This function is used for its side effects and the evaluation order is defined to be the same as the order of the elements in the tree.
+""".
+-spec foreach(t(), hash()) -> [{key(), value()}].
+
+foreach(#?MODULE{store = _Store}, Root) when is_binary(Root) ->
+    error(not_implemented).
+    %% do_foreach(Store, Root).
+
+
+-doc """
+Calls `Fun(Elem, AccIn)` on successive elements of tree `T`, starting from the current root with `AccIn == Acc0`. `Fun/2` must return a new accumulator, which is passed to the next call. The function returns the final value of the accumulator. `Acc0` is returned if the tree is empty.
+
+""".
+-spec fold(t(), Fun :: fold_fun(), AccIn :: any()) -> AccOut :: any().
+
+fold(T, Fun, AccIn) ->
+    fold(T, Fun, AccIn, []).
+
+
+-doc """
+Calls `Fun(Elem, AccIn)` on successive elements of tree `T`, starting from the current root with `AccIn == Acc0`. `Fun/2` must return a new accumulator, which is passed to the next call. The function returns the final value of the accumulator. `Acc0` is returned if the tree is empty.
+
+""".
+-spec fold(t(), Fun :: fold_fun(), AccIn :: any(), Opts :: fold_opts()) ->
+    AccOut :: any().
+
+fold(#?MODULE{store = Store} = T, Fun, AccIn, Opts) ->
+    Root = key_value:get_lazy(root, Opts, fun() -> root(T) end),
+    do_fold(Store, Fun, AccIn, Opts, Root).
 
 
 -doc """
@@ -236,17 +288,8 @@ List all items.
 """.
 -spec keys(t()) -> [{key(), value()}].
 
-keys(#?MODULE{store = Store} = T) ->
-    do_to_list(Store, root(T), fun(K, _) -> K end).
-
-
--doc """
-
-""".
--spec fold(t(), fold_fun(), any(), fold_opts()) -> [{key(), value()}].
-
-fold(#?MODULE{} = _T, _Fun, _Acc, _Opts) ->
-    error(not_implemented).
+keys(#?MODULE{} = T) ->
+    lists:reverse(fold(T, fun({K, _}, Acc) -> [K | Acc] end, [])).
 
 
 -doc """
@@ -295,6 +338,18 @@ insert(#?MODULE{store = Store0} = T, Key, Value) ->
 
 -doc """
 """.
+-spec put(t(), bondy_mst_page:t()) -> {Hash :: hash(), t()}.
+
+put(#?MODULE{store = Store0} = T, Page) ->
+    Fun = fun() ->
+        {Root, Store} = bondy_mst_store:put(Store0, Page),
+        {Root, T#?MODULE{store = Store}}
+    end,
+    bondy_mst_store:transaction(Store0, Fun).
+
+
+-doc """
+""".
 -spec merge(T1 :: t(), T2 :: t()) -> NewT1 :: t().
 
 merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2) ->
@@ -304,6 +359,16 @@ merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2) ->
         T1#?MODULE{store = Store}
     end,
     bondy_mst_store:transaction(Store0, Fun).
+
+
+-doc """
+Returns the hashes of the pages identified by root hash that are missing from
+the store.
+""".
+-spec missing_set(t(), Root :: binary()) -> [hash()].
+
+missing_set(#?MODULE{store = Store}, Root) ->
+    bondy_mst_store:missing_set(Store, Root).
 
 
 -doc """
@@ -856,28 +921,25 @@ merge_aux_rec(
 
 
 %% @private
-do_to_list(Store, Root) ->
-    do_to_list(Store, Root, fun(K, V) -> {K, V} end).
+do_fold(_, _, AccIn, _, undefined) ->
+    AccIn;
 
-
-%% @private
-do_to_list(_, undefined, _) ->
-    [];
-
-do_to_list(Store, Root, Fun) ->
+do_fold(Store, Fun, AccIn, Opts, Root) ->
     case bondy_mst_store:get(Store, Root) of
         undefined ->
-            [];
+            AccIn;
 
         Page ->
             Low = bondy_mst_page:low(Page),
-            List = bondy_mst_page:list(Page),
-            L1 = do_to_list(Store, Low, Fun),
-            Acc = lists:flatmap(
-                fun({K, V, R}) -> [Fun(K, V) | do_to_list(Store, R, Fun)] end,
-                List
-            ),
-            L1 ++ Acc
+            AccOut = do_fold(Store, Fun, AccIn, Opts, Low),
+            bondy_mst_page:fold(
+                Page,
+                fun({K, V, Hash}, Acc0) ->
+                    Acc1 = Fun({K, V}, Acc0),
+                    do_fold(Store, Fun, Acc1, Opts, Hash)
+                end,
+                AccOut
+            )
     end.
 
 
@@ -889,7 +951,9 @@ diff_to_list(_, _, undefined, _, _) ->
     [];
 
 diff_to_list(_, Store1, R1, _, undefined) ->
-    do_to_list(Store1, R1);
+    lists:reverse(
+        do_fold(Store1, fun(E, Acc) -> [E | Acc] end, [], [], R1)
+    );
 
 diff_to_list(T, Store1, R1, Store2, R2) ->
     Page1 = bondy_mst_store:get(Store1, R1),
