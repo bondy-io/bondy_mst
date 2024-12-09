@@ -64,6 +64,7 @@ The number of peers is limited by the option `max_merges`.
 
 -export([init/3]).
 -export([handle/2]).
+-export([event_data/1]).
 
 
 
@@ -264,6 +265,8 @@ handle(Cmd, _State) ->
     error({unknown_event, Cmd}).
 
 
+event_data(#event{key = Key, value = Value}) ->
+    {Key, Value}.
 
 
 %% =============================================================================
