@@ -53,7 +53,7 @@ A node of the tree is:
 -type t()           ::  #bondy_mst{}.
 -type opts()        ::  list() | map().
 -type comparator()  ::  fun((key(), key()) -> eq | lt | gt).
--type merger()      ::  fun((value(), value()) -> value()).
+-type merger()      ::  fun((key(), value(), value()) -> value()).
 -type key_range()   ::  {key(), key()}
                         | {first, key()}
                         | {key(), undefined}.
@@ -141,7 +141,7 @@ new(Opts) when is_map(Opts) ->
     DefaultStore = fun() -> bondy_mst_store:new(bondy_mst_map_store, []) end,
     Store = get_option(store, Opts, DefaultStore),
     Comparator = get_option(comparator, Opts, fun comparator/2),
-    Merger = get_option(merger, Opts, fun merger/2),
+    Merger = get_option(merger, Opts, fun merger/3),
 
     #?MODULE{
         store = Store,
@@ -421,7 +421,7 @@ get_option(comparator, #{comparator := Fun}, _) when is_function(Fun, 2) ->
 get_option(comparator, _, Default) ->
     apply_default(Default);
 
-get_option(merger, #{merger := Fun}, _) when is_function(Fun, 2) ->
+get_option(merger, #{merger := Fun}, _) when is_function(Fun, 3) ->
     Fun;
 
 get_option(merger, _, Default) ->
@@ -444,7 +444,8 @@ comparator(A, B) when A == B -> eq.
 Returns the default merger, which assumes the MST is a Set (where all values
 are `true`).
 """.
-merger(true, true) -> true.
+merger(_Key, true, true) ->
+    true.
 
 
 
@@ -473,8 +474,8 @@ compare(#?MODULE{comparator = Fun}, A, B) ->
 
 
 %% @private
-merge_values(#?MODULE{merger = Fun}, A, B) ->
-    Fun(A, B).
+merge_values(#?MODULE{merger = Fun}, Key, A, B) ->
+    Fun(Key, A, B).
 
 
 %% @private
@@ -673,7 +674,7 @@ insert_at_lower_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
 insert_after_first(T, Key, Value, Store0, [{K1, V1, R1}]) ->
     case compare(T, K1, Key) of
         eq ->
-            List = [{K1, merge_values(T, V1, Value), R1}],
+            List = [{K1, merge_values(T, Key, V1, Value), R1}],
             {List, Store0};
 
         lt ->
@@ -688,7 +689,7 @@ insert_after_first(T, Key, Value, Store0, [First, Second | Rest0]) ->
 
     case compare(T, K1, Key) of
         eq ->
-            List = [{K1, merge_values(T, V1, Value), R1}, Second | Rest0],
+            List = [{K1, merge_values(T, K1, V1, Value), R1}, Second | Rest0],
             {List, Store0};
 
         lt ->
@@ -912,7 +913,7 @@ merge_aux_rec(
 
         eq ->
             {NewLow, Store1} = merge_aux(T1, T2, Store0, Low1, Low2),
-            NewV = merge_values(T1, V1, V2),
+            NewV = merge_values(T1, K1, V1, V2),
             {NewR, NewRest, Store} = merge_aux_rec(
                 T1, T2, Store1, R1, Rest1, R2, Rest2
             ),
