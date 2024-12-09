@@ -51,14 +51,15 @@ The number of peers is limited by the option `max_merges`.
 -type get_cmd()             ::  #get{}.
 -type missing_cmd()         ::  #missing{}.
 -type put_cmd()             ::  #put{}.
--type command()             ::  get_cmd()
+-type message()             ::  event()
+                                | get_cmd()
                                 | put_cmd()
                                 | missing_cmd().
 
 
 -export_type([event/0]).
 -export_type([node_id/0]).
--export_type([command/0]).
+-export_type([message/0]).
 
 -export([init/3]).
 -export([handle/2]).
@@ -71,7 +72,7 @@ The number of peers is limited by the option `max_merges`.
 
 -doc """
 """.
--callback send(Peer :: node_id(), command()) -> ok | {error, any()}.
+-callback send(Peer :: node_id(), message()) -> ok | {error, any()}.
 
 -doc """
 Whenever this module wants to gossip an event it will call `Module:broadcast/1`.
