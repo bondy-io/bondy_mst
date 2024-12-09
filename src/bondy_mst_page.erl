@@ -45,6 +45,7 @@ that may reference other data pages by their hash.
 -export_type([hash/0]).
 
 -export([fold/3]).
+-export([foreach/2]).
 -export([freed_at/1]).
 -export([is_referenced_at/2]).
 -export([level/1]).
@@ -144,6 +145,15 @@ Calls `Fun(Entry, AccIn)` on successive entries of the page, starting with `AccI
 
 fold(#?MODULE{list = List}, Fun, Acc) ->
     lists:foldl(Fun, Acc, List).
+
+
+-doc """
+
+""".
+-spec foreach(t(), fun((entry()) -> any())) -> ok.
+
+foreach(#?MODULE{list = List}, Fun) ->
+    lists:foreach(Fun, List).
 
 
 -doc "Returns the hashes of all pages referenced by this page.".

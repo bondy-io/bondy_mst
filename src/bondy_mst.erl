@@ -86,8 +86,8 @@ A node of the tree is:
 -export([first/1]).
 -export([fold/3]).
 -export([fold/4]).
--export([foreach/1]).
 -export([foreach/2]).
+-export([foreach/3]).
 -export([gc/1]).
 -export([gc/2]).
 -export([get/2]).
@@ -244,21 +244,21 @@ This function is used for its side effects and the evaluation order is defined t
 
 The same as calling `foreach(T, root(T))`.
 """.
--spec foreach(t()) -> [{key(), value()}].
+-spec foreach(t(), fun(({key(), value()}) -> ok)) -> ok.
 
-foreach(#?MODULE{} = T) ->
-    foreach(T, root(T)).
+foreach(#?MODULE{} = T, Fun) ->
+    foreach(T, Fun, []).
 
 
 -doc """
 Calls `Fun(Elem)` for each element `Elem` in the tree, starting from `Root`.
 This function is used for its side effects and the evaluation order is defined to be the same as the order of the elements in the tree.
 """.
--spec foreach(t(), hash()) -> [{key(), value()}].
+-spec foreach(t(),fun(({key(), value()}) -> ok), Opts :: list()) -> ok.
 
-foreach(#?MODULE{store = _Store}, Root) when is_binary(Root) ->
-    error(not_implemented).
-    %% do_foreach(Store, Root).
+foreach(#?MODULE{store = Store} = T, Fun, Opts) ->
+    Root = key_value:get_lazy(root, Opts, fun() -> root(T) end),
+    do_foreach(Store, Fun, Opts, Root).
 
 
 -doc """
@@ -941,6 +941,29 @@ do_fold(Store, Fun, AccIn, Opts, Root) ->
                 AccOut
             )
     end.
+
+
+%% @private
+do_foreach(_, _, _, undefined) ->
+    ok;
+
+do_foreach(Store, Fun, Opts, Root) ->
+    case bondy_mst_store:get(Store, Root) of
+        undefined ->
+            ok;
+
+        Page ->
+            Low = bondy_mst_page:low(Page),
+            ok = do_foreach(Store, Fun, Opts, Low),
+            bondy_mst_page:foreach(
+                Page,
+                fun({K, V, Hash}) ->
+                    ok = Fun({K, V}),
+                    do_foreach(Store, Fun, Opts, Hash)
+                end
+            )
+    end.
+
 
 
 %% @private
