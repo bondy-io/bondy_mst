@@ -72,12 +72,12 @@ either by implementing or using a peer sampling service e.g.
 """.
 -callback broadcast(event()) -> ok | {error, any()}.
 
+
 -doc """
-During handle_event/2 this module will call `Module:merge/1`. This is to be used
-to persiste the broadcasted object in case MST is used only for anti-entropy
-and not as a general data store.
+Called after merging a tree page from a remote tree.
+    The implemeneter can use this to extract the entries and merge the data in a main store when the tree is used only for anti-entropy.
 """.
--callback merge(any()) -> ok.
+-callback on_merge(bondy_mst_page:t()) -> ok.
 
 
 %% =============================================================================
@@ -212,11 +212,15 @@ handle(#get{from = Peer, root = PeerRoot, set = Set}, State) ->
     end;
 
 handle(#put{from = Peer, set = Set}, State) ->
+    Mod = State#state.callback_mod,
+
     case maps:is_key(Peer, State#state.merges) of
         true ->
             Tree = sets:fold(
                 fun({Hash, Page}, Acc0) ->
                     {Hash, Acc} = bondy_mst:put(Acc0, Page),
+                    %% Call the callback merge function
+                    ok = Mod:on_merge(Page),
                     Acc
                 end,
                 State#state.tree,
@@ -372,7 +376,4 @@ do_merge(State0, Peer, PeerRoot) ->
 
 maybe_gc(State) ->
     State.
-
-
-
 
