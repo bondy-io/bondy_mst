@@ -1,4 +1,13 @@
 -module(bondy_mst_exchange).
+-moduledoc"""
+This module implements the logic for anti-entropy exchanges. The idea is for the user to choose the right infrastructure e.g. using this module as helper for a `gen_server` or `gen_statem`.
+
+Exchanges are performed in the background and without blocking local operations. The tree is not changed until all the remote information necessary for the merge is obtained from a peer.
+
+The algorithm allows a set of remote trees that we want to merge with the local tree to be kept in the state (`#state.merges`) and all missing pages are requested to the remote peers. Once all blocks are locally available, the merge operation is done without network communication and the local tree is updated.
+
+The number of peers is limited by the option `max_merges`.
+""".
 
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
