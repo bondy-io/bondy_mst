@@ -46,6 +46,7 @@ The number of peers is limited by the option `max_merges`.
 
 
 %% Normally a node() but we allow a binary for simulation purposes
+-type t()                   ::  #state{}.
 -type node_id()             ::  node() | binary().
 -type event()               ::  #event{}.
 -type get_cmd()             ::  #get{}.
@@ -56,7 +57,7 @@ The number of peers is limited by the option `max_merges`.
                                 | put_cmd()
                                 | missing_cmd().
 
-
+-export_type([t/0]).
 -export_type([event/0]).
 -export_type([node_id/0]).
 -export_type([message/0]).
@@ -96,6 +97,8 @@ Called after merging a tree page from a remote tree.
 
 -doc """
 """.
+-spec init(atom(), bondy_mst:t(), list() | map()) -> t().
+
 init(NodeId, Tree, Opts) when is_list(Opts) ->
     init(NodeId, Tree, maps:from_list(Opts));
 
