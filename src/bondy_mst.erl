@@ -473,7 +473,7 @@ compare(#?MODULE{comparator = Fun}, A, B) ->
 
 
 %% @private
-merge(#?MODULE{merger = Fun}, A, B) ->
+merge_values(#?MODULE{merger = Fun}, A, B) ->
     Fun(A, B).
 
 
@@ -673,7 +673,7 @@ insert_at_lower_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
 insert_after_first(T, Key, Value, Store0, [{K1, V1, R1}]) ->
     case compare(T, K1, Key) of
         eq ->
-            List = [{K1, merge(T, V1, Value), R1}],
+            List = [{K1, merge_values(T, V1, Value), R1}],
             {List, Store0};
 
         lt ->
@@ -688,7 +688,7 @@ insert_after_first(T, Key, Value, Store0, [First, Second | Rest0]) ->
 
     case compare(T, K1, Key) of
         eq ->
-            List = [{K1, merge(T, V1, Value), R1}, Second | Rest0],
+            List = [{K1, merge_values(T, V1, Value), R1}, Second | Rest0],
             {List, Store0};
 
         lt ->
@@ -912,7 +912,7 @@ merge_aux_rec(
 
         eq ->
             {NewLow, Store1} = merge_aux(T1, T2, Store0, Low1, Low2),
-            NewV = merge(T1, V1, V2),
+            NewV = merge_values(T1, V1, V2),
             {NewR, NewRest, Store} = merge_aux_rec(
                 T1, T2, Store1, R1, Rest1, R2, Rest2
             ),
