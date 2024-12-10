@@ -201,7 +201,7 @@ handle(#get{from = Peer, root = PeerRoot, set = Set}, State) ->
 
     %% We determine the hashes we don't have
     Missing = sets:filter(
-        fun(Hash) -> bondy_mst_store:has(Store, Hash) end,
+        fun(Hash) -> not bondy_mst_store:has(Store, Hash) end,
         Set
     ),
 
