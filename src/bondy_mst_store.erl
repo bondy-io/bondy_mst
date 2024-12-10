@@ -122,7 +122,7 @@ Get the root page.
 
 Returns page or `undefined`.
 """.
--spec set_root(Store :: t(), Hash :: hash()) -> ok.
+-spec set_root(Store :: t(), Hash :: hash()) -> t().
 
 set_root(#?MODULE{mod = Mod, state = State0} = T, Hash) when is_binary(Hash) ->
     State = Mod:set_root(State0, Hash),
