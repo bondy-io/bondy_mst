@@ -138,7 +138,6 @@ init(NodeId, Tree, Opts0) when is_map(Opts0) ->
 Call this function when your node receives a message or broadcast from a peer.
 """.
 handle(#event{} = Event, State0) ->
-
     Tree0 = State0#state.tree,
     Peer = Event#event.from,
     PeerRoot = Event#event.root,
@@ -155,7 +154,10 @@ handle(#event{} = Event, State0) ->
 
     case Root == PeerRoot of
         true ->
-            %% We are in sync with peer
+            ?LOG_INFO(#{
+                message => "No merge required, trees in sync.",
+                peer => Peer
+            }),
             State0;
 
         false when Key == undefined andalso Value == undefined ->
@@ -183,6 +185,10 @@ handle(#event{} = Event, State0) ->
                         true ->
                             maybe_merge(State3, Peer, PeerRoot);
                         false ->
+                            ?LOG_INFO(#{
+                                message => "Event merged, trees in sync.",
+                                peer => Peer
+                            }),
                             State3
                     end
             end
@@ -351,11 +357,18 @@ merge(State, Peer) ->
 
     case sets:is_empty(MissingSet) of
         true ->
+            ?LOG_INFO(#{
+                message => "All pages locally available."
+            }),
             %% All pages are locally available, so we perform the merge and
             %% update the local tree.
             do_merge(State, Peer, PeerRoot);
 
         false ->
+            ?LOG_INFO(#{
+                message => "Requesting missing pages from peer.",
+                peer => Peer
+            }),
             %% We still have missing pages, so we request them and keep the
             %% remote reference in a buffer until we receive those pages from
             %% the peer.
