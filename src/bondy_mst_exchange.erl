@@ -66,6 +66,7 @@ The number of peers is limited by the option `max_merges`.
 -export([handle/2]).
 -export([event_data/1]).
 -export([trigger/2]).
+-export([put/3]).
 
 
 
@@ -132,6 +133,29 @@ init(NodeId, Tree, Opts0) when is_map(Opts0) ->
         max_same_merge = MaxSameMerges
     },
     {ok, State}.
+
+
+put(Key, Value, State0) ->
+    Tree0 = State0#state.tree,
+    Root0 = bondy_mst:root(Tree0),
+    Tree = bondy_mst:put(Tree0, Key, Value),
+    Root = bondy_mst:root(Tree),
+    State = State0#state{tree = Tree},
+
+    case Root0 == Root of
+        true ->
+            State;
+        false ->
+            Event = #event{
+                from = State#state.node_id,
+                root = Root,
+                key = Key,
+                value = Value
+            },
+            ok = (State#state.callback_mod):broadcast(Event),
+            State
+    end.
+
 
 
 -doc """
