@@ -65,6 +65,7 @@ The number of peers is limited by the option `max_merges`.
 -export([init/3]).
 -export([handle/2]).
 -export([event_data/1]).
+-export([trigger/2]).
 
 
 
@@ -263,6 +264,21 @@ handle(#missing{from = Peer}, State) ->
 
 handle(Cmd, _State) ->
     error({unknown_event, Cmd}).
+
+
+-doc """
+Triggers an exchange by sending the local tree's root to `Peer`.
+The exchange might not proper when Peer has reached `max_merges`.
+""".
+trigger(Peer, State) when is_atom(Peer) ->
+    Event = #event{
+        from = State#state.node_id,
+        root = bondy_mst:root(State#state.tree),
+        key = undefined,
+        value = undefined
+    },
+    ok = (State#state.callback_mod):send(Peer, Event),
+    State.
 
 
 event_data(#event{key = Key, value = Value}) ->
