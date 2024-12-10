@@ -239,7 +239,7 @@ handle(#put{from = Peer, set = Set}, State) ->
         true ->
             Tree = sets:fold(
                 fun({Hash, Page}, Acc0) ->
-                    {Hash, Acc} = bondy_mst:put_page(Acc0, Page),
+                    Acc = bondy_mst:put_page(Acc0, Page),
                     %% Call the callback merge function
                     ok = Mod:on_merge(Page),
                     Acc
