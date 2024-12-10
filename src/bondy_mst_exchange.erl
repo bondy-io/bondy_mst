@@ -164,7 +164,7 @@ handle(#event{} = Event, State0) ->
             maybe_merge(State0, Peer, PeerRoot);
 
         false ->
-            Tree1 = bondy_mst:insert(Tree0, Key, Value),
+            Tree1 = bondy_mst:put(Tree0, Key, Value),
             NewRoot = bondy_mst:root(Tree1),
             State1 = State0#state{tree = Tree1},
 
@@ -239,7 +239,7 @@ handle(#put{from = Peer, set = Set}, State) ->
         true ->
             Tree = sets:fold(
                 fun({Hash, Page}, Acc0) ->
-                    {Hash, Acc} = bondy_mst:put(Acc0, Page),
+                    {Hash, Acc} = bondy_mst:put_page(Acc0, Page),
                     %% Call the callback merge function
                     ok = Mod:on_merge(Page),
                     Acc
@@ -285,6 +285,7 @@ trigger(Peer, State) when is_atom(Peer) ->
     },
     ok = (State#state.callback_mod):send(Peer, Event),
     State.
+
 
 
 event_data(#event{key = Key, value = Value}) ->

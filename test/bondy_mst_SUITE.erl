@@ -106,21 +106,21 @@ small_test(Config) ->
 
     %% Test for basic MST operations
     A = lists:foldl(
-        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        fun(N, Acc) -> ?MST:put(Acc, N) end,
         ?MST:new(#{store => Fun(~"bondy_mst_a")}),
         lists:seq(1, 10)
     ),
     ?assertEqual([{1, 10}], ?ISET([K || {K, true} <- ?MST:to_list(A)])),
 
     B = lists:foldl(
-        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        fun(N, Acc) -> ?MST:put(Acc, N) end,
         ?MST:new(#{store => Fun(~"bondy_mst_b")}),
         lists:seq(5, 15)
     ),
     ?assertEqual([{5, 15}], ?ISET([K || {K, true} <- ?MST:to_list(B)])),
 
     Z = lists:foldl(
-        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        fun(N, Acc) -> ?MST:put(Acc, N) end,
         ?MST:new(#{store => Fun(~"bondy_mst_z")}),
         lists:seq(1, 15)
     ),
@@ -190,17 +190,17 @@ large_test(Config) ->
     ShuffledA = list_shuffle(lists:seq(1, 1000)),
     ShuffledB = list_shuffle(lists:seq(550, 1500)),
      A = lists:foldl(
-        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        fun(N, Acc) -> ?MST:put(Acc, N) end,
         ?MST:new(#{store => Fun(~"bondy_mst_a")}),
         ShuffledA
     ),
     B = lists:foldl(
-        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        fun(N, Acc) -> ?MST:put(Acc, N) end,
         ?MST:new(#{store => Fun(~"bondy_mst_b")}),
         ShuffledB
     ),
     Z = lists:foldl(
-        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        fun(N, Acc) -> ?MST:put(Acc, N) end,
         ?MST:new(#{store => Fun(~"bondy_mst_z")}),
         lists:seq(1, 1500)
     ),
@@ -244,7 +244,7 @@ first_last_test(Config) ->
 
     %% Test for basic MST operations
     A = lists:foldl(
-        fun(N, Acc) -> ?MST:insert(Acc, N) end,
+        fun(N, Acc) -> ?MST:put(Acc, N) end,
         ?MST:new(#{store => Fun(~"first_last_test")}),
         lists:seq(1, 10)
     ),
@@ -256,14 +256,14 @@ persistent_test(Config) ->
 
     T0 = ?MST:new(#{store => Fun(~"persistent_test")}),
 
-    T1 = ?MST:insert(T0, 1),
+    T1 = ?MST:put(T0, 1),
     R1 = ?MST:root(T1),
 
-    T2 = ?MST:insert(T1, 2),
+    T2 = ?MST:put(T1, 2),
     E2 = erlang:monotonic_time(),
     R2 = ?MST:root(T2),
 
-    T3 = ?MST:insert(T2, 3),
+    T3 = ?MST:put(T2, 3),
     E3 = erlang:monotonic_time(),
     R3 = ?MST:root(T3),
 

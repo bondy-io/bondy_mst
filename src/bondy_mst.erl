@@ -92,8 +92,6 @@ A node of the tree is:
 -export([gc/2]).
 -export([get/2]).
 -export([get_range/2]).
--export([insert/2]).
--export([insert/3]).
 -export([keys/1]).
 -export([last/1]).
 -export([last_n/3]).
@@ -102,6 +100,8 @@ A node of the tree is:
 -export([new/0]).
 -export([new/1]).
 -export([put/2]).
+-export([put/3]).
+-export([put_page/2]).
 -export([root/1]).
 -export([store/1]).
 -export([to_list/1]).
@@ -316,31 +316,39 @@ last_n(#?MODULE{} = T, TopBound, N) ->
 
 
 -doc """
+Inserts a key in the tree.
+The same as calling `put(T, Key, true)`.
 """.
--spec insert(t(), key()) -> t().
+-spec put(t(), key()) -> t().
 
-insert(#?MODULE{} = T, Key) ->
-    insert(T, Key, true).
+put(#?MODULE{} = T, Key) ->
+    put(T, Key, true).
 
 
 -doc """
-""".
--spec insert(t(), key(), value()) -> t().
+Associates `Key` with value `Value` and inserts the association into tree `Tree1`.
 
-insert(#?MODULE{store = Store0} = T, Key, Value) ->
+If key `Key` already exists in tree `Tree1`, the old associated value is merged with `Value` by calling the configured `merger` function. The function returns a new map `Tree2` containing the new association and the old associations in `Tree1`.
+
+The call fails with an exception if the tree has not been initialised with a  `merger` function supporting the type of `Value`.
+""".
+-spec put(Tree1 :: t(), Key :: key(), Value :: value()) -> Tree2 :: t().
+
+put(#?MODULE{store = Store0} = T, Key, Value) ->
     Fun = fun() ->
         Level = calc_level(Key),
-        {_Root, Store} = insert_at(T, Key, Value, Level),
+        {_Root, Store} = put_at(T, Key, Value, Level),
         T#?MODULE{store = Store}
     end,
     bondy_mst_store:transaction(Store0, Fun).
 
 
 -doc """
-""".
--spec put(t(), bondy_mst_page:t()) -> {Hash :: hash(), t()}.
 
-put(#?MODULE{store = Store0} = T, Page) ->
+""".
+-spec put_page(t(), bondy_mst_page:t()) -> {Hash :: hash(), t()}.
+
+put_page(#?MODULE{store = Store0} = T, Page) ->
     Fun = fun() ->
         {Root, Store} = bondy_mst_store:put(Store0, Page),
         {Root, T#?MODULE{store = Store}}
@@ -594,43 +602,43 @@ do_last_n(T, TopBound, N, Low, [{K, V, Low2} | Rest]) ->
 
 
 %% @private
-insert_at(T, Key, Value, Level) ->
-    insert_at(T, Key, Value, Level, T#?MODULE.store, root(T)).
+put_at(T, Key, Value, Level) ->
+    put_at(T, Key, Value, Level, T#?MODULE.store, root(T)).
 
 
 %% @private
-insert_at(_T, Key, Value, Level, Store, undefined) ->
+put_at(_T, Key, Value, Level, Store, undefined) ->
     NewPage = bondy_mst_page:new(Level, undefined, [{Key, Value, undefined}]),
     bondy_mst_store:put(Store, NewPage);
 
 
-insert_at(T, Key, Value, Level, Store0, Root) ->
+put_at(T, Key, Value, Level, Store0, Root) ->
     Page = bondy_mst_store:get(Store0, Root),
     [First | _] = bondy_mst_page:list(Page),
 
     case bondy_mst_page:level(Page) of
         PageLevel when PageLevel < Level ->
-            insert_at_higher_level(T, Key, Value, Level, Root, Store0);
+            put_at_higher_level(T, Key, Value, Level, Root, Store0);
 
         PageLevel when PageLevel == Level ->
             Store = bondy_mst_store:free(Store0, Root, Page),
-            insert_at_same_level(T, Key, Value, Level, First, Store, Page);
+            put_at_same_level(T, Key, Value, Level, First, Store, Page);
 
         PageLevel when PageLevel > Level ->
             Store = bondy_mst_store:free(Store0, Root, Page),
-            insert_at_lower_level(T, Key, Value, Level, First, Store, Page)
+            put_at_lower_level(T, Key, Value, Level, First, Store, Page)
     end.
 
 
 %% @private
-insert_at_higher_level(T, Key, Value, Level, Root, Store0) ->
+put_at_higher_level(T, Key, Value, Level, Root, Store0) ->
     {Low, High, Store} = split(T, Store0, Root, Key),
     NewPage = bondy_mst_page:new(Level, Low, [{Key, Value, High}]),
     bondy_mst_store:put(Store, NewPage).
 
 
 %% @private
-insert_at_same_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
+put_at_same_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
     List0 = bondy_mst_page:list(Page),
     Low = bondy_mst_page:low(Page),
     PageLevel = bondy_mst_page:level(Page),
@@ -643,26 +651,26 @@ insert_at_same_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
             bondy_mst_store:put(Store, NewPage);
 
         Other when Other == gt orelse Other == eq ->
-            {List1, Store} = insert_after_first(T, Key, Value, Store0, List0),
+            {List1, Store} = put_after_first(T, Key, Value, Store0, List0),
             NewPage = bondy_mst_page:new(PageLevel, Low, List1),
             bondy_mst_store:put(Store, NewPage)
     end.
 
 
 %% @private
-insert_at_lower_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
+put_at_lower_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
     List0 = bondy_mst_page:list(Page),
     Low0 = bondy_mst_page:low(Page),
     PageLevel = bondy_mst_page:level(Page),
 
     case compare(T, Key, K0) of
         lt ->
-            {Low, Store} = insert_at(T, Key, Value, Level, Store0, Low0),
+            {Low, Store} = put_at(T, Key, Value, Level, Store0, Low0),
             NewPage = bondy_mst_page:new(PageLevel, Low, List0),
             bondy_mst_store:put(Store, NewPage);
 
         gt ->
-            {List, Store} = insert_sub_after_first(
+            {List, Store} = put_sub_after_first(
                 T, Key, Value, Store0, Level, List0
             ),
             NewPage = bondy_mst_page:new(PageLevel, Low0, List),
@@ -671,7 +679,7 @@ insert_at_lower_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
 
 
 %% @private
-insert_after_first(T, Key, Value, Store0, [{K1, V1, R1}]) ->
+put_after_first(T, Key, Value, Store0, [{K1, V1, R1}]) ->
     case compare(T, K1, Key) of
         eq ->
             List = [{K1, merge_values(T, Key, V1, Value), R1}],
@@ -683,7 +691,7 @@ insert_after_first(T, Key, Value, Store0, [{K1, V1, R1}]) ->
             {List, Store}
     end;
 
-insert_after_first(T, Key, Value, Store0, [First, Second | Rest0]) ->
+put_after_first(T, Key, Value, Store0, [First, Second | Rest0]) ->
     {K1, V1, R1} = First,
     {K2, _, _} = Second,
 
@@ -700,7 +708,7 @@ insert_after_first(T, Key, Value, Store0, [First, Second | Rest0]) ->
                     {List, Store};
 
                 _ ->
-                    {Rest, Store} = insert_after_first(
+                    {Rest, Store} = put_after_first(
                         T, Key, Value, Store0, [Second | Rest0]
                     ),
                     List = [First | Rest],
@@ -711,19 +719,19 @@ insert_after_first(T, Key, Value, Store0, [First, Second | Rest0]) ->
 
 
 %% @private
-insert_sub_after_first(T, Key, Value, Store0, Level, [{K1, V1, R1}]) ->
+put_sub_after_first(T, Key, Value, Store0, Level, [{K1, V1, R1}]) ->
     case compare(T, K1, Key) of
         eq ->
             error(inconsistency);
 
         _ ->
-            {R, Store} = insert_at(T, Key, Value, Level, Store0, R1),
+            {R, Store} = put_at(T, Key, Value, Level, Store0, R1),
             List = [{K1, V1, R}],
             {List, Store}
     end;
 
 
-insert_sub_after_first(T, Key, Value, Store0, Level, [First, Second | Rest0]) ->
+put_sub_after_first(T, Key, Value, Store0, Level, [First, Second | Rest0]) ->
     {K1, V1, R1} = First,
     {K2, _, _} = Second,
 
@@ -734,11 +742,11 @@ insert_sub_after_first(T, Key, Value, Store0, Level, [First, Second | Rest0]) ->
         _ ->
             case compare(T, Key, K2) of
                 lt ->
-                    {R, Store} = insert_at(T, Key, Value, Level, Store0, R1),
+                    {R, Store} = put_at(T, Key, Value, Level, Store0, R1),
                     List = [{K1, V1, R}, Second | Rest0],
                     {List, Store};
                 _ ->
-                    {Rest, Store} = insert_sub_after_first(
+                    {Rest, Store} = put_sub_after_first(
                         T, Key, Value, Store0, Level, [Second | Rest0]
                     ),
                     List = [First | Rest],

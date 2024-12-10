@@ -97,6 +97,7 @@ implementations(Application, Behaviour) ->
                 fun(Mod) -> implements_behaviour(Mod, Behaviour) end,
                 Mods
             );
+
         _ ->
             []
     end.
