@@ -99,7 +99,7 @@ Called after merging a tree page from a remote tree.
 
 -doc """
 """.
--spec init(atom(), bondy_mst:t(), list() | map()) -> t().
+-spec init(atom(), bondy_mst:t(), list() | map()) -> {ok, t()}.
 
 init(NodeId, Tree, Opts) when is_list(Opts) ->
     init(NodeId, Tree, maps:from_list(Opts));
@@ -347,7 +347,7 @@ merge(State, Peer) ->
     Tree = State#state.tree,
     PeerRoot = maps:get(Peer, State#state.merges),
 
-    MissingSet = bondy_mst_store:missing_set(Tree, PeerRoot),
+    MissingSet = bondy_mst:missing_set(Tree, PeerRoot),
 
     case sets:is_empty(MissingSet) of
         true ->
@@ -376,7 +376,7 @@ do_merge(State0, Peer, PeerRoot) ->
 
     Tree1 = bondy_mst:merge(Tree0, Tree0, PeerRoot),
     NewRoot = bondy_mst:root(Tree1),
-    true = sets:is_empty(bondy_mst_store:missing_set(Tree1, NewRoot)),
+    true = sets:is_empty(bondy_mst:missing_set(Tree1, NewRoot)),
 
     NewMerges = maps:filter(
         fun(_, V) -> V =/= PeerRoot andalso V =/= NewRoot end,
