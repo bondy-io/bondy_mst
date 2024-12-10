@@ -83,14 +83,14 @@ The callback `Module` is responsible for sending the event to some random peers,
 either by implementing or using a peer sampling service e.g.
 `partisan_plumtree_broadcast`.
 """.
--callback broadcast(event()) -> ok | {error, any()}.
+-callback broadcast(Event :: event()) -> ok | {error, any()}.
 
 
 -doc """
 Called after merging a tree page from a remote tree.
     The implemeneter can use this to extract the entries and merge the data in a main store when the tree is used only for anti-entropy.
 """.
--callback on_merge(bondy_mst_page:t()) -> ok.
+-callback on_merge(Page :: bondy_mst_page:t()) -> ok.
 
 
 %% =============================================================================
@@ -316,6 +316,9 @@ maybe_merge(#state{} = State0, Peer, PeerRoot) ->
             merge(State, Peer);
 
         false ->
+            ?LOG_INFO(#{
+                message => "Skipping merge, limit reached", peer => Peer}
+            ),
             State0
     end.
 
@@ -337,6 +340,10 @@ count_merges(Merges, Root) ->
 
 %% @private
 merge(State, Peer) ->
+    ?LOG_INFO(#{
+        message => "Starting merge",
+        peer => Peer
+    }),
     Tree = State#state.tree,
     PeerRoot = maps:get(Peer, State#state.merges),
 
