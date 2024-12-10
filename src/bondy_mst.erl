@@ -162,7 +162,7 @@ delete(#?MODULE{store = Val}) ->
 -doc """
 Returns the tree's root hash.
 """.
--spec root(t()) -> binary().
+-spec root(Tree :: t()) -> binary().
 
 root(#?MODULE{store = Store}) ->
     bondy_mst_store:get_root(Store).
