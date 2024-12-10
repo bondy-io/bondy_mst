@@ -50,7 +50,7 @@ A node of the tree is:
     merger          ::  merger()
 }).
 
--type t()           ::  #bondy_mst{}.
+-type t()           ::  #?MODULE{}.
 -type opts()        ::  list() | map().
 -type comparator()  ::  fun((key(), key()) -> eq | lt | gt).
 -type merger()      ::  fun((key(), value(), value()) -> value()).
