@@ -375,7 +375,8 @@ put(#?MODULE{} = T, Key) ->
 put(#?MODULE{store = Store0} = T, Key, Value) ->
     Fun = fun() ->
         Level = calc_level(Key),
-        {_Root, Store} = put_at(T, Key, Value, Level),
+        {Root, Store1} = put_at(T, Key, Value, Level),
+        Store = bondy_mst_store:set_root(Store1, Root),
         T#?MODULE{store = Store}
     end,
     bondy_mst_store:transaction(Store0, Fun).
