@@ -16,19 +16,13 @@
 %%  limitations under the License.
 %% ===========================================================================
 
-
+%% -----------------------------------------------------------------------------
+%% @doc This module implements the `bondy_mst_store' behaviour using RocksDB.
+%% This store offers read-concurrency via the use of persistent data sturcture
+%% concepts.
+%% @end
+%% -----------------------------------------------------------------------------
 -module(bondy_mst_rocksdb_store).
--moduledoc """
-This module implements the `bondy_mst_store` behaviour using RocksDB.
-
-As opposed to other backend stores, this module does not offer support for read
-concurrency, and as a result:
-
-* Versioning is not implemented, every mutating operation returns a copy of the
-map; and
-* All calls to `free/2` are made effective immediately by removing the pages
-from the map.
-""".
 
 -behaviour(bondy_mst_store).
 
@@ -88,8 +82,10 @@ from the map.
 
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec new(Opts :: opts()) -> t() | no_return().
 
 new(Opts) when is_list(Opts) ->
@@ -134,16 +130,20 @@ new(Opts0) when is_map(Opts0) ->
     }.
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec get_root(T :: t()) -> Root :: hash() | undefined.
 
 get_root(#?MODULE{root_key = RootKey} = T) ->
     do_get(T, RootKey).
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec set_root(T :: t(), Hash :: hash()) -> t().
 
 set_root(#?MODULE{root_key = RootKey} = T, Hash) ->
@@ -154,16 +154,20 @@ set_root(#?MODULE{root_key = RootKey} = T, Hash) ->
     transaction(T, Fun).
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec get(T :: t(), Hash :: hash()) -> Page :: page() | undefined.
 
 get(#?MODULE{name = Name} = T, Hash) ->
     do_get(T, prefixed_key(Name, Hash)).
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec has(T :: t(), Hash :: hash()) -> boolean().
 
 has(#?MODULE{name = Name} = T, Hash) when is_binary(Hash) ->
@@ -179,8 +183,10 @@ has(#?MODULE{name = Name} = T, Hash) when is_binary(Hash) ->
     end.
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec put(T :: t(), Page :: page()) -> {Hash :: hash(), T :: t()}.
 
 put(#?MODULE{name = Name, root_key = RootKey} = T, Page) ->
@@ -194,8 +200,10 @@ put(#?MODULE{name = Name, root_key = RootKey} = T, Page) ->
     transaction(T, Fun).
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec copy(t(), Target :: bondy_mst_store:t(), Hash :: hash()) -> t().
 
 copy(#?MODULE{name = Name} = T, Target, Hash) ->
@@ -227,9 +235,10 @@ copy(#?MODULE{name = Name} = T, Target, Hash) ->
     end.
 
 
--doc """
-Can only be called within a transaction.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Can only be called within a transaction.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec free(T :: t(), Hash :: hash(), Page :: page()) -> T :: t() | no_return().
 
 free(#?MODULE{opts = #{persistent := true}} = T, Hash, Page0) ->
@@ -257,10 +266,11 @@ free(#?MODULE{opts = #{persistent := false}} = T, Hash, _Page) ->
 
 
 
--doc """
-This call can be made concurrently i.e. in a different process than the owner
-of the tree.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc This call can be made concurrently i.e. in a different process than the
+%% owner of the tree.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
 
 gc(#?MODULE{ref = Ref, opts = #{persistent := true}} = T, Epoch)
@@ -301,8 +311,10 @@ gc(#?MODULE{opts = #{persistent := false}} = T, _KeepRoots) ->
     T.
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec missing_set(T :: t(), Root :: binary()) -> sets:set(hash()).
 
 missing_set(T, Root) ->
@@ -319,8 +331,10 @@ missing_set(T, Root) ->
     end.
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec page_refs(Page :: page()) -> [hash()].
 
 page_refs(Page) ->
@@ -334,8 +348,10 @@ delete(#?MODULE{ref = _Ref, name = _Name}) ->
     ok.
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec transaction(t(), fun(() -> any())) -> any() | no_return().
 
 transaction(#?MODULE{} = T, Fun) ->

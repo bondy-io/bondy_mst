@@ -19,14 +19,12 @@
 
 %% =============================================================================
 %% @doc
-%%
 %% @end
 %% =============================================================================
 -module(bondy_mst_config).
 -behaviour(app_config).
 
 -include_lib("kernel/include/logger.hrl").
-
 
 
 -define(APP, bondy_mst).

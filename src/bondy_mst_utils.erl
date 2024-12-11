@@ -16,11 +16,8 @@
 %%  limitations under the License.
 %% ===========================================================================
 
-
-
 -module(bondy_mst_utils).
--moduledoc """
-""".
+
 
 -type hash()    ::  binary().
 
@@ -32,6 +29,8 @@
 -export([hash/2]).
 -export([implementations/2]).
 -export([implements_behaviour/2]).
+-export([apply_lazy/3]).
+-export([apply_lazy/5]).
 
 
 
@@ -39,35 +38,43 @@
 %% API
 %% =============================================================================
 
--doc """
-""".
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec hash(Term :: term()) -> Digest :: binary().
 
 hash(Term) ->
     hash(Term, sha256).
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec hash(Term :: term(), Algo :: atom()) -> Digest :: binary().
 
 hash(Term, Algo) ->
     crypto:hash(Algo, erlang:term_to_binary(Term, [{minor_version, 2}])).
 
 
--doc """
-Ensures a module is loaded.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Ensures a module is loaded.
+%% @end
+%% -----------------------------------------------------------------------------
 ensure_loaded(Mod) ->
     erlang:function_exported(Mod, module_info, 0)
         orelse code:ensure_loaded(Mod),
     ok.
 
 
--doc """
-Lists the behaviours implemented by a module.
-Raises an exception if the module is not loaded.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Lists the behaviours implemented by a module.
+%% Raises an exception if the module is not loaded.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec behaviours(atom()) -> [atom()] | no_return().
 
 behaviours(Module) ->
@@ -76,18 +83,22 @@ behaviours(Module) ->
     lists:flatten(proplists:get_all_values(behaviour, Attributes)).
 
 
--doc """
-Returns `true` if module `module` implements behaviour `behaviour`. Otherwise, it returns `false`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns `true' if module `module' implements behaviour `behaviour'.
+%% Otherwise, it returns `false'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec implements_behaviour(atom(), atom()) -> boolean().
 
 implements_behaviour(Module, Behaviour) ->
     lists:member(Behaviour, behaviours(Module)).
 
 
--doc """
-Returns the list of modules implementing `behaviour` in application `application`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the list of modules implementing `Behaviour' in application
+%% `Application'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec implementations(atom(), atom()) -> [atom()].
 
 implementations(Application, Behaviour) ->
@@ -102,3 +113,22 @@ implementations(Application, Behaviour) ->
             []
     end.
 
+
+-spec apply_lazy(module(), atom(), fun(() -> any())) -> any().
+
+apply_lazy(Module, FunctionName, Fun) when is_function(Fun, 0) ->
+    apply_lazy(Module, FunctionName, 0, [], Fun).
+
+
+-spec apply_lazy(module(), atom(), integer(), list(), term()) -> term().
+
+apply_lazy(Module, FunctionName, Arity, Args, Fun) when is_function(Fun, 0) ->
+    ok = ensure_loaded(Module),
+
+    case erlang:function_exported(Module, FunctionName, Arity) of
+        true ->
+            erlang:apply(Module, FunctionName, Args);
+
+        false ->
+            Fun()
+    end.

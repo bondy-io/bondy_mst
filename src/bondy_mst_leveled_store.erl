@@ -16,12 +16,11 @@
 %%  limitations under the License.
 %% ===========================================================================
 
-
+%% -----------------------------------------------------------------------------
+%% @doc Non-concurrent, MST backend using `leveled`.
+%% @end
+%% -----------------------------------------------------------------------------
 -module(bondy_mst_leveled_store).
--moduledoc """
-Non-concurrent, MST backend using `leveled`.
-""".
-
 -behaviour(bondy_mst_store).
 
 -include_lib("kernel/include/logger.hrl").
@@ -62,8 +61,6 @@ Non-concurrent, MST backend using `leveled`.
 
 
 
--doc """
-""".
 -spec new(Opts :: map() | list()) -> t().
 
 new(Opts) when is_list(Opts) ->
@@ -74,16 +71,12 @@ new(#{name := Name} = _Opts) ->
     #?MODULE{pid = Pid, name = Name}.
 
 
--doc """
-""".
 -spec get_root(T :: t()) -> Root :: hash() | undefined.
 
 get_root(#?MODULE{pid = Pid, name = Name}) ->
     do_get(Pid, Name, ?ROOT_KEY).
 
 
--doc """
-""".
 -spec set_root(T :: t(), Hash :: hash()) -> t().
 
 set_root(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
@@ -91,24 +84,18 @@ set_root(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
     T.
 
 
--doc """
-""".
 -spec get(T :: t(), Hash :: binary()) -> Page :: page() | undefined.
 
 get(#?MODULE{pid = Pid, name = Name}, Hash) ->
     do_get(Pid, Name, Hash).
 
 
--doc """
-""".
 -spec has(T :: t(), Hash :: binary()) -> boolean().
 
 has(#?MODULE{pid = Pid, name = Name}, Hash) ->
     leveled_bookie:book_head(Pid, Name, Hash) /= not_found.
 
 
--doc """
-""".
 -spec put(T :: t(), Page :: page()) -> {Hash :: binary(), T :: t()}.
 
 put(#?MODULE{pid = Pid, name = Name} = T, Page) ->
@@ -118,8 +105,6 @@ put(#?MODULE{pid = Pid, name = Name} = T, Page) ->
     {Hash, T}.
 
 
--doc """
-""".
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().
 
 copy(#?MODULE{pid = Pid, name = Name} = T, OtherStore, Hash) ->
@@ -140,8 +125,6 @@ copy(#?MODULE{pid = Pid, name = Name} = T, OtherStore, Hash) ->
     end.
 
 
--doc """
-""".
 -spec free(T :: t(), Hash :: binary(), Page :: page()) -> T :: t().
 
 free(#?MODULE{pid = Pid, name = Name} = T, Hash, _Page) ->
@@ -149,8 +132,6 @@ free(#?MODULE{pid = Pid, name = Name} = T, Hash, _Page) ->
     T.
 
 
--doc """
-""".
 -spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
 
 gc(#?MODULE{} = T, _KeepRoots) ->
@@ -158,8 +139,6 @@ gc(#?MODULE{} = T, _KeepRoots) ->
     T.
 
 
--doc """
-""".
 -spec missing_set(T :: t(), Root :: binary()) -> sets:set(page()).
 
 missing_set(T, Root) ->
@@ -176,8 +155,6 @@ missing_set(T, Root) ->
     end.
 
 
--doc """
-""".
 -spec page_refs(Page :: page()) -> [binary()].
 
 page_refs(Page) ->

@@ -1,10 +1,34 @@
+%% ===========================================================================
+%%  bondy_mst_store.erl -
+%%
+%%  Copyright (c) 2023-2024 Leapsight. All rights reserved.
+%%
+%%  Licensed under the Apache License, Version 2.0 (the "License");
+%%  you may not use this file except in compliance with the License.
+%%  You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%%  Unless required by applicable law or agreed to in writing, software
+%%  distributed under the License is distributed on an "AS IS" BASIS,
+%%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%%  See the License for the specific language governing permissions and
+%%  limitations under the License.
+%%
+%%  This module contains a port the code written in Elixir for the
+%%  simulations shown in the paper: Merkle Search Trees: Efficient State-Based
+%%  CRDTs in Open Networks by Alex Auvolat, François Taïani
+%% ===========================================================================
 
 
+%% -----------------------------------------------------------------------------
+%% @doc Behaviour to be implemented for page stores to allow their manipulation.
+%% This behaviour may also be implemented by store proxies that track operations
+%% and implement different synchronization or caching mechanisms.
+%% @end
+%% -----------------------------------------------------------------------------
 -module(bondy_mst_store).
--moduledoc """
-Behaviour to be implemented for page stores to allow their manipulation.
-This behaviour may also be implemented by store proxies that track operations and implement different synchronization or caching mechanisms.
-""".
+
 
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
@@ -19,13 +43,13 @@ This behaviour may also be implemented by store proxies that track operations an
 -type t()               ::  #?MODULE{}.
 -type page()            ::  any().
 -type backend()         ::  any().
--type iterator_action() ::  first
-                            | last
-                            | next
-                            | prev
-                            | binary()
-                            | {seek, binary()}
-                            | {seek_for_prev, binary()}.
+%% -type iterator_action() ::  first
+%%                             | last
+%%                             | next
+%%                             | prev
+%%                             | binary()
+%%                             | {seek, binary()}
+%%                             | {seek_for_prev, binary()}.
 
 -export_type([t/0]).
 -export_type([backend/0]).
@@ -106,22 +130,24 @@ is_type(#?MODULE{}) -> true;
 is_type(_) -> false.
 
 
--doc """
-Get the root page.
-
-Returns page or `undefined`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Get the root hash.
+%% Returns hash or `undefined'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec get_root(Store :: t()) -> Root :: hash() | undefined.
 
 get_root(#?MODULE{mod = Mod, state = State}) ->
     Mod:get_root(State).
 
 
--doc """
-Get the root page.
 
-Returns page or `undefined`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Get the root hash.
+%% Returns hash or `undefined'.
+%% WARNING: You should never call this function. It is used internally.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec set_root(Store :: t(), Hash :: hash()) -> t().
 
 set_root(#?MODULE{mod = Mod, state = State0} = T, Hash) when is_binary(Hash) ->
@@ -129,31 +155,32 @@ set_root(#?MODULE{mod = Mod, state = State0} = T, Hash) when is_binary(Hash) ->
     T#?MODULE{state = State}.
 
 
--doc """
-Get a page referenced by its hash.
-
-Returns page or `undefined`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Get a page referenced by its hash.
+%% Returns page or `undefined'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec get(Store :: t(), Hash :: hash()) -> Page :: page() | undefined.
 
 get(#?MODULE{mod = Mod, state = State}, Hash) ->
     Mod:get(State, Hash).
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec has(Store :: t(), Hash :: hash()) -> boolean().
 
 has(#?MODULE{mod = Mod, state = State}, Hash) ->
     Mod:has(State, Hash).
 
 
--doc """
-Put a page. Argument is the content of the page, returns the
-hash that the store has associated to it.
-
-Returns {hash, store}
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Put a page. Argument is the content of the page, returns the
+%% hash that the store has associated to it.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec put(Store :: t(), Page :: page()) -> {Hash :: hash(), Store :: t()}.
 
 put(#?MODULE{mod = Mod, state = State0} = T, Page) ->
@@ -161,50 +188,61 @@ put(#?MODULE{mod = Mod, state = State0} = T, Page) ->
     {Hash, T#?MODULE{state = State}}.
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec copy(Store :: t(), OtherStore :: t(), Hash :: hash()) -> Store :: t().
 
 copy(#?MODULE{mod = Mod, state = State0} = T, OtherStore, Hash) ->
     T#?MODULE{state = Mod:copy(State0, OtherStore, Hash)}.
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec free(Store :: t(), Hash :: hash(), Page :: page()) -> Store :: t().
 
 free(#?MODULE{mod = Mod, state = State0} = T, Hash, Page) ->
     T#?MODULE{state = Mod:free(State0, Hash, Page)}.
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec gc(Store :: t(), KeepRoots :: [list()]) -> Store :: t().
 
 gc(#?MODULE{mod = Mod, state = State0} = T, KeepRoots) ->
     T#?MODULE{state = Mod:gc(State0, KeepRoots)}.
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec page_refs(Store :: t(), Page :: page()) -> Refs :: [binary()].
 
 page_refs(#?MODULE{mod = Mod}, Page) ->
     Mod:page_refs(Page).
 
 
--doc """
-Returns the hashes of the pages identified by root hash that are missing from
-the store.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the hashes of the pages identified by root hash that are missing
+%% from the store.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec missing_set(Store :: t(), Root :: binary()) -> [hash()].
 
 missing_set(#?MODULE{mod = Mod, state = State}, Root) ->
     Mod:missing_set(State, Root).
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec delete(Store :: t()) -> ok.
 
 delete(#?MODULE{mod = Mod, state = State}) ->
@@ -218,8 +256,10 @@ delete(#?MODULE{mod = Mod, state = State}) ->
 %% =============================================================================
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec transaction(Store :: t(), Fun :: fun(() -> any())) ->
     any() | {error, Reason :: any()}.
 

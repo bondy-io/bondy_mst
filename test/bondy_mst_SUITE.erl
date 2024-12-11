@@ -107,21 +107,21 @@ small_test(Config) ->
     %% Test for basic MST operations
     A = lists:foldl(
         fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(~"bondy_mst_a")}),
+        ?MST:new(#{store => Fun(<<"bondy_mst_a">>)}),
         lists:seq(1, 10)
     ),
     ?assertEqual([{1, 10}], ?ISET([K || {K, true} <- ?MST:to_list(A)])),
 
     B = lists:foldl(
         fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(~"bondy_mst_b")}),
+        ?MST:new(#{store => Fun(<<"bondy_mst_b">>)}),
         lists:seq(5, 15)
     ),
     ?assertEqual([{5, 15}], ?ISET([K || {K, true} <- ?MST:to_list(B)])),
 
     Z = lists:foldl(
         fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(~"bondy_mst_z")}),
+        ?MST:new(#{store => Fun(<<"bondy_mst_z">>)}),
         lists:seq(1, 15)
     ),
     ?assertEqual([{1, 15}], ?ISET([K || {K, true} <- ?MST:to_list(Z)])),
@@ -191,17 +191,17 @@ large_test(Config) ->
     ShuffledB = list_shuffle(lists:seq(550, 1500)),
      A = lists:foldl(
         fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(~"bondy_mst_a")}),
+        ?MST:new(#{store => Fun(<<"bondy_mst_a">>)}),
         ShuffledA
     ),
     B = lists:foldl(
         fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(~"bondy_mst_b")}),
+        ?MST:new(#{store => Fun(<<"bondy_mst_b">>)}),
         ShuffledB
     ),
     Z = lists:foldl(
         fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(~"bondy_mst_z")}),
+        ?MST:new(#{store => Fun(<<"bondy_mst_z">>)}),
         lists:seq(1, 1500)
     ),
     C = ?MST:merge(A, B),
@@ -245,7 +245,7 @@ first_last_test(Config) ->
     %% Test for basic MST operations
     A = lists:foldl(
         fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(~"first_last_test")}),
+        ?MST:new(#{store => Fun(<<"first_last_test">>)}),
         lists:seq(1, 10)
     ),
     ?assertEqual({1, true}, bondy_mst:first(A)),
@@ -254,7 +254,7 @@ first_last_test(Config) ->
 persistent_test(Config) ->
     Fun = ?config(store_fun, Config),
 
-    T0 = ?MST:new(#{store => Fun(~"persistent_test")}),
+    T0 = ?MST:new(#{store => Fun(<<"persistent_test">>)}),
 
     T1 = ?MST:put(T0, 1),
     R1 = ?MST:root(T1),

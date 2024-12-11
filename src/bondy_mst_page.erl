@@ -17,12 +17,13 @@
 %% ===========================================================================
 
 
-
+%% -----------------------------------------------------------------------------
+%% @doc Module that represents objects that are used as data pages in a
+%% pagestore and that may reference other data pages by their hash.
+%% @end
+%% -----------------------------------------------------------------------------
 -module(bondy_mst_page).
--moduledoc"""
-Module that represents objects that are used as data pages in a pagestore and
-that may reference other data pages by their hash.
-""".
+
 
 -include("bondy_mst.hrl").
 
@@ -63,7 +64,10 @@ that may reference other data pages by their hash.
 %% =============================================================================
 
 
--doc "Creates a new page".
+%% -----------------------------------------------------------------------------
+%% @doc Creates a new page
+%% @end
+%% -----------------------------------------------------------------------------
 -spec new(level(), hash(), [entry()]) -> t().
 
 new(Level, Low, List) when is_integer(Level), is_list(List) ->
@@ -75,7 +79,10 @@ new(Level, Low, List) when is_integer(Level), is_list(List) ->
     }.
 
 
--doc "Creates a new page".
+%% -----------------------------------------------------------------------------
+%% @doc Creates a new page
+%% @end
+%% -----------------------------------------------------------------------------
 -spec pattern() -> t().
 
 pattern() ->
@@ -87,41 +94,48 @@ pattern() ->
     }.
 
 
--doc """
-Returns the level of this page in the tree i.e. the logical height.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the level of this page in the tree i.e. the logical height.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec level(t()) -> level().
 
 level(#?MODULE{level = Val}) -> Val.
 
 
--doc "".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec low(t()) -> hash().
 
 low(#?MODULE{low = Val}) -> Val.
 
 
--doc """
-Returns the epoch number at which this page has been freed or `undefined` if
-it hasn't i.e. it is still active.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the epoch number at which this page has been freed or `undefined' if it hasn't i.e. it is still active.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec freed_at(t()) -> epoch() | undefined.
 
 freed_at(#?MODULE{freed_at = Val}) -> Val.
 
 
--doc """
-Sets the version number at which this page has been freed.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Sets the version number at which this page has been freed.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec set_freed_at(t(), epoch()) -> t().
 
 set_freed_at(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
     T#?MODULE{freed_at = Epoch}.
 
 
--doc """
-Returns `true` if the page is referenced at `Epoch`. Otherwise, returns `false`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns `true' if the page is referenced at `Epoch'.
+%% Otherwise, returns `false'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec is_referenced_at(t(), epoch()) -> boolean().
 
 is_referenced_at(#?MODULE{freed_at = undefined}, _) ->
@@ -131,32 +145,43 @@ is_referenced_at(#?MODULE{freed_at = LastEpoch}, Epoch) ->
     LastEpoch >= Epoch.
 
 
--doc "Returns the list of entries in this page.".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the list of entries in this page.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec list(t()) -> [entry()].
 
 list(#?MODULE{list = Val}) -> Val.
 
 
 
--doc """
-Calls `Fun(Entry, AccIn)` on successive entries of the page, starting with `AccIn == Acc0`. `Fun/2` must return a new accumulator, which is passed to the next call. The function returns the final value of the accumulator. `Acc0` is returned if the tree is empty.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Calls `Fun(Entry, AccIn)' on successive entries of the page, starting
+%% with `AccIn == Acc0'. `Fun/2' must return a new accumulator, which is passed
+%% to the next call. The function returns the final value of the accumulator.
+%% `Acc0' is returned if the tree is empty.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec fold(t(), fun((entry(), any()) -> any()), any()) -> any().
 
 fold(#?MODULE{list = List}, Fun, Acc) ->
     lists:foldl(Fun, Acc, List).
 
 
--doc """
-
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec foreach(t(), fun((entry()) -> any())) -> ok.
 
 foreach(#?MODULE{list = List}, Fun) ->
     lists:foreach(Fun, List).
 
 
--doc "Returns the hashes of all pages referenced by this page.".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the hashes of all pages referenced by this page.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec refs(t()) -> [hash()].
 
 refs(#?MODULE{list = List, low = Low}) ->

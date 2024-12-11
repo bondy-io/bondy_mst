@@ -15,29 +15,16 @@
 %%  See the License for the specific language governing permissions and
 %%  limitations under the License.
 %%
-%%  This repository contains a port the code written in Elixir for the
+%%  This module contains a port the code written in Elixir for the
 %%  simulations shown in the paper: Merkle Search Trees: Efficient State-Based
 %%  CRDTs in Open Networks by Alex Auvolat, François Taïani
 %% ===========================================================================
 
+%% -----------------------------------------------------------------------------
+%% @doc A Merkle search tree.
+%% @end
+%% -----------------------------------------------------------------------------
 -module(bondy_mst).
--moduledoc """
-A Merkle search tree.
-
-A node of the tree is:
-
-```
-{
-  Level,
-  NodeHash | undefined,
-  [
-    { ItemLowBound, NodeHash | undefined },
-    { ItemLowBound, NodeHash | undefined },
-    ...
-  }
-}
-```
-""".
 
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
@@ -51,7 +38,15 @@ A node of the tree is:
 }).
 
 -type t()           ::  #?MODULE{}.
--type opts()        ::  list() | map().
+-type opts()        ::  [opt()] | opts_map().
+-type opt()         ::  {store, bondy_mst_store:t()}
+                        | {merger, merger()}
+                        | {comparator, comparator()}.
+-type opts_map()    ::  #{
+                            store => bondy_mst_store:t(),
+                            merger => merger(),
+                            comparator => comparator()
+                        }.
 -type comparator()  ::  fun((key(), key()) -> eq | lt | gt).
 -type merger()      ::  fun((key(), value(), value()) -> value()).
 -type key_range()   ::  {key(), key()}
@@ -69,10 +64,12 @@ A node of the tree is:
 
 
 -export_type([t/0]).
-
+-export_type([opt/0]).
 -export_type([opts/0]).
+-export_type([opts_map/0]).
 -export_type([comparator/0]).
 -export_type([merger/0]).
+
 %% Defined in bondy_mst.hrl
 -export_type([level/0]).
 -export_type([key/0]).
@@ -107,6 +104,8 @@ A node of the tree is:
 -export([to_list/1]).
 -export([to_list/2]).
 
+-export([format_error/2]).
+
 
 %% =============================================================================
 %% API
@@ -114,24 +113,32 @@ A node of the tree is:
 
 
 
--doc """
-Create a new Merkle Search Tree.
-
-This structure can be used as a ser with only true keys or as a map if a
-merge function is given.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Create a new Merkle Search Tree using the default store.
+%% This structure can be used as a ser with only true keys or as a map if a
+%% merge function is given.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec new() -> t().
 
 new() ->
     new([]).
 
 
--doc """
-Create a new Merkle Search Tree.
+%% -----------------------------------------------------------------------------
+%% @doc Create a new Merkle Search Tree.
 
-This structure can be used as a ser with only true keys or as a map if a
-merge function is given.
-""".
+%% This structure can be used as a ser with only true keys (default) or as a map
+%% if a proper merger function is given.
+%% == Options ==
+%% * {store, bondy_mst_store:t()} - a stores.
+%% Defaults to an instance of `bondy_mst_map_store'.
+%% * {merger, merger()} - a merger function.
+%% Defaults to the grow-only set merger function `merger/3'.
+%% * {comparator, comparator()} - a key comparator function.
+%% Defaults to `comparator/2'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec new(opts()) -> t().
 
 new(Opts) when is_list(Opts) ->
@@ -150,86 +157,94 @@ new(Opts) when is_map(Opts) ->
     }.
 
 
--doc """
-Deletes the tree (by deleting its backend store).
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Deletes the tree (by deleting its backend store).
+%% @end
+%% -----------------------------------------------------------------------------
 -spec delete(t()) -> ok.
 
 delete(#?MODULE{store = Val}) ->
     bondy_mst_store:delete(Val).
 
 
--doc """
-Returns the tree's root hash.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the tree's root hash.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec root(Tree :: t()) -> binary().
 
 root(#?MODULE{store = Store}) ->
     bondy_mst_store:get_root(Store).
 
 
--doc """
-Returns the tree's store.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the tree's store.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec store(t()) -> bondy_mst_store:t().
 
 store(#?MODULE{store = Val}) ->
     Val.
 
 
--doc """
-Returns the value for key `Key`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the value for key `Key'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec get(T :: t(), Key :: key()) -> Value :: any().
 
 get(#?MODULE{} = T, Key) ->
     get(T, Key, root(T)).
 
 
--doc """
-Returns the first entry.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the first entry.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec first(T :: t()) -> Value :: {key(), value()} | undefined.
 
 first(#?MODULE{} = T) ->
     first(T, root(T)).
 
 
--doc """
-Returns the last entry.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the last entry.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec last(T :: t()) -> Value :: {key(), value()} | undefined.
 
 last(#?MODULE{} = T) ->
     last(T, root(T)).
 
 
--doc """
-""".
+
 -spec get_range(T :: t(), Range :: key_range()) -> Value :: any().
 
 get_range(#?MODULE{} = T, {From, To}) ->
-    Opts = [{first, From}, {stop, To}],
-    fold(
-        T,
-        fun(K, V, Acc) -> [{K, V} | Acc] end,
-        [],
-        Opts
-    ).
+    error(not_implemented).
+    %% Opts = [{first, From}, {stop, To}],
+    %% fold(
+    %%     T,
+    %%     fun(K, V, Acc) -> [{K, V} | Acc] end,
+    %%     [],
+    %%     Opts
+    %% ).
 
 
--doc """
-List all items.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc List all items.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec to_list(t()) -> [{key(), value()}].
 
 to_list(#?MODULE{} = T) ->
     to_list(T, root(T)).
 
 
--doc """
-List all items.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc List all items.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec to_list(t(), hash()) -> [{key(), value()}].
 
 to_list(#?MODULE{} = T, Root) when is_binary(Root) ->
@@ -238,22 +253,29 @@ to_list(#?MODULE{} = T, Root) when is_binary(Root) ->
     ).
 
 
--doc """
-Calls `Fun(Elem)` for each element `Elem` in the tree, starting from its current root.
-This function is used for its side effects and the evaluation order is defined to be the same as the order of the elements in the tree.
-
-The same as calling `foreach(T, root(T))`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Calls `Fun(Elem)' for each element `Elem' in the tree, starting from its
+%% current root.
+%% This function is used for its side effects and the evaluation order is
+%% defined to be the same as the order of the elements in the tree.
+%%
+%% The same as calling `foreach(T, root(T))'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec foreach(t(), fun(({key(), value()}) -> ok)) -> ok.
 
 foreach(#?MODULE{} = T, Fun) ->
     foreach(T, Fun, []).
 
 
--doc """
-Calls `Fun(Elem)` for each element `Elem` in the tree, starting from `Root`.
-This function is used for its side effects and the evaluation order is defined to be the same as the order of the elements in the tree.
-""".
+
+%% -----------------------------------------------------------------------------
+%% @doc Calls `Fun(Elem)' for each element `Elem' in the tree, starting from
+%% `Root'.
+%% This function is used for its side effects and the evaluation order is
+%% defined to be the same as the order of the elements in the tree.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec foreach(t(),fun(({key(), value()}) -> ok), Opts :: list()) -> ok.
 
 foreach(#?MODULE{store = Store} = T, Fun, Opts) ->
@@ -261,20 +283,26 @@ foreach(#?MODULE{store = Store} = T, Fun, Opts) ->
     do_foreach(Store, Fun, Opts, Root).
 
 
--doc """
-Calls `Fun(Elem, AccIn)` on successive elements of tree `T`, starting from the current root with `AccIn == Acc0`. `Fun/2` must return a new accumulator, which is passed to the next call. The function returns the final value of the accumulator. `Acc0` is returned if the tree is empty.
-
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Calls `Fun(Elem, AccIn)'' on successive elements of tree `T', starting
+%% from the current root with `AccIn == Acc0'. `Fun/2' must return a new
+%% accumulator, which is passed to the next call. The function returns the final
+%% value of the accumulator. `Acc0' is returned if the tree is empty.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec fold(t(), Fun :: fold_fun(), AccIn :: any()) -> AccOut :: any().
 
 fold(T, Fun, AccIn) ->
     fold(T, Fun, AccIn, []).
 
 
--doc """
-Calls `Fun(Elem, AccIn)` on successive elements of tree `T`, starting from the current root with `AccIn == Acc0`. `Fun/2` must return a new accumulator, which is passed to the next call. The function returns the final value of the accumulator. `Acc0` is returned if the tree is empty.
-
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Calls `Fun(Elem, AccIn)'' on successive elements of tree `T', starting
+%% from the current root with `AccIn == Acc0'. `Fun/2' must return a new
+%% accumulator, which is passed to the next call. The function returns the final
+%% value of the accumulator. `Acc0' is returned if the tree is empty.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec fold(t(), Fun :: fold_fun(), AccIn :: any(), Opts :: fold_opts()) ->
     AccOut :: any().
 
@@ -283,18 +311,20 @@ fold(#?MODULE{store = Store} = T, Fun, AccIn, Opts) ->
     do_fold(Store, Fun, AccIn, Opts, Root).
 
 
--doc """
-List all items.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc List all items.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec keys(t()) -> [{key(), value()}].
 
 keys(#?MODULE{} = T) ->
     lists:reverse(fold(T, fun({K, _}, Acc) -> [K | Acc] end, [])).
 
 
--doc """
-
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec diff_to_list(t(), t()) -> list().
 
 diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
@@ -307,31 +337,38 @@ diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
     ).
 
 
--doc """
-Get the last `N` items of the tree, or the last `N` items strictly before given
-upper bound `TopBound` if non `undefined`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Get the last `N' items of the tree, or the last `N' items strictly
+%% before given upper bound `TopBound' if non `undefined'.
+%% @end
+%% -----------------------------------------------------------------------------
 last_n(#?MODULE{} = T, TopBound, N) ->
     last_n(T, TopBound, N, root(T)).
 
 
--doc """
-Inserts a key in the tree.
-The same as calling `put(T, Key, true)`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Inserts a key in the tree. The same as calling `put(T, Key, true)'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec put(t(), key()) -> t().
 
 put(#?MODULE{} = T, Key) ->
     put(T, Key, true).
 
 
--doc """
-Associates `Key` with value `Value` and inserts the association into tree `Tree1`.
-
-If key `Key` already exists in tree `Tree1`, the old associated value is merged with `Value` by calling the configured `merger` function. The function returns a new map `Tree2` containing the new association and the old associations in `Tree1`.
-
-The call fails with an exception if the tree has not been initialised with a  `merger` function supporting the type of `Value`.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Associates `Key' with value `Value' and inserts the association into
+%% tree `Tree1'.
+%%
+%% If key `Key' already exists in tree `Tree1', the old associated value is
+%% merged with `Value' by calling the configured `merger' function. The function
+%% returns a new map `Tree2' containing the new association and the old
+%% associations in `Tree1'.
+%%
+%% The call fails with an exception if the tree has not been initialised with a
+%% `merger' function supporting the type of `Value'.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec put(Tree1 :: t(), Key :: key(), Value :: value()) -> Tree2 :: t().
 
 put(#?MODULE{store = Store0} = T, Key, Value) ->
@@ -343,9 +380,10 @@ put(#?MODULE{store = Store0} = T, Key, Value) ->
     bondy_mst_store:transaction(Store0, Fun).
 
 
--doc """
-
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec put_page(t(), bondy_mst_page:t()) -> t().
 
 put_page(#?MODULE{store = Store0} = T, Page) ->
@@ -356,8 +394,10 @@ put_page(#?MODULE{store = Store0} = T, Page) ->
     bondy_mst_store:transaction(Store0, Fun).
 
 
--doc """
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec merge(T1 :: t(), T2 :: t()) -> NewT1 :: t().
 
 merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2) ->
@@ -369,37 +409,41 @@ merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2) ->
     bondy_mst_store:transaction(Store0, Fun).
 
 
--doc """
-Returns the hashes of the pages identified by root hash that are missing from
-the store.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Returns the hashes of the pages identified by root hash that are missing
+%% from the store.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec missing_set(t(), Root :: binary()) -> [hash()].
 
 missing_set(#?MODULE{store = Store}, Root) ->
     bondy_mst_store:missing_set(Store, Root).
 
 
--doc """
-Dump Merkle search tree structure.
-""".
+%% -----------------------------------------------------------------------------
+%% @doc Dump Merkle search tree structure.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec dump(t()) -> undefined.
 
 dump(#?MODULE{store = Store} = T) ->
     dump(Store, root(T)).
 
 
--doc """
-
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec gc(t()) -> t().
 
 gc(#?MODULE{} = T) ->
     gc(T, [root(T)]).
 
 
--doc """
-
-""".
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec gc(t(), KeepRoots :: [binary()] | Epoch :: non_neg_integer()) -> t().
 
 gc(#?MODULE{store = Store0} = T, Arg) when is_list(Arg) orelse is_integer(Arg) ->
@@ -411,13 +455,35 @@ gc(#?MODULE{store = Store0} = T, Arg) when is_list(Arg) orelse is_integer(Arg) -
 
 
 
+format_error(Reason, [{_M, _F, _As, Info} | _]) ->
+    ErrorInfo = proplists:get_value(error_info, Info, #{}),
+    ErrorMap = maps:get(cause, ErrorInfo),
+    ErrorMap#{
+        %% general => "optional general information",
+        reason => io_lib:format("~p: ~p", [?MODULE, Reason])
+    }.
+
+
 %% =============================================================================
 %% PRIVATE: OPTIONS VALIDATION & DEFAULTS
 %% =============================================================================
 
 %% priv
-get_option(store, #{store := Store}, _) ->
-    bondy_mst_store:is_type(Store) orelse error(badarg),
+get_option(store, #{store := Store} = Opts, _) ->
+    bondy_mst_store:is_type(Store)
+        orelse erlang:error(
+            badarg,
+            [Opts],
+            [{error_info, #{
+                module => ?MODULE,
+                cause => #{
+                    1 =>
+                        "value for option 'store' "
+                        "should be a valid bondy_mst_store:t()"
+                }
+            }}]
+        ),
+
     Store;
 
 get_option(store, _, Default) ->
@@ -443,24 +509,31 @@ apply_default(Default) ->
     Default.
 
 
--doc "Returns the default comparator".
-comparator(A, B) when A < B -> lt;
-comparator(A, B) when A > B -> gt;
-comparator(A, B) when A == B -> eq.
-
--doc """
-Returns the default merger, which assumes the MST is a Set (where all values
-are `true`).
-""".
-merger(_Key, true, true) ->
-    true.
-
-
 
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
 
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc Returns the default comparator
+%% @end
+%% -----------------------------------------------------------------------------
+comparator(A, B) when A < B -> lt;
+comparator(A, B) when A > B -> gt;
+comparator(A, B) when A == B -> eq.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc Returns the default merger, which assumes the MST is a Set (where all
+%% values are `true').
+%% @end
+%% -----------------------------------------------------------------------------
+merger(_Key, true, true) ->
+    true.
 
 
 %% @private
