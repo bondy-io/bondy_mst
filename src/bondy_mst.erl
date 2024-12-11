@@ -93,6 +93,7 @@
 -export([last/1]).
 -export([last_n/3]).
 -export([merge/2]).
+-export([merge/3]).
 -export([missing_set/2]).
 -export([new/0]).
 -export([new/1]).
@@ -400,10 +401,21 @@ put_page(#?MODULE{store = Store0} = T, Page) ->
 %% -----------------------------------------------------------------------------
 -spec merge(T1 :: t(), T2 :: t()) -> NewT1 :: t().
 
-merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2) ->
+merge(#?MODULE{} = T1, #?MODULE{} = T2) ->
+    merge(T1, T2, root(T2)).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec merge(T1 :: t(), T2 :: t(), Root :: hash()) -> NewT1 :: t().
+
+merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2, Root)
+when is_binary(Root) ->
     Fun = fun() ->
-        {Root, Store1} = merge_aux(T1, T2, Store0, root(T1), root(T2)),
-        Store = bondy_mst_store:set_root(Store1, Root),
+        {NewRoot, Store1} = merge_aux(T1, T2, Store0, root(T1), Root),
+        Store = bondy_mst_store:set_root(Store1, NewRoot),
         T1#?MODULE{store = Store}
     end,
     bondy_mst_store:transaction(Store0, Fun).
