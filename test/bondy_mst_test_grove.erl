@@ -72,7 +72,7 @@ send(Peer, Message) ->
 
 broadcast(Event) ->
     ct:pal("Broadcasting event ~p", [Event]),
-    [send(Peer, Event) || Peer <- peers()],
+    _ = [send(Peer, Event) || Peer <- peers()],
     ok.
 
 
@@ -109,7 +109,7 @@ handle_call(ping, _From, Grove) ->
 
 handle_call(root, _From, Grove) ->
     ct:pal("handling root"),
-    Reply = bondy_mst:root(bondy_mst_grove:tree(Grove)),
+    Reply = bondy_mst_grove:root(Grove),
     {reply, Reply, Grove};
 
 handle_call({get, Key}, _From, Grove) ->
@@ -127,27 +127,26 @@ handle_call({put, Key}, _From, Grove0) ->
     Grove1 = bondy_mst_grove:put(Grove0, Key, true),
     {reply, ok, Grove1};
 
-handle_call({trigger, Peer}, _From, Grove0) ->
+handle_call({trigger, Peer}, _From, Grove) ->
     ct:pal("handling sync peer:~p", [Peer]),
-    Grove = bondy_mst_grove:trigger(Grove0, Peer),
-    Reply = ok,
+    Reply = bondy_mst_grove:trigger(Grove, Peer),
     {reply, Reply, Grove};
 
 handle_call(_Request, _From, State) ->
-    {reply, ok, State}.
+    {reply, {error, unknown_call}, State}.
 
 
 handle_cast({grove_message, Message}, Grove0) ->
     Grove = bondy_mst_grove:handle(Grove0, Message),
     {noreply, Grove};
 
-handle_cast(_Request, State) ->
-    {noreply, State}.
+handle_cast(_Request, Grove) ->
+    {noreply, Grove}.
 
 
-handle_info(_, State) ->
-    {noreply, State}.
+handle_info(_, Grove) ->
+    {noreply, Grove}.
 
 
-terminate(_Reason, State) ->
+terminate(_Reason, _Grove) ->
     ok.

@@ -82,6 +82,7 @@ init_per_testcase(_TestCase, Config) ->
 
 %% Called after each test case
 end_per_testcase(_TestCase, _Config) ->
+    _ = [catch gen_server:stop(Peer) || Peer <- bondy_mst_test_grove:peers()],
     catch file:del_dir_r("/tmp/bondy_mst/"),
     ok.
 

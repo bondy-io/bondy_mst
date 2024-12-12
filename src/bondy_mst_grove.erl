@@ -127,6 +127,7 @@
 -export([handle/2]).
 -export([new/2]).
 -export([put/3]).
+-export([root/1]).
 -export([tree/1]).
 -export([trigger/2]).
 
@@ -211,7 +212,7 @@ tree(#?MODULE{tree = Tree}) ->
 %% @doc Returns the underlying tree.
 %% @end
 %% -----------------------------------------------------------------------------
--spec root(t()) -> hash().
+-spec root(t()) -> hash() | undefined.
 
 root(#?MODULE{tree = Tree}) ->
     bondy_mst:root(Tree).
@@ -421,8 +422,8 @@ handle(Grove, #missing{from = Peer}) ->
             Grove
     end;
 
-handle(_Grove, Cmd) ->
-    error({unknown_event, Cmd}).
+handle(_Grove, Msg) ->
+    error({unknown_event, Msg}).
 
 
 %% -----------------------------------------------------------------------------
@@ -430,15 +431,16 @@ handle(_Grove, Cmd) ->
 %% The exchange might not proper when Peer has reached `max_merges'.
 %% @end
 %% -----------------------------------------------------------------------------
+-spec trigger(t(), node_id()) -> ok.
+
 trigger(Grove, Peer) when is_atom(Peer) ->
     Event = #gossip{
         from = Grove#?MODULE.node_id,
-        root = bondy_mst:root(Grove#?MODULE.tree),
+        root = root(Grove),
         key = undefined,
         value = undefined
     },
-    ok = (Grove#?MODULE.callback_mod):send(Peer, Event),
-    Grove.
+    (Grove#?MODULE.callback_mod):send(Peer, Event).
 
 
 %% -----------------------------------------------------------------------------
@@ -487,17 +489,29 @@ on_merge(Grove, Page) ->
     end.
 
 %% @private
+-spec maybe_broadcast(t(), gossip() | undefined) -> t().
+
 maybe_broadcast(Grove, undefined) ->
     %% The original paper schedules a broadcast, but we don't
     Grove;
 
-maybe_broadcast(Grove, Event) ->
+maybe_broadcast(Grove, Gossip) ->
     Now = erlang:monotonic_time(),
-    (Grove#?MODULE.callback_mod):broadcast(Event),
-    Grove#?MODULE{last_broadcast_time = Now}.
+    case (Grove#?MODULE.callback_mod):broadcast(Gossip) of
+        ok ->
+            Grove#?MODULE{last_broadcast_time = Now};
+        {error, Reason} ->
+            ?LOG_ERROR(#{
+                message => "Error while broadcasting gossip message",
+                reason => Reason
+            }),
+            Grove
+    end.
 
 
 %% @private
+-spec maybe_merge(t(), node_id(), hash() | undefined) -> t().
+
 maybe_merge(#?MODULE{} = Grove, _, undefined) ->
     Grove;
 
@@ -599,20 +613,20 @@ do_merge(Grove0, Peer, PeerRoot) ->
     case Root =/= NewRoot of
         true ->
             Grove = maybe_gc(Grove1),
-            ok =
-                case NewRoot =/= PeerRoot of
-                    true ->
-                        Event = #gossip{
-                            from = Grove#?MODULE.node_id,
-                            root = NewRoot,
-                            key = undefined,
-                            value = undefined
-                        },
-                        (Grove#?MODULE.callback_mod):send(Peer, Event);
+            case NewRoot =/= PeerRoot of
+                true ->
+                    Event = #gossip{
+                        from = Grove#?MODULE.node_id,
+                        root = NewRoot,
+                        key = undefined,
+                        value = undefined
+                    },
+                    (Grove#?MODULE.callback_mod):send(Peer, Event);
 
-                    false ->
-                        ok
-                end;
+                false ->
+                    ok
+            end,
+            Grove;
 
         false ->
             Grove1
