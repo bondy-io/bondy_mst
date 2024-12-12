@@ -220,6 +220,7 @@ anti_entropy_fwd(Config) ->
 
     timer:sleep(5000),
 
+    %% Now Peer2 and Peer3 should have synced the data
     L2 = [K || {K, true} <- gen_server:call(Peer2, list)],
     L3 = [K || {K, true} <- gen_server:call(Peer3, list)],
 

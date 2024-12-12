@@ -384,9 +384,13 @@ handle(Grove, #put{from = Peer, map = Map}) ->
                 payload_size => maps:size(Map)
             }),
             Tree = maps:fold(
-                fun(Hash, Page, Acc0) ->
+                fun(Hash0, Page, Acc0) ->
                     %% Input and output hash should be the same
-                    {Hash, Acc} = bondy_mst:put_page(Acc0, Page),
+                    {Hash1, Acc} = bondy_mst:put_page(Acc0, Page),
+
+                    Hash0 == Hash1
+                        orelse error({inconsistency, Hash0, Page, Hash1}),
+
                     %% Call the callback merge function
                     ok = on_merge(Grove, Page),
                     Acc
@@ -433,7 +437,10 @@ handle(_Grove, Msg) ->
 %% -----------------------------------------------------------------------------
 -spec trigger(t(), node_id()) -> ok.
 
-trigger(Grove, Peer) when is_atom(Peer) ->
+trigger(#?MODULE{node_id = Node}, Node) ->
+    ok;
+
+trigger(#?MODULE{node_id = Node} = Grove, Peer) when is_atom(Peer) ->
     Event = #gossip{
         from = Grove#?MODULE.node_id,
         root = root(Grove),
