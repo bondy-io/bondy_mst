@@ -66,7 +66,7 @@
     last_broadcast_time     ::  integer() | undefined
 }).
 
--record(event, {
+-record(gossip, {
     from                    ::  node_id(),
     root                    ::  hash(),
     key                     ::  any(),
@@ -81,7 +81,7 @@
 
 -record(put, {
     from                    ::  node_id(),
-    set                     ::  sets:set(hash())
+    map                     ::  #{hash() := bondy_mst_page:t()}
 }).
 
 -record(missing, {
@@ -109,26 +109,26 @@
                                     callback_mod => module()
                                 }.
 
--type event()               ::  #event{}.
+-type gossip()              ::  #gossip{}.
 -type get_cmd()             ::  #get{}.
 -type missing_cmd()         ::  #missing{}.
 -type put_cmd()             ::  #put{}.
--type message()             ::  event()
+-type message()             ::  gossip()
                                 | get_cmd()
                                 | put_cmd()
                                 | missing_cmd().
 
 -export_type([t/0]).
--export_type([event/0]).
+-export_type([gossip/0]).
 -export_type([node_id/0]).
 -export_type([message/0]).
 
--export([new/2]).
--export([tree/1]).
+-export([gossip_data/1]).
 -export([handle/2]).
--export([event_data/1]).
--export([trigger/2]).
+-export([new/2]).
 -export([put/3]).
+-export([tree/1]).
+-export([trigger/2]).
 
 
 
@@ -146,7 +146,7 @@
 %% `Module:broadcast/1'.
 %% The callback `Module' is responsible for sending the event to some random peers, either by implementing or using a peer sampling service e.g.
 %% `partisan_plumtree_broadcast'.
--callback broadcast(Event :: event()) -> ok | {error, any()}.
+-callback broadcast(Event :: gossip()) -> ok | {error, any()}.
 
 
 %% Called after merging a tree page from a remote tree.
@@ -207,11 +207,20 @@ tree(#?MODULE{tree = Tree}) ->
 %% =============================================================================
 
 
+%% -----------------------------------------------------------------------------
+%% @doc Returns the underlying tree.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec root(t()) -> hash().
+
+root(#?MODULE{tree = Tree}) ->
+    bondy_mst:root(Tree).
+
 
 %% -----------------------------------------------------------------------------
 %% @doc Calls `bondy_mst:put/3' and if the operation changed the tree (previous
 %% and new root differ), it bradcasts the change to the peers by calling
-%% the callback's `Module:broadcast/1' with an `event()'.
+%% the callback's `Module:broadcast/1' with an `gossip()'.
 %%
 %% When the event is received by the peer it must handle it calling `handle/2'
 %% on its local grove.
@@ -220,25 +229,33 @@ tree(#?MODULE{tree = Tree}) ->
 -spec put(Grove0 :: t(), Key :: any(), Value :: any()) -> Grove1 :: t().
 
 put(Grove0, Key, Value) ->
+    Store = bondy_mst:store(Grove0#?MODULE.tree),
+    NodeId = Grove0#?MODULE.node_id,
+    CBMod = Grove0#?MODULE.callback_mod,
     Tree0 = Grove0#?MODULE.tree,
-    Root0 = bondy_mst:root(Tree0),
-    Tree = bondy_mst:put(Tree0, Key, Value),
-    Root = bondy_mst:root(Tree),
-    Grove = Grove0#?MODULE{tree = Tree},
 
-    case Root0 == Root of
-        true ->
-            Grove;
-        false ->
-            Event = #event{
-                from = Grove#?MODULE.node_id,
-                root = Root,
-                key = Key,
-                value = Value
-            },
-            ok = (Grove#?MODULE.callback_mod):broadcast(Event),
-            Grove
-    end.
+    Fun = fun() ->
+        Root0 = bondy_mst:root(Tree0),
+        Tree = bondy_mst:put(Tree0, Key, Value),
+        Root = bondy_mst:root(Tree),
+
+        case Root0 == Root of
+            true ->
+                Tree;
+
+            false ->
+                Msg = #gossip{
+                    from = NodeId,
+                    root = Root,
+                    key = Key,
+                    value = Value
+                },
+                ok = CBMod:broadcast(Msg),
+                Tree
+        end
+    end,
+    Tree = bondy_mst_store:transaction(Store, Fun),
+    Grove0#?MODULE{tree = Tree}.
 
 
 
@@ -253,12 +270,12 @@ put(Grove0, Key, Value) ->
 %% peer.
 %% @end
 %% -----------------------------------------------------------------------------
-handle(Grove0, #event{} = Event) ->
+handle(Grove0, #gossip{} = Event) ->
     Tree0 = Grove0#?MODULE.tree,
-    Peer = Event#event.from,
-    PeerRoot = Event#event.root,
-    Key = Event#event.key,
-    Value = Event#event.value,
+    Peer = Event#gossip.from,
+    PeerRoot = Event#gossip.root,
+    Key = Event#gossip.key,
+    Value = Event#gossip.value,
 
     telemetry:execute(
         [bondy_mst, broadcast, recv],
@@ -268,27 +285,27 @@ handle(Grove0, #event{} = Event) ->
 
     Root = bondy_mst:root(Tree0),
 
-    case Root == PeerRoot of
+    case PeerRoot == Root of
         true ->
             ?LOG_INFO(#{
-                message => "No merge required, trees in sync.",
+                message => "No merge required, trees in sync",
+                root => PeerRoot,
                 peer => Peer
             }),
             Grove0;
 
         false when Key == undefined andalso Value == undefined ->
+            %% Full merge
             maybe_merge(Grove0, Peer, PeerRoot);
 
         false ->
             Tree1 = bondy_mst:put(Tree0, Key, Value),
-            NewRoot = bondy_mst:root(Tree1),
             Grove1 = Grove0#?MODULE{tree = Tree1},
 
-            case Root == NewRoot of
-                true ->
-                    maybe_merge(Grove1, Peer, PeerRoot);
+            NewRoot = bondy_mst:root(Tree1),
 
-                false ->
+            case NewRoot =/= Root of
+                true ->
                     Merges0 = Grove1#?MODULE.merges,
                     Merges = maps:filter(
                         fun(_, V) -> V =/= NewRoot end,
@@ -299,14 +316,21 @@ handle(Grove0, #event{} = Event) ->
 
                     case NewRoot =/= PeerRoot of
                         true ->
+                            %% We have missing data
                             maybe_merge(Grove3, Peer, PeerRoot);
+
                         false ->
                             ?LOG_INFO(#{
-                                message => "Event merged, trees in sync.",
+                                message => "Event merged, trees in sync",
+                                root => NewRoot,
                                 peer => Peer
                             }),
                             Grove3
-                    end
+                    end;
+
+                false ->
+                    %% We have missing data
+                    maybe_merge(Grove1, Peer, PeerRoot)
             end
     end;
 
@@ -324,20 +348,22 @@ handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
     ok =
         case sets:is_empty(Missing) of
             true ->
-                HashPages = sets:fold(
+                %% We collect the pages for the requested hashes and reply
+                Map = sets:fold(
                     fun(Hash, Acc) ->
                         Page = bondy_mst_store:get(Store, Hash),
-                        sets:add_element({Hash, Page}, Acc)
+                        maps:put(Hash, Page, Acc)
                     end,
-                    sets:new([{version, 2}]),
+                    #{},
                     Set
                 ),
-                Cmd = #put{from = Grove#?MODULE.node_id, set = HashPages},
-                (Grove#?MODULE.callback_mod):send(Peer, Cmd);
+                Msg = #put{from = Grove#?MODULE.node_id, map = Map},
+                (Grove#?MODULE.callback_mod):send(Peer, Msg);
 
             false ->
-                Cmd = #missing{from = Grove#?MODULE.node_id},
-                (Grove#?MODULE.callback_mod):send(Peer, Cmd)
+                %% We don't have all the pages, we reply a missing message
+                Msg = #missing{from = Grove#?MODULE.node_id},
+                (Grove#?MODULE.callback_mod):send(Peer, Msg)
         end,
 
     case PeerRoot == bondy_mst:root(Tree) of
@@ -348,22 +374,35 @@ handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
             maybe_merge(Grove, Peer, PeerRoot)
     end;
 
-handle(Grove, #put{from = Peer, set = Set}) ->
+handle(Grove, #put{from = Peer, map = Map}) ->
     case maps:is_key(Peer, Grove#?MODULE.merges) of
         true ->
-            Tree = sets:fold(
-                fun({_Hash, Page}, Acc0) ->
-                    Acc = bondy_mst:put_page(Acc0, Page),
+            ?LOG_INFO(#{
+                message => "Accepted PUT message",
+                peer => Peer,
+                payload_size => maps:size(Map)
+            }),
+            Tree = maps:fold(
+                fun(Hash, Page, Acc0) ->
+                    %% Input and output hash should be the same
+                    {Hash, Acc} = bondy_mst:put_page(Acc0, Page),
                     %% Call the callback merge function
                     ok = on_merge(Grove, Page),
                     Acc
                 end,
                 Grove#?MODULE.tree,
-                Set
+                Map
             ),
             Grove#?MODULE{tree = Tree};
 
         false ->
+            ?LOG_INFO(#{
+                message => "Ignored PUT message, peer is not in merge buffer",
+                peer => Peer,
+                payload_size => maps:size(Map)
+            }),
+            %% REVIEW: Will this happen when a previous merge has been evicted
+            %% from the merge buffer?
             Grove
     end;
 
@@ -392,7 +431,7 @@ handle(_Grove, Cmd) ->
 %% @end
 %% -----------------------------------------------------------------------------
 trigger(Grove, Peer) when is_atom(Peer) ->
-    Event = #event{
+    Event = #gossip{
         from = Grove#?MODULE.node_id,
         root = bondy_mst:root(Grove#?MODULE.tree),
         key = undefined,
@@ -403,10 +442,10 @@ trigger(Grove, Peer) when is_atom(Peer) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Extracts a key-value pair from the `event()`.
+%% @doc Extracts a key-value pair from the `gossip()`.
 %% @end
 %% -----------------------------------------------------------------------------
-event_data(#event{key = Key, value = Value}) ->
+gossip_data(#gossip{key = Key, value = Value}) ->
     {Key, Value}.
 
 
@@ -466,9 +505,9 @@ maybe_merge(#?MODULE{} = Grove0, Peer, PeerRoot) ->
     Max = Grove0#?MODULE.max_merges,
     MaxSame = Grove0#?MODULE.max_same_merge,
     Merges = Grove0#?MODULE.merges,
-    Count = count_merges(Merges, PeerRoot),
+    Same = count_same_merges(Merges, PeerRoot),
 
-    case Count < MaxSame andalso map_size(Merges) < Max of
+    case Same < MaxSame andalso map_size(Merges) < Max of
         true ->
             Grove = Grove0#?MODULE{merges = maps:put(Peer, PeerRoot, Merges)},
             merge(Grove, Peer);
@@ -482,7 +521,7 @@ maybe_merge(#?MODULE{} = Grove0, Peer, PeerRoot) ->
 
 
 %% @private
-count_merges(Merges, Root) ->
+count_same_merges(Merges, Root) ->
      maps:fold(
         fun
             (_, V, Acc) when V == Root ->
@@ -502,28 +541,34 @@ merge(Grove, Peer) ->
         message => "Starting merge",
         peer => Peer
     }),
+
     Tree = Grove#?MODULE.tree,
+
     PeerRoot = maps:get(Peer, Grove#?MODULE.merges),
+    %% Pre-condition
+    true = PeerRoot =/= undefined,
 
     MissingSet = bondy_mst:missing_set(Tree, PeerRoot),
 
     case sets:is_empty(MissingSet) of
         true ->
-            ?LOG_INFO(#{
-                message => "All pages locally available."
-            }),
             %% All pages are locally available, so we perform the merge and
             %% update the local tree.
+            ?LOG_INFO(#{
+                message => "All pages locally available",
+                peer => Peer
+            }),
             do_merge(Grove, Peer, PeerRoot);
 
         false ->
-            ?LOG_INFO(#{
-                message => "Requesting missing pages from peer.",
-                peer => Peer
-            }),
             %% We still have missing pages, so we request them and keep the
             %% remote reference in a buffer until we receive those pages from
-            %% the peer.
+            %% peer.
+            ?LOG_INFO(#{
+                message => "Requesting missing pages from peer",
+                missing_count => sets:size(MissingSet),
+                peer => Peer
+            }),
             Root = bondy_mst:root(Tree),
             Cmd = #get{
                 from = Grove#?MODULE.node_id,
@@ -541,6 +586,7 @@ do_merge(Grove0, Peer, PeerRoot) ->
 
     Tree1 = bondy_mst:merge(Tree0, Tree0, PeerRoot),
     NewRoot = bondy_mst:root(Tree1),
+    %% Post-condition
     true = sets:is_empty(bondy_mst:missing_set(Tree1, NewRoot)),
 
     NewMerges = maps:filter(
@@ -548,20 +594,15 @@ do_merge(Grove0, Peer, PeerRoot) ->
         Grove0#?MODULE.merges
     ),
 
-    Grove1 = Grove0#?MODULE{
-        tree = Tree1,
-        merges = NewMerges
-    },
+    Grove1 = Grove0#?MODULE{tree = Tree1, merges = NewMerges},
 
     case Root =/= NewRoot of
         true ->
-            %% NewEvents = bondy_mst:diff_to_list(Tree1, Tree1, Root),
-            %% Entropy measurement here!
             Grove = maybe_gc(Grove1),
             ok =
                 case NewRoot =/= PeerRoot of
                     true ->
-                        Event = #event{
+                        Event = #gossip{
                             from = Grove#?MODULE.node_id,
                             root = NewRoot,
                             key = undefined,
