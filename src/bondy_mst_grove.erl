@@ -393,7 +393,7 @@ handle(Grove, #put{from = Peer, map = Map}) ->
                 Grove#?MODULE.tree,
                 Map
             ),
-            Grove#?MODULE{tree = Tree};
+            merge(Grove#?MODULE{tree = Tree}, Peer);
 
         false ->
             ?LOG_INFO(#{
