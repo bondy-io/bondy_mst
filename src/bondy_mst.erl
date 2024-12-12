@@ -221,7 +221,7 @@ last(#?MODULE{} = T) ->
 
 -spec get_range(T :: t(), Range :: key_range()) -> Value :: any().
 
-get_range(#?MODULE{} = T, {From, To}) ->
+get_range(#?MODULE{} = _T, {_From, _To}) ->
     error(not_implemented).
     %% Opts = [{first, From}, {stop, To}],
     %% fold(
@@ -696,7 +696,6 @@ put_at(T, Key, Value, Level) ->
 put_at(_T, Key, Value, Level, Store, undefined) ->
     NewPage = bondy_mst_page:new(Level, undefined, [{Key, Value, undefined}]),
     bondy_mst_store:put(Store, NewPage);
-
 
 put_at(T, Key, Value, Level, Store0, Root) ->
     Page = bondy_mst_store:get(Store0, Root),
