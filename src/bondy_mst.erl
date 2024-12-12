@@ -386,12 +386,12 @@ put(#?MODULE{store = Store0} = T, Key, Value) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec put_page(t(), bondy_mst_page:t()) -> t().
+-spec put_page(t(), bondy_mst_page:t()) -> {Hash :: hash(), t()}.
 
 put_page(#?MODULE{store = Store0} = T, Page) ->
     Fun = fun() ->
-        {_Root, Store} = bondy_mst_store:put(Store0, Page),
-        T#?MODULE{store = Store}
+        {Hash, Store} = bondy_mst_store:put(Store0, Page),
+        {Hash, T#?MODULE{store = Store}}
     end,
     bondy_mst_store:transaction(Store0, Fun).
 
