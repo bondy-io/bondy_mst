@@ -3,7 +3,6 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
--define(MST, bondy_mst).
 
 -define(ISET(L), interval_sets:from_list(L)).
 
@@ -106,50 +105,50 @@ small_test(Config) ->
 
     %% Test for basic MST operations
     A = lists:foldl(
-        fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(<<"bondy_mst_a">>)}),
+        fun(N, Acc) -> bondy_mst:put(Acc, N) end,
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_a">>)}),
         lists:seq(1, 10)
     ),
-    ?assertEqual([{1, 10}], ?ISET([K || {K, true} <- ?MST:to_list(A)])),
+    ?assertEqual([{1, 10}], ?ISET([K || {K, true} <- bondy_mst:to_list(A)])),
 
     B = lists:foldl(
-        fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(<<"bondy_mst_b">>)}),
+        fun(N, Acc) -> bondy_mst:put(Acc, N) end,
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_b">>)}),
         lists:seq(5, 15)
     ),
-    ?assertEqual([{5, 15}], ?ISET([K || {K, true} <- ?MST:to_list(B)])),
+    ?assertEqual([{5, 15}], ?ISET([K || {K, true} <- bondy_mst:to_list(B)])),
 
     Z = lists:foldl(
-        fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(<<"bondy_mst_z">>)}),
+        fun(N, Acc) -> bondy_mst:put(Acc, N) end,
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_z">>)}),
         lists:seq(1, 15)
     ),
-    ?assertEqual([{1, 15}], ?ISET([K || {K, true} <- ?MST:to_list(Z)])),
+    ?assertEqual([{1, 15}], ?ISET([K || {K, true} <- bondy_mst:to_list(Z)])),
 
-    C = ?MST:merge(A, B),
-    D = ?MST:merge(B, A),
+    C = bondy_mst:merge(A, B),
+    D = bondy_mst:merge(B, A),
 
-    ?assertNotEqual(undefined, ?MST:root(C)),
-    ?assertNotEqual(undefined, ?MST:root(D)),
+    ?assertNotEqual(undefined, bondy_mst:root(C)),
+    ?assertNotEqual(undefined, bondy_mst:root(D)),
 
-    ?assertEqual(?MST:root(C), ?MST:root(D)),
-    ?assertEqual(?MST:root(C), ?MST:root(Z)),
-    ?assertEqual(?MST:to_list(C), ?MST:to_list(Z)),
+    ?assertEqual(bondy_mst:root(C), bondy_mst:root(D)),
+    ?assertEqual(bondy_mst:root(C), bondy_mst:root(Z)),
+    ?assertEqual(bondy_mst:to_list(C), bondy_mst:to_list(Z)),
 
     case C =/= A of
         true ->
             %% Only true for map store
-            DA = [K || {K, true} <- ?MST:diff_to_list(C, A)],
+            DA = [K || {K, true} <- bondy_mst:diff_to_list(C, A)],
             ?assertEqual(
                 ?ISET(lists:sort(lists:seq(11, 15))),
                 ?ISET(lists:sort(DA))
             ),
             ?assertEqual(
                 [],
-                ?MST:diff_to_list(A, C)
+                bondy_mst:diff_to_list(A, C)
             ),
 
-            DB = [K || {K, true} <- ?MST:diff_to_list(C, B)],
+            DB = [K || {K, true} <- bondy_mst:diff_to_list(C, B)],
             ?assertEqual(
                 ?ISET(lists:sort(lists:seq(1, 4))),
                 ?ISET(lists:sort(DB))
@@ -157,16 +156,16 @@ small_test(Config) ->
 
             ?assertEqual(
                 [],
-                ?MST:diff_to_list(B, C)
+                bondy_mst:diff_to_list(B, C)
             ),
 
-            DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
+            DBA = [K || {K, _} <- bondy_mst:diff_to_list(B, A)],
             ?assertEqual(
                 ?ISET(lists:seq(11, 15)),
                 ?ISET(lists:sort(DBA))
             ),
 
-            DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
+            DAB = [K || {K, _} <- bondy_mst:diff_to_list(A, B)],
             ?assertEqual(
                 ?ISET(lists:seq(1, 4)),
                 ?ISET(lists:sort(DAB))
@@ -190,43 +189,43 @@ large_test(Config) ->
     ShuffledA = list_shuffle(lists:seq(1, 1000)),
     ShuffledB = list_shuffle(lists:seq(550, 1500)),
      A = lists:foldl(
-        fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(<<"bondy_mst_a">>)}),
+        fun(N, Acc) -> bondy_mst:put(Acc, N) end,
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_a">>)}),
         ShuffledA
     ),
     B = lists:foldl(
-        fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(<<"bondy_mst_b">>)}),
+        fun(N, Acc) -> bondy_mst:put(Acc, N) end,
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_b">>)}),
         ShuffledB
     ),
     Z = lists:foldl(
-        fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(<<"bondy_mst_z">>)}),
+        fun(N, Acc) -> bondy_mst:put(Acc, N) end,
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_z">>)}),
         lists:seq(1, 1500)
     ),
-    C = ?MST:merge(A, B),
-    D = ?MST:merge(B, A),
+    C = bondy_mst:merge(A, B),
+    D = bondy_mst:merge(B, A),
 
     case C =/= A of
         true ->
 
-            ?assertEqual(?MST:root(C), ?MST:root(D)),
-            ?assertEqual(?MST:root(C), ?MST:root(Z)),
+            ?assertEqual(bondy_mst:root(C), bondy_mst:root(D)),
+            ?assertEqual(bondy_mst:root(C), bondy_mst:root(Z)),
 
-            FullList = [K || {K, _} <- ?MST:to_list(C)],
+            FullList = [K || {K, _} <- bondy_mst:to_list(C)],
             ?assertEqual(?ISET(lists:seq(1, 1500)), ?ISET(lists:sort(FullList))),
 
-            DCA = [K || {K, _} <- ?MST:diff_to_list(C, A)],
+            DCA = [K || {K, _} <- bondy_mst:diff_to_list(C, A)],
             ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DCA)),
-            DCB = [K || {K, _} <- ?MST:diff_to_list(C, B)],
+            DCB = [K || {K, _} <- bondy_mst:diff_to_list(C, B)],
             ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DCB)),
 
-            ?assertEqual([], ?MST:diff_to_list(A, C)),
-            ?assertEqual([], ?MST:diff_to_list(B, C)),
+            ?assertEqual([], bondy_mst:diff_to_list(A, C)),
+            ?assertEqual([], bondy_mst:diff_to_list(B, C)),
 
-            DBA = [K || {K, _} <- ?MST:diff_to_list(B, A)],
+            DBA = [K || {K, _} <- bondy_mst:diff_to_list(B, A)],
             ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DBA)),
-            DAB = [K || {K, _} <- ?MST:diff_to_list(A, B)],
+            DAB = [K || {K, _} <- bondy_mst:diff_to_list(A, B)],
             ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DAB));
 
         false ->
@@ -244,8 +243,8 @@ first_last_test(Config) ->
 
     %% Test for basic MST operations
     A = lists:foldl(
-        fun(N, Acc) -> ?MST:put(Acc, N) end,
-        ?MST:new(#{store => Fun(<<"first_last_test">>)}),
+        fun(N, Acc) -> bondy_mst:put(Acc, N) end,
+        bondy_mst:new(#{store => Fun(<<"first_last_test">>)}),
         lists:seq(1, 10)
     ),
     ?assertEqual({1, true}, bondy_mst:first(A)),
@@ -254,18 +253,18 @@ first_last_test(Config) ->
 persistent_test(Config) ->
     Fun = ?config(store_fun, Config),
 
-    T0 = ?MST:new(#{store => Fun(<<"persistent_test">>)}),
+    T0 = bondy_mst:new(#{store => Fun(<<"persistent_test">>)}),
 
-    T1 = ?MST:put(T0, 1),
-    R1 = ?MST:root(T1),
+    T1 = bondy_mst:put(T0, 1),
+    R1 = bondy_mst:root(T1),
 
-    T2 = ?MST:put(T1, 2),
+    T2 = bondy_mst:put(T1, 2),
     E2 = erlang:monotonic_time(),
-    R2 = ?MST:root(T2),
+    R2 = bondy_mst:root(T2),
 
-    T3 = ?MST:put(T2, 3),
+    T3 = bondy_mst:put(T2, 3),
     E3 = erlang:monotonic_time(),
-    R3 = ?MST:root(T3),
+    R3 = bondy_mst:root(T3),
 
 
     ?assertEqual([{1, true}], bondy_mst:to_list(T1, R1)),
