@@ -289,7 +289,7 @@ handle(Grove0, #gossip{} = Event) ->
         true ->
             ?LOG_INFO(#{
                 message => "No merge required, trees in sync",
-                root => PeerRoot,
+                root => binary:encode_hex(PeerRoot),
                 peer => Peer
             }),
             Grove0;
@@ -322,7 +322,7 @@ handle(Grove0, #gossip{} = Event) ->
                         false ->
                             ?LOG_INFO(#{
                                 message => "Event merged, trees in sync",
-                                root => NewRoot,
+                                root => binary:encode_hex(NewRoot),
                                 peer => Peer
                             }),
                             Grove3
