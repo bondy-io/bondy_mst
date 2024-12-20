@@ -29,6 +29,7 @@
 -export([hash/2]).
 -export([implementations/2]).
 -export([implements_behaviour/2]).
+-export([implements_callback/3]).
 -export([apply_lazy/3]).
 -export([apply_lazy/5]).
 
@@ -95,6 +96,19 @@ implements_behaviour(Module, Behaviour) ->
 
 
 %% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec implements_callback(
+    Module :: module(), FunctionName :: atom(), Arity :: non_neg_integer()) ->
+    boolean().
+
+implements_callback(Module, FunctionName, Arity) ->
+    ok = ensure_loaded(Module),
+    erlang:function_exported(Module, FunctionName, Arity).
+
+
+%% -----------------------------------------------------------------------------
 %% @doc Returns the list of modules implementing `Behaviour' in application
 %% `Application'.
 %% @end
@@ -123,9 +137,7 @@ apply_lazy(Module, FunctionName, Fun) when is_function(Fun, 0) ->
 -spec apply_lazy(module(), atom(), integer(), list(), term()) -> term().
 
 apply_lazy(Module, FunctionName, Arity, Args, Fun) when is_function(Fun, 0) ->
-    ok = ensure_loaded(Module),
-
-    case erlang:function_exported(Module, FunctionName, Arity) of
+    case implements_callback(Module, FunctionName, Arity) of
         true ->
             erlang:apply(Module, FunctionName, Args);
 

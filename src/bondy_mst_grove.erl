@@ -47,8 +47,15 @@
 %% * send/2
 %% * broadcast/1
 %% * on_merge/1
+%% * on_update/1
 %% @end
 %% -----------------------------------------------------------------------------
+
+%% !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+%% @TODO
+%% if A has no data and B has data
+%% When A initiates an exchange with B no data is merged, only the other way
+%% around.
 
 -module(bondy_mst_grove).
 
@@ -63,7 +70,9 @@
     max_merges = 6          ::  pos_integer(),
     max_same_merge = 1      ::  pos_integer(),
     merges = #{}            ::  #{node_id() => hash()},
-    last_broadcast_time     ::  integer() | undefined
+    last_broadcast_time     ::  integer() | undefined,
+    on_update = false      ::  boolean(),
+    on_merge = false        ::  boolean()
 }).
 
 -record(gossip, {
@@ -155,8 +164,12 @@
 %% main store when the tree is used only for anti-entropy.
 -callback on_merge(Page :: bondy_mst_page:t()) -> ok.
 
+-callback on_update(Key :: any(), Value :: any()) -> ok.
+
 
 -optional_callbacks([on_merge/1]).
+-optional_callbacks([on_update/2]).
+
 
 
 
@@ -182,13 +195,17 @@ new(NodeId, Opts0) when
     CallbackMod = validate_callback_mod(GroveOpts),
     MaxMerges = maps:get(max_merges, GroveOpts, 6),
     MaxSameMerges = maps:get(max_same_merge, GroveOpts, 1),
+    OnUpdate = bondy_mst_utils:implements_callback(CallbackMod, on_update, 1),
+    OnMerge = bondy_mst_utils:implements_callback(CallbackMod, on_merge, 1),
 
     #?MODULE{
         node_id = NodeId,
         callback_mod = CallbackMod,
         tree = Tree,
         max_merges = MaxMerges,
-        max_same_merge = MaxSameMerges
+        max_same_merge = MaxSameMerges,
+        on_update = OnUpdate,
+        on_merge = OnMerge
     }.
 
 
@@ -245,6 +262,7 @@ put(Grove0, Key, Value) ->
                 Tree;
 
             false ->
+                ok = on_update(Key, Value),
                 Msg = #gossip{
                     from = NodeId,
                     root = Root,
@@ -479,7 +497,29 @@ validate_callback_mod(Opts) ->
     CallbackMod.
 
 
-on_merge(Grove, Page) ->
+on_update(Grove, Gossip) ->
+    try
+        Mod = Grove#?MODULE.callback_mod,
+        bondy_mst_utils:apply_lazy(
+            Mod, on_update, 1, [Gossip], fun() -> ok end
+        )
+    catch
+        Class:Reason:Stacktrace ->
+            ?LOG_ERROR(#{
+                message =>
+                    "Unexpected error while calling callback 'on_update'.",
+                class => Class,
+                reason => Reason,
+                stacktrace => Stacktrace
+            }),
+        ok
+    end.
+
+
+on_merge(#?MODULE{on_merge = false} = Grove, Page) ->
+    ok;
+
+on_merge(#?MODULE{on_merge = true} = Grove, Page) ->
     try
         bondy_mst_utils:apply_lazy(
             Grove#?MODULE.callback_mod, on_merge, 1, [Page], fun() -> ok end
@@ -494,6 +534,7 @@ on_merge(Grove, Page) ->
             }),
         ok
     end.
+
 
 %% @private
 -spec maybe_broadcast(t(), gossip() | undefined) -> t().
