@@ -48,6 +48,7 @@
 
 
 %% API
+-export([close/1]).
 -export([copy/3]).
 -export([delete/1]).
 -export([free/3]).
@@ -56,7 +57,7 @@
 -export([get_root/1]).
 -export([has/2]).
 -export([missing_set/2]).
--export([new/1]).
+-export([open/1]).
 -export([page_refs/1]).
 -export([put/2]).
 -export([set_root/2]).
@@ -73,12 +74,12 @@
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec new(Opts :: opts()) -> t() | no_return().
+-spec open(Opts :: opts()) -> t() | no_return().
 
-new(Opts) when is_list(Opts) ->
-    new(maps:from_list(Opts));
+open(Opts) when is_list(Opts) ->
+    open(maps:from_list(Opts));
 
-new(Opts0) when is_map(Opts0) ->
+open(Opts0) when is_map(Opts0) ->
     DefaultOpts = #{
         name => undefined,
         persistent => true
@@ -106,6 +107,16 @@ new(Opts0) when is_map(Opts0) ->
         tab = Tab,
         opts = Opts
     }.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec close(t()) -> ok.
+
+close(#?MODULE{}) ->
+    ok.
 
 
 %% -----------------------------------------------------------------------------

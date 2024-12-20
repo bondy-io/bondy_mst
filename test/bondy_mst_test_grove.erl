@@ -44,7 +44,7 @@ start_all(StoreType) ->
 start(StoreType, Peers) ->
     Started = [
         begin
-            Store = bondy_mst_store:new(
+            Store = bondy_mst_store:open(
                 StoreType, [{name, atom_to_binary(NodeId)}]
             ),
             {ok, _} = start_link(NodeId, Store),

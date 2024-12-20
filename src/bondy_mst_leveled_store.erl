@@ -40,6 +40,7 @@
 
 
 %% API
+-export([close/1]).
 -export([copy/3]).
 -export([delete/1]).
 -export([free/3]).
@@ -48,7 +49,7 @@
 -export([get_root/1]).
 -export([has/2]).
 -export([missing_set/2]).
--export([new/1]).
+-export([open/1]).
 -export([page_refs/1]).
 -export([put/2]).
 -export([set_root/2]).
@@ -61,14 +62,24 @@
 
 
 
--spec new(Opts :: map() | list()) -> t().
+-spec open(Opts :: map() | list()) -> t().
 
-new(Opts) when is_list(Opts) ->
-    new(maps:from_list(Opts));
+open(Opts) when is_list(Opts) ->
+    open(maps:from_list(Opts));
 
-new(#{name := Name} = _Opts) ->
+open(#{name := Name} = _Opts) ->
+    %% TODO at the moment we use a global instance, we should give the option
+    %% to create a dedicated instance or have shared store
     Pid = persistent_term:get({bondy_mst, leveled}),
     #?MODULE{pid = Pid, name = Name}.
+
+
+-spec close(t()) -> ok.
+
+close(#?MODULE{pid = Pid}) ->
+    %% TODO at the moment we use a global instance, we should give the option
+    %% to create a dedicated instance or have shared store
+    ok.
 
 
 -spec get_root(T :: t()) -> Root :: hash() | undefined.

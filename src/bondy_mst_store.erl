@@ -56,6 +56,7 @@
 -export_type([page/0]).
 
 %% API
+-export([close/1]).
 -export([copy/3]).
 -export([delete/1]).
 -export([free/3]).
@@ -65,7 +66,7 @@
 -export([has/2]).
 -export([is_type/1]).
 -export([missing_set/2]).
--export([new/2]).
+-export([open/2]).
 -export([page_refs/2]).
 -export([put/2]).
 -export([set_root/2]).
@@ -77,7 +78,9 @@
 %% =============================================================================
 
 
--callback new(Opts :: map()) -> backend().
+-callback open(Opts :: map()) -> backend().
+
+-callback close(backend()) -> ok.
 
 -callback get_root(backend()) -> hash() | undefined.
 
@@ -114,14 +117,24 @@
 
 
 
--spec new(Mod :: module(), Opts :: map()) -> t() | no_return().
+-spec open(Mod :: module(), Opts :: map()) -> t() | no_return().
 
-new(Mod, Opts) when is_atom(Mod) andalso (is_map(Opts) orelse is_list(Opts)) ->
+open(Mod, Opts) when is_atom(Mod) andalso (is_map(Opts) orelse is_list(Opts)) ->
     #?MODULE{
         mod = Mod,
-        state = Mod:new(Opts),
+        state = Mod:open(Opts),
         transactions = supports_transactions(Mod)
     }.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec close(t()) -> ok.
+
+close(#?MODULE{mod = Mod, state = State}) ->
+    Mod:close(State).
 
 
 -spec is_type(any()) -> boolean().
