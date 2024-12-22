@@ -246,11 +246,11 @@ root(#?MODULE{tree = Tree}) ->
 %% -----------------------------------------------------------------------------
 -spec put(Grove0 :: t(), Key :: any(), Value :: any()) -> Grove1 :: t().
 
-put(Grove0, Key, Value) ->
-    Store = bondy_mst:store(Grove0#?MODULE.tree),
-    NodeId = Grove0#?MODULE.node_id,
-    CBMod = Grove0#?MODULE.callback_mod,
-    Tree0 = Grove0#?MODULE.tree,
+put(Grove, Key, Value) ->
+    Store = bondy_mst:store(Grove#?MODULE.tree),
+    NodeId = Grove#?MODULE.node_id,
+    CBMod = Grove#?MODULE.callback_mod,
+    Tree0 = Grove#?MODULE.tree,
 
     Fun = fun() ->
         Root0 = bondy_mst:root(Tree0),
@@ -262,7 +262,7 @@ put(Grove0, Key, Value) ->
                 Tree;
 
             false ->
-                ok = on_update(Key, Value),
+                ok = on_update(Grove, Key, Value),
                 Msg = #gossip{
                     from = NodeId,
                     root = Root,
@@ -274,7 +274,7 @@ put(Grove0, Key, Value) ->
         end
     end,
     Tree = bondy_mst_store:transaction(Store, Fun),
-    Grove0#?MODULE{tree = Tree}.
+    Grove#?MODULE{tree = Tree}.
 
 
 
@@ -497,11 +497,13 @@ validate_callback_mod(Opts) ->
     CallbackMod.
 
 
-on_update(Grove, Gossip) ->
+on_update(#?MODULE{on_merge = false}, _, _) ->
+    ok;
+
+on_update(#?MODULE{callback_mod = Mod} = Grove, Key, Value) ->
     try
-        Mod = Grove#?MODULE.callback_mod,
         bondy_mst_utils:apply_lazy(
-            Mod, on_update, 1, [Gossip], fun() -> ok end
+            Mod, on_update, 1, [Key, Value], fun() -> ok end
         )
     catch
         Class:Reason:Stacktrace ->
@@ -516,14 +518,12 @@ on_update(Grove, Gossip) ->
     end.
 
 
-on_merge(#?MODULE{on_merge = false} = Grove, Page) ->
+on_merge(#?MODULE{on_merge = false}, _) ->
     ok;
 
-on_merge(#?MODULE{on_merge = true} = Grove, Page) ->
+on_merge(#?MODULE{callback_mod = Mod} = Grove, Page) ->
     try
-        bondy_mst_utils:apply_lazy(
-            Grove#?MODULE.callback_mod, on_merge, 1, [Page], fun() -> ok end
-        )
+        bondy_mst_utils:apply_lazy(Mod, on_merge, 1, [Page], fun() -> ok end)
     catch
         Class:Reason:Stacktrace ->
             ?LOG_ERROR(#{
