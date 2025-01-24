@@ -458,7 +458,7 @@ handle(_Grove, Msg) ->
 trigger(#?MODULE{node_id = Node}, Node) ->
     ok;
 
-trigger(#?MODULE{node_id = Node} = Grove, Peer) when is_atom(Peer) ->
+trigger(#?MODULE{} = Grove, Peer) when is_atom(Peer) ->
     Event = #gossip{
         from = Grove#?MODULE.node_id,
         root = root(Grove),
@@ -500,7 +500,7 @@ validate_callback_mod(Opts) ->
 on_update(#?MODULE{on_merge = false}, _, _) ->
     ok;
 
-on_update(#?MODULE{callback_mod = Mod} = Grove, Key, Value) ->
+on_update(#?MODULE{callback_mod = Mod}, Key, Value) ->
     try
         bondy_mst_utils:apply_lazy(
             Mod, on_update, 1, [Key, Value], fun() -> ok end
@@ -521,7 +521,7 @@ on_update(#?MODULE{callback_mod = Mod} = Grove, Key, Value) ->
 on_merge(#?MODULE{on_merge = false}, _) ->
     ok;
 
-on_merge(#?MODULE{callback_mod = Mod} = Grove, Page) ->
+on_merge(#?MODULE{callback_mod = Mod}, Page) ->
     try
         bondy_mst_utils:apply_lazy(Mod, on_merge, 1, [Page], fun() -> ok end)
     catch

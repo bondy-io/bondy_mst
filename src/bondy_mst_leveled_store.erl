@@ -76,7 +76,7 @@ open(#{name := Name} = _Opts) ->
 
 -spec close(t()) -> ok.
 
-close(#?MODULE{pid = Pid}) ->
+close(#?MODULE{}) ->
     %% TODO at the moment we use a global instance, we should give the option
     %% to create a dedicated instance or have shared store
     ok.
