@@ -27,6 +27,12 @@
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 
+-ifdef(TEST).
+    -define(ETS_ACCESS, public).
+-else.
+    -define(ETS_ACCESS, protected).
+-endif.
+
 -record(?MODULE, {
     name            ::  binary(),
     tab             ::  ets:tid(),
@@ -100,7 +106,7 @@ open(Opts0) when is_map(Opts0) ->
         Opts
     ),
 
-    Tab = ets:new(undefined, [set, protected]),
+    Tab = ets:new(undefined, [set, ?ETS_ACCESS]),
 
     #?MODULE{
         name = maps:get(name, Opts),
