@@ -246,7 +246,10 @@ to_list(#?MODULE{} = T) ->
 %% @doc List all items.
 %% @end
 %% -----------------------------------------------------------------------------
--spec to_list(t(), hash()) -> [{key(), value()}].
+-spec to_list(t(), hash() | undefined) -> [{key(), value()}].
+
+to_list(#?MODULE{}, undefined) ->
+    [];
 
 to_list(#?MODULE{} = T, Root) when is_binary(Root) ->
     lists:reverse(
@@ -583,6 +586,7 @@ get(#?MODULE{} = T, Key, Root) ->
     case bondy_mst_store:get(T#?MODULE.store, Root) of
         undefined ->
             undefined;
+
         Page ->
             Low = bondy_mst_page:low(Page),
             List = bondy_mst_page:list(Page),
@@ -637,7 +641,7 @@ last(#?MODULE{} = T, Root) ->
         [] ->
             undefined;
 
-        L ->
+        L when is_list(L) ->
             case lists:last(L) of
                 {K, V, undefined} ->
                     {K, V};
@@ -656,6 +660,7 @@ last_n(#?MODULE{} = T, TopBound, N, Root) ->
     case bondy_mst_store:get(T#?MODULE.store, Root) of
         undefined ->
             [];
+
         Page ->
             Low = bondy_mst_page:low(Page),
             List = bondy_mst_page:list(Page),
@@ -916,48 +921,50 @@ get_page(Store, Hash, T) ->
 
 %% @private
 -spec merge_aux(
-    T1 :: t(),
-    T2 :: t(),
-    T1Store :: bondy_mst_store:t(),
-    T1Root :: hash(),
-    T2Root :: hash()) -> NewT1 :: t().
+    A :: t(),
+    B :: t(),
+    Store :: bondy_mst_store:t(),
+    ARoot :: hash(),
+    BRoot :: hash()) ->
+    {NewRootHash :: hash(), NewStore :: bondy_mst_store:t()}.
 
-merge_aux(_, _, Store0, R, R) ->
-    {R, Store0};
+merge_aux(_, _, Store0, Root, Root) ->
+    {Root, Store0};
 
-merge_aux(_, _, Store0, R1, undefined) ->
-    {R1, Store0};
+merge_aux(_, _, Store0, ARoot, undefined) ->
+    {ARoot, Store0};
 
-merge_aux(_, T2, Store0, undefined, R2) ->
-    Store = bondy_mst_store:copy(Store0, T2#?MODULE.store, R2),
-    {R2, Store};
+merge_aux(_, B, Store0, undefined, BRoot) ->
+    Store = bondy_mst_store:copy(Store0, B#?MODULE.store, BRoot),
+    {BRoot, Store};
 
-merge_aux(T1, T2, Store0, R1, R2) ->
-    Page1 = bondy_mst_store:get(Store0, R1),
-    Level1 = bondy_mst_page:level(Page1),
-    Low1 = bondy_mst_page:low(Page1),
-    List1 = bondy_mst_page:list(Page1),
+merge_aux(A, B, Store0, ARoot, BRoot) ->
+    APage = bondy_mst_store:get(Store0, ARoot),
+    ALevel = bondy_mst_page:level(APage),
+    ALow = bondy_mst_page:low(APage),
+    AEntries = bondy_mst_page:list(APage),
 
-    Page2 = get_page(Store0, R2, T2),
-    Low2 = bondy_mst_page:low(Page2),
-    List2 = bondy_mst_page:list(Page2),
+    BPage = get_page(Store0, BRoot, B),
+    BLevel = bondy_mst_page:level(BPage),
+    BLow = bondy_mst_page:low(BPage),
+    BEntries = bondy_mst_page:list(BPage),
 
     {Level, {Low, List, Store}} =
-        case bondy_mst_page:level(Page2) of
-            Level1 ->
+        case BLevel of
+            ALevel ->
                 {
-                    Level1,
-                    merge_aux_rec(T1, T2, Store0, Low1, List1, Low2, List2)
+                    ALevel,
+                    merge_aux_rec(A, B, Store0, ALow, AEntries, BLow, BEntries)
                 };
-            Level2 when Level1 > Level2 ->
+            BLevel when ALevel > BLevel ->
                 {
-                    Level1,
-                    merge_aux_rec(T1, T2, Store0, Low1, List1, R2, [])
+                    ALevel,
+                    merge_aux_rec(A, B, Store0, ALow, AEntries, BRoot, [])
                 };
-            Level2 when Level1 < Level2 ->
+            BLevel when ALevel < BLevel ->
                 {
-                    Level2,
-                    merge_aux_rec(T1, T2, Store0, R1, [], Low2, List2)
+                    BLevel,
+                    merge_aux_rec(A, B, Store0, ARoot, [], BLow, BEntries)
                 }
         end,
     NewPage = bondy_mst_page:new(Level, Low, List),
@@ -965,55 +972,54 @@ merge_aux(T1, T2, Store0, R1, R2) ->
 
 
 %% @private
-merge_aux_rec(T1, T2, Store0, Low1, [], Low2, []) ->
-    {Hash, Store} = merge_aux(T1, T2, Store0, Low1, Low2),
+merge_aux_rec(A, B, Store0, ALow, [], BLow, []) ->
+    {Hash, Store} = merge_aux(A, B, Store0, ALow, BLow),
     {Hash, [], Store};
 
-merge_aux_rec(T1, T2, Store0, Low1, [], Low2, [{K, V, R} | Rest]) ->
-    {Low1L, Low1H, Store1} = split(T1, Store0, Low1, K),
-    {NewLow, Store2} = merge_aux(T1, T2, Store1, Low1L, Low2),
-    {NewR, NewRest, Store} = merge_aux_rec(T1, T2, Store2, Low1H, [], R, Rest),
+merge_aux_rec(A, B, Store0, ALow, [], BLow, [{K, V, R} | Rest]) ->
+    {ALowL, ALowH, Store1} = split(A, Store0, ALow, K),
+    {NewLow, Store2} = merge_aux(A, B, Store1, ALowL, BLow),
+    {NewR, NewRest, Store} = merge_aux_rec(A, B, Store2, ALowH, [], R, Rest),
     {NewLow, [{K, V, NewR} | NewRest], Store};
 
-merge_aux_rec(T1, T2, Store0, Low1, [{K, V, R} | Rest], Low2, []) ->
-    {Low2L, Low2H, Store1} = split(T2, Store0, Low2, K),
-    {NewLow, Store2} = merge_aux(T1, T2, Store1, Low1, Low2L),
-    {NewR, NewRest, Store} = merge_aux_rec(
-        T1, T2, Store2, R, Rest, Low2H, []
-    ),
+merge_aux_rec(A, B, Store0, ALow, [{K, V, R} | Rest], BLow, []) ->
+    {BLowL, BLowH, Store1} = split(B, Store0, BLow, K),
+    {NewLow, Store2} = merge_aux(A, B, Store1, ALow, BLowL),
+    {NewR, NewRest, Store} = merge_aux_rec(A, B, Store2, R, Rest, BLowH, []),
     {NewLow, [{K, V, NewR} | NewRest], Store};
 
 merge_aux_rec(
-    T1,
-    T2,
+    A,
+    B,
     Store0,
-    Low1,
-    [{K1, V1, R1} | Rest1] = List1,
-    Low2,
-    [{K2, V2, R2} | Rest2] = List2) ->
-    case compare(T1, K1, K2) of
+    ALow,
+    [{AKey, AValue, ARoot} | ARest] = AEntries,
+    BLow,
+    [{BKey, BValue, BRoot} | BRest] = BEntries) ->
+    case compare(A, AKey, BKey) of
         lt ->
-            {Low2L, Low2H, Store1} = split(T2, Store0, Low2, K1),
-            {NewLow, Store2} = merge_aux(T1, T2, Store1, Low1, Low2L),
+            {BLowL, BLowH, Store1} = split(B, Store0, BLow, AKey),
+            {NewLow, Store2} = merge_aux(A, B, Store1, ALow, BLowL),
             {NewR, NewRest, Store} = merge_aux_rec(
-                T1, T2, Store2, R1, Rest1, Low2H, List2
+                A, B, Store2, ARoot, ARest, BLowH, BEntries
             ),
-            {NewLow, [{K1, V1, NewR} | NewRest], Store};
+            {NewLow, [{AKey, AValue, NewR} | NewRest], Store};
+
         gt ->
-            {Low1L, Low1H, Store1} = split(T1, Store0, Low1, K2),
-            {NewLow, Store2} = merge_aux(T1, T2, Store1, Low1L, Low2),
+            {ALowL, ALowH, Store1} = split(A, Store0, ALow, BKey),
+            {NewLow, Store2} = merge_aux(A, B, Store1, ALowL, BLow),
             {NewR, NewRest, Store} = merge_aux_rec(
-                T1, T2, Store2, Low1H, List1, R2, Rest2
+                A, B, Store2, ALowH, AEntries, BRoot, BRest
             ),
-            {NewLow, [{K2, V2, NewR} | NewRest], Store};
+            {NewLow, [{BKey, BValue, NewR} | NewRest], Store};
 
         eq ->
-            {NewLow, Store1} = merge_aux(T1, T2, Store0, Low1, Low2),
-            NewV = merge_values(T1, K1, V1, V2),
+            {NewLow, Store1} = merge_aux(A, B, Store0, ALow, BLow),
+            NewV = merge_values(A, AKey, AValue, BValue),
             {NewR, NewRest, Store} = merge_aux_rec(
-                T1, T2, Store1, R1, Rest1, R2, Rest2
+                A, B, Store1, ARoot, ARest, BRoot, BRest
             ),
-            {NewLow, [{K1, NewV, NewR} | NewRest], Store}
+            {NewLow, [{AKey, NewV, NewR} | NewRest], Store}
     end.
 
 
@@ -1070,76 +1076,79 @@ diff_to_list(_, _, R, _, R) ->
 diff_to_list(_, _, undefined, _, _) ->
     [];
 
-diff_to_list(_, Store1, R1, _, undefined) ->
+diff_to_list(_, Store1, ARoot, _, undefined) ->
     lists:reverse(
-        do_fold(Store1, fun(E, Acc) -> [E | Acc] end, [], [], R1)
+        do_fold(Store1, fun(E, Acc) -> [E | Acc] end, [], [], ARoot)
     );
 
-diff_to_list(T, Store1, R1, Store2, R2) ->
-    Page1 = bondy_mst_store:get(Store1, R1),
-    Low1 = bondy_mst_page:low(Page1),
-    List1 = bondy_mst_page:list(Page1),
-    Level1 = bondy_mst_page:level(Page1),
+diff_to_list(T, Store1, ARoot, Store2, BRoot) ->
+    APage = bondy_mst_store:get(Store1, ARoot),
+    ALow = bondy_mst_page:low(APage),
+    AEntries = bondy_mst_page:list(APage),
+    ALevel = bondy_mst_page:level(APage),
 
-    Page2 = bondy_mst_store:get(Store2, R2),
-    List2 = bondy_mst_page:list(Page2),
-    Low2 = bondy_mst_page:low(Page2),
+    BPage = bondy_mst_store:get(Store2, BRoot),
+    BEntries = bondy_mst_page:list(BPage),
+    BLow = bondy_mst_page:low(BPage),
+    BLevel = bondy_mst_page:level(BPage),
 
-    case bondy_mst_page:level(Page2) of
-        Level1 ->
-            diff_to_list_rec(T, Store1, Low1, List1, Store2, Low2, List2);
+    case BLevel of
+        ALevel ->
+            diff_to_list_rec(T, Store1, ALow, AEntries, Store2, BLow, BEntries);
 
-        Level2 when Level1 > Level2 ->
-            diff_to_list_rec(T, Store1, Low1, List1, Store2, R2, []);
+        BLevel when ALevel > BLevel ->
+            diff_to_list_rec(T, Store1, ALow, AEntries, Store2, BRoot, []);
 
-        Level2 when Level1 < Level2 ->
-            diff_to_list_rec(T, Store1, R1, [], Store2, Low2, List2)
+        BLevel when ALevel < BLevel ->
+            diff_to_list_rec(T, Store1, ARoot, [], Store2, BLow, BEntries)
     end.
 
 
 
 %% @private
-diff_to_list_rec(T, Store1, Low1, [], Store2, Low2, []) ->
-    diff_to_list(T, Store1, Low1, Store2, Low2);
+diff_to_list_rec(T, Store1, ALow, [], Store2, BLow, []) ->
+    diff_to_list(T, Store1, ALow, Store2, BLow);
 
-diff_to_list_rec(T, Store1_0, Low1, [], Store2, Low2, [{K, _, R} | Rest2]) ->
-    {Low1L, Low1H, Store1} = split(T, Store1_0, Low1, K),
-    diff_to_list(T, Store1, Low1L, Store2, Low2) ++
-    diff_to_list_rec(T, Store1, Low1H, [], Store2, R, Rest2);
+diff_to_list_rec(T, Store1_0, ALow, [], Store2, BLow, [{K, _, R} | Rest2]) ->
+    {ALowL, ALowH, Store1} = split(T, Store1_0, ALow, K),
+    diff_to_list(T, Store1, ALowL, Store2, BLow) ++
+    diff_to_list_rec(T, Store1, ALowH, [], Store2, R, Rest2);
 
-diff_to_list_rec(T, Store1, Low1, [{K, V, R} | Rest1], Store2_0, Low2, []) ->
-    {Low2L, Low2H, Store2} = split(T, Store2_0, Low2, K),
-    diff_to_list(T, Store1, Low1, Store2, Low2L) ++
-    [{K, V} | diff_to_list_rec(T, Store1, R, Rest1, Store2, Low2H, [])];
+diff_to_list_rec(T, Store1, ALow, [{K, V, R} | Rest1], Store2_0, BLow, []) ->
+    {BLowL, BLowH, Store2} = split(T, Store2_0, BLow, K),
+    diff_to_list(T, Store1, ALow, Store2, BLowL) ++
+    [{K, V} | diff_to_list_rec(T, Store1, R, Rest1, Store2, BLowH, [])];
 
-diff_to_list_rec(T, Store1_0, Low1, List1, Store2_0, Low2, List2) ->
-    [{K1, V1, R1} | Rest1] = List1,
-    [{K2, V2, R2} | Rest2] = List2,
+diff_to_list_rec(T, Store1_0, ALow, AEntries, Store2_0, BLow, BEntries) ->
+    [{K1, V1, ARoot} | Rest1] = AEntries,
+    [{K2, V2, BRoot} | Rest2] = BEntries,
 
     case compare(T, K1, K2) of
         lt ->
-            {Low2L, Low2H, Store2} = split(T, Store2_0, Low2, K1),
-            diff_to_list(T, Store1_0, Low1, Store2, Low2L)
+            {BLowL, BLowH, Store2} = split(T, Store2_0, BLow, K1),
+            diff_to_list(T, Store1_0, ALow, Store2, BLowL)
             ++ [
                 {K1, V1}
-                | diff_to_list_rec(T, Store1_0, R1, Rest1, Store2, Low2H, List2)
+                | diff_to_list_rec(
+                    T, Store1_0, ARoot, Rest1, Store2, BLowH, BEntries
+                )
             ];
 
         gt ->
-            {Low1L, Low1H, Store1} = split(T, Store1_0, Low1, K2),
-            diff_to_list(T, Store1, Low1L, Store2_0, Low2)
-            ++ diff_to_list_rec(T, Store1, Low1H, List1, Store2_0, R2, Rest2);
+            {ALowL, ALowH, Store1} = split(T, Store1_0, ALow, K2),
+            diff_to_list(T, Store1, ALowL, Store2_0, BLow)
+            ++ diff_to_list_rec(T, Store1, ALowH, AEntries, Store2_0, BRoot, Rest2);
 
         eq ->
-            L0 = diff_to_list_rec(T, Store1_0, R1, Rest1, Store2_0, R2, Rest2),
+            L0 = diff_to_list_rec(T, Store1_0, ARoot, Rest1, Store2_0, BRoot, Rest2),
 
             case V1 == V2 of
                 true ->
-                    diff_to_list(T, Store1_0, Low1, Store2_0, Low2) ++ L0;
+                    diff_to_list(T, Store1_0, ALow, Store2_0, BLow) ++ L0;
 
                 false ->
                     L = [{K1, V1} | L0],
-                    diff_to_list(T, Store1_0, Low1, Store2_0, Low2) ++ L
+                    diff_to_list(T, Store1_0, ALow, Store2_0, BLow) ++ L
 
             end
     end.

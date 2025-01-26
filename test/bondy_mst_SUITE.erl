@@ -74,7 +74,6 @@ init_per_group(rocksdb_store, Config) ->
 
 
 end_per_group(_, _Config) ->
-    catch file:del_dir_r("/tmp/bondy_mst/"),
     ok.
 
 
@@ -95,7 +94,6 @@ init_per_testcase(_TestCase, Config) ->
 
 %% Called after each test case
 end_per_testcase(_TestCase, _Config) ->
-    catch file:del_dir_r("/tmp/bondy_mst/"),
     ok.
 
 

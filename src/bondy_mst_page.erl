@@ -49,6 +49,7 @@
 -export([foreach/2]).
 -export([freed_at/1]).
 -export([is_referenced_at/2]).
+-export([is_type/1]).
 -export([level/1]).
 -export([list/1]).
 -export([low/1]).
@@ -92,6 +93,17 @@ pattern() ->
         list = '$3',
         freed_at = '$4'
     }.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Returns true if `Arg` is a page.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec is_type(Arg :: any()) -> boolean().
+
+is_type(#?MODULE{}) -> true;
+is_type(_) -> false.
+
 
 
 %% -----------------------------------------------------------------------------

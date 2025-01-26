@@ -4,10 +4,13 @@ REBAR ?= rebar3
 
 all: compile
 
-clean:
+clean: clean-data
+	rm -rf _build
 	$(REBAR) clean
 
-test: eunit cover
+test: eunit cover ct
+
+ct: clean-data
 	${REBAR} as test ct
 
 eunit:
@@ -16,3 +19,5 @@ eunit:
 cover:
 	${REBAR} cover
 
+clean-data:
+	rm -rf /tmp/bondy_mst/

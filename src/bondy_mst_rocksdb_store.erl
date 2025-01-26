@@ -172,7 +172,7 @@ set_root(#?MODULE{root_key = RootKey} = T, Hash) ->
 %% -----------------------------------------------------------------------------
 -spec get(T :: t(), Hash :: hash()) -> Page :: page() | undefined.
 
-get(#?MODULE{name = Name} = T, Hash) ->
+get(#?MODULE{name = Name} = T, Hash) when is_binary(Hash) ->
     do_get(T, prefixed_key(Name, Hash)).
 
 
@@ -183,7 +183,8 @@ get(#?MODULE{name = Name} = T, Hash) ->
 -spec has(T :: t(), Hash :: hash()) -> boolean().
 
 has(#?MODULE{name = Name} = T, Hash) when is_binary(Hash) ->
-    do_get(T, prefixed_key(Name, Hash)) =/= undefined.
+    Result = do_get(T, prefixed_key(Name, Hash)),
+    Result =/= undefined.
 
 
 %% -----------------------------------------------------------------------------
@@ -193,6 +194,8 @@ has(#?MODULE{name = Name} = T, Hash) when is_binary(Hash) ->
 -spec put(T :: t(), Page :: page()) -> {Hash :: hash(), T :: t()}.
 
 put(#?MODULE{name = Name, root_key = RootKey} = T, Page) ->
+    bondy_mst_page:is_type(Page) orelse error(badarg),
+
     %% We put and update root atomically
     Fun = fun() ->
         Hash = bondy_mst_utils:hash(Page),
