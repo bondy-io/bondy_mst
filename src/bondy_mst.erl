@@ -630,7 +630,10 @@ last(#?MODULE{}, undefined) ->
 
 last(#?MODULE{} = T, Root) ->
     Page = bondy_mst_store:get(T#?MODULE.store, Root),
-    case bondy_mst_page:list(Page) of
+    case Page == undefined orelse bondy_mst_page:list(Page) of
+        true ->
+            undefined;
+
         [] ->
             undefined;
 
