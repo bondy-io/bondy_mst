@@ -183,16 +183,7 @@ get(#?MODULE{name = Name} = T, Hash) ->
 -spec has(T :: t(), Hash :: hash()) -> boolean().
 
 has(#?MODULE{name = Name} = T, Hash) when is_binary(Hash) ->
-    case do_get(T, prefixed_key(Name, Hash)) of
-        {ok, _} ->
-            true;
-
-        not_found ->
-            false;
-
-        {error, Reason} ->
-            error(format_reason(Reason))
-    end.
+    do_get(T, prefixed_key(Name, Hash)) =/= undefined.
 
 
 %% -----------------------------------------------------------------------------
