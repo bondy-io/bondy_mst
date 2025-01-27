@@ -69,7 +69,7 @@
 %% @doc Creates a new page
 %% @end
 %% -----------------------------------------------------------------------------
--spec new(level(), hash(), [entry()]) -> t().
+-spec new(level(), hash() | undefined, [entry()]) -> t().
 
 new(Level, Low, List) when is_integer(Level), is_list(List) ->
     #?MODULE{
