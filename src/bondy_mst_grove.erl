@@ -51,12 +51,6 @@
 %% @end
 %% -----------------------------------------------------------------------------
 
-%% !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-%% @TODO
-%% if A has no data and B has data
-%% When A initiates an exchange with B no data is merged, only the other way
-%% around.
-
 -module(bondy_mst_grove).
 
 
