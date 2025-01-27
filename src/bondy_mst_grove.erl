@@ -149,7 +149,8 @@
 
 %% Whenever this module wants to gossip an event it will call
 %% `Module:broadcast/1'.
-%% The callback `Module' is responsible for sending the event to some random peers, either by implementing or using a peer sampling service e.g.
+%% The callback `Module' is responsible for sending the event to some random
+%% peers, either by implementing or using a peer sampling service e.g.
 %% `partisan_plumtree_broadcast'.
 -callback broadcast(Event :: gossip()) -> ok | {error, any()}.
 
@@ -353,7 +354,6 @@ handle(Grove0, #gossip{} = Event) ->
         false ->
             Tree1 = bondy_mst:put(Tree0, Key, Value),
             Grove1 = Grove0#?MODULE{tree = Tree1},
-
             NewRoot = bondy_mst:root(Tree1),
 
             case NewRoot =/= Root of
@@ -365,6 +365,8 @@ handle(Grove0, #gossip{} = Event) ->
                     ),
                     Grove2 = Grove1#?MODULE{merges = Merges},
                     Grove3 = maybe_broadcast(Grove2, Event),
+
+                    ok = on_update(Grove3, Key, Value),
 
                     case NewRoot =/= PeerRoot of
                         true ->
@@ -387,6 +389,11 @@ handle(Grove0, #gossip{} = Event) ->
     end;
 
 handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
+    ?LOG_INFO(#{
+        message => "Received GET message",
+        peer => Peer,
+        set_size => sets:size(Set)
+    }),
     %% We are being asked to produce a set of pages
     Tree = Grove#?MODULE.tree,
     Store = bondy_mst:store(Tree),
@@ -487,6 +494,8 @@ handle(_Grove, Msg) ->
 %% PRIVATE
 %% =============================================================================
 
+
+%% @private
 validate_callback_mod(Opts) ->
     CallbackMod = maps:get(callback_mod, Opts),
 
@@ -503,13 +512,12 @@ validate_callback_mod(Opts) ->
     CallbackMod.
 
 
-on_update(#?MODULE{on_merge = false}, _, _) ->
-    ok;
 
+%% @private
 on_update(#?MODULE{callback_mod = Mod}, Key, Value) ->
     try
         bondy_mst_utils:apply_lazy(
-            Mod, on_update, 1, [Key, Value], fun() -> ok end
+            Mod, on_update, 2, [Key, Value], fun() -> ok end
         )
     catch
         Class:Reason:Stacktrace ->
@@ -522,7 +530,6 @@ on_update(#?MODULE{callback_mod = Mod}, Key, Value) ->
             }),
         ok
     end.
-
 
 on_merge(#?MODULE{on_merge = false}, _) ->
     ok;
