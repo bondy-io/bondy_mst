@@ -135,6 +135,7 @@
 -export([gossip_data/1]).
 -export([handle/2]).
 -export([new/2]).
+-export([node_id/1]).
 -export([put/3]).
 -export([root/1]).
 -export([tree/1]).
@@ -208,6 +209,16 @@ new(NodeId, Opts0) when
         on_merge = OnMerge
     }.
 
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Returns the node_id
+%% @end
+%% -----------------------------------------------------------------------------
+-spec node_id(t()) -> node_id().
+
+node_id(#?MODULE{node_id = Val}) ->
+    Val.
 
 
 %% -----------------------------------------------------------------------------
