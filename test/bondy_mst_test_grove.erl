@@ -149,7 +149,7 @@ handle_call({put, Key, Value}, _From, Grove0) ->
     {reply, ok, Grove1};
 
 handle_call({trigger, Peer}, _From, Grove) ->
-    ct:pal("handling sync peer: ~p", [Peer]),
+    ct:pal("Triggering sync on peer: ~p", [Peer]),
     Reply = bondy_mst_grove:trigger(Grove, Peer),
     {reply, Reply, Grove};
 
@@ -158,6 +158,10 @@ handle_call(_Request, _From, State) ->
 
 
 handle_cast({grove_message, Message}, Grove0) ->
+    ct:pal(
+        "(~p) Handling grove_message: ~p",
+        [bondy_mst_grove:node_id(Grove0), Message]
+    ),
     Grove = bondy_mst_grove:handle(Grove0, Message),
     {noreply, Grove};
 
