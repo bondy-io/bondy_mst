@@ -199,7 +199,6 @@ put(#?MODULE{name = Name, root_key = RootKey} = T, Page) ->
     %% We put and update root atomically
     Fun = fun() ->
         Hash = bondy_mst_utils:hash(Page),
-        ok = do_put(T, RootKey, Hash),
         ok = do_put(T, prefixed_key(Name, Hash), encode_value(Page)),
         {Hash, T}
     end,

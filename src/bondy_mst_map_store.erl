@@ -118,7 +118,7 @@ has(#?MODULE{pages = Pages}, Hash) ->
 put(#?MODULE{pages = Pages} = T0, Page) ->
     Hash = bondy_mst_utils:hash(Page),
     T = T0#?MODULE{pages = maps:put(Hash, Page, Pages)},
-    {Hash, set_root(T, Hash)}.
+    {Hash, T}.
 
 
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().

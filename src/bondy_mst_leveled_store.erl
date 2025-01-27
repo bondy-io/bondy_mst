@@ -112,7 +112,6 @@ has(#?MODULE{pid = Pid, name = Name}, Hash) ->
 put(#?MODULE{pid = Pid, name = Name} = T, Page) ->
     Hash = bondy_mst_utils:hash(Page),
     ok = leveled_bookie:book_put(Pid, Name, Hash, Page, []),
-    ok = leveled_bookie:book_put(Pid, Name, ?ROOT_KEY, Hash, []),
     {Hash, T}.
 
 

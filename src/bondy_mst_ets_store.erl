@@ -175,7 +175,7 @@ has(#?MODULE{tab = Tab}, Hash) ->
 put(#?MODULE{tab = Tab} = T, Page) ->
     Hash = bondy_mst_utils:hash(Page),
     %% We insert both atomically
-    true = ets:insert(Tab, [{Hash, Page}, {?ROOT_KEY, Hash}]),
+    true = ets:insert(Tab, [{Hash, Page}]),
     {Hash, T}.
 
 
