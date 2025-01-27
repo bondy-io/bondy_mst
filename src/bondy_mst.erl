@@ -854,9 +854,9 @@ split(_, Store, undefined, _) ->
 
 split(T, Store0, Hash, Key) ->
     Page = get_page(Store0, Hash, T),
-    [{K0, _, _} | _] = List0 = bondy_mst_page:list(Page),
     Level = bondy_mst_page:level(Page),
     Low = bondy_mst_page:low(Page),
+    [{K0, _, _} | _] = List0 = bondy_mst_page:list(Page),
 
     Store1 = bondy_mst_store:free(Store0, Hash, Page),
 
@@ -976,16 +976,16 @@ merge_aux_rec(A, B, Store0, ALow, [], BLow, []) ->
     {Hash, Store} = merge_aux(A, B, Store0, ALow, BLow),
     {Hash, [], Store};
 
-merge_aux_rec(A, B, Store0, ALow, [], BLow, [{K, V, R} | Rest]) ->
+merge_aux_rec(A, B, Store0, ALow, [], BLow, [{K, V, R} | BRest]) ->
     {ALowL, ALowH, Store1} = split(A, Store0, ALow, K),
     {NewLow, Store2} = merge_aux(A, B, Store1, ALowL, BLow),
-    {NewR, NewRest, Store} = merge_aux_rec(A, B, Store2, ALowH, [], R, Rest),
+    {NewR, NewRest, Store} = merge_aux_rec(A, B, Store2, ALowH, [], R, BRest),
     {NewLow, [{K, V, NewR} | NewRest], Store};
 
-merge_aux_rec(A, B, Store0, ALow, [{K, V, R} | Rest], BLow, []) ->
+merge_aux_rec(A, B, Store0, ALow, [{K, V, R} | ARest], BLow, []) ->
     {BLowL, BLowH, Store1} = split(B, Store0, BLow, K),
     {NewLow, Store2} = merge_aux(A, B, Store1, ALow, BLowL),
-    {NewR, NewRest, Store} = merge_aux_rec(A, B, Store2, R, Rest, BLowH, []),
+    {NewR, NewRest, Store} = merge_aux_rec(A, B, Store2, R, ARest, BLowH, []),
     {NewLow, [{K, V, NewR} | NewRest], Store};
 
 merge_aux_rec(
