@@ -22,7 +22,7 @@
 
 %% -----------------------------------------------------------------------------
 %% @doc
-%% This module implements a sychronised group of Merkle Search Trees (trees)
+%% This module implements a sychronised group of Merkle Search Tree
 %% replicas across a cluster.
 %%
 %% This module implements a the logic for anti-entropy exchanges. The idea is
