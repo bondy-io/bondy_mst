@@ -13,7 +13,6 @@ The following table shows the existing backends and their capabilities:
 
 |Module|Type|Read Concurrency|Transactions|GC|
 |---|---|---|---|---|
-
 |`bondy_mst_map_store`|Dedicated `map()`|No|No|Epoch-based|
 |`bondy_mst_ets_store`|Dedicated `ets` table|Yes|No|Epoch-based|
 |`bondy_mst_rocksdb_store`|Named tree on shared `rocksdb` instance|Yes|Yes (Optimistic)|Epoch-based|
