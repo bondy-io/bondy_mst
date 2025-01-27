@@ -8,7 +8,6 @@
 
 -compile(export_all).
 
-%% All test cases to be run
 
 all() ->
     [
