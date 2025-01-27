@@ -56,7 +56,7 @@
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Start plumtree_partitions_coordinator and link to calling process.
+%% @doc Start and link to calling process.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec start_link(list()) -> {ok, pid()} | ignore | {error, term()}.
@@ -112,12 +112,9 @@ handle_continue({init_config, Opts0}, #state{} = State0) ->
     ),
     {ok, BlockCache} = rocksdb:new_cache(lru, CacheSize),
 
-
+    %% Create a shared write buffer
     WriteBufferSize = memory:mebibytes(10 * N),
 
-
-    %% Create a shared buffer for partition hashtree instances
-    %% This value is harcoded
     {ok, WriteBuffer} = rocksdb:new_write_buffer_manager(
         WriteBufferSize,
         BlockCache
