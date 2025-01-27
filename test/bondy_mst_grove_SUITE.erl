@@ -25,7 +25,8 @@ set_test_cases() ->
     [
         set_online_sync,
         set_online_sync_complex,
-        set_anti_entropy_fwd
+        set_anti_entropy_fwd,
+        set_bidirectional_sync
     ].
 
 set_of_awsets_test_cases() ->
@@ -308,6 +309,37 @@ set_anti_entropy_fwd(Config) ->
 
     ?assertEqual(L1, L2),
     ?assertEqual(L2, L3),
+    ok.
+
+set_bidirectional_sync(Config) ->
+    GroveOpts = ?config(grove_opts, Config),
+    [Peer1, Peer2, Peer3] = bondy_mst_test_grove:peers(),
+
+    %% We start Peer2 first
+    {ok, [Peer2]} = bondy_mst_test_grove:start(GroveOpts, [Peer2]),
+
+    %% And put some values
+    L = lists:seq(1, 1000),
+    _ = [gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL) || X <- list_shuffle(L)],
+    L2 = [K || {K, true} <- gen_server:call(Peer2, list, ?TIMEOUT_XXL)],
+    ?assertEqual(L, L2),
+
+    %% We start Peer1 and trigger sync Peer1 -> Peer2
+    {ok, [Peer1]} = bondy_mst_test_grove:start(GroveOpts, [Peer1]),
+    ok = gen_server:call(Peer1, {trigger, Peer2}, ?TIMEOUT_XXL),
+    timer:sleep(5000),
+    %% Now Peer1 should have synced the data
+    L1 = [K || {K, true} <- gen_server:call(Peer1, list, ?TIMEOUT_XXL)],
+    ?assertEqual(L, L2),
+
+    %% We start Peer3 and trigger sync Peer2 -> Peer3
+    {ok, [Peer3]} = bondy_mst_test_grove:start(GroveOpts, [Peer3]),
+    ok = gen_server:call(Peer2, {trigger, Peer3}, ?TIMEOUT_XXL),
+    timer:sleep(5000),
+    %% Now Peer3 should have synced the data
+    L3 = [K || {K, true} <- gen_server:call(Peer3, list, ?TIMEOUT_XXL)],
+    ?assertEqual(L, L3),
+
     ok.
 
 

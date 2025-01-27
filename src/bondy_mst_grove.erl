@@ -290,6 +290,34 @@ put(Grove, Key, Value) ->
 
 
 %% -----------------------------------------------------------------------------
+%% @doc Triggers an exchange by sending the local tree's root to `Peer'.
+%% The exchange might not occur if Peer has reached its `max_merges'.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec trigger(t(), node_id()) -> ok.
+
+trigger(#?MODULE{node_id = Peer}, Peer) ->
+    ok;
+
+trigger(#?MODULE{} = Grove, Peer) when is_atom(Peer) ->
+    Event = #gossip{
+        from = Grove#?MODULE.node_id,
+        root = root(Grove),
+        key = undefined,
+        value = undefined
+    },
+    (Grove#?MODULE.callback_mod):send(Peer, Event).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Extracts a key-value pair from the `gossip()`.
+%% @end
+%% -----------------------------------------------------------------------------
+gossip_data(#gossip{key = Key, value = Value}) ->
+    {Key, Value}.
+
+
+%% -----------------------------------------------------------------------------
 %% @doc Call this function when your node receives a message or broadcast from a
 %% peer.
 %% @end
@@ -312,7 +340,7 @@ handle(Grove0, #gossip{} = Event) ->
     case PeerRoot == Root of
         true ->
             ?LOG_INFO(#{
-                message => "No merge required, trees in sync",
+                message => "Trees in sync",
                 root => encode_hash(PeerRoot),
                 peer => Peer
             }),
@@ -453,33 +481,6 @@ handle(_Grove, Msg) ->
     error({unknown_event, Msg}).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Triggers an exchange by sending the local tree's root to `Peer'.
-%% The exchange might not proper when Peer has reached `max_merges'.
-%% @end
-%% -----------------------------------------------------------------------------
--spec trigger(t(), node_id()) -> ok.
-
-trigger(#?MODULE{node_id = Node}, Node) ->
-    ok;
-
-trigger(#?MODULE{} = Grove, Peer) when is_atom(Peer) ->
-    Event = #gossip{
-        from = Grove#?MODULE.node_id,
-        root = root(Grove),
-        key = undefined,
-        value = undefined
-    },
-    (Grove#?MODULE.callback_mod):send(Peer, Event).
-
-
-%% -----------------------------------------------------------------------------
-%% @doc Extracts a key-value pair from the `gossip()`.
-%% @end
-%% -----------------------------------------------------------------------------
-gossip_data(#gossip{key = Key, value = Value}) ->
-    {Key, Value}.
-
 
 
 %% =============================================================================
@@ -565,7 +566,9 @@ maybe_broadcast(Grove, Gossip) ->
 %% @private
 -spec maybe_merge(t(), node_id(), hash() | undefined) -> t().
 
-maybe_merge(#?MODULE{} = Grove, _, undefined) ->
+maybe_merge(#?MODULE{} = Grove, Peer, undefined) ->
+    %% Peer is empty, so we trigger an exchange in the other direction
+    ok = trigger(Grove, Peer),
     Grove;
 
 maybe_merge(#?MODULE{} = Grove0, Peer, PeerRoot) ->
