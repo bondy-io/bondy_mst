@@ -15,12 +15,11 @@ all() ->
         {group, set_with_local_store, []},
         {group, set_with_ets_store, []},
         {group, set_with_leveled_store, []},
-        {group, set_with_rocksdb_store, []}
-        %% ,
-        %% {group, set_of_awsets_with_local_store, []},
-        %% {group, set_of_awsets_with_ets_store, []},
-        %% {group, set_of_awsets_with_leveled_store, []},
-        %% {group, set_of_awsets_with_rocksdb_store, []}
+        {group, set_with_rocksdb_store, []},
+        {group, set_of_awsets_with_local_store, []},
+        {group, set_of_awsets_with_ets_store, []},
+        {group, set_of_awsets_with_leveled_store, []},
+        {group, set_of_awsets_with_rocksdb_store, []}
     ].
 
 set_test_cases() ->
@@ -376,9 +375,11 @@ set_of_awsets_anti_entropy_fwd(Config) ->
     {ok, V2} = state_type:mutate({add, bar}, Peer2, V0),
     V3 = state_awset:merge(V1, V2),
 
-    L1 = [{X, V1} || X <- lists:seq(1, 1000)],
-    L2 = [{X, V2} || X <- lists:seq(1, 1000)],
-    L3 = [{X, V3} || X <- lists:seq(1, 1000)],
+    N = 1000,
+
+    L1 = [{X, V1} || X <- lists:seq(1, N)],
+    L2 = [{X, V2} || X <- lists:seq(1, N)],
+    L3 = [{X, V3} || X <- lists:seq(1, N)],
 
     %% We override broadcast, this way Peer2 will not receive
     %% the broadcast of the changes, i.e. we simulate they are not connected
