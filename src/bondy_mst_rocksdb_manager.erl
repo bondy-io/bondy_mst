@@ -1,5 +1,5 @@
 %% =============================================================================
-%%  plum_db_partition_manager.erl -
+%%  bondy_mst_rocksdb_manager.erl -
 %%
 %%  Copyright (c) 2016-2021 Leapsight. All rights reserved.
 %%
@@ -36,7 +36,6 @@
 
 -export([start_link/1]).
 -export([stop/0]).
--export([stats/1]).
 
 %% gen_server callbacks
 -export([init/1]).
@@ -73,12 +72,6 @@ start_link(Opts) ->
 
 stop() ->
     gen_server:stop(?MODULE).
-
-
-stats(Arg) ->
-    Res = plum_db_partition_server:stats(Arg),
-    resulto:map(Res, fun(Bin) -> parse(Bin) end).
-
 
 
 %% =============================================================================
