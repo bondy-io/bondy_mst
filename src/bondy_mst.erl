@@ -153,7 +153,7 @@ new() ->
 %% @return A new MST instance.
 %% @end
 %% -----------------------------------------------------------------------------
--spec new(opts()) -> t().
+-spec new(Opts :: opts()) -> t().
 
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
