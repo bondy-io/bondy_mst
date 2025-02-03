@@ -21,7 +21,17 @@
 %% ===========================================================================
 
 %% -----------------------------------------------------------------------------
-%% @doc A Merkle search tree.
+%% @doc
+%%  This module implements a Merkle Search Tree (MST), a probabilistic data
+%%  structure optimized for efficient storage and retrieval of key-value pairs.
+%%
+%%  The MST is designed for distributed systems where efficient merging and
+%%  verification of large datasets are required.
+%%
+%%  It supports:
+%%    - Efficient key-value insertion and retrieval.
+%%    - Merkle-based verification for integrity checks.
+%%    - Custom comparators and mergers.
 %% @end
 %% -----------------------------------------------------------------------------
 -module(bondy_mst).
@@ -116,8 +126,7 @@
 
 %% -----------------------------------------------------------------------------
 %% @doc Create a new Merkle Search Tree using the default store.
-%% This structure can be used as a ser with only true keys or as a map if a
-%% merge function is given.
+%% The same as calling `new(#{})'.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec new() -> t().
@@ -127,17 +136,21 @@ new() ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Create a new Merkle Search Tree.
-
-%% This structure can be used as a ser with only true keys (default) or as a map
-%% if a proper merger function is given.
+%% @doc Creates a new MST instance with configurable options.
+%%
+%% This structure can be used as a CRDT set with only true keys (default)
+%% or as a CRDT map if a proper merger function is given.
 %% == Options ==
-%% * {store, bondy_mst_store:t()} - a stores.
-%% Defaults to an instance of `bondy_mst_map_store'.
-%% * {merger, merger()} - a merger function.
-%% Defaults to the grow-only set merger function `merger/3'.
-%% * {comparator, comparator()} - a key comparator function.
-%% Defaults to `comparator/2'.
+%%
+%% <ul>
+%% <li>`store => bondy_mst_store:t()' - Defaults to an instance of
+%% `bondy_mst_map_store'.</li>
+%% <li>`merger => merger()' - a merger function.
+%% Defaults to the grow-only set merger function `merger/3'.</li>
+%% <li>`comparator => comparator()' - a key comparator function.
+%% Defaults to `comparator/2'.</li>
+%% </ul>
+%% @return A new MST instance.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec new(opts()) -> t().
@@ -189,7 +202,7 @@ store(#?MODULE{store = Val}) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Returns the value for key `Key'.
+%% @doc Returns the value associated with key `Key'.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec get(T :: t(), Key :: key()) -> Value :: any().
@@ -199,7 +212,7 @@ get(#?MODULE{} = T, Key) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Returns the first entry.
+%% @doc Returns the first key-value pair in the MST or `undefined' if empty.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec first(T :: t()) -> Value :: {key(), value()} | undefined.
@@ -209,7 +222,7 @@ first(#?MODULE{} = T) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Returns the last entry.
+%% @doc Returns the last key-value pair in the MST or `undefined' if empty.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec last(T :: t()) -> Value :: {key(), value()} | undefined.
@@ -326,7 +339,7 @@ keys(#?MODULE{} = T) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc
+%% @doc Computes the difference between two MSTs and returns it as a list.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec diff_to_list(t(), t()) -> list().
@@ -361,8 +374,7 @@ put(#?MODULE{} = T, Key) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Associates `Key' with value `Value' and inserts the association into
-%% tree `Tree1'.
+%% @doc Inserts a key-value pair into the MST.
 %%
 %% If key `Key' already exists in tree `Tree1', the old associated value is
 %% merged with `Value' by calling the configured `merger' function. The function
@@ -400,7 +412,7 @@ put_page(#?MODULE{store = Store0} = T, Page) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc
+%% @doc Merges two MSTs into a single tree.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec merge(T1 :: t(), T2 :: t()) -> NewT1 :: t().
@@ -410,7 +422,7 @@ merge(#?MODULE{} = T1, #?MODULE{} = T2) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc
+%% @doc Merges two MSTs into a single tree.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec merge(T1 :: t(), T2 :: t(), Root :: hash()) -> NewT1 :: t().
@@ -437,7 +449,7 @@ missing_set(#?MODULE{store = Store}, Root) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Dump Merkle search tree structure.
+%% @doc Dumps the structure of the MST for debugging purposes.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec dump(t()) -> undefined.
@@ -534,7 +546,7 @@ apply_default(Default) ->
 
 %% -----------------------------------------------------------------------------
 %% @private
-%% @doc Returns the default comparator
+%% @doc Returns the default comparator function used in the MST.
 %% @end
 %% -----------------------------------------------------------------------------
 comparator(A, B) when A < B -> lt;
@@ -544,7 +556,7 @@ comparator(A, B) when A == B -> eq.
 
 %% -----------------------------------------------------------------------------
 %% @private
-%% @doc Returns the default merger, which assumes the MST is a Set (where all
+%% @doc Returns the default merger function, assuming MST as a set. (where all
 %% values are `true').
 %% @end
 %% -----------------------------------------------------------------------------
@@ -553,11 +565,13 @@ merger(_Key, true, true) ->
 
 
 %% @private
+%% Computes the level of a key by hashing and counting leading zeroes.
 calc_level(Key) ->
     Hash = binary:encode_hex(bondy_mst_utils:hash(Key)),
     count_leading_zeroes(Hash, 0).
 
 %% @private
+%% Counts leading zeroes in a binary hash.
 count_leading_zeroes(<<"0", Rest/binary>>, Acc) ->
     count_leading_zeroes(Rest, Acc + 1);
 
@@ -566,11 +580,13 @@ count_leading_zeroes(_, Acc) ->
 
 
 %% @private
+%% Compares two keys using the MST’s configured comparator.
 compare(#?MODULE{comparator = Fun}, A, B) ->
     Fun(A, B).
 
 
 %% @private
+%% Merges two values using the MST’s configured merger function.
 merge_values(#?MODULE{merger = Fun}, Key, A, B) ->
     Fun(Key, A, B).
 
@@ -595,6 +611,7 @@ get(#?MODULE{} = T, Key, Root) ->
 
 
 %% @private
+%% Recursively retrieves a value from the MST.
 do_get(T, Key, Low, []) ->
     get(T, Key, Low);
 
@@ -1024,6 +1041,7 @@ merge_aux_rec(
 
 
 %% @private
+%% Iterates over the MST and applies a function to each element.
 do_fold(_, _, AccIn, _, undefined) ->
     AccIn;
 

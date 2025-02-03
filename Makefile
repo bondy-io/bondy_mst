@@ -21,3 +21,6 @@ cover:
 
 clean-data:
 	rm -rf /tmp/bondy_mst/
+
+docs:
+	${REBAR} ex_doc skip_deps=true
