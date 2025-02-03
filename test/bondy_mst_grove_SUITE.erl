@@ -330,7 +330,7 @@ set_bidirectional_sync(Config) ->
     timer:sleep(5000),
     %% Now Peer1 should have synced the data
     L1 = [K || {K, true} <- gen_server:call(Peer1, list, ?TIMEOUT_XXL)],
-    ?assertEqual(L, L2),
+    ?assertEqual(L, L1),
 
     %% We start Peer3 and trigger sync Peer2 -> Peer3
     {ok, [Peer3]} = bondy_mst_test_grove:start(GroveOpts, [Peer3]),
