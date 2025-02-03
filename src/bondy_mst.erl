@@ -452,7 +452,7 @@ missing_set(#?MODULE{store = Store}, Root) ->
 %% @doc Dumps the structure of the MST for debugging purposes.
 %% @end
 %% -----------------------------------------------------------------------------
--spec dump(t()) -> undefined.
+-spec dump(t()) -> ok.
 
 dump(#?MODULE{store = Store} = T) ->
     dump(Store, root(T)).
@@ -1179,7 +1179,7 @@ dump(Store, R) ->
 
 %% @private
 dump(_, undefined, _) ->
-    undefined;
+    ok;
 
 dump(Store, Root, Space) ->
     Page = bondy_mst_store:get(Store, Root),
