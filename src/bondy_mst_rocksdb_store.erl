@@ -193,10 +193,9 @@ has(#?MODULE{name = Name} = T, Hash) when is_binary(Hash) ->
 %% -----------------------------------------------------------------------------
 -spec put(T :: t(), Page :: page()) -> {Hash :: hash(), T :: t()}.
 
-put(#?MODULE{name = Name, root_key = RootKey} = T, Page) ->
+put(#?MODULE{name = Name} = T, Page) ->
     bondy_mst_page:is_type(Page) orelse error(badarg),
 
-    %% We put and update root atomically
     Fun = fun() ->
         Hash = bondy_mst_utils:hash(Page),
         ok = do_put(T, prefixed_key(Name, Hash), encode_value(Page)),
