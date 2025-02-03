@@ -338,10 +338,10 @@ handle(Grove0, #gossip{} = Event) ->
 
     Root = bondy_mst:root(Tree0),
 
-    case PeerRoot == Root of
+    case Root == PeerRoot of
         true ->
             ?LOG_INFO(#{
-                message => "Trees in sync",
+                message => "Replica in sync",
                 root => encode_hash(PeerRoot),
                 peer => Peer
             }),
@@ -352,12 +352,14 @@ handle(Grove0, #gossip{} = Event) ->
             maybe_merge(Grove0, Peer, PeerRoot);
 
         false ->
+            %% We insert the broadcasted change and get the new root
             Tree1 = bondy_mst:put(Tree0, Key, Value),
             Grove1 = Grove0#?MODULE{tree = Tree1},
             NewRoot = bondy_mst:root(Tree1),
 
-            case NewRoot =/= Root of
+            case Root =/= NewRoot of
                 true ->
+                    %% We remove from pending merges
                     Merges0 = Grove1#?MODULE.merges,
                     Merges = maps:filter(
                         fun(_, V) -> V =/= NewRoot end,
@@ -375,7 +377,8 @@ handle(Grove0, #gossip{} = Event) ->
 
                         false ->
                             ?LOG_INFO(#{
-                                message => "Event merged, trees in sync",
+                                message =>
+                                    "Broadcasted data merged, replicas in sync",
                                 root => encode_hash(NewRoot),
                                 peer => Peer
                             }),
@@ -437,7 +440,7 @@ handle(Grove, #put{from = Peer, map = Map}) ->
     case maps:is_key(Peer, Grove#?MODULE.merges) of
         true ->
             ?LOG_INFO(#{
-                message => "Accepted PUT message",
+                message => "Received peer data during sync",
                 peer => Peer,
                 payload_size => maps:size(Map)
             }),
@@ -449,7 +452,6 @@ handle(Grove, #put{from = Peer, map = Map}) ->
                     Hash0 == Hash1
                         orelse error({inconsistency, Hash0, Page, Hash1}),
 
-                    %% Call the callback merge function
                     ok = on_merge(Grove, Page),
                     Acc
                 end,
@@ -517,7 +519,7 @@ validate_callback_mod(Opts) ->
 on_update(#?MODULE{callback_mod = Mod}, Key, Value) ->
     try
         bondy_mst_utils:apply_lazy(
-            Mod, on_update, 2, [Key, Value], fun() -> ok end
+            Mod, ?FUNCTION_NAME, 2, [Key, Value], fun() -> ok end
         )
     catch
         Class:Reason:Stacktrace ->
@@ -531,12 +533,14 @@ on_update(#?MODULE{callback_mod = Mod}, Key, Value) ->
         ok
     end.
 
-on_merge(#?MODULE{on_merge = false}, _) ->
-    ok;
 
-on_merge(#?MODULE{callback_mod = Mod}, Page) ->
+%% @private
+%% Calls the callback merge function if on_merge was enabled
+on_merge(#?MODULE{on_merge = true, callback_mod = Mod}, Page) ->
     try
-        bondy_mst_utils:apply_lazy(Mod, on_merge, 1, [Page], fun() -> ok end)
+        bondy_mst_utils:apply_lazy(
+            Mod, ?FUNCTION_NAME, 1, [Page], fun() -> ok end
+        )
     catch
         Class:Reason:Stacktrace ->
             ?LOG_ERROR(#{
@@ -546,7 +550,10 @@ on_merge(#?MODULE{callback_mod = Mod}, Page) ->
                 stacktrace => Stacktrace
             }),
         ok
-    end.
+    end;
+
+on_merge(#?MODULE{on_merge = false}, _) ->
+    ok.
 
 
 %% @private
@@ -655,7 +662,6 @@ merge(Grove, Peer) ->
             ok = (Grove#?MODULE.callback_mod):send(Peer, Cmd),
             Grove
     end.
-
 
 do_merge(Grove0, Peer, PeerRoot) ->
     Tree0 = Grove0#?MODULE.tree,
