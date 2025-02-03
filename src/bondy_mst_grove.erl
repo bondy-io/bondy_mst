@@ -65,7 +65,7 @@
     max_same_merge = 1      ::  pos_integer(),
     merges = #{}            ::  #{node_id() => hash()},
     last_broadcast_time     ::  integer() | undefined,
-    on_update = false      ::  boolean(),
+    on_update = false       ::  boolean(),
     on_merge = false        ::  boolean()
 }).
 
@@ -311,7 +311,7 @@ trigger(#?MODULE{} = Grove, Peer) when is_atom(Peer) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Extracts a key-value pair from the `gossip()`.
+%% @doc Extracts a key-value pair from the `gossip()'.
 %% @end
 %% -----------------------------------------------------------------------------
 gossip_data(#gossip{key = Key, value = Value}) ->
