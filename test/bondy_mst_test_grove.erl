@@ -13,7 +13,6 @@
 %% BONDY_MSRT_GROVE CALLBACKS
 -export([send/2]).
 -export([broadcast/1]).
--export([on_merge/1]).
 
 
 %% GEN_SERVER CALLBACKS
@@ -88,11 +87,6 @@ broadcast(Gossip) ->
 
     ct:pal("Broadcasting event ~p to peer ~p", [Gossip, Peers]),
     _ = [send(Peer, Gossip) || Peer <- Peers],
-    ok.
-
-
-on_merge(_Page) ->
-    %% We do nothing as we are using the MST as the store itself.
     ok.
 
 
