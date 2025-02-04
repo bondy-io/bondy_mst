@@ -46,8 +46,6 @@
 %%
 %% * send/2
 %% * broadcast/1
-%% * on_merge/1
-%% * on_update/1
 %% @end
 %% -----------------------------------------------------------------------------
 
@@ -64,9 +62,7 @@
     max_merges = 6          ::  pos_integer(),
     max_same_merge = 1      ::  pos_integer(),
     merges = #{}            ::  #{node_id() => hash()},
-    last_broadcast_time     ::  integer() | undefined,
-    on_update = false       ::  boolean(),
-    on_merge = false        ::  boolean()
+    last_broadcast_time     ::  integer() | undefined
 }).
 
 -record(gossip, {
@@ -147,25 +143,12 @@
 -callback send(Peer :: node_id(), message()) -> ok | {error, any()}.
 
 
-%% Whenever this module wants to gossip an event it will call
+%% Whenever this module wants to send a gossip message it will call
 %% `Module:broadcast/1'.
-%% The callback `Module' is responsible for sending the event to some random
+%% The callback `Module' is responsible for sending the gossip to some random
 %% peers, either by implementing or using a peer sampling service e.g.
 %% `partisan_plumtree_broadcast'.
 -callback broadcast(Event :: gossip()) -> ok | {error, any()}.
-
-
-%% Called after merging a tree page from a remote tree.
-%% The implemeneter can use this to extract the entries and merge the data in a
-%% main store when the tree is used only for anti-entropy.
--callback on_merge(Page :: bondy_mst_page:t()) -> ok.
-
--callback on_update(Key :: any(), Value :: any()) -> ok.
-
-
--optional_callbacks([on_merge/1]).
--optional_callbacks([on_update/2]).
-
 
 
 
@@ -174,7 +157,10 @@
 %% =============================================================================
 
 
-
+%% -----------------------------------------------------------------------------
+%% @doc Cretes a new grove.
+%% @end
+%% -----------------------------------------------------------------------------
 -spec new(node_id(), opts()) -> Grove :: t() | no_return().
 
 new(NodeId, Opts) when is_list(Opts) ->
@@ -191,23 +177,19 @@ new(NodeId, Opts0) when
     CallbackMod = validate_callback_mod(GroveOpts),
     MaxMerges = maps:get(max_merges, GroveOpts, 6),
     MaxSameMerges = maps:get(max_same_merge, GroveOpts, 1),
-    OnUpdate = bondy_mst_utils:implements_callback(CallbackMod, on_update, 1),
-    OnMerge = bondy_mst_utils:implements_callback(CallbackMod, on_merge, 1),
 
     #?MODULE{
         node_id = NodeId,
         callback_mod = CallbackMod,
         tree = Tree,
         max_merges = MaxMerges,
-        max_same_merge = MaxSameMerges,
-        on_update = OnUpdate,
-        on_merge = OnMerge
+        max_same_merge = MaxSameMerges
     }.
 
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Returns the node_id
+%% @doc Returns the grove's local node_id
 %% @end
 %% -----------------------------------------------------------------------------
 -spec node_id(t()) -> node_id().
@@ -217,7 +199,7 @@ node_id(#?MODULE{node_id = Val}) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Returns the underlying tree.
+%% @doc Returns the grove's local tree.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec tree(t()) -> bondy_mst:t().
@@ -232,7 +214,7 @@ tree(#?MODULE{tree = Tree}) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Returns the underlying tree.
+%% @doc Returns the root of the grove's local tree.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec root(t()) -> hash() | undefined.
@@ -242,12 +224,12 @@ root(#?MODULE{tree = Tree}) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Calls `bondy_mst:put/3' and if the operation changed the tree (previous
-%% and new root differ), it bradcasts the change to the peers by calling
-%% the callback's `Module:broadcast/1' with an `gossip()'.
+%% @doc Calls `bondy_mst:put/3' on the local tree and if the operation changed
+%% the tree (previous and new root differ), it broadcasts the change to the
+%% peers by calling the callback's `Module:broadcast/1' with a `gossip()'.
 %%
 %% When the event is received by the peer it must handle it calling `handle/2'
-%% on its local grove.
+%% on its local grove instance.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec put(Grove0 :: t(), Key :: any(), Value :: any()) -> Grove1 :: t().
@@ -268,7 +250,6 @@ put(Grove, Key, Value) ->
                 Tree;
 
             false ->
-                ok = on_update(Grove, Key, Value),
                 Msg = #gossip{
                     from = NodeId,
                     root = Root,
@@ -311,7 +292,7 @@ trigger(#?MODULE{} = Grove, Peer) when is_atom(Peer) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Extracts a key-value pair from the `gossip()'.
+%% @doc Extracts a key-value pair from the `gossip()' message.
 %% @end
 %% -----------------------------------------------------------------------------
 gossip_data(#gossip{key = Key, value = Value}) ->
@@ -367,8 +348,6 @@ handle(Grove0, #gossip{} = Event) ->
                     ),
                     Grove2 = Grove1#?MODULE{merges = Merges},
                     Grove3 = maybe_broadcast(Grove2, Event),
-
-                    ok = on_update(Grove3, Key, Value),
 
                     case NewRoot =/= PeerRoot of
                         true ->
@@ -452,7 +431,6 @@ handle(Grove, #put{from = Peer, map = Map}) ->
                     Hash0 == Hash1
                         orelse error({inconsistency, Hash0, Page, Hash1}),
 
-                    ok = on_merge(Grove, Page),
                     Acc
                 end,
                 Grove#?MODULE.tree,
@@ -512,48 +490,6 @@ validate_callback_mod(Opts) ->
             )
         ),
     CallbackMod.
-
-
-
-%% @private
-on_update(#?MODULE{callback_mod = Mod}, Key, Value) ->
-    try
-        bondy_mst_utils:apply_lazy(
-            Mod, ?FUNCTION_NAME, 2, [Key, Value], fun() -> ok end
-        )
-    catch
-        Class:Reason:Stacktrace ->
-            ?LOG_ERROR(#{
-                message =>
-                    "Unexpected error while calling callback 'on_update'.",
-                class => Class,
-                reason => Reason,
-                stacktrace => Stacktrace
-            }),
-        ok
-    end.
-
-
-%% @private
-%% Calls the callback merge function if on_merge was enabled
-on_merge(#?MODULE{on_merge = true, callback_mod = Mod}, Page) ->
-    try
-        bondy_mst_utils:apply_lazy(
-            Mod, ?FUNCTION_NAME, 1, [Page], fun() -> ok end
-        )
-    catch
-        Class:Reason:Stacktrace ->
-            ?LOG_ERROR(#{
-                message => "Unexpected error while calling callback 'on_merge'",
-                class => Class,
-                reason => Reason,
-                stacktrace => Stacktrace
-            }),
-        ok
-    end;
-
-on_merge(#?MODULE{on_merge = false}, _) ->
-    ok.
 
 
 %% @private
@@ -663,6 +599,8 @@ merge(Grove, Peer) ->
             Grove
     end.
 
+
+%% @private
 do_merge(Grove0, Peer, PeerRoot) ->
     Tree0 = Grove0#?MODULE.tree,
     Root = bondy_mst:root(Tree0),
@@ -702,11 +640,13 @@ do_merge(Grove0, Peer, PeerRoot) ->
     end.
 
 
+%% @private
 maybe_gc(Grove) ->
     %% @TODO.
     Grove.
 
 
+%% @private
 encode_hash(undefined) -> undefined;
 encode_hash(Bin) -> binary:encode_hex(Bin).
 
