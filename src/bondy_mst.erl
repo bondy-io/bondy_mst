@@ -44,16 +44,19 @@
     %% `comparator` is a compare function for keys
     comparator      ::  comparator(),
     %% `merger` is a function for merging two items that have the same key
-    merger          ::  merger()
+    merger          ::  merger(),
+    hash_algorithm  ::  atom()
 }).
 
 -type t()           ::  #?MODULE{}.
 -type opts()        ::  [opt()] | opts_map().
 -type opt()         ::  {store, bondy_mst_store:t()}
+                        | {hash_algorithm, atom()}
                         | {merger, merger()}
                         | {comparator, comparator()}.
 -type opts_map()    ::  #{
                             store => bondy_mst_store:t(),
+                            hash_algorithm => atom(),
                             merger => merger(),
                             comparator => comparator()
                         }.
@@ -158,8 +161,13 @@ new() ->
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
-new(Opts) when is_map(Opts) ->
-    DefaultStore = fun() -> bondy_mst_store:open(bondy_mst_map_store, []) end,
+new(Opts0) when is_map(Opts0) ->
+    Opts = maps:merge(#{hash_algorithm => sha256}, Opts0),
+    Algo = maps:get(hash_algorithm, Opts),
+
+    DefaultStore = fun() ->
+        bondy_mst_store:open(bondy_mst_map_store, Algo, Opts)
+    end,
     Store = get_option(store, Opts, DefaultStore),
     Comparator = get_option(comparator, Opts, fun comparator/2),
     Merger = get_option(merger, Opts, fun merger/3),
@@ -167,7 +175,8 @@ new(Opts) when is_map(Opts) ->
     #?MODULE{
         store = Store,
         comparator = Comparator,
-        merger = Merger
+        merger = Merger,
+        hash_algorithm = Algo
     }.
 
 
@@ -389,7 +398,7 @@ put(#?MODULE{} = T, Key) ->
 
 put(#?MODULE{store = Store0} = T, Key, Value) ->
     Fun = fun() ->
-        Level = calc_level(Key),
+        Level = calc_level(T, Key),
         {Root, Store1} = put_at(T, Key, Value, Level),
         Store = bondy_mst_store:set_root(Store1, Root),
         T#?MODULE{store = Store}
@@ -566,9 +575,10 @@ merger(_Key, true, true) ->
 
 %% @private
 %% Computes the level of a key by hashing and counting leading zeroes.
-calc_level(Key) ->
-    Hash = binary:encode_hex(bondy_mst_utils:hash(Key)),
+calc_level(#?MODULE{hash_algorithm = Algo}, Key) ->
+    Hash = binary:encode_hex(bondy_mst_utils:hash(Key, Algo)),
     count_leading_zeroes(Hash, 0).
+
 
 %% @private
 %% Counts leading zeroes in a binary hash.

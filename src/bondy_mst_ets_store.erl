@@ -34,9 +34,10 @@
 -endif.
 
 -record(?MODULE, {
-    name            ::  binary(),
-    tab             ::  ets:tid(),
-    opts            ::  opts_map()
+    name                ::  binary(),
+    tab                 ::  ets:tid(),
+    hashing_algorithm   ::  atom(),
+    opts                ::  opts_map()
 }).
 
 -type t()           ::  #?MODULE{}.
@@ -63,7 +64,7 @@
 -export([get_root/1]).
 -export([has/2]).
 -export([missing_set/2]).
--export([open/1]).
+-export([open/2]).
 -export([page_refs/1]).
 -export([put/2]).
 -export([set_root/2]).
@@ -80,12 +81,12 @@
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec open(Opts :: opts()) -> t() | no_return().
+-spec open(Algo :: atom(), Opts :: opts()) -> t() | no_return().
 
-open(Opts) when is_list(Opts) ->
-    open(maps:from_list(Opts));
+open(Algo, Opts) when is_atom(Algo), is_list(Opts) ->
+    open(Algo, maps:from_list(Opts));
 
-open(Opts0) when is_map(Opts0) ->
+open(Algo, Opts0) when is_atom(Algo), is_map(Opts0) ->
     DefaultOpts = #{
         name => undefined,
         persistent => true
@@ -111,6 +112,7 @@ open(Opts0) when is_map(Opts0) ->
     #?MODULE{
         name = maps:get(name, Opts),
         tab = Tab,
+        hashing_algorithm = Algo,
         opts = Opts
     }.
 
@@ -172,8 +174,8 @@ has(#?MODULE{tab = Tab}, Hash) ->
 %% -----------------------------------------------------------------------------
 -spec put(T :: t(), Page :: page()) -> {Root :: binary(), T :: t()}.
 
-put(#?MODULE{tab = Tab} = T, Page) ->
-    Hash = bondy_mst_utils:hash(Page),
+put(#?MODULE{tab = Tab, hashing_algorithm = Algo} = T, Page) ->
+    Hash = bondy_mst_page:hash(Page, Algo),
     %% We insert both atomically
     true = ets:insert(Tab, [{Hash, Page}]),
     {Hash, T}.

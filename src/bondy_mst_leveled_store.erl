@@ -28,12 +28,14 @@
 -include("bondy_mst.hrl").
 
 -record(?MODULE, {
-    pid         :: pid(),
-    name        :: atom() | binary()
+    pid                 ::  pid(),
+    name                ::  atom() | binary(),
+    hashing_algorithm   ::  atom()
 }).
 
--type t()       ::  #?MODULE{}.
--type page()    ::  bondy_mst_page:t().
+-type t()               ::  #?MODULE{}.
+-type page()            ::  bondy_mst_page:t().
+-type opts()            ::  #{} | [].
 
 -export_type([t/0]).
 -export_type([page/0]).
@@ -49,7 +51,7 @@
 -export([get_root/1]).
 -export([has/2]).
 -export([missing_set/2]).
--export([open/1]).
+-export([open/2]).
 -export([page_refs/1]).
 -export([put/2]).
 -export([set_root/2]).
@@ -62,16 +64,23 @@
 
 
 
--spec open(Opts :: map() | list()) -> t().
+-spec open(Algo :: atom(), Opts :: opts()) -> t() | no_return().
 
-open(Opts) when is_list(Opts) ->
-    open(maps:from_list(Opts));
+open(Algo, Opts) when is_atom(Algo), is_list(Opts) ->
+    open(Algo, maps:from_list(Opts));
 
-open(#{name := Name} = _Opts) ->
+open(Algo, Opts) when is_atom(Algo), is_map(Opts) ->
+    Name = maps:get(name, Opts, undefined),
+    Name =/= undefined orelse error(badarg),
+
     %% TODO at the moment we use a global instance, we should give the option
     %% to create a dedicated instance or have shared store
     Pid = persistent_term:get({bondy_mst, leveled}),
-    #?MODULE{pid = Pid, name = Name}.
+    #?MODULE{
+        pid = Pid,
+        name = Name,
+        hashing_algorithm = Algo
+    }.
 
 
 -spec close(t()) -> ok.
@@ -109,8 +118,8 @@ has(#?MODULE{pid = Pid, name = Name}, Hash) ->
 
 -spec put(T :: t(), Page :: page()) -> {Hash :: binary(), T :: t()}.
 
-put(#?MODULE{pid = Pid, name = Name} = T, Page) ->
-    Hash = bondy_mst_utils:hash(Page),
+put(#?MODULE{pid = Pid, name = Name, hashing_algorithm = Algo} = T, Page) ->
+    Hash = bondy_mst_page:hash(Page, Algo),
     ok = leveled_bookie:book_put(Pid, Name, Hash, Page, []),
     {Hash, T}.
 

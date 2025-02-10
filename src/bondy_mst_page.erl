@@ -31,7 +31,8 @@
     level           ::  level(),
     low             ::  hash() | undefined,
     list            ::  [entry()],
-    freed_at        ::  epoch() | undefined
+    freed_at        ::  epoch() | undefined,
+    source = local  ::  local | node()
 }).
 
 -type t()           ::  #?MODULE{}.
@@ -39,6 +40,7 @@
 
 -export_type([t/0]).
 -export_type([entry/0]).
+
 %% Defined in bondy_mst.hrl
 -export_type([level/0]).
 -export_type([key/0]).
@@ -48,6 +50,7 @@
 -export([fold/3]).
 -export([foreach/2]).
 -export([freed_at/1]).
+-export([hash/2]).
 -export([is_referenced_at/2]).
 -export([is_type/1]).
 -export([level/1]).
@@ -155,6 +158,18 @@ is_referenced_at(#?MODULE{freed_at = undefined}, _) ->
 
 is_referenced_at(#?MODULE{freed_at = LastEpoch}, Epoch) ->
     LastEpoch >= Epoch.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc %% @doc Computes the hash of the page using algorithm `Algo'.
+%% This function must be used to obtain a hash as it ignores certain fields that
+%% will diverge between replicas and are used for operational and/or efficiency
+%% purposes.
+%% @end
+%% -----------------------------------------------------------------------------
+hash(#?MODULE{} = T, Algo) when is_atom(Algo) ->
+    #?MODULE{level = Level, low = Low, list = List} = T,
+    bondy_mst_utils:hash({Level, Low, List}, Algo).
 
 
 %% -----------------------------------------------------------------------------

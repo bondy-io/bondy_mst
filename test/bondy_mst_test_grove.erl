@@ -53,7 +53,7 @@ start(#{store_type := StoreType, name := Name0} = Opts, Peers) ->
         begin
             Name = <<Name0/binary, "-", (atom_to_binary(NodeId))/binary>>,
             Store = bondy_mst_store:open(
-                StoreType, [{name, Name}]
+                StoreType, sha256, [{name, Name}]
             ),
             {ok, _} = start_link(NodeId, Opts#{store => Store}),
             NodeId

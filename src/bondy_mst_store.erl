@@ -43,6 +43,8 @@
 -type t()               ::  #?MODULE{}.
 -type page()            ::  any().
 -type backend()         ::  any().
+-type opts()            ::  #{atom() => any()} | [{atom(), any()}].
+
 %% -type iterator_action() ::  first
 %%                             | last
 %%                             | next
@@ -54,6 +56,7 @@
 -export_type([t/0]).
 -export_type([backend/0]).
 -export_type([page/0]).
+-export_type([opts/0]).
 
 %% API
 -export([close/1]).
@@ -66,7 +69,7 @@
 -export([has/2]).
 -export([is_type/1]).
 -export([missing_set/2]).
--export([open/2]).
+-export([open/3]).
 -export([page_refs/2]).
 -export([put/2]).
 -export([set_root/2]).
@@ -78,7 +81,7 @@
 %% =============================================================================
 
 
--callback open(Opts :: map()) -> backend().
+-callback open(HashAlgorithm :: atom(), Opts :: opts()) -> backend().
 
 -callback close(backend()) -> ok.
 
@@ -117,12 +120,16 @@
 
 
 
--spec open(Mod :: module(), Opts :: map()) -> t() | no_return().
+-spec open(Mod :: module(), HashAlgo :: atom(), Opts :: map() | list()) ->
+    t() | no_return().
 
-open(Mod, Opts) when is_atom(Mod) andalso (is_map(Opts) orelse is_list(Opts)) ->
+open(Mod, HashAlgo, Opts)
+when is_atom(Mod)
+andalso is_atom(HashAlgo)
+andalso (is_map(Opts) orelse is_list(Opts)) ->
     #?MODULE{
         mod = Mod,
-        state = Mod:open(Opts),
+        state = Mod:open(HashAlgo, Opts),
         transactions = supports_transactions(Mod)
     }.
 

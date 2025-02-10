@@ -36,13 +36,15 @@
 -include("bondy_mst.hrl").
 
 -record(?MODULE, {
-    root        ::  hash() | undefined,
-    pages = #{} ::  map(),
-    opts        ::  map()
+    root                ::  hash() | undefined,
+    hashing_algorithm   ::  atom(),
+    pages = #{}         ::  map(),
+    opts                ::  map()
 }).
 
--type t()       ::  #?MODULE{}.
--type page()    ::  bondy_mst_page:t().
+-type t()               ::  #?MODULE{}.
+-type page()            ::  bondy_mst_page:t().
+-type opts()            ::  #{} | [].
 
 -export_type([t/0]).
 -export_type([page/0]).
@@ -57,7 +59,7 @@
 -export([get_root/1]).
 -export([has/2]).
 -export([missing_set/2]).
--export([open/1]).
+-export([open/2]).
 -export([page_refs/1]).
 -export([put/2]).
 -export([set_root/2]).
@@ -70,16 +72,18 @@
 
 
 
--spec open(Opts :: map() | list()) -> t().
+-spec open(Algo :: atom(), Opts :: opts()) -> t() | no_return().
 
-open(Opts) when is_list(Opts) ->
-    open(maps:from_list(Opts));
+open(Algo, Opts) when is_atom(Algo), is_list(Opts) ->
+    open(Algo, maps:from_list(Opts));
 
-open(Opts) when is_map(Opts) ->
+open(Algo, Opts0) when is_atom(Algo), is_map(Opts0) ->
     Default = #{read_concurrency => false},
+    Opts = maps:merge(Default, Opts0),
 
     #?MODULE{
-        opts = maps:merge(Default, Opts)
+        hashing_algorithm = Algo,
+        opts = Opts
     }.
 
 
@@ -115,8 +119,8 @@ has(#?MODULE{pages = Pages}, Hash) ->
 
 -spec put(t(), page()) -> {Hash :: binary(), t()}.
 
-put(#?MODULE{pages = Pages} = T0, Page) ->
-    Hash = bondy_mst_utils:hash(Page),
+put(#?MODULE{pages = Pages, hashing_algorithm = Algo} = T0, Page) ->
+    Hash = bondy_mst_page:hash(Page, Algo),
     T = T0#?MODULE{pages = maps:put(Hash, Page, Pages)},
     {Hash, T}.
 

@@ -46,12 +46,12 @@ groups() ->
 
 
 init_per_group(local_store, Config) ->
-    Fun = fun(_) -> bondy_mst_store:open(bondy_mst_map_store, []) end,
+    Fun = fun(_) -> bondy_mst_store:open(bondy_mst_map_store, sha256, []) end,
     [{store_fun, Fun}] ++ Config;
 
 init_per_group(ets_store, Config) ->
     Fun = fun(Name) ->
-        bondy_mst_store:open(bondy_mst_ets_store, [{name, Name}])
+        bondy_mst_store:open(bondy_mst_ets_store, sha256, [{name, Name}])
     end,
     [{store_fun, Fun}] ++ Config;
 
@@ -60,7 +60,7 @@ init_per_group(leveled_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
 
     Fun = fun(Name) ->
-        bondy_mst_store:open(bondy_mst_leveled_store, [{name, Name}])
+        bondy_mst_store:open(bondy_mst_leveled_store, sha256, [{name, Name}])
     end,
     [{store_fun, Fun}] ++ Config;
 
@@ -68,7 +68,7 @@ init_per_group(rocksdb_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
 
     Fun = fun(Name) ->
-        bondy_mst_store:open(bondy_mst_rocksdb_store, [{name, Name}])
+        bondy_mst_store:open(bondy_mst_rocksdb_store, sha256, [{name, Name}])
     end,
     [{store_fun, Fun}] ++ Config.
 

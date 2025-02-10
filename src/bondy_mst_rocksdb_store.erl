@@ -35,24 +35,25 @@
 
 
 -record(?MODULE, {
-    name            ::  binary(),
-    ref             ::  rocksdb:db_handle(),
-    opts            ::  opts_map(),
-    root_key        ::  binary()
+    name                ::  binary(),
+    ref                 ::  rocksdb:db_handle(),
+    hashing_algorithm   ::  atom(),
+    opts                ::  opts_map(),
+    root_key            ::  binary()
 }).
 
--type t()           ::  #?MODULE{}.
--type opt()         ::  {name, binary()}
-                        | {transactions, tx_kind()}
-                        | {persistent, boolean()}.
--type opts()        ::  [opt()] | opts_map().
--type opts_map()    ::  #{
-                            name := binary(),
-                            transactions => tx_kind(),
-                            persistent => boolean()
-                        }.
--type tx_kind()     ::  pessimistic | optimistic.
--type page()        ::  bondy_mst_page:t().
+-type t()               ::  #?MODULE{}.
+-type opt()             ::  {name, binary()}
+                            | {transactions, tx_kind()}
+                            | {persistent, boolean()}.
+-type opts()            ::  [opt()] | opts_map().
+-type opts_map()        ::  #{
+                                name := binary(),
+                                transactions => tx_kind(),
+                                persistent => boolean()
+                            }.
+-type tx_kind()         ::  pessimistic | optimistic.
+-type page()            ::  bondy_mst_page:t().
 
 
 -export_type([t/0]).
@@ -69,7 +70,7 @@
 -export([get_root/1]).
 -export([has/2]).
 -export([missing_set/2]).
--export([open/1]).
+-export([open/2]).
 -export([page_refs/1]).
 -export([put/2]).
 -export([set_root/2]).
@@ -87,12 +88,12 @@
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec open(Opts :: opts()) -> t() | no_return().
+-spec open(Algo :: atom(), Opts :: opts()) -> t() | no_return().
 
-open(Opts) when is_list(Opts) ->
-    open(maps:from_list(Opts));
+open(Algo, Opts) when is_atom(Algo), is_list(Opts) ->
+    open(Algo, maps:from_list(Opts));
 
-open(Opts0) when is_map(Opts0) ->
+open(Algo, Opts0) when is_atom(Algo), is_map(Opts0) ->
     DefaultOpts = #{
         name => undefined,
         transactions => optimistic,
@@ -126,6 +127,7 @@ open(Opts0) when is_map(Opts0) ->
     #?MODULE{
         name = Name,
         ref = Ref,
+        hashing_algorithm = Algo,
         opts = Opts,
         root_key = prefixed_key(Name, ?ROOT_KEY)
     }.
@@ -193,11 +195,11 @@ has(#?MODULE{name = Name} = T, Hash) when is_binary(Hash) ->
 %% -----------------------------------------------------------------------------
 -spec put(T :: t(), Page :: page()) -> {Hash :: hash(), T :: t()}.
 
-put(#?MODULE{name = Name} = T, Page) ->
+put(#?MODULE{name = Name, hashing_algorithm = Algo} = T, Page) ->
     bondy_mst_page:is_type(Page) orelse error(badarg),
 
     Fun = fun() ->
-        Hash = bondy_mst_utils:hash(Page),
+        Hash = bondy_mst_page:hash(Page, Algo),
         ok = do_put(T, prefixed_key(Name, Hash), encode_value(Page)),
         {Hash, T}
     end,
