@@ -10,8 +10,8 @@
     utils,
     resulto,
     memory,
-    leveled,
-    rocksdb
+    %% rocksdb,
+    leveled
    ]},
   {env,[]},
   {modules, []},

@@ -44,11 +44,11 @@ groups() ->
         {set_with_local_store, [], set_test_cases()},
         {set_with_ets_store, [], set_test_cases()},
         {set_with_ets_persistent_store, [], set_test_cases()},
-        {set_with_rocksdb_store, [], set_test_cases()},
+        %% {set_with_rocksdb_store, [], set_test_cases()},
         {set_with_leveled_store, [], set_test_cases()},
         {set_of_awsets_with_local_store, [], set_of_awsets_test_cases()},
         {set_of_awsets_with_ets_store, [], set_of_awsets_test_cases()},
-        {set_of_awsets_with_rocksdb_store, [], set_of_awsets_test_cases()},
+        %% {set_of_awsets_with_rocksdb_store, [], set_of_awsets_test_cases()},
         {set_of_awsets_with_leveled_store, [], set_of_awsets_test_cases()}
     ].
 

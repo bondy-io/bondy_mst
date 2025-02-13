@@ -14,8 +14,8 @@ all() ->
     [
         {group, local_store, []},
         {group, ets_store, []},
-        {group, leveled_store, []},
-        {group, rocksdb_store, []}
+        %% {group, rocksdb_store, []},
+        {group, leveled_store, []}
     ].
 
 groups() ->
@@ -31,12 +31,12 @@ groups() ->
             persistent_test,
             large_test
         ]},
-        {rocksdb_store, [], [
-            small_test,
-            first_last_test,
-            persistent_test,
-            large_test
-        ]},
+        %% {rocksdb_store, [], [
+        %%     small_test,
+        %%     first_last_test,
+        %%     persistent_test,
+        %%     large_test
+        %% ]},
         {leveled_store, [], [
             small_test,
             first_last_test,

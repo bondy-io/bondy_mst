@@ -73,7 +73,7 @@ init([]) ->
         intensity => 0,
         period => 1
     },
-    ChildSpecs = maybe_append_leveled(maybe_append_rocksdb_manager([])),
+    ChildSpecs = maybe_append_leveled([]),
 
     {ok, {SupFlags, ChildSpecs}}.
 
@@ -95,23 +95,23 @@ maybe_append_leveled(Acc) ->
                 ]
     end.
 
-maybe_append_rocksdb_manager(Acc) ->
-    case bondy_mst_config:get([store, rocksdb], []) of
-        [] ->
-            Acc;
-        Opts ->
-            [
-                #{
-                    id => bondy_mst_rocksdb_manager,
-                    start => {
-                        bondy_mst_rocksdb_manager,
-                        start_link,
-                        [Opts]
-                    },
-                    restart => permanent,
-                    shutdown => 5000,
-                    type => worker,
-                    modules => [bondy_mst_rocksdb_manager]
-                } | Acc
-            ]
-    end.
+%% maybe_append_rocksdb_manager(Acc) ->
+%%     case bondy_mst_config:get([store, rocksdb], []) of
+%%         [] ->
+%%             Acc;
+%%         Opts ->
+%%             [
+%%                 #{
+%%                     id => bondy_mst_rocksdb_manager,
+%%                     start => {
+%%                         bondy_mst_rocksdb_manager,
+%%                         start_link,
+%%                         [Opts]
+%%                     },
+%%                     restart => permanent,
+%%                     shutdown => 5000,
+%%                     type => worker,
+%%                     modules => [bondy_mst_rocksdb_manager]
+%%                 } | Acc
+%%             ]
+%%     end.
