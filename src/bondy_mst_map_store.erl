@@ -58,6 +58,7 @@
 -export([get/2]).
 -export([get_root/1]).
 -export([has/2]).
+-export([list/1]).
 -export([missing_set/2]).
 -export([open/2]).
 -export([page_refs/1]).
@@ -131,6 +132,7 @@ copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
     case bondy_mst_store:get(OtherStore, Hash) of
         undefined ->
             T0;
+
         Page ->
             Refs = bondy_mst_store:page_refs(OtherStore, Page),
             T = lists:foldl(
@@ -142,6 +144,17 @@ copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
     end.
 
 
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec list(t()) -> [page()].
+
+list(#?MODULE{pages = Pages}) ->
+    maps:values(Pages).
+
+
+
 -spec free(t(), Hash :: binary(), Page :: page()) -> t().
 
 free(#?MODULE{pages = Pages0} = T, Hash, _Page) ->
@@ -149,9 +162,13 @@ free(#?MODULE{pages = Pages0} = T, Hash, _Page) ->
     T#?MODULE{pages = Pages}.
 
 
--spec gc(t(), KeepRoots :: [list()]) -> t().
+-spec gc(t(), KeepRoots :: [list()] | epoch()) -> t().
 
-gc(#?MODULE{pages = Pages0} = T, KeepRoots) ->
+gc(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
+    %% Epoch-based GC not implemented as this is not a persistent structure
+    T;
+
+gc(#?MODULE{pages = Pages0} = T, KeepRoots) when is_list(KeepRoots) ->
     Pages =
         lists:foldl(
             fun(X, Acc) -> gc_aux(Acc, Pages0, X) end,
@@ -170,7 +187,7 @@ missing_set(#?MODULE{pages = Pages} = T, Root) ->
 
         Page ->
             lists:foldl(
-                fun(X, Acc) -> sets:union(Acc, missing_set(T, X)) end,
+                fun(Hash, Acc) -> sets:union(Acc, missing_set(T, Hash)) end,
                 sets:new([{version, 2}]),
                 page_refs(Page)
             )

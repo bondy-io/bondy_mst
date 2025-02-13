@@ -127,9 +127,26 @@ handle_call({get, Key}, _From, Grove) ->
     Reply = bondy_mst:get(bondy_mst_grove:tree(Grove), Key),
     {reply, Reply, Grove};
 
+handle_call({gc, Epoch}, _From, Grove0) ->
+    ct:pal("Triggering GC on peer"),
+    Grove = bondy_mst_grove:gc(Grove0, Epoch),
+    {reply, ok, Grove};
+
 handle_call(list, _From, Grove) ->
     ct:pal("handling list"),
     Reply = bondy_mst:to_list(bondy_mst_grove:tree(Grove)),
+    {reply, Reply, Grove};
+
+handle_call(list_pages, _From, Grove) ->
+    ct:pal("handling list_pages"),
+    Store = bondy_mst:store(bondy_mst_grove:tree(Grove)),
+    Reply = bondy_mst_store:list(Store),
+    {reply, Reply, Grove};
+
+handle_call({fold_pages, Fun, Acc, Opts}, _From, Grove) ->
+    ct:pal("handling fold_pages"),
+    Tree = bondy_mst_grove:tree(Grove),
+    Reply = bondy_mst:fold_pages(Tree, Fun, Acc, Opts),
     {reply, Reply, Grove};
 
 handle_call({put, Key}, _From, Grove0) ->

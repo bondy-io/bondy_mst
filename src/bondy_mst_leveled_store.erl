@@ -50,6 +50,7 @@
 -export([get/2]).
 -export([get_root/1]).
 -export([has/2]).
+-export([list/1]).
 -export([missing_set/2]).
 -export([open/2]).
 -export([page_refs/1]).
@@ -144,16 +145,32 @@ copy(#?MODULE{pid = Pid, name = Name} = T, OtherStore, Hash) ->
     end.
 
 
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec list(t()) -> [page()].
+
+list(#?MODULE{}) ->
+    %% TODO
+    [].
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec free(T :: t(), Hash :: binary(), Page :: page()) -> T :: t().
 
 free(#?MODULE{pid = Pid, name = Name} = T, Hash, _Page) ->
+    %% We immediately delete
     ok = leveled_bookie:book_delete(Pid, Name, Hash, []),
     T.
 
 
--spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
+-spec gc(T :: t(), KeepRoots :: [list()] | epoch()) -> T :: t().
 
-gc(#?MODULE{} = T, _KeepRoots) ->
+gc(#?MODULE{} = T, _) ->
     %% Do nothing, we free instead
     T.
 

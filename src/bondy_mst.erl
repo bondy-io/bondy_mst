@@ -40,41 +40,41 @@
 -include("bondy_mst.hrl").
 
 -record(bondy_mst, {
-    store           ::  bondy_mst_store:t(),
+    store               ::  bondy_mst_store:t(),
     %% `comparator` is a compare function for keys
-    comparator      ::  comparator(),
+    comparator          ::  comparator(),
     %% `merger` is a function for merging two items that have the same key
-    merger          ::  merger(),
-    hash_algorithm  ::  atom()
+    merger              ::  merger(),
+    hash_algorithm      ::  atom()
 }).
 
--type t()           ::  #?MODULE{}.
--type opts()        ::  [opt()] | opts_map().
--type opt()         ::  {store, bondy_mst_store:t()}
-                        | {hash_algorithm, atom()}
-                        | {merger, merger()}
-                        | {comparator, comparator()}.
--type opts_map()    ::  #{
-                            store => bondy_mst_store:t(),
-                            hash_algorithm => atom(),
-                            merger => merger(),
-                            comparator => comparator()
-                        }.
--type comparator()  ::  fun((key(), key()) -> eq | lt | gt).
--type merger()      ::  fun((key(), value(), value()) -> value()).
--type key_range()   ::  {key(), key()}
-                        | {first, key()}
-                        | {key(), undefined}.
+-type t()               ::  #?MODULE{}.
+-type opts()            ::  [opt()] | opts_map().
+-type opt()             ::  {store, bondy_mst_store:t()}
+                            | {hash_algorithm, atom()}
+                            | {merger, merger()}
+                            | {comparator, comparator()}.
+-type opts_map()        ::  #{
+                                store => bondy_mst_store:t(),
+                                hash_algorithm => atom(),
+                                merger => merger(),
+                                comparator => comparator()
+                            }.
+-type comparator()      ::  fun((key(), key()) -> eq | lt | gt).
+-type merger()          ::  fun((key(), value(), value()) -> value()).
+-type key_range()       ::  {key(), key()}
+                            | {first, key()}
+                            | {key(), undefined}.
 %% Fold
--type fold_fun()    ::  fun(({key(), value()}, any()) -> any()).
--type fold_opts()   ::  [fold_opt()].
--type fold_opt()    ::  {root, hash()}
-                        | {first, key()}
-                        | {match_spec, term()}
-                        | {stop, key()}
-                        | {keys_only, boolean()}
-                        | {limit, pos_integer() | infinity}.
-
+-type fold_fun()        ::  fun(({key(), value()}, any()) -> any()).
+-type fold_opts()       ::  [fold_opt()].
+-type fold_opt()        ::  {root, hash()}
+                            | {first, key()}
+                            | {match_spec, term()}
+                            | {stop, key()}
+                            | {keys_only, boolean()}
+                            | {limit, pos_integer() | infinity}.
+-type fold_pages_fun()  ::  fun(({hash(), bondy_mst_page:t()}, any()) -> any()).
 
 -export_type([t/0]).
 -export_type([opt/0]).
@@ -96,6 +96,7 @@
 -export([first/1]).
 -export([fold/3]).
 -export([fold/4]).
+-export([fold_pages/4]).
 -export([foreach/2]).
 -export([foreach/3]).
 -export([gc/1]).
@@ -161,10 +162,8 @@ new() ->
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
-new(Opts0) when is_map(Opts0) ->
-    Opts = maps:merge(#{hash_algorithm => sha256}, Opts0),
-    Algo = maps:get(hash_algorithm, Opts),
-
+new(Opts) when is_map(Opts) ->
+    Algo = maps:get(hash_algorithm, Opts, sha256),
     DefaultStore = fun() ->
         bondy_mst_store:open(bondy_mst_map_store, Algo, Opts)
     end,
@@ -335,6 +334,20 @@ fold(T, Fun, AccIn) ->
 fold(#?MODULE{store = Store} = T, Fun, AccIn, Opts) ->
     Root = key_value:get_lazy(root, Opts, fun() -> root(T) end),
     do_fold(Store, Fun, AccIn, Opts, Root).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec fold_pages(
+    t(), Fun :: fold_pages_fun(), AccIn :: any(), Opts :: fold_opts()) ->
+    AccOut :: any().
+
+fold_pages(#?MODULE{store = Store} = T, Fun, AccIn, Opts)
+when is_function(Fun, 2), is_map(Opts) ->
+    Root = key_value:get_lazy(root, Opts, fun() -> root(T) end),
+    do_fold_pages(Store, Fun, AccIn, Opts, Root).
 
 
 %% -----------------------------------------------------------------------------
@@ -559,8 +572,8 @@ apply_default(Default) ->
 %% @end
 %% -----------------------------------------------------------------------------
 comparator(A, B) when A < B -> lt;
-comparator(A, B) when A > B -> gt;
-comparator(A, B) when A == B -> eq.
+comparator(A, B) when A == B -> eq;
+comparator(A, B) when A > B -> gt.
 
 
 %% -----------------------------------------------------------------------------
@@ -880,7 +893,7 @@ split(_, Store, undefined, _) ->
     {undefined, undefined, Store};
 
 split(T, Store0, Hash, Key) ->
-    Page = get_page(Store0, Hash, T),
+    Page = get_page(T, Store0, Hash),
     Level = bondy_mst_page:level(Page),
     Low = bondy_mst_page:low(Page),
     [{K0, _, _} | _] = List0 = bondy_mst_page:list(Page),
@@ -907,6 +920,7 @@ split_aux(T, Store0, Key, _, [{K1, V1, R1}]) ->
     case compare(T, K1, Key) of
         eq ->
             error(inconsistency);
+
         _ ->
             {R1L, R1H, Store} = split(T, Store0, R1, Key),
             {[{K1, V1, R1L}], R1H, Store}
@@ -936,7 +950,7 @@ split_aux(T, Store0, Key, Level, [First, Second | Rest0]) ->
 
 
 %% @private
-get_page(Store, Hash, T) ->
+get_page(T, Store, Hash) ->
     case bondy_mst_store:get(Store, Hash) of
         undefined ->
             bondy_mst_store:get(T#?MODULE.store, Hash);
@@ -971,7 +985,7 @@ merge_aux(A, B, Store0, ARoot, BRoot) ->
     ALow = bondy_mst_page:low(APage),
     AEntries = bondy_mst_page:list(APage),
 
-    BPage = get_page(Store0, BRoot, B),
+    BPage = get_page(B, Store0, BRoot),
     BLevel = bondy_mst_page:level(BPage),
     BLow = bondy_mst_page:low(BPage),
     BEntries = bondy_mst_page:list(BPage),
@@ -1070,6 +1084,29 @@ do_fold(Store, Fun, AccIn, Opts, Root) ->
                     do_fold(Store, Fun, Acc1, Opts, Hash)
                 end,
                 AccOut
+            )
+    end.
+
+
+%% @private
+%% Iterates over the MST and applies a function to each element.
+do_fold_pages(_, _, Acc, _, undefined) ->
+    Acc;
+
+do_fold_pages(Store, Fun, AccIn, Opts, Root) ->
+    case bondy_mst_store:get(Store, Root) of
+        undefined ->
+            AccIn;
+
+        Page ->
+            Low = bondy_mst_page:low(Page),
+            AccOut = do_fold_pages(Store, Fun, AccIn, Opts, Low),
+            bondy_mst_page:fold(
+                Page,
+                fun({_, _, Hash}, Acc0) ->
+                    do_fold_pages(Store, Fun, Acc0, Opts, Hash)
+                end,
+                Fun({Root, Page}, AccOut)
             )
     end.
 

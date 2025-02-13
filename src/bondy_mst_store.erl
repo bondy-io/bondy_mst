@@ -68,6 +68,8 @@
 -export([get_root/1]).
 -export([has/2]).
 -export([is_type/1]).
+-export([list/1]).
+-export([list/2]).
 -export([missing_set/2]).
 -export([open/3]).
 -export([page_refs/2]).
@@ -92,6 +94,8 @@
 -callback get(backend(), page()) -> page() | undefined.
 
 -callback has(backend(), page()) -> boolean().
+
+-callback list(backend()) -> [page()].
 
 -callback put(backend(), page()) -> {Hash :: hash(), backend()}.
 
@@ -170,9 +174,8 @@ get_root(#?MODULE{mod = Mod, state = State}) ->
 %% -----------------------------------------------------------------------------
 -spec set_root(Store :: t(), Hash :: hash()) -> t().
 
-set_root(#?MODULE{mod = Mod, state = State0} = T, Hash) when is_binary(Hash) ->
-    State = Mod:set_root(State0, Hash),
-    T#?MODULE{state = State}.
+set_root(#?MODULE{} = T, Hash) when is_binary(Hash) ->
+    do_set_root(T, Hash).
 
 
 %% -----------------------------------------------------------------------------
@@ -194,6 +197,31 @@ get(#?MODULE{mod = Mod, state = State}, Hash) ->
 
 has(#?MODULE{mod = Mod, state = State}, Hash) ->
     Mod:has(State, Hash).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Returns the list of all the pages in the store.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec list(Store :: t()) -> [page()].
+
+list(#?MODULE{mod = Mod, state = State}) ->
+    Mod:list(State).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Returns the list of pages which have root `Root`.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec list(Store :: t(), Root :: hash()) -> [page()].
+
+list(#?MODULE{} = Store, Root) when is_binary(Root) ->
+    fold_descendants(
+        Store,
+        Root,
+        fun({_, P}, Acc) -> [P|Acc] end,
+        []
+    ).
 
 
 %% -----------------------------------------------------------------------------
@@ -224,8 +252,14 @@ copy(#?MODULE{mod = Mod, state = State0} = T, OtherStore, Hash) ->
 %% -----------------------------------------------------------------------------
 -spec free(Store :: t(), Hash :: hash(), Page :: page()) -> Store :: t().
 
-free(#?MODULE{mod = Mod, state = State0} = T, Hash, Page) ->
-    T#?MODULE{state = Mod:free(State0, Hash, Page)}.
+free(#?MODULE{mod = Mod, state = State0} = T0, Hash, Page) ->
+    T = T0#?MODULE{state = Mod:free(State0, Hash, Page)},
+    case get_root(T) of
+        Hash ->
+            do_set_root(T, undefined);
+        _ ->
+            T
+    end.
 
 
 %% -----------------------------------------------------------------------------
@@ -301,3 +335,31 @@ supports_transactions(Mod) ->
     ok = bondy_mst_utils:ensure_loaded(Mod),
     erlang:function_exported(Mod, transaction, 2).
 
+
+do_set_root(#?MODULE{mod = Mod, state = State0} = T, Hash)
+when is_binary(Hash) orelse Hash == undefined ->
+    State = Mod:set_root(State0, Hash),
+    T#?MODULE{state = State}.
+
+
+%% @private
+fold_descendants(_, undefined, _, Acc) ->
+    Acc;
+
+fold_descendants(Store, Root, Fun, AccIn) ->
+    case ?MODULE:get(Store, Root) of
+        undefined ->
+            AccIn;
+
+        Page ->
+            Low = bondy_mst_page:low(Page),
+            AccOut = fold_descendants(Store, Low, Fun, AccIn),
+
+            bondy_mst_page:fold(
+                Page,
+                fun({_, _, Hash}, Acc0) ->
+                    fold_descendants(Store, Hash, Fun, Acc0)
+                end,
+                Fun({Root, Page}, AccOut)
+            )
+    end.

@@ -69,6 +69,7 @@
 -export([get/2]).
 -export([get_root/1]).
 -export([has/2]).
+-export([list/1]).
 -export([missing_set/2]).
 -export([open/2]).
 -export([page_refs/1]).
@@ -242,6 +243,26 @@ copy(#?MODULE{name = Name} = T, Target, Hash) ->
 
 
 %% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec list(t()) -> [page()].
+
+list(#?MODULE{ref = Ref} = T) ->
+    Name = T#?MODULE.name,
+    {ok, Itr} = rocksdb:iterator(Ref, []),
+    Prefix = prefixed_key(Name),
+    IterAction = {seek, Prefix},
+
+    try
+        do_list(rocksdb:iterator_move(Itr, IterAction), T, Prefix, Itr, [])
+    after
+        rocksdb:iterator_close(Itr)
+    end.
+
+
+
+%% -----------------------------------------------------------------------------
 %% @doc Can only be called within a transaction.
 %% @end
 %% -----------------------------------------------------------------------------
@@ -256,7 +277,7 @@ free(#?MODULE{opts = #{persistent := true}} = T, Hash, Page0) ->
     T;
 
 free(#?MODULE{opts = #{persistent := false}} = T, Hash, _Page) ->
-    %% We immidiately delete
+    %% We immediately delete
     Fun = fun() ->
         TxRef = tx_ref(T),
         Key = prefixed_key(T#?MODULE.name, Hash),
@@ -284,12 +305,14 @@ when is_integer(Epoch) ->
     {ok, Itr} = rocksdb:iterator(Ref, []),
     {ok, BatchRef} = rocksdb:batch(),
     Name = T#?MODULE.name,
-    IterAction = {seek, <<Name/binary, 0>>},
+    Prefix = prefixed_key(Name),
+    IterAction = {seek, Prefix},
 
     try
         ok = gc_batch_delete(
-            rocksdb:iterator_move(Itr, IterAction), T, Itr, BatchRef, Epoch
-        ),
+            rocksdb:iterator_move(Itr, IterAction),
+            T, Prefix, Itr, BatchRef, Epoch
+            ),
 
         case rocksdb:write_batch(Ref, BatchRef, []) of
             ok ->
@@ -446,6 +469,11 @@ do_put(#?MODULE{} = T, Key, Value) when is_binary(Key), is_binary(Value) ->
         {error, Reason} ->
             error(format_reason(Reason))
     end.
+
+
+%% @private
+prefixed_key(Name) when is_binary(Name)->
+    <<Name/binary, 0>>.
 
 
 %% @private
@@ -641,20 +669,46 @@ format_reason(Term) ->
 
 
 %% @private
-gc_batch_delete({error, iterator_closed}, _T, _Itr, _BatchRef, _Epoch) ->
+gc_batch_delete({error, iterator_closed}, _T, _Pref, _Itr, _BatchRef, _Epoch) ->
   throw(iterator_closed);
 
-gc_batch_delete({error, invalid_iterator}, _T, _Itr, _BatchRef, _Epoch) ->
+gc_batch_delete({error, invalid_iterator}, _T, _Pref, _Itr, _BatchRef, _Epoch) ->
   ok;
 
-gc_batch_delete({ok, K, V}, T, Itr, BatchRef, Epoch) ->
-    Page = binary_to_term(V),
-    _ = case bondy_mst_page:freed_at(Page) =< Epoch of
+gc_batch_delete({ok, K, V}, T, Prefix, Itr, BatchRef, Epoch) ->
+    case binary:longest_common_prefix([K, Prefix]) == byte_size(Prefix) of
         true ->
-            ok = rocksdb:batch_delete(BatchRef, K);
+            Page = binary_to_term(V),
+            _ = case bondy_mst_page:freed_at(Page) =< Epoch of
+                true ->
+                    ok = rocksdb:batch_delete(BatchRef, K);
+
+                false ->
+                    ok
+            end,
+            Action = rocksdb:iterator_move(Itr, next),
+            gc_batch_delete(Action, T, Prefix, Itr, BatchRef, Epoch);
 
         false ->
+            %% We finished iterating with Prefix
             ok
-    end,
-    gc_batch_delete(rocksdb:iterator_move(Itr, next), T, Itr, BatchRef, Epoch).
+    end.
 
+
+%% @private
+do_list({error, iterator_closed}, _, _, _, _) ->
+    throw(iterator_closed);
+
+do_list({error, invalid_iterator}, _, _, _, Acc) ->
+    Acc;
+
+do_list({ok, K, V}, T, Prefix, Itr, Acc) ->
+    case binary:longest_common_prefix([K, Prefix]) == byte_size(Prefix) of
+        true ->
+            Page = binary_to_term(V),
+            Action = rocksdb:iterator_move(Itr, next),
+            do_list(Action, T, Prefix, Itr, [Page | Acc]);
+
+        false ->
+            Acc
+    end.

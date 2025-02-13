@@ -28,15 +28,16 @@
 -include("bondy_mst.hrl").
 
 -record(?MODULE, {
-    level           ::  level(),
-    low             ::  hash() | undefined,
-    list            ::  [entry()],
-    freed_at        ::  epoch() | undefined,
-    source = local  ::  local | node()
+    level               ::  level(),
+    low                 ::  hash() | undefined,
+    list                ::  [entry()],
+    source = undefined  ::  source(),
+    freed_at            ::  epoch() | undefined
 }).
 
--type t()           ::  #?MODULE{}.
--type entry()       ::  {key(), value(), hash() | undefined}.
+-type t()               ::  #?MODULE{}.
+-type entry()           ::  {key(), value(), hash() | undefined}.
+-type source()          ::  undefined | node().
 
 -export_type([t/0]).
 -export_type([entry/0]).
@@ -46,7 +47,9 @@
 -export_type([key/0]).
 -export_type([value/0]).
 -export_type([hash/0]).
+-export_type([source/0]).
 
+-export([field_index/1]).
 -export([fold/3]).
 -export([foreach/2]).
 -export([freed_at/1]).
@@ -60,6 +63,8 @@
 -export([pattern/0]).
 -export([refs/1]).
 -export([set_freed_at/2]).
+-export([set_source/2]).
+-export([source/1]).
 
 
 
@@ -90,11 +95,13 @@ new(Level, Low, List) when is_integer(Level), is_list(List) ->
 -spec pattern() -> t().
 
 pattern() ->
-    #?MODULE{
-        level = '$1',
-        low = '$2',
-        list = '$3',
-        freed_at = '$4'
+    {
+        ?MODULE,
+        '$1', % level
+        '$2', % low
+        '$3', % list
+        '$4', % source
+        '$5'  % freed_at
     }.
 
 
@@ -107,6 +114,14 @@ pattern() ->
 is_type(#?MODULE{}) -> true;
 is_type(_) -> false.
 
+
+-spec field_index(atom()) -> pos_integer().
+
+field_index(level) -> #?MODULE.level;
+field_index(low) -> #?MODULE.low;
+field_index(list) -> #?MODULE.list;
+field_index(source) -> #?MODULE.source;
+field_index(freed_at) -> #?MODULE.freed_at.
 
 
 %% -----------------------------------------------------------------------------
@@ -128,7 +143,8 @@ low(#?MODULE{low = Val}) -> Val.
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Returns the epoch number at which this page has been freed or `undefined' if it hasn't i.e. it is still active.
+%% @doc Returns the epoch number at which this page has been freed or
+%% `undefined' if it hasn't i.e. it is still active.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec freed_at(t()) -> epoch() | undefined.
@@ -144,6 +160,32 @@ freed_at(#?MODULE{freed_at = Val}) -> Val.
 
 set_freed_at(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
     T#?MODULE{freed_at = Epoch}.
+
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Returns the source from which we obtained this page
+%% @end
+%% -----------------------------------------------------------------------------
+-spec source(t()) -> source().
+
+source(#?MODULE{source = Val}) -> Val.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Sets the source from which we obtained this page
+%% @end
+%% -----------------------------------------------------------------------------
+-spec set_source(t(), source()) -> t().
+
+set_source(#?MODULE{} = T, undefined) ->
+        T#?MODULE{source = undefined};
+
+set_source(#?MODULE{} = T, Src) when is_atom(Src) ->
+    set_source(T, atom_to_binary(Src));
+
+set_source(#?MODULE{} = T, Src) when is_binary(Src) ->
+    T#?MODULE{source = Src}.
 
 
 %% -----------------------------------------------------------------------------
@@ -217,6 +259,7 @@ refs(#?MODULE{list = List, low = Low}) ->
     case Low =/= undefined of
         true ->
             [Low | Refs];
+
         false ->
             Refs
     end.

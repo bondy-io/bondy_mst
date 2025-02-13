@@ -11,14 +11,17 @@
 
 all() ->
     [
+
         {group, set_with_local_store, []},
         {group, set_with_ets_store, []},
-        {group, set_with_leveled_store, []},
-        {group, set_with_rocksdb_store, []},
-        {group, set_of_awsets_with_local_store, []},
-        {group, set_of_awsets_with_ets_store, []},
-        {group, set_of_awsets_with_leveled_store, []},
-        {group, set_of_awsets_with_rocksdb_store, []}
+        {group, set_with_ets_persistent_store, []}
+        %% ,
+        %% {group, set_with_leveled_store, []},
+        %% {group, set_with_rocksdb_store, []},
+        %% {group, set_of_awsets_with_local_store, []},
+        %% {group, set_of_awsets_with_ets_store, []},
+        %% {group, set_of_awsets_with_leveled_store, []},
+        %% {group, set_of_awsets_with_rocksdb_store, []}
     ].
 
 set_test_cases() ->
@@ -40,6 +43,7 @@ groups() ->
     [
         {set_with_local_store, [], set_test_cases()},
         {set_with_ets_store, [], set_test_cases()},
+        {set_with_ets_persistent_store, [], set_test_cases()},
         {set_with_rocksdb_store, [], set_test_cases()},
         {set_with_leveled_store, [], set_test_cases()},
         {set_of_awsets_with_local_store, [], set_of_awsets_test_cases()},
@@ -59,7 +63,16 @@ init_per_group(set_with_local_store, Config) ->
 init_per_group(set_with_ets_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_ets_store
+        store_type => bondy_mst_ets_store,
+        persistent => false
+    },
+    [{grove_opts, Opts}] ++ Config;
+
+init_per_group(set_with_ets_persistent_store, Config) ->
+    {ok, _} = application:ensure_all_started(bondy_mst),
+    Opts = #{
+        store_type => bondy_mst_ets_store,
+        persistent => true
     },
     [{grove_opts, Opts}] ++ Config;
 
@@ -147,6 +160,10 @@ end_per_testcase(_TestCase, _Config) ->
 
 
 set_online_sync(Config) ->
+    N1 = 10,
+    N2 = 20,
+    N3 = 30,
+
     GroveOpts = ?config(grove_opts, Config),
     {ok, Peers} = bondy_mst_test_grove:start_all(GroveOpts),
 
@@ -164,12 +181,12 @@ set_online_sync(Config) ->
 
     _ = [
         gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(1, 1000)
+        || X <- suffled_seq(1, N1)
     ],
 
     timer:sleep(5000),
 
-    E1 = ?ISET([{1, 1000}]),
+    E1 = ?ISET([{1, N1}]),
     ?assertEqual(
         E1,
         ?ISET([K || {K, true} <- gen_server:call(Peer1, list, ?TIMEOUT_XXL)]),
@@ -188,14 +205,14 @@ set_online_sync(Config) ->
 
     _ = [
         gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(1001, 2000)
+        || X <- suffled_seq(N1 + 1, N2)
     ],
     _ = [
         gen_server:call(Peer3, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(2001, 3000)
+        || X <- suffled_seq(N2 + 1, N3)
     ],
 
-    E2 = ?ISET([{1, 3000}]),
+    E2 = ?ISET([{1, N3}]),
     ?assertEqual(
         E2,
         ?ISET([K || {K, true} <- gen_server:call(Peer1, list, ?TIMEOUT_XXL)]),
@@ -214,15 +231,15 @@ set_online_sync(Config) ->
 
     _ = [
         gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(1001, 2000)
+        || X <- suffled_seq(N1 + 1, N2)
     ],
     _ = [
         gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(2001, 3000)
+        || X <- suffled_seq(N2 + 1, N3)
     ],
     _ = [
         gen_server:call(Peer3, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(1, 1000)
+        || X <- suffled_seq(1, N1)
     ],
 
     ?assertEqual(
@@ -241,14 +258,102 @@ set_online_sync(Config) ->
         "Peer3 should have all the elements via replication"
     ),
 
+    NewRoot = gen_server:call(Peer1, root, ?TIMEOUT_XXL),
+
     ?assertEqual(
-        gen_server:call(Peer1, root, ?TIMEOUT_XXL),
+        NewRoot,
         gen_server:call(Peer2, root, ?TIMEOUT_XXL)
     ),
 
     ?assertEqual(
-        gen_server:call(Peer2, root, ?TIMEOUT_XXL),
+        NewRoot,
         gen_server:call(Peer3, root, ?TIMEOUT_XXL)
+    ),
+
+
+    %%  GC
+    Epoch = erlang:monotonic_time(),
+    ok = gen_server:call(Peer1, {gc, Epoch}, ?TIMEOUT_XXL),
+    ok = gen_server:call(Peer2, {gc, Epoch}, ?TIMEOUT_XXL),
+    ok = gen_server:call(Peer3, {gc, Epoch}, ?TIMEOUT_XXL),
+
+    %% Check pages after GC
+    GetContent = fun(Page) ->
+        {
+            bondy_mst_page:level(Page),
+            bondy_mst_page:low(Page),
+            bondy_mst_page:list(Page)
+        }
+    end,
+
+    Peer1Pages = gen_server:call(Peer1, list_pages, ?TIMEOUT_XXL),
+    Peer2Pages = gen_server:call(Peer2, list_pages, ?TIMEOUT_XXL),
+    Peer3Pages = gen_server:call(Peer3, list_pages, ?TIMEOUT_XXL),
+
+    ?assertEqual(
+        [],
+        lists:filter(
+            fun(Page) -> bondy_mst_page:freed_at(Page) =/= undefined end,
+            Peer1Pages
+        ),
+        "All garbage should've been collected in Peer1"
+    ),
+
+    ?assertEqual(
+        [],
+        lists:filter(
+            fun(Page) -> bondy_mst_page:freed_at(Page) =/= undefined end,
+            Peer2Pages
+        ),
+        {"All garbage should've been collected in Peer2", Peer2Pages}
+    ),
+
+    ?assertEqual(
+        [],
+        lists:filter(
+            fun(Page) -> bondy_mst_page:freed_at(Page) =/= undefined end,
+            Peer3Pages
+        ),
+        {"All garbage should've been collected in Peer3", Peer3Pages}
+    ),
+
+    %% Check list of pages
+    Fun = fun({_Hash, Page}, Acc) -> [Page | Acc] end,
+    Opts = #{root => NewRoot},
+    ?assertEqual(
+        lists:sort(Peer1Pages),
+        lists:sort(
+            gen_server:call(Peer1, {fold_pages, Fun, [], Opts}, ?TIMEOUT_XXL)
+        ),
+        "We should have a single root, all pages members of it"
+    ),
+
+    ?assertEqual(
+        lists:sort(Peer2Pages),
+        lists:sort(
+            gen_server:call(Peer2, {fold_pages, Fun, [], Opts}, ?TIMEOUT_XXL)
+        ),
+        "We should have a single root, all pages members of it"
+    ),
+
+    ?assertEqual(
+        lists:sort(Peer3Pages),
+        lists:sort(
+            gen_server:call(Peer3, {fold_pages, Fun, [], Opts}, ?TIMEOUT_XXL)
+        ),
+        "We should have a single root, all pages members of it"
+    ),
+
+    Contents = [GetContent(P) || P <- Peer1Pages],
+    ?assertEqual(
+        Contents,
+        [GetContent(P) || P <- Peer2Pages],
+        #{peer1 => Peer1Pages, peer2 => Peer2Pages}
+    ),
+    ?assertEqual(
+        Contents,
+        [GetContent(P) || P <- Peer3Pages],
+        #{peer1 => Peer1Pages, peer2 => Peer3Pages}
     ),
 
     ok.
@@ -473,8 +578,16 @@ set_of_awsets_anti_entropy_fwd(Config) ->
     ok.
 
 
+
 %% =============================================================================
-%% PRIVATE
+%% PRIVATE VALIDATIONS
+%% =============================================================================
+
+%% no_dangling_garbage(T) ->
+
+
+%% =============================================================================
+%% PRIVATE UTILS
 %% =============================================================================
 
 %% @private

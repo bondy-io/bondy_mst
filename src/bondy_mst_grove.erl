@@ -127,6 +127,7 @@
 -export([new/2]).
 -export([node_id/1]).
 -export([put/3]).
+-export([gc/2]).
 -export([root/1]).
 -export([tree/1]).
 -export([trigger/2]).
@@ -261,6 +262,17 @@ put(Grove, Key, Value) ->
         end
     end,
     Tree = bondy_mst_store:transaction(Store, Fun),
+    Grove#?MODULE{tree = Tree}.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec gc(t(), KeepRoots :: [binary()] | Epoch :: non_neg_integer()) -> t().
+
+gc(Grove, Epoch) ->
+    Tree = bondy_mst:gc(Grove#?MODULE.tree, Epoch),
     Grove#?MODULE{tree = Tree}.
 
 
@@ -424,12 +436,17 @@ handle(Grove, #put{from = Peer, map = Map}) ->
                 payload_size => maps:size(Map)
             }),
             Tree = maps:fold(
-                fun(Hash0, Page, Acc0) ->
-                    %% Input and output hash should be the same
+                fun(Hash0, Page0, Acc0) ->
+                    %% We add the page flagging Peer as source.
+                    Page = bondy_mst_page:set_source(Page0, Peer),
                     {Hash1, Acc} = bondy_mst:put_page(Acc0, Page),
 
+                    %% Post-condition: Input and output hash should be the same
+                    %% A difference might occur when the peer runs a different
+                    %% implementation or when is using a different hashing
+                    %% algorithm, in which case we fail.
                     Hash0 == Hash1
-                        orelse error({inconsistency, Hash0, Page, Hash1}),
+                        orelse error({inconsistency, Hash0, Page0, Hash1}),
 
                     Acc
                 end,

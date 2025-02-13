@@ -63,6 +63,7 @@
 -export([get/2]).
 -export([get_root/1]).
 -export([has/2]).
+-export([list/1]).
 -export([missing_set/2]).
 -export([open/2]).
 -export([page_refs/1]).
@@ -176,8 +177,7 @@ has(#?MODULE{tab = Tab}, Hash) ->
 
 put(#?MODULE{tab = Tab, hashing_algorithm = Algo} = T, Page) ->
     Hash = bondy_mst_page:hash(Page, Algo),
-    %% We insert both atomically
-    true = ets:insert(Tab, [{Hash, Page}]),
+    true = ets:insert(Tab, {Hash, Page}),
     {Hash, T}.
 
 
@@ -188,7 +188,6 @@ put(#?MODULE{tab = Tab, hashing_algorithm = Algo} = T, Page) ->
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().
 
 copy(#?MODULE{tab = Tab} = T, OtherStore, Hash) ->
-
     case bondy_mst_store:get(OtherStore, Hash) of
         undefined ->
             T;
@@ -205,21 +204,34 @@ copy(#?MODULE{tab = Tab} = T, OtherStore, Hash) ->
     end.
 
 
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec list(t()) -> [page()].
+
+list(#?MODULE{tab = Tab}) ->
+    MS = [{{'$1', '$2'}, [{'=/=', '$1', ?ROOT_KEY}], ['$2']}],
+    ets:select(Tab, MS).
+
+
 %% -----------------------------------------------------------------------------
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
 -spec free(T :: t(), Hash :: binary(), Page :: page()) -> T :: t().
 
-free(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Hash, Page0) ->
+free(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Hash, _Page0) ->
     %% We keep the hash and page, marking it free. We then gc/2 to actually
     %% delete them.
+    Idx = bondy_mst_page:field_index(freed_at),
     Epoch = erlang:monotonic_time(),
-    Page = bondy_mst_page:set_freed_at(Page0, Epoch),
-    true = ets:insert(Tab, {Hash, Page}),
+    true = ets:update_element(Tab, Hash, {Idx, Epoch}),
     T;
 
 free(#?MODULE{tab = Tab, opts = #{persistent := false}} = T, Hash, _Page) ->
+    %% We immediately delete
     true = ets:delete(Tab, Hash),
     T.
 
@@ -228,19 +240,28 @@ free(#?MODULE{tab = Tab, opts = #{persistent := false}} = T, Hash, _Page) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec gc(T :: t(), KeepRoots :: [list()]) -> T :: t().
+-spec gc(T :: t(), KeepRoots :: [list()] | epoch()) -> T :: t().
 
 gc(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Epoch)
 when is_integer(Epoch) ->
+    Idx = bondy_mst_page:field_index(freed_at),
+    Var = list_to_atom("$" ++ integer_to_list(Idx)),
     MatchSpec = [
         {
             {'_', bondy_mst_page:pattern()},
-            [{'=<','$4', {const, Epoch}}],
+            [{'=<', Var, {const, Epoch}}],
             [true]
         }
     ],
+    W0 = ets:info(Tab, memory),
     Num = ets:select_delete(Tab, MatchSpec),
-    ?LOG_DEBUG("Gargage collection deleted ~p freed pages", [Num]),
+    W1 = ets:info(Tab, memory),
+    Mem = memory:format(memory:words(W0 - W1), decimal),
+
+    ?LOG_INFO(
+        "Garbage Collection completed: ~p pages freed, ~p reclaimed.",
+        [Num, Mem]
+    )
     T;
 
 gc(#?MODULE{opts = #{persistent := true}} = T, KeepRoots)
@@ -248,7 +269,7 @@ when is_list(KeepRoots) ->
     %% Review: not supported yet
     T;
 
-gc(#?MODULE{opts = #{persistent := false}} = T, _KeepRoots) ->
+gc(#?MODULE{opts = #{persistent := false}} = T, _) ->
     %% No garbage as free/3 deletes immediately
     T.
 
@@ -266,7 +287,7 @@ missing_set(T, Root) ->
 
         Page ->
             lists:foldl(
-                fun(P, Acc) -> sets:union(Acc, missing_set(T, P)) end,
+                fun(Hash, Acc) -> sets:union(Acc, missing_set(T, Hash)) end,
                 sets:new([{version, 2}]),
                 page_refs(Page)
             )

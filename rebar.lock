@@ -34,7 +34,7 @@
   1},
  {<<"memory">>,
   {git,"https://github.com/Leapsight/memory.git",
-       {ref,"b378f96b1fd35727b1d21865cbb5c390bba7f452"}},
+       {ref,"53ec8d53454912015346d712f4ece5eaeb162b0c"}},
   0},
  {<<"resulto">>,{pkg,<<"resulto">>,<<"0.1.1">>},0},
  {<<"rocksdb">>,{pkg,<<"rocksdb">>,<<"1.9.0">>},0},
