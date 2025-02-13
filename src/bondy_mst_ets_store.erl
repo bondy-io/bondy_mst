@@ -261,7 +261,7 @@ when is_integer(Epoch) ->
     ?LOG_INFO(
         "Garbage Collection completed: ~p pages freed, ~p reclaimed.",
         [Num, Mem]
-    )
+    ),
     T;
 
 gc(#?MODULE{opts = #{persistent := true}} = T, KeepRoots)
