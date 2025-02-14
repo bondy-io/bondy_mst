@@ -97,11 +97,11 @@ new(Level, Low, List) when is_integer(Level), is_list(List) ->
 pattern() ->
     {
         ?MODULE,
-        '$1', % level
-        '$2', % low
-        '$3', % list
-        '$4', % source
-        '$5'  % freed_at
+        '_', % level
+        '_', % low
+        '_', % list
+        '_', % source
+        '_'  % freed_at
     }.
 
 
