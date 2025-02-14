@@ -226,7 +226,7 @@ free(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Hash, Page0) ->
     %% We keep the hash and page, marking it free.
     %% gc/2 will actually delete it.
     Page = bondy_mst_page:set_freed_at(Page0, erlang:monotonic_time()),
-    true = ets:insert(Tab, Hash, Page),
+    true = ets:insert(Tab, {Hash, Page}),
     T;
 
 free(#?MODULE{tab = Tab, opts = #{persistent := false}} = T, Hash, _Page) ->
