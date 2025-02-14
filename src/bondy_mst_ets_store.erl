@@ -222,12 +222,11 @@ list(#?MODULE{tab = Tab}) ->
 %% -----------------------------------------------------------------------------
 -spec free(T :: t(), Hash :: binary(), Page :: page()) -> T :: t().
 
-free(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Hash, _Page0) ->
-    %% We keep the hash and page, marking it free. We then gc/2 to actually
-    %% delete them.
-    Idx = bondy_mst_page:field_index(freed_at),
-    Epoch = erlang:monotonic_time(),
-    true = ets:update_element(Tab, Hash, {Idx, Epoch}),
+free(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Hash, Page0) ->
+    %% We keep the hash and page, marking it free.
+    %% gc/2 will actually delete it.
+    Page = bondy_mst_page:set_freed_at(Page0, erlang:monotonic_time()),
+    true = ets:insert(Tab, Hash, Page),
     T;
 
 free(#?MODULE{tab = Tab, opts = #{persistent := false}} = T, Hash, _Page) ->
@@ -246,9 +245,10 @@ gc(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Epoch)
 when is_integer(Epoch) ->
     Idx = bondy_mst_page:field_index(freed_at),
     Var = list_to_atom("$" ++ integer_to_list(Idx)),
+    VPattern = setelement(Idx, bondy_mst_page:pattern(), Var),
     MatchSpec = [
         {
-            {'_', bondy_mst_page:pattern()},
+            {'_', VPattern},
             [{'=<', Var, {const, Epoch}}],
             [true]
         }
