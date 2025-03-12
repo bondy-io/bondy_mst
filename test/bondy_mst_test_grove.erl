@@ -22,15 +22,6 @@
 -export([handle_info/2]).
 -export([terminate/2]).
 
--type t() :: bondy_mst_groove:t().
--type opts_map()            ::  #{
-                                    name => atom(),
-                                    store_type => module(),
-                                    merger => bondy_mst:merger(),
-                                    comparator => bondy_mst:comparator(),
-                                    max_merges => pos_integer(),
-                                    max_same_merge => pos_integer()
-                                }.
 
 %% =============================================================================
 %% API

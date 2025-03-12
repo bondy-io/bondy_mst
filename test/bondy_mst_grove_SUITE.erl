@@ -321,18 +321,18 @@ set_online_sync(Config) ->
     Fun = fun({_Hash, Page}, Acc) -> [Page | Acc] end,
     Opts = #{root => NewRoot},
     ?assertEqual(
-        lists:sort(Peer1Pages),
         lists:sort(
             gen_server:call(Peer1, {fold_pages, Fun, [], Opts}, ?TIMEOUT_XXL)
         ),
+        lists:sort(Peer1Pages),
         "We should have a single root, all pages members of it"
     ),
 
     ?assertEqual(
-        lists:sort(Peer2Pages),
         lists:sort(
             gen_server:call(Peer2, {fold_pages, Fun, [], Opts}, ?TIMEOUT_XXL)
         ),
+        lists:sort(Peer2Pages),
         "We should have a single root, all pages members of it"
     ),
 
