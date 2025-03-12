@@ -42,7 +42,8 @@
 %% The number of active exchanges is limited by the option `max_merges'.
 %%
 %% ## Network Operations
-%% This module relies on a callback module provided by you that implements the following callbacks:
+%% This module relies on a callback module provided by you that implements the
+%% following callbacks:
 %%
 %% * send/2
 %% * broadcast/1
@@ -127,6 +128,7 @@
 -export([new/2]).
 -export([node_id/1]).
 -export([put/3]).
+-export([put/4]).
 -export([gc/2]).
 -export([root/1]).
 -export([tree/1]).
@@ -236,21 +238,41 @@ root(#?MODULE{tree = Tree}) ->
 -spec put(Grove0 :: t(), Key :: any(), Value :: any()) -> Grove1 :: t().
 
 put(Grove, Key, Value) ->
+    put(Grove, Key, Value, #{}).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Calls `bondy_mst:put/3' on the local tree and if the operation changed
+%% the tree (previous and new root differ), it broadcasts the change to the
+%% peers by calling the callback's `Module:broadcast/1' with a `gossip()'.
+%%
+%% When the event is received by the peer it must handle it calling `handle/2'
+%% on its local grove instance.
+%%
+%% ## Options
+%%
+%% * `broadcast => boolean` - If `false` it doesn't broadcast the change to
+%% peers. This means you will reply on peers performing periodic anti-entropy
+%% exchanges to learn about the change. Default is `true`.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec put(Grove0 :: t(), Key :: any(), Value :: any(), Opts :: key_value:t()) ->
+    Grove1 :: t().
+
+put(Grove, Key, Value, Opts) ->
     Store = bondy_mst:store(Grove#?MODULE.tree),
     NodeId = Grove#?MODULE.node_id,
     CBMod = Grove#?MODULE.callback_mod,
     Tree0 = Grove#?MODULE.tree,
+    BCast = key_value:get(broadcast, Opts, true),
 
     Fun = fun() ->
         Root0 = bondy_mst:root(Tree0),
         Tree = bondy_mst:put(Tree0, Key, Value),
         Root = bondy_mst:root(Tree),
 
-        case Root0 == Root of
-            true ->
-                Tree;
-
-            false ->
+        case Root0 =/= Root of
+            true when BCast == true ->
                 Msg = #gossip{
                     from = NodeId,
                     root = Root,
@@ -258,6 +280,9 @@ put(Grove, Key, Value) ->
                     value = Value
                 },
                 ok = CBMod:broadcast(Msg),
+                Tree;
+
+            _ ->
                 Tree
         end
     end,
@@ -521,6 +546,7 @@ maybe_broadcast(Grove, Gossip) ->
     case (Grove#?MODULE.callback_mod):broadcast(Gossip) of
         ok ->
             Grove#?MODULE{last_broadcast_time = Now};
+
         {error, Reason} ->
             ?LOG_ERROR(#{
                 message => "Error while broadcasting gossip message",
