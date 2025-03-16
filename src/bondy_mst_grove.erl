@@ -154,6 +154,12 @@
 -callback broadcast(Event :: gossip()) -> ok | {error, any()}.
 
 
+%% Called when a merge exchange has finished
+-callback on_merge(Peer :: node()) -> ok.
+
+
+-optional_callbacks([on_merge/1]).
+
 
 %% =============================================================================
 %% API
@@ -351,7 +357,7 @@ handle(Grove0, #gossip{} = Event) ->
     telemetry:execute(
         [bondy_mst, broadcast, recv],
         #{count => 1},
-        #{peer => Peer}
+        #{peer => Peer, pid => self()}
     ),
 
     Root = bondy_mst:root(Tree0),
@@ -498,7 +504,7 @@ handle(Grove, #missing{from = Peer}) ->
             telemetry:execute(
                 [bondy_mst, merge, abandoned],
                 #{count => 1},
-                #{peer => Peer}
+                #{peer => Peer, pid => self()}
             ),
             Grove#?MODULE{merges = Merges};
 
@@ -599,15 +605,15 @@ count_same_merges(Merges, Root) ->
 
 
 %% @private
-merge(Grove, Peer) ->
+merge(Grove0, Peer) ->
     ?LOG_INFO(#{
         message => "Starting merge",
         peer => Peer
     }),
 
-    Tree = Grove#?MODULE.tree,
+    Tree = Grove0#?MODULE.tree,
 
-    PeerRoot = maps:get(Peer, Grove#?MODULE.merges),
+    PeerRoot = maps:get(Peer, Grove0#?MODULE.merges),
     %% Pre-condition
     true = PeerRoot =/= undefined,
 
@@ -621,7 +627,9 @@ merge(Grove, Peer) ->
                 message => "All pages locally available",
                 peer => Peer
             }),
-            do_merge(Grove, Peer, PeerRoot);
+            Grove = do_merge(Grove0, Peer, PeerRoot),
+            ok = on_merge(Grove, Peer),
+            Grove;
 
         false ->
             %% We still have missing pages, so we request them and keep the
@@ -634,12 +642,12 @@ merge(Grove, Peer) ->
             }),
             Root = bondy_mst:root(Tree),
             Cmd = #get{
-                from = Grove#?MODULE.node_id,
+                from = Grove0#?MODULE.node_id,
                 root = Root,
                 set = MissingSet
             },
-            ok = (Grove#?MODULE.callback_mod):send(Peer, Cmd),
-            Grove
+            ok = (Grove0#?MODULE.callback_mod):send(Peer, Cmd),
+            Grove0
     end.
 
 
@@ -650,6 +658,8 @@ do_merge(Grove0, Peer, PeerRoot) ->
 
     Tree1 = bondy_mst:merge(Tree0, Tree0, PeerRoot),
     NewRoot = bondy_mst:root(Tree1),
+
+
     %% Post-condition
     true = sets:is_empty(bondy_mst:missing_set(Tree1, NewRoot)),
 
@@ -680,6 +690,27 @@ do_merge(Grove0, Peer, PeerRoot) ->
 
         false ->
             Grove1
+    end.
+
+
+%% @private
+on_merge(Grove, Peer) ->
+    try
+    bondy_mst_utils:apply_lazy(
+        Grove#?MODULE.callback_mod,
+        on_merge,
+        1,
+        [Peer],
+        fun() -> ok end
+    )
+    catch
+        Class:Reason:Stacktrace ->
+            ?LOG_ERROR(#{
+                message => "Error while evaluating callback on_merge/1",
+                class => Class,
+                reason => Reason,
+                stacktrace => Stacktrace
+            })
     end.
 
 
