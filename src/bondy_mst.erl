@@ -509,16 +509,11 @@ gc(#?MODULE{} = T) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec gc(t(), KeepRoots :: [binary()] | Epoch :: non_neg_integer()) -> t().
+-spec gc(t(), KeepRoots :: [hash()] | Epoch :: integer()) -> t().
 
 gc(#?MODULE{store = Store0} = T, Arg) when is_list(Arg) orelse is_integer(Arg) ->
-    Fun = fun() ->
-        Store = bondy_mst_store:gc(Store0, Arg),
-        T#?MODULE{store = Store}
-    end,
+    Fun = fun() -> T#?MODULE{store = bondy_mst_store:gc(Store0, Arg)} end,
     bondy_mst_store:transaction(Store0, Fun).
-
-
 
 format_error(Reason, [{_M, _F, _As, Info} | _]) ->
     ErrorInfo = proplists:get_value(error_info, Info, #{}),
