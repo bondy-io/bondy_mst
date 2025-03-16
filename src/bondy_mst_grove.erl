@@ -52,14 +52,13 @@
 
 -module(bondy_mst_grove).
 
-
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 
 -record(?MODULE, {
     node_id                 ::  node_id(),
-    tree                    ::  bondy_mst:t(),
     callback_mod            ::  module(),
+    tree                    ::  bondy_mst:t(),
     max_merges = 6          ::  pos_integer(),
     max_same_merge = 1      ::  pos_integer(),
     merges = #{}            ::  #{node_id() => hash()},
@@ -123,13 +122,15 @@
 -export_type([node_id/0]).
 -export_type([message/0]).
 
+-export([cancel_merge/2]).
+-export([gc/2]).
 -export([gossip_data/1]).
 -export([handle/2]).
+-export([merges/1]).
 -export([new/2]).
 -export([node_id/1]).
 -export([put/3]).
 -export([put/4]).
--export([gc/2]).
 -export([root/1]).
 -export([tree/1]).
 -export([trigger/2]).
@@ -307,6 +308,32 @@ gc(Grove, Epoch) ->
     Grove#?MODULE{tree = Tree}.
 
 
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec merges(t()) -> [node()].
+
+merges(#?MODULE{merges = Merges}) ->
+    maps:keys(Merges).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Cancels and ongoing merge (if it exists for peer `Peer`).
+%%
+%% You should use a fault detector to cancel merges when a peer crashes.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec cancel_merge(t(), node_id()) -> ok.
+
+cancel_merge(#?MODULE{merges = Merges} = Grove, Peer) ->
+    %% TODO This should cleanup all pages stored in the tree that have been
+    %% synced but not merged yet.
+    %% We will need to rely on the GC as we have multiple merges and there is no
+    %% way to diff between unmerged and merged pages.
+    Grove#?MODULE{merges = maps:without([Peer], Merges)}.
+
+
 
 %% =============================================================================
 %% API: ANTI-ENTROPY EXCHANGE PROTOCOL
@@ -467,9 +494,7 @@ handle(Grove, #put{from = Peer, map = Map}) ->
                 payload_size => maps:size(Map)
             }),
             Tree = maps:fold(
-                fun(Hash0, Page0, Acc0) ->
-                    %% We add the page flagging Peer as source.
-                    Page = bondy_mst_page:set_source(Page0, Peer),
+                fun(Hash0, Page, Acc0) ->
                     {Hash1, Acc} = bondy_mst:put_page(Acc0, Page),
 
                     %% Post-condition: Input and output hash should be the same
@@ -477,7 +502,7 @@ handle(Grove, #put{from = Peer, map = Map}) ->
                     %% implementation or when is using a different hashing
                     %% algorithm, in which case we fail.
                     Hash0 == Hash1
-                        orelse error({inconsistency, Hash0, Page0, Hash1}),
+                        orelse error({inconsistency, Hash0, Page, Hash1}),
 
                     Acc
                 end,
@@ -723,4 +748,5 @@ maybe_gc(Grove) ->
 %% @private
 encode_hash(undefined) -> undefined;
 encode_hash(Bin) -> binary:encode_hex(Bin).
+
 
