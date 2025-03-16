@@ -32,6 +32,21 @@
 %%    - Efficient key-value insertion and retrieval.
 %%    - Merkle-based verification for integrity checks.
 %%    - Custom comparators and mergers.
+%% An MST is a search tree, similar to a B-tree in the sense that internal tree
+%% nodes contain several values that define a partition of the keys in which the
+%% children values are separated.
+%%
+%% The tree is divided in layers which are numbered starting at layer 0 which
+%% corresponds to the layer of the leaf nodes.
+%%
+%% The tree nodes in layer `L` are blocks of consecutive items whose boundaries
+%% corresponds to items of layers `L' > L`.
+%%
+%% Deterministic randomness obtained by hashind the values is used to determine
+%% the tree shape. Values stored in the MST are asigned a layer by computing
+%% their hash and writing that value in base `B`. The layer to which an item is
+%% assigned is the layer whose numner is the length of the longest prefix of the
+%% hash.
 %% @end
 %% -----------------------------------------------------------------------------
 -module(bondy_mst).
