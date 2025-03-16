@@ -31,13 +31,11 @@
     level               ::  level(),
     low                 ::  hash() | undefined,
     list                ::  [entry()],
-    source = undefined  ::  source(),
     freed_at            ::  epoch() | undefined
 }).
 
 -type t()               ::  #?MODULE{}.
 -type entry()           ::  {key(), value(), hash() | undefined}.
--type source()          ::  undefined | node().
 
 -export_type([t/0]).
 -export_type([entry/0]).
@@ -47,7 +45,6 @@
 -export_type([key/0]).
 -export_type([value/0]).
 -export_type([hash/0]).
--export_type([source/0]).
 
 -export([field_index/1]).
 -export([fold/3]).
@@ -63,8 +60,6 @@
 -export([pattern/0]).
 -export([refs/1]).
 -export([set_freed_at/2]).
--export([set_source/2]).
--export([source/1]).
 
 
 
@@ -100,7 +95,6 @@ pattern() ->
         '_', % level
         '_', % low
         '_', % list
-        '_', % source
         '_'  % freed_at
     }.
 
@@ -120,7 +114,6 @@ is_type(_) -> false.
 field_index(level) -> #?MODULE.level;
 field_index(low) -> #?MODULE.low;
 field_index(list) -> #?MODULE.list;
-field_index(source) -> #?MODULE.source;
 field_index(freed_at) -> #?MODULE.freed_at.
 
 
@@ -160,32 +153,6 @@ freed_at(#?MODULE{freed_at = Val}) -> Val.
 
 set_freed_at(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
     T#?MODULE{freed_at = Epoch}.
-
-
-
-%% -----------------------------------------------------------------------------
-%% @doc Returns the source from which we obtained this page
-%% @end
-%% -----------------------------------------------------------------------------
--spec source(t()) -> source().
-
-source(#?MODULE{source = Val}) -> Val.
-
-
-%% -----------------------------------------------------------------------------
-%% @doc Sets the source from which we obtained this page
-%% @end
-%% -----------------------------------------------------------------------------
--spec set_source(t(), source()) -> t().
-
-set_source(#?MODULE{} = T, undefined) ->
-        T#?MODULE{source = undefined};
-
-set_source(#?MODULE{} = T, Src) when is_atom(Src) ->
-    set_source(T, atom_to_binary(Src));
-
-set_source(#?MODULE{} = T, Src) when is_binary(Src) ->
-    T#?MODULE{source = Src}.
 
 
 %% -----------------------------------------------------------------------------
