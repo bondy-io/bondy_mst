@@ -45,6 +45,7 @@
 -export([close/1]).
 -export([copy/3]).
 -export([delete/1]).
+-export([delete/2]).
 -export([free/3]).
 -export([gc/2]).
 -export([get/2]).
@@ -123,6 +124,18 @@ put(#?MODULE{pid = Pid, name = Name, hashing_algorithm = Algo} = T, Page) ->
     Hash = bondy_mst_page:hash(Page, Algo),
     ok = leveled_bookie:book_put(Pid, Name, Hash, Page, []),
     {Hash, T}.
+
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec delete(T :: t(), Hash :: binary()) -> T :: t().
+
+delete(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
+    ok = leveled_bookie:book_delete(Pid, Name, Hash, []),
+    T.
 
 
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().

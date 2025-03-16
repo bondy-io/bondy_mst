@@ -62,6 +62,7 @@
 -export([close/1]).
 -export([copy/3]).
 -export([delete/1]).
+-export([delete/2]).
 -export([free/3]).
 -export([gc/2]).
 -export([get/2]).
@@ -98,6 +99,8 @@
 -callback list(backend()) -> [page()].
 
 -callback put(backend(), page()) -> {Hash :: hash(), backend()}.
+
+-callback delete(backend(), hash()) -> backend().
 
 -callback copy(backend(), OtherStore :: t(), Hash :: hash()) -> backend().
 
@@ -234,6 +237,16 @@ list(#?MODULE{} = Store, Root) when is_binary(Root) ->
 put(#?MODULE{mod = Mod, state = State0} = T, Page) ->
     {Hash, State} = Mod:put(State0, Page),
     {Hash, T#?MODULE{state = State}}.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Deletes a page.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec delete(Store :: t(), Hash :: hash()) -> Store :: t().
+
+delete(#?MODULE{mod = Mod, state = State} = T, Page) ->
+    T#?MODULE{state = Mod:delete(State, Page)}.
 
 
 %% -----------------------------------------------------------------------------

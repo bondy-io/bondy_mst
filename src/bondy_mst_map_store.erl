@@ -53,6 +53,7 @@
 -export([close/1]).
 -export([copy/3]).
 -export([delete/1]).
+-export([delete/2]).
 -export([free/3]).
 -export([gc/2]).
 -export([get/2]).
@@ -124,6 +125,12 @@ put(#?MODULE{pages = Pages, hashing_algorithm = Algo} = T0, Page) ->
     Hash = bondy_mst_page:hash(Page, Algo),
     T = T0#?MODULE{pages = maps:put(Hash, Page, Pages)},
     {Hash, T}.
+
+
+-spec delete(t(), hash()) -> t().
+
+delete(#?MODULE{pages = Pages} = T, Hash) ->
+    T#?MODULE{pages = maps:remove(Hash, Pages)}.
 
 
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().

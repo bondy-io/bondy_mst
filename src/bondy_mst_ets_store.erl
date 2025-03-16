@@ -58,6 +58,7 @@
 -export([close/1]).
 -export([copy/3]).
 -export([delete/1]).
+-export([delete/2]).
 -export([free/3]).
 -export([gc/2]).
 -export([get/2]).
@@ -108,7 +109,7 @@ open(Algo, Opts0) when is_atom(Algo), is_map(Opts0) ->
         Opts
     ),
 
-    Tab = ets:new(undefined, [set, ?ETS_ACCESS]),
+    Tab = ets:new(undefined, [set, ?ETS_ACCESS, {read_concurrency, true}]),
 
     #?MODULE{
         name = maps:get(name, Opts),
@@ -173,12 +174,23 @@ has(#?MODULE{tab = Tab}, Hash) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec put(T :: t(), Page :: page()) -> {Root :: binary(), T :: t()}.
+-spec put(T :: t(), Page :: page()) -> {Hash :: binary(), T :: t()}.
 
 put(#?MODULE{tab = Tab, hashing_algorithm = Algo} = T, Page) ->
     Hash = bondy_mst_page:hash(Page, Algo),
     true = ets:insert(Tab, {Hash, Page}),
     {Hash, T}.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec delete(T :: t(), Hash :: binary()) -> T :: t().
+
+delete(#?MODULE{tab = Tab} = T, Hash) ->
+    true = ets:delete(Tab, Hash),
+    T.
 
 
 %% -----------------------------------------------------------------------------
