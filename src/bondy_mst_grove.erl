@@ -301,7 +301,7 @@ put(Grove, Key, Value, Opts) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec gc(t(), KeepRoots :: [binary()] | Epoch :: non_neg_integer()) -> t().
+-spec gc(t(), KeepRoots :: [binary()] | Epoch :: integer()) -> t().
 
 gc(Grove, Epoch) ->
     Tree = bondy_mst:gc(Grove#?MODULE.tree, Epoch),
