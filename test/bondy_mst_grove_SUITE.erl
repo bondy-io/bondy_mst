@@ -14,12 +14,13 @@ all() ->
 
         {group, set_with_local_store, []},
         {group, set_with_ets_store, []},
-        {group, set_with_ets_persistent_store, []}
+        {group, set_with_ets_persistent_store, []},
+        {group, set_of_awsets_with_local_store, []},
+        {group, set_of_awsets_with_ets_store, []}
         %% ,
         %% {group, set_with_leveled_store, []},
         %% {group, set_with_rocksdb_store, []},
-        %% {group, set_of_awsets_with_local_store, []},
-        %% {group, set_of_awsets_with_ets_store, []},
+
         %% {group, set_of_awsets_with_leveled_store, []},
         %% {group, set_of_awsets_with_rocksdb_store, []}
     ].
@@ -158,17 +159,17 @@ end_per_testcase(_TestCase, _Config) ->
 %% =============================================================================
 
 
-
 set_online_sync(Config) ->
     N1 = 10,
     N2 = 20,
     N3 = 30,
 
+    %% We start 3 replicas
     GroveOpts = ?config(grove_opts, Config),
     {ok, Peers} = bondy_mst_test_grove:start_all(GroveOpts),
-
     [Peer1, Peer2, Peer3] = Peers,
 
+    %% We validate they are alive
     ?assert(
         lists:all(
             fun(Peer) ->
@@ -179,13 +180,14 @@ set_online_sync(Config) ->
         )
     ),
 
+    %% We add data to replica at Peer1
     _ = [
         gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL)
         || X <- suffled_seq(1, N1)
     ],
-
     timer:sleep(5000),
 
+    %% Post condition: the 3 replicas have the same pages
     E1 = ?ISET([{1, N1}]),
     ?assertEqual(
         E1,
@@ -203,15 +205,24 @@ set_online_sync(Config) ->
         "Peer3 should have all the elements via replication"
     ),
 
-    _ = [
-        gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(N1 + 1, N2)
-    ],
-    _ = [
-        gen_server:call(Peer3, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(N2 + 1, N3)
-    ],
+    %% We concurrently write into replicas at peers 2 and 3
+    _ = spawn(fun() ->
+        _ = [
+            gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL)
+            || X <- suffled_seq(N1 + 1, N2)
+        ]
+    end),
 
+    _ = spawn(fun() ->
+        _ = [
+            gen_server:call(Peer3, {put, X}, ?TIMEOUT_XXL)
+            || X <- suffled_seq(N2 + 1, N3)
+        ]
+    end),
+
+    timer:sleep(5000),
+
+    %% Post condition: the 3 replicas have the same pages
     E2 = ?ISET([{1, N3}]),
     ?assertEqual(
         E2,
@@ -229,18 +240,27 @@ set_online_sync(Config) ->
         "Peer3 should have all the elements via replication"
     ),
 
-    _ = [
-        gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(N1 + 1, N2)
-    ],
-    _ = [
-        gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(N2 + 1, N3)
-    ],
-    _ = [
-        gen_server:call(Peer3, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(1, N1)
-    ],
+    %% We concurrently write into all replicas
+    _ = spawn(fun() ->
+        _ = [
+            gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL)
+            || X <- suffled_seq(N1 + 1, N2)
+        ]
+    end),
+    _ = spawn(fun() ->
+        _ = [
+            gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL)
+            || X <- suffled_seq(N2 + 1, N3)
+        ]
+    end),
+    _ = spawn(fun() ->
+        _ = [
+            gen_server:call(Peer3, {put, X}, ?TIMEOUT_XXL)
+            || X <- suffled_seq(1, N1)
+        ]
+    end),
+
+    timer:sleep(5000),
 
     ?assertEqual(
         E2,
