@@ -21,11 +21,13 @@ all() ->
 groups() ->
     [
         {local_store, [], [
+            commutative_test,
             small_test,
             first_last_test,
             large_test
         ]},
         {ets_store, [], [
+            commutative_test,
             small_test,
             first_last_test,
             persistent_test,
@@ -38,6 +40,7 @@ groups() ->
         %%     large_test
         %% ]},
         {leveled_store, [], [
+            commutative_test,
             small_test,
             first_last_test,
             large_test
@@ -97,6 +100,20 @@ end_per_testcase(_TestCase, _Config) ->
     ok.
 
 
+commutative_test(Config) ->
+    Fun = ?config(store_fun, Config),
+
+    A = lists:foldl(
+        fun(N, Acc) -> bondy_mst:put(Acc, N) end,
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_comm_a">>)}),
+        lists:seq(1, 10)
+    ),
+
+    B = bondy_mst:new(#{store => Fun(<<"bondy_mst_comm_b">>)}),
+
+    M1 = bondy_mst:to_list(bondy_mst:merge(A, B)),
+    M2 = bondy_mst:to_list(bondy_mst:merge(B, A)),
+    ?assert(M1 == M2).
 
 small_test(Config) ->
     Fun = ?config(store_fun, Config),
@@ -104,21 +121,21 @@ small_test(Config) ->
     %% Test for basic MST operations
     A = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_a">>)}),
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_small_a">>)}),
         lists:seq(1, 10)
     ),
     ?assertEqual([{1, 10}], ?ISET([K || {K, true} <- bondy_mst:to_list(A)])),
 
     B = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_b">>)}),
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_small_b">>)}),
         lists:seq(5, 15)
     ),
     ?assertEqual([{5, 15}], ?ISET([K || {K, true} <- bondy_mst:to_list(B)])),
 
     Z = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_z">>)}),
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_small_z">>)}),
         lists:seq(1, 15)
     ),
     ?assertEqual([{1, 15}], ?ISET([K || {K, true} <- bondy_mst:to_list(Z)])),
@@ -188,17 +205,17 @@ large_test(Config) ->
     ShuffledB = list_shuffle(lists:seq(550, 1500)),
      A = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_a">>)}),
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_large_a">>)}),
         ShuffledA
     ),
     B = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_b">>)}),
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_large_b">>)}),
         ShuffledB
     ),
     Z = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_z">>)}),
+        bondy_mst:new(#{store => Fun(<<"bondy_mst_large_z">>)}),
         lists:seq(1, 1500)
     ),
     C = bondy_mst:merge(A, B),
