@@ -176,6 +176,8 @@ gc(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
     T;
 
 gc(#?MODULE{pages = Pages0} = T, KeepRoots) when is_list(KeepRoots) ->
+    %% Folds the roots we want to keep and create a new map contining only these
+    %% roots and its descendants.
     Fun = fun(X, Acc) -> gc_aux(Acc, Pages0, X) end,
     Pages = lists:foldl(Fun, #{}, KeepRoots),
     T#?MODULE{pages = Pages}.
@@ -216,22 +218,9 @@ delete(#?MODULE{}) ->
 %% =============================================================================
 
 
-
-%% Marking Phase:
-%% - For each root key in KeepRoots, gc_aux/3 is invoked to “mark” the page:
-%%      - If the page exists in Pages0, it is added to the accumulator.
-%%      - The function then recursively processes all pages referenced by that
-%%      page using page_refs(Page).
-%%
-%% Cycle Prevention:
-%% - The check to see if a page is already in the accumulator
-%% (not is_map_key(Root, Acc0)) ensures that each page is processed only once.
-%%
-%% Final Result
-%% - The fold returns a new pages map that includes only the pages reachable
-%% from the keep roots.
-%% - The state is updated with this new pages map, effectively “sweeping” out
-%% any unreachable (garbage) pages.
+%% Accumulates in `Acc0` those pages that are decendants of Root.
+%% Cycle Prevention: ensures that each page is processed only once by
+%% checking if Root is already in the accumulator (`not is_map_key/2` guard).
 gc_aux(Acc0, FromPages, Root)
 when is_map(Acc0) andalso not is_map_key(Root, Acc0) ->
     case maps:get(Root, FromPages, undefined) of
@@ -242,6 +231,7 @@ when is_map(Acc0) andalso not is_map_key(Root, Acc0) ->
             case maps:is_key(Root, Acc0) of
                 true ->
                     Acc0;
+
                 false ->
                     Acc = maps:put(Root, Page, Acc0),
                     lists:foldl(
