@@ -22,5 +22,8 @@ cover:
 clean-data:
 	rm -rf /tmp/bondy_mst/
 
+clean-logs:
+	rm -rf _build/test/logs/
+
 docs:
 	${REBAR} ex_doc skip_deps=true
