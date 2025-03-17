@@ -462,10 +462,11 @@ merge(#?MODULE{} = T1, #?MODULE{} = T2) ->
 %% @doc Merges two MSTs into a single tree.
 %% @end
 %% -----------------------------------------------------------------------------
--spec merge(T1 :: t(), T2 :: t(), Root :: hash()) -> NewT1 :: t().
+-spec merge(T1 :: t(), T2 :: t(), Root :: hash() | undefined) -> NewT1 :: t().
+
 
 merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2, Root)
-when is_binary(Root) ->
+when is_binary(Root) orelse Root == undefined ->
     Fun = fun() ->
         {NewRoot, Store1} = merge_aux(T1, T2, Store0, root(T1), Root),
         Store = bondy_mst_store:set_root(Store1, NewRoot),
