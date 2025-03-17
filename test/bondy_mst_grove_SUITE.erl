@@ -353,7 +353,7 @@ set_online_sync(Config) ->
             gen_server:call(Peer2, {fold_pages, Fun, [], Opts}, ?TIMEOUT_XXL)
         ),
         lists:sort(Peer2Pages),
-        "We should have a single root, all pages members of it"
+        "We should have a single root, all pages descendants of it"
     ),
 
     ?assertEqual(
