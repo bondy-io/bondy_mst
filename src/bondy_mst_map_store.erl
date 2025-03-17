@@ -135,7 +135,7 @@ delete(#?MODULE{pages = Pages} = T, Hash) ->
 
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().
 
-copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
+copy(#?MODULE{} = T0, OtherStore, Hash) ->
     case bondy_mst_store:get(OtherStore, Hash) of
         undefined ->
             T0;
@@ -147,7 +147,7 @@ copy(#?MODULE{pages = Pages} = T0, OtherStore, Hash) ->
                 T0,
                 Refs
             ),
-            T#?MODULE{pages = maps:put(Hash, Page, Pages)}
+            T#?MODULE{pages = maps:put(Hash, Page, T#?MODULE.pages)}
     end.
 
 
