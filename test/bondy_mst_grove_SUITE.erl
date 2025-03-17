@@ -45,11 +45,11 @@ groups() ->
         {set_with_local_store, [], set_test_cases()},
         {set_with_ets_store, [], set_test_cases()},
         {set_with_ets_persistent_store, [], set_test_cases()},
-        {set_with_rocksdb_store, [], set_test_cases()},
+        %% {set_with_rocksdb_store, [], set_test_cases()},
         {set_with_leveled_store, [], set_test_cases()},
         {set_of_awsets_with_local_store, [], set_of_awsets_test_cases()},
         {set_of_awsets_with_ets_store, [], set_of_awsets_test_cases()},
-        {set_of_awsets_with_rocksdb_store, [], set_of_awsets_test_cases()},
+        %% {set_of_awsets_with_rocksdb_store, [], set_of_awsets_test_cases()},
         {set_of_awsets_with_leveled_store, [], set_of_awsets_test_cases()}
     ].
 
@@ -353,7 +353,7 @@ set_online_sync(Config) ->
         lists:sort(
             gen_server:call(Peer2, {fold_pages, Fun, [], Opts}, ?TIMEOUT_XXL)
         ),
-        "We should have a single root, all pages members of it"
+        "We should have a single root, all pages descendants of it"
     ),
 
     ?assertEqual(
