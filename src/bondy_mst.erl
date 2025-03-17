@@ -360,7 +360,7 @@ fold(#?MODULE{store = Store} = T, Fun, AccIn, Opts) ->
     AccOut :: any().
 
 fold_pages(#?MODULE{store = Store} = T, Fun, AccIn, Opts)
-when is_function(Fun, 2), is_map(Opts) ->
+when is_function(Fun, 2) andalso (is_map(Opts) orelse is_list(Opts)) ->
     Root = key_value:get_lazy(root, Opts, fun() -> root(T) end),
     do_fold_pages(Store, Fun, AccIn, Opts, Root).
 
