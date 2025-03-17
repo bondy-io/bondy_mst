@@ -59,10 +59,10 @@
     node_id                 ::  node_id(),
     callback_mod            ::  module(),
     tree                    ::  bondy_mst:t(),
+    last_broadcast_time     ::  integer() | undefined,
     max_merges = 6          ::  pos_integer(),
     max_same_merge = 1      ::  pos_integer(),
-    merges = #{}            ::  #{node_id() => hash()},
-    last_broadcast_time     ::  integer() | undefined
+    merges = #{}            ::  #{node_id() => hash()}
 }).
 
 -record(gossip, {
@@ -301,10 +301,11 @@ put(Grove, Key, Value, Opts) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec gc(t(), KeepRoots :: [binary()] | Epoch :: integer()) -> t().
+-spec gc(t(), KeepRoots :: [binary()]) -> t();
+        (t(), Epoch :: integer()) -> t().
 
-gc(Grove, Epoch) ->
-    Tree = bondy_mst:gc(Grove#?MODULE.tree, Epoch),
+gc(Grove, Arg) ->
+    Tree = bondy_mst:gc(Grove#?MODULE.tree, Arg),
     Grove#?MODULE{tree = Tree}.
 
 
@@ -328,9 +329,8 @@ merges(#?MODULE{merges = Merges}) ->
 
 cancel_merge(#?MODULE{merges = Merges} = Grove, Peer) ->
     %% TODO This should cleanup all pages stored in the tree that have been
-    %% synced but not merged yet.
-    %% We will need to rely on the GC as we have multiple merges and there is no
-    %% way to diff between unmerged and merged pages.
+    %% synced but not merged yet. But carefull as pages might be used by
+    %% multiple merges
     Grove#?MODULE{merges = maps:without([Peer], Merges)}.
 
 
@@ -721,13 +721,14 @@ do_merge(Grove0, Peer, PeerRoot) ->
 %% @private
 on_merge(Grove, Peer) ->
     try
-    bondy_mst_utils:apply_lazy(
-        Grove#?MODULE.callback_mod,
-        on_merge,
-        1,
-        [Peer],
-        fun() -> ok end
-    )
+
+        bondy_mst_utils:apply_lazy(
+            Grove#?MODULE.callback_mod,
+            on_merge,
+            1,
+            [Peer],
+            fun() -> ok end
+        )
     catch
         Class:Reason:Stacktrace ->
             ?LOG_ERROR(#{
@@ -748,5 +749,4 @@ maybe_gc(Grove) ->
 %% @private
 encode_hash(undefined) -> undefined;
 encode_hash(Bin) -> binary:encode_hex(Bin).
-
 
