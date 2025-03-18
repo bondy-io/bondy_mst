@@ -181,11 +181,12 @@ free(#?MODULE{pid = Pid, name = Name} = T, Hash, _Page) ->
     T.
 
 
--spec gc(T :: t(), KeepRoots :: [list()] | epoch()) -> T :: t().
+-spec gc(T :: t(), KeepRoots :: [list()] | epoch()) ->
+    {T :: t(), Metadata :: map()}.
 
 gc(#?MODULE{} = T, _) ->
     %% Do nothing, we free instead
-    T.
+    {T, #{}}.
 
 
 -spec missing_set(T :: t(), Root :: binary()) -> sets:set(page()).
