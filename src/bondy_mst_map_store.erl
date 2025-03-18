@@ -16,24 +16,25 @@
 %%  limitations under the License.
 %% ===========================================================================
 
-%% -----------------------------------------------------------------------------
-%% @doc This module implements the `bondy_mst_store' behaviour using an
-%% in-process `map'.
-%%
-%% As opposed to other backend stores, this module does not offer support for
-%% read concurrency, and as a result:
-%% * Versioning is not implemented, every mutating operation returns a copy of
-%% the map; and
-%% * All calls to `free/3' are made effective immediately by removing the pages
-%% from the map.
-%% @end
-%% -----------------------------------------------------------------------------
 -module(bondy_mst_map_store).
 
 -behaviour(bondy_mst_store).
 
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
+
+?MODULEDOC("""
+This module implements the `bondy_mst_store' behaviour using an in-process
+`map'.
+
+As opposed to other backend stores, this module does not offer support for
+read concurrency, and as a result:
+
+* Versioning is not implemented, every mutating operation returns a copy of
+the map; and
+* All calls to `free/3' are made effective immediately by removing the pages
+from the map.
+""").
 
 -record(?MODULE, {
     root                ::  hash() | undefined,
