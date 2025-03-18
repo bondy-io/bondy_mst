@@ -123,6 +123,7 @@
 -export_type([message/0]).
 
 -export([cancel_merge/2]).
+-export([gc/1]).
 -export([gc/2]).
 -export([gossip_data/1]).
 -export([handle/2]).
@@ -301,10 +302,20 @@ put(Grove, Key, Value, Opts) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
+-spec gc(t()) -> t().
+
+gc(#?MODULE{} = Grove) ->
+    gc(Grove, [root(Grove)]).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
 -spec gc(t(), KeepRoots :: [binary()]) -> t();
         (t(), Epoch :: integer()) -> t().
 
-gc(Grove, Arg) ->
+gc(#?MODULE{} = Grove, Arg) when is_list(Arg) orelse is_integer(Arg) ->
     Tree = bondy_mst:gc(Grove#?MODULE.tree, Arg),
     Grove#?MODULE{tree = Tree}.
 
