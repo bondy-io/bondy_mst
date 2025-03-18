@@ -152,10 +152,7 @@ copy(#?MODULE{} = T0, OtherStore, Hash) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+
 -spec list(t()) -> [page()].
 
 list(#?MODULE{pages = Pages}) ->
@@ -170,18 +167,25 @@ free(#?MODULE{pages = Pages0} = T, Hash, _Page) ->
     T#?MODULE{pages = Pages}.
 
 
--spec gc(t(), KeepRoots :: [list()] | epoch()) -> t().
+-spec gc(t(), KeepRoots :: [list()] | epoch()) -> {T :: t(), Metadata :: map()}.
 
 gc(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
     %% Epoch-based GC not implemented as this is not a persistent structure
-    T;
+    {T, #{}};
 
 gc(#?MODULE{pages = Pages0} = T, KeepRoots) when is_list(KeepRoots) ->
     %% Folds the roots we want to keep and create a new map contining only these
     %% roots and its descendants.
     Fun = fun(X, Acc) -> gc_aux(Acc, Pages0, X) end,
     Pages = lists:foldl(Fun, #{}, KeepRoots),
-    T#?MODULE{pages = Pages}.
+    Bytes = memory:words(
+        erts_debug:flat_size(Pages0) - erts_debug:flat_size(Pages)
+    ),
+    Meta = #{
+        freed_count => maps:size(Pages0) - maps:size(Pages),
+        freed_bytes =>  Bytes
+    },
+    {T#?MODULE{pages = Pages}, Meta}.
 
 
 -spec missing_set(t(), Root :: binary()) -> [Pages :: list()].

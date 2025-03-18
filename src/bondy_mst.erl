@@ -138,6 +138,79 @@
 
 
 %% =============================================================================
+%% TELEMETRY EVENTS
+%% =============================================================================
+
+
+-telemetry_event #{
+    event => [?MODULE, gc, start],
+    description =>
+    <<"Emitted at the start of the garbage collection execution">>,
+    measurements => <<
+    "#{system_time => non_neg_integer(), "
+    "monotonic_time => non_neg_integer()}"
+    >>,
+    metadata => <<"#{}">>
+}.
+
+-telemetry_event #{
+    event => [?MODULE, gc, stop],
+    description =>
+    <<"Emitted at the end of the garbage collection execution">>,
+    measurements => <<
+    "#{system_time => non_neg_integer(), "
+    "monotonic_time => non_neg_integer()}"
+    >>,
+    metadata => <<"#{freed_count := integer(), freed_bytes := integer()}">>
+}.
+
+-telemetry_event #{
+    event => [?MODULE, gc, exception],
+    description =>
+    <<"Emitted when garbage collection fails">>,
+    measurements => <<
+    "#{system_time => non_neg_integer(), "
+    "monotonic_time => non_neg_integer()}"
+    >>,
+    metadata => <<"#{}">>
+}.
+
+-telemetry_event #{
+    event => [?MODULE, merge, start],
+    description =>
+    <<"Emitted at the start of the merge execution">>,
+    measurements => <<
+    "#{system_time => non_neg_integer(), "
+    "monotonic_time => non_neg_integer()}"
+    >>,
+    metadata => <<"#{}">>
+}.
+
+-telemetry_event #{
+    event => [?MODULE, merge, stop],
+    description =>
+    <<"Emitted at the end of the merge execution">>,
+    measurements => <<
+    "#{system_time => non_neg_integer(), "
+    "monotonic_time => non_neg_integer()}"
+    >>,
+    metadata => <<"#{}">>
+}.
+
+-telemetry_event #{
+    event => [?MODULE, merge, exception],
+    description =>
+    <<"Emitted when merge fails">>,
+    measurements => <<
+    "#{system_time => non_neg_integer(), "
+    "monotonic_time => non_neg_integer()}"
+    >>,
+    metadata => <<"#{}">>
+}.
+
+
+
+%% =============================================================================
 %% API
 %% =============================================================================
 
@@ -467,12 +540,21 @@ merge(#?MODULE{} = T1, #?MODULE{} = T2) ->
 
 merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2, Root)
 when is_binary(Root) orelse Root == undefined ->
-    Fun = fun() ->
-        {NewRoot, Store1} = merge_aux(T1, T2, Store0, root(T1), Root),
-        Store = bondy_mst_store:set_root(Store1, NewRoot),
-        T1#?MODULE{store = Store}
-    end,
-    bondy_mst_store:transaction(Store0, Fun).
+    telemetry:span(
+        [bondy_mst, merge],
+        #{},
+        fun() ->
+            Fun = fun() ->
+                {NewRoot, Store1} = merge_aux(T1, T2, Store0, root(T1), Root),
+                Store = bondy_mst_store:set_root(Store1, NewRoot),
+                T1#?MODULE{store = Store}
+            end,
+            Result = bondy_mst_store:transaction(Store0, Fun),
+            {Result, #{}}
+        end
+    ).
+
+
 
 
 %% -----------------------------------------------------------------------------
@@ -513,8 +595,18 @@ gc(#?MODULE{} = T) ->
 -spec gc(t(), KeepRoots :: [hash()] | Epoch :: integer()) -> t().
 
 gc(#?MODULE{store = Store0} = T, Arg) when is_list(Arg) orelse is_integer(Arg) ->
-    Fun = fun() -> T#?MODULE{store = bondy_mst_store:gc(Store0, Arg)} end,
-    bondy_mst_store:transaction(Store0, Fun).
+    telemetry:span(
+        [bondy_mst, gc],
+        #{},
+        fun() ->
+            Fun = fun() ->
+                {Store, Meta} = bondy_mst_store:gc(Store0, Arg),
+                {T#?MODULE{store = Store}, Meta}
+            end,
+            bondy_mst_store:transaction(Store0, Fun)
+        end
+    ).
+
 
 format_error(Reason, [{_M, _F, _As, Info} | _]) ->
     ErrorInfo = proplists:get_value(error_info, Info, #{}),
@@ -523,6 +615,7 @@ format_error(Reason, [{_M, _F, _As, Info} | _]) ->
         %% general => "optional general information",
         reason => io_lib:format("~p: ~p", [?MODULE, Reason])
     }.
+
 
 
 %% =============================================================================
@@ -756,33 +849,33 @@ put_at(_T, Key, Value, Level, Store, undefined) ->
     NewPage = bondy_mst_page:new(Level, undefined, [{Key, Value, undefined}]),
     bondy_mst_store:put(Store, NewPage);
 
-put_at(T, Key, Value, Level, Store0, Root) ->
-    Page = bondy_mst_store:get(Store0, Root),
+put_at(T, Key, Value, Level, Store0, Hash) when is_binary(Hash) ->
+    Page = bondy_mst_store:get(Store0, Hash),
     [First | _] = bondy_mst_page:list(Page),
 
     case bondy_mst_page:level(Page) of
         PageLevel when PageLevel < Level ->
-            put_at_higher_level(T, Key, Value, Level, Root, Store0);
+            put_above(T, Key, Value, Level, Hash, Store0);
 
         PageLevel when PageLevel == Level ->
-            Store = bondy_mst_store:free(Store0, Root, Page),
-            put_at_same_level(T, Key, Value, Level, First, Store, Page);
+            Store = bondy_mst_store:free(Store0, Hash, Page),
+            put_alongside(T, Key, Value, Level, First, Store, Page);
 
         PageLevel when PageLevel > Level ->
-            Store = bondy_mst_store:free(Store0, Root, Page),
-            put_at_lower_level(T, Key, Value, Level, First, Store, Page)
+            Store = bondy_mst_store:free(Store0, Hash, Page),
+            put_below(T, Key, Value, Level, First, Store, Page)
     end.
 
 
 %% @private
-put_at_higher_level(T, Key, Value, Level, Root, Store0) ->
+put_above(T, Key, Value, Level, Root, Store0) ->
     {Low, High, Store} = split(T, Store0, Root, Key),
-    NewPage = bondy_mst_page:new(Level, Low, [{Key, Value, High}]),
-    bondy_mst_store:put(Store, NewPage).
+    NewRootPage = bondy_mst_page:new(Level, Low, [{Key, Value, High}]),
+    bondy_mst_store:put(Store, NewRootPage).
 
 
 %% @private
-put_at_same_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
+put_alongside(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
     List0 = bondy_mst_page:list(Page),
     Low = bondy_mst_page:low(Page),
     PageLevel = bondy_mst_page:level(Page),
@@ -802,7 +895,7 @@ put_at_same_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
 
 
 %% @private
-put_at_lower_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
+put_below(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
     List0 = bondy_mst_page:list(Page),
     Low0 = bondy_mst_page:low(Page),
     PageLevel = bondy_mst_page:level(Page),
@@ -824,12 +917,12 @@ put_at_lower_level(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
 
 %% @private
 put_after_first(T, Key, Value, Store0, [{K1, V1, R1}]) ->
-    case compare(T, K1, Key) of
+    case compare(T, Key, K1) of
         eq ->
             List = [{K1, merge_values(T, Key, V1, Value), R1}],
             {List, Store0};
 
-        lt ->
+        gt ->
             {R1A, R1B, Store} = split(T, Store0, R1, Key),
             List = [{K1, V1, R1A}, {Key, Value, R1B}],
             {List, Store}
@@ -839,14 +932,14 @@ put_after_first(T, Key, Value, Store0, [First, Second | Rest0]) ->
     {K1, V1, R1} = First,
     {K2, _, _} = Second,
 
-    case compare(T, K1, Key) of
+    case compare(T, Key, K1) of
         eq ->
             List = [{K1, merge_values(T, K1, V1, Value), R1}, Second | Rest0],
             {List, Store0};
 
-        lt ->
-            case compare(T, K2, Key) of
-                gt ->
+        gt ->
+            case compare(T, Key, K2) of
+                lt ->
                     {R1A, R1B, Store} = split(T, Store0, R1, Key),
                     List = [{K1, V1, R1A}, {Key, Value, R1B}, Second | Rest0],
                     {List, Store};

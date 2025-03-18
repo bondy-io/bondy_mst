@@ -106,7 +106,8 @@
 
 -callback free(backend(), hash(), page()) -> backend().
 
--callback gc(backend(), KeepRoots :: [hash()] | Epoch :: epoch()) -> backend().
+-callback gc(backend(), KeepRoots :: [hash()] | Epoch :: epoch()) ->
+    {backend(), Metadata :: map()}.
 
 -callback missing_set(backend(), Root :: binary()) -> sets:set(hash()).
 
@@ -280,10 +281,11 @@ free(#?MODULE{mod = Mod, state = State0} = T0, Hash, Page) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec gc(Store :: t(), KeepRoots :: [hash()] | Epoch :: integer()) ->
-    Store :: t().
+    {Store :: t(), Metadata :: map()}.
 
 gc(#?MODULE{mod = Mod, state = State0} = T, KeepRoots) ->
-    T#?MODULE{state = Mod:gc(State0, KeepRoots)}.
+    {State, Meta} = Mod:gc(State0, KeepRoots),
+    {T#?MODULE{state = State}, Meta}.
 
 
 %% -----------------------------------------------------------------------------

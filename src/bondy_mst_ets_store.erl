@@ -249,11 +249,8 @@ free(#?MODULE{tab = Tab, opts = #{persistent := false}} = T, Hash, _Page) ->
     T.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
--spec gc(T :: t(), KeepRoots :: [list()] | epoch()) -> T :: t().
+-spec gc(T :: t(), KeepRoots :: [list()] | epoch()) ->
+    {T :: t(), Metadata :: map()}.
 
 gc(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Epoch)
 when is_integer(Epoch) ->
@@ -270,28 +267,27 @@ when is_integer(Epoch) ->
     W0 = ets:info(Tab, memory),
     Num = ets:select_delete(Tab, MatchSpec),
     W1 = ets:info(Tab, memory),
-    Mem = memory:format(memory:words(W0 - W1), decimal),
+    Bytes = memory:words(W0 - W1),
+    Mem = memory:format(Bytes, decimal),
 
     ?LOG_INFO(
         "Garbage Collection completed: ~p pages freed, ~p reclaimed.",
         [Num, Mem]
     ),
-    T;
+
+    Meta = #{freed_count => Num, freed_bytes => Bytes},
+    {T, Meta};
 
 gc(#?MODULE{opts = #{persistent := true}} = T, KeepRoots)
 when is_list(KeepRoots) ->
     %% Review: not supported yet
-    T;
+    {T, #{}};
 
 gc(#?MODULE{opts = #{persistent := false}} = T, _) ->
     %% No garbage as free/3 deletes immediately
-    T.
+    {T, #{}}.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 -spec missing_set(T :: t(), Root :: binary()) -> sets:set(page()).
 
 missing_set(T, Root) ->
