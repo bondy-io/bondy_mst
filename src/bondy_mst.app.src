@@ -11,7 +11,8 @@
     resulto,
     memory,
     %% rocksdb,
-    leveled
+    leveled,
+    bloomfi
    ]},
   {env,[]},
   {modules, []},
