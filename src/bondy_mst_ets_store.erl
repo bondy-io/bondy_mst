@@ -16,16 +16,18 @@
 %%  limitations under the License.
 %% ===========================================================================
 
-%% -----------------------------------------------------------------------------
-%% @doc Read-concurrent, MST backend using `ets'.
-%% @end
-%% -----------------------------------------------------------------------------
 -module(bondy_mst_ets_store).
+
 
 -behaviour(bondy_mst_store).
 
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
+
+?MODULEDOC("""
+Read-concurrent, MST backend using `ets`.
+""").
+
 
 -ifdef(TEST).
     -define(ETS_ACCESS, public).
