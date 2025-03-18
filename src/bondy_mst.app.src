@@ -10,8 +10,9 @@
     utils,
     resulto,
     memory,
+    rocksdb,
     leveled,
-    rocksdb
+    bloomfi
    ]},
   {env,[]},
   {modules, []},
