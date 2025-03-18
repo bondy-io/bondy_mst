@@ -170,12 +170,12 @@ free(#?MODULE{pages = Pages0} = T, Hash, _Page) ->
 -spec gc(t(), KeepRoots :: [list()] | epoch()) -> {T :: t(), Metadata :: map()}.
 
 gc(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
-    %% Epoch-based GC not implemented as this is not a persistent structure
+    %% Epoch-based GC not implemented by this store
     {T, #{}};
 
 gc(#?MODULE{pages = Pages0} = T, KeepRoots) when is_list(KeepRoots) ->
-    %% Folds the roots we want to keep and create a new map contining only these
-    %% roots and its descendants.
+    %% Folds the roots we want to keep and create a new map containing only
+    %% those roots and its descendants.
     Fun = fun(X, Acc) -> gc_aux(Acc, Pages0, X) end,
     Pages = lists:foldl(Fun, #{}, KeepRoots),
     Bytes = memory:words(
