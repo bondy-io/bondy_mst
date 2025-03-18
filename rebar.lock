@@ -7,6 +7,10 @@
   {git,"https://github.com/leapsight/base62.git",
        {ref,"6e1c622c2e9bba51fadba44fa050d4b4ae706890"}},
   2},
+ {<<"bloomfi">>,
+  {git,"https://github.com/Leapsight/bloomfi.git",
+       {ref,"8e3b33884d9e04dfc52ad300a0b574718e859194"}},
+  0},
  {<<"eqwalizer_support">>,
   {git_subdir,"https://github.com/whatsapp/eqwalizer.git",
               {ref,"759af3c1ab1062bcafbc4a528634f958d85a69f0"},
@@ -48,7 +52,8 @@
   1}]}.
 [
 {pkg_hash,[
- {<<"resulto">>, <<"81A22FA01BBE17C238D0670579ADD6661CCB54F3A9EA921FF6EA3F9500E9C19D">>}, {<<"telemetry">>, <<"FEDEBBAE410D715CF8E7062C96A1EF32EC22E764197F70CDA73D82778D61E7A2">>}]},
+ {<<"resulto">>, <<"81A22FA01BBE17C238D0670579ADD6661CCB54F3A9EA921FF6EA3F9500E9C19D">>},
+ {<<"telemetry">>, <<"FEDEBBAE410D715CF8E7062C96A1EF32EC22E764197F70CDA73D82778D61E7A2">>}]},
 {pkg_hash_ext,[
  {<<"resulto">>, <<"B2D55EB62782980668E152D8488126B1669785E2130195F450D0048D63796D25">>},
  {<<"telemetry">>, <<"7015FC8919DBE63764F4B4B87A95B7C0996BD539E0D499BE6EC9D7F3875B79E6">>}]}

@@ -223,24 +223,54 @@ when is_integer(Epoch) ->
     Num = ets:select_delete(Tab, MatchSpec),
     W1 = ets:info(Tab, memory),
     Bytes = memory:words(W0 - W1),
-    Mem = memory:format(Bytes, decimal),
-
-    ?LOG_INFO(
-        "Garbage Collection completed: ~p pages freed, ~p reclaimed.",
-        [Num, Mem]
-    ),
-
     Meta = #{freed_count => Num, freed_bytes => Bytes},
     {T, Meta};
 
-gc(#?MODULE{opts = #{persistent := true}} = T, KeepRoots)
+gc(#?MODULE{opts = #{persistent := _}} = T, KeepRoots)
 when is_list(KeepRoots) ->
-    %% Review: not supported yet
-    {T, #{}};
+    Tab = T#?MODULE.tab,
+    W0 = ets:info(Tab, memory),
 
-gc(#?MODULE{opts = #{persistent := false}} = T, _) ->
-    %% No garbage as free/3 deletes immediately
-    {T, #{}}.
+    %% We build a bloomfilter containing all the hases of pages emanating from
+    %% roots in KeepRoots
+    BF0 = bloomfi:new(ets:info(Tab, size)),
+
+    BF = lists:foldl(
+        fun(Root, Acc) ->
+            Fun = fun({Hash, _}, InnerAcc) -> bloomfi:add(Hash, InnerAcc) end,
+            fold_pages(Tab, Fun, Acc, Root)
+        end,
+        BF0,
+        KeepRoots
+    ),
+    %% We iterate over all the tree hashes and remove any hash not in the bloom
+    %% filter.
+    MS = [{{'$1', '_'}, [{'=/=', '$1', ?ROOT_KEY}], ['$1']}],
+    All = ets:select(Tab, MS),
+
+    Num = lists:foldl(
+        fun(Hash, Acc) ->
+            case bloomfi:member(Hash, BF) of
+                true ->
+                    %% This could be a false positive, which means we will not
+                    %% free the page when we should, but we will eventually in
+                    %% future executions
+                    Acc;
+
+                false ->
+                    %% Definitely not in the set so we free
+                    true = ets:delete(Tab, Hash),
+                    Acc + 1
+            end
+        end,
+        0,
+        All
+    ),
+
+    W1 = ets:info(Tab, memory),
+    Bytes = memory:words(W0 - W1),
+    Meta = #{freed_count => Num, freed_bytes => Bytes},
+    {T, Meta}.
 
 
 -spec missing_set(T :: t(), Root :: binary()) -> sets:set(page()).
@@ -294,6 +324,27 @@ do_get(Tab, Hash) ->
             Value
     end.
 
+
+%% @private
+fold_pages(_, _, Acc, undefined) ->
+    Acc;
+
+fold_pages(Tab, Fun, AccIn, Root) ->
+    case do_get(Tab, Root) of
+        undefined ->
+            AccIn;
+
+        Page ->
+            Low = bondy_mst_page:low(Page),
+            AccOut = fold_pages(Tab, Fun, AccIn, Low),
+            bondy_mst_page:fold(
+                Page,
+                fun({_, _, Hash}, Acc0) ->
+                    fold_pages(Tab, Fun, Acc0, Hash)
+                end,
+                Fun({Root, Page}, AccOut)
+            )
+    end.
 
 
 

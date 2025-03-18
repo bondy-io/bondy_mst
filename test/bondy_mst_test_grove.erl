@@ -118,8 +118,13 @@ handle_call({get, Key}, _From, Grove) ->
     Reply = bondy_mst:get(bondy_mst_grove:tree(Grove), Key),
     {reply, Reply, Grove};
 
-handle_call({gc, Epoch}, _From, Grove0) ->
+handle_call(gc, _From, Grove0) ->
     ct:pal("Triggering GC on peer"),
+    Grove = bondy_mst_grove:gc(Grove0),
+    {reply, ok, Grove};
+
+handle_call({gc, Epoch}, _From, Grove0) ->
+    ct:pal("Triggering GC for Epoch on peer"),
     Grove = bondy_mst_grove:gc(Grove0, Epoch),
     {reply, ok, Grove};
 
