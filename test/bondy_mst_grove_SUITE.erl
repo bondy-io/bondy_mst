@@ -16,13 +16,11 @@ all() ->
         {group, set_with_ets_store, []},
         {group, set_with_ets_persistent_store, []},
         {group, set_of_awsets_with_local_store, []},
-        {group, set_of_awsets_with_ets_store, []}
-        %% ,
-        %% {group, set_with_leveled_store, []},
-        %% {group, set_with_rocksdb_store, []},
-
-        %% {group, set_of_awsets_with_leveled_store, []},
-        %% {group, set_of_awsets_with_rocksdb_store, []}
+        {group, set_of_awsets_with_ets_store, []},
+        {group, set_with_leveled_store, []},
+        {group, set_with_rocksdb_store, []},
+        {group, set_of_awsets_with_leveled_store, []},
+        {group, set_of_awsets_with_rocksdb_store, []}
     ].
 
 set_test_cases() ->
