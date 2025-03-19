@@ -9,7 +9,7 @@
   2},
  {<<"bloomfi">>,
   {git,"https://github.com/Leapsight/bloomfi.git",
-       {ref,"8e3b33884d9e04dfc52ad300a0b574718e859194"}},
+       {ref,"d09a310876ea82e49aa984d8d385725918c8d7c1"}},
   0},
  {<<"eqwalizer_support">>,
   {git_subdir,"https://github.com/whatsapp/eqwalizer.git",
