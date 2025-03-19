@@ -1,6 +1,6 @@
 {application, bondy_mst,
  [{description, "An OTP application"},
-  {vsn, "0.3.3"},
+  {vsn, "0.3.4"},
   {registered, []},
   {mod, {bondy_mst_app, []}},
   {applications,
