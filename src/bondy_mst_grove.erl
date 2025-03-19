@@ -306,7 +306,7 @@ put(Grove, Key, Value, Opts) ->
 
 gc(#?MODULE{} = Grove) ->
     %% We avoid GC the last tree version and the versions being merged
-    KeepRoots = [root(Grove) | [Hash || {_Peer, Hash} <- Grove#?MODULE.merges]],
+    KeepRoots = [root(Grove) | maps:values(Grove#?MODULE.merges)],
     gc(Grove, KeepRoots).
 
 
