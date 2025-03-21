@@ -522,7 +522,7 @@ handle(Grove0, #gossip{} = Gossip) ->
 
     case Root == PeerRoot of
         true ->
-            ?LOG_INFO(#{
+            ?LOG_DEBUG(#{
                 message => <<"No merged required, replicas in sync">>,
                 root => encode_hash(PeerRoot),
                 peer => Peer
@@ -549,7 +549,7 @@ handle(Grove0, #gossip{} = Gossip) ->
                             maybe_merge(Grove3, Peer, PeerRoot);
 
                         false ->
-                            ?LOG_INFO(#{
+                            ?LOG_DEBUG(#{
                                 message => <<
                                     "Broadcasted data merged, replicas in sync"
                                 >>,
@@ -566,7 +566,7 @@ handle(Grove0, #gossip{} = Gossip) ->
     end;
 
 handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
-    ?LOG_INFO(#{
+    ?LOG_DEBUG(#{
         message => <<"Received GET message">>,
         peer => Peer,
         set_size => sets:size(Set)
@@ -613,7 +613,7 @@ handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
 handle(Grove, #put{from = Peer, map = Map}) ->
     case maps:is_key(Peer, Grove#?MODULE.merges) of
         true ->
-            ?LOG_INFO(#{
+            ?LOG_DEBUG(#{
                 message => <<"Received peer data">>,
                 peer => Peer,
                 payload_size => maps:size(Map)
@@ -637,7 +637,7 @@ handle(Grove, #put{from = Peer, map = Map}) ->
             merge(Grove#?MODULE{tree = Tree}, Peer);
 
         false ->
-            ?LOG_INFO(#{
+            ?LOG_DEBUG(#{
                 message => <<
                     "Ignored data from peer. Peer is not in merge set."
                 >>,
@@ -782,7 +782,7 @@ maybe_merge(#?MODULE{} = Grove0, Peer, PeerRoot) ->
             merge(Grove, Peer);
 
         false ->
-            ?LOG_INFO(#{
+            ?LOG_DEBUG(#{
                 message => <<
                     "Skipping merge, merge concurrency limits reached."
                 >>,
@@ -825,7 +825,7 @@ merge(Grove0, Peer) ->
         true ->
             %% All pages are locally available, so we perform the merge and
             %% update the local tree.
-            ?LOG_INFO(#{
+            ?LOG_DEBUG(#{
                 message => <<
                     "All peer pages are now locally available. "
                     "Finishing merge."
@@ -840,7 +840,7 @@ merge(Grove0, Peer) ->
             %% We still have missing pages, so we request them and keep the
             %% remote reference in a buffer until we receive those pages from
             %% peer.
-            ?LOG_INFO(#{
+            ?LOG_DEBUG(#{
                 message => <<"Requesting missing pages from peer.">>,
                 missing_count => sets:size(MissingSet),
                 peer => Peer
