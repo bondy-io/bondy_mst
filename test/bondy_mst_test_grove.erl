@@ -120,7 +120,7 @@ handle_call({get, Key}, _From, Grove) ->
 
 handle_call(gc, _From, Grove0) ->
     ct:pal("Triggering GC on peer"),
-    Grove = bondy_mst_grove:gc(Grove0),
+    Grove = bondy_mst_grove:gc(Grove0, [bondy_mst_grove:root(Grove0)]),
     {reply, ok, Grove};
 
 handle_call({gc, Epoch}, _From, Grove0) ->

@@ -585,7 +585,7 @@ dump(#?MODULE{store = Store} = T) ->
 -spec gc(t()) -> t().
 
 gc(#?MODULE{} = T) ->
-    gc(T, [root(T)]).
+    gc(T, []).
 
 
 %% -----------------------------------------------------------------------------
@@ -594,12 +594,20 @@ gc(#?MODULE{} = T) ->
 %% -----------------------------------------------------------------------------
 -spec gc(t(), KeepRoots :: [hash()] | Epoch :: integer()) -> t().
 
-gc(#?MODULE{store = Store0} = T, Arg) when is_list(Arg) orelse is_integer(Arg) ->
+gc(#?MODULE{store = Store0} = T, Arg0)
+when is_list(Arg0) orelse is_integer(Arg0) ->
     telemetry:span(
         [bondy_mst, gc],
         #{},
         fun() ->
             Fun = fun() ->
+                %% Protect the current version when receiving a list
+                Arg = case is_list(Arg0) of
+                    true ->
+                        [root(T) | Arg0];
+                    false ->
+                        Arg0
+                end,
                 {Store, Meta} = bondy_mst_store:gc(Store0, Arg),
                 {T#?MODULE{store = Store}, Meta}
             end,

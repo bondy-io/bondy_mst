@@ -1,7 +1,7 @@
 %% ===========================================================================
 %%  bondy_mst.erl -
 %%
-%%  Copyright (c) 2023-2024 Leapsight. All rights reserved.
+%%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
 %%
 %%  Licensed under the Apache License, Version 2.0 (the "License");
 %%  you may not use this file except in compliance with the License.
@@ -20,51 +20,81 @@
 %%  CRDTs in Open Networks by Alex Auvolat, François Taïani
 %% ===========================================================================
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% This module implements a sychronised group of Merkle Search Tree
-%% replicas across a cluster.
-%%
-%% This module implements a the logic for anti-entropy exchanges. The idea is
-%% for the user to choose the right infrastructure e.g. using this module as
-%% helper for a `gen_server' or `gen_statem'
-%%
-%% Anti-entropy exchanges are performed in the background and without blocking
-%% local operations. The underlying tree is not changed until all the remote
-%% information necessary for the merge is obtained from a peer.
-%%
-%% This module allows a set of remote trees that we want to merge with the local
-%% tree to be kept in the state (`#?bondy_mst_grove.merges') and all missing
-%% pages are requested to the remote peers. Once all pages are locally
-%% available, the merge operation is done without network communication and the
-%% local tree is updated.
-%%
-%% The number of active exchanges is limited by the option `max_merges'.
-%%
-%% ## Network Operations
-%% This module relies on a callback module provided by you that implements the
-%% following callbacks:
-%%
-%% * send/2
-%% * broadcast/1
-%% @end
-%% -----------------------------------------------------------------------------
-
 -module(bondy_mst_grove).
 
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 
+?MODULEDOC("""
+This module implements a sychronised group of Merkle Search Tree
+replicas across a cluster.
+
+This module implements a the logic for anti-entropy exchanges. The idea is
+for the user to choose the right infrastructure e.g. using this module as
+helper for a `gen_server` or `gen_statem`
+
+Anti-entropy exchanges are performed in the background and without blocking
+local operations. The underlying tree is not changed until all the remote
+information necessary for the merge is obtained from a peer.
+
+This module allows a set of remote trees that we want to merge with the local
+tree to be kept in the state (`#?bondy_mst_grove.merges`) and all missing
+pages are requested to the remote peers. Once all pages are locally
+available, the merge operation is done without network communication and the
+local tree is updated.
+
+The number of active exchanges is limited by the option `max_merges`.
+
+## Keys
+Keys can be anything except for the reserved atom `undefined`.
+
+## Network Operations
+This module relies on a callback module provided by you that implements the
+following callbacks:
+
+* send/2
+* broadcast/1
+""").
+
 -record(?MODULE, {
-    node_id                 ::  node_id(),
-    callback_mod            ::  module(),
-    tree                    ::  bondy_mst:t(),
-    last_broadcast_time     ::  integer() | undefined,
-    max_merges = 6          ::  pos_integer(),
-    max_same_merge = 1      ::  pos_integer(),
-    merges = #{}            ::  #{node_id() => hash()}
+    node_id                         ::  node_id(),
+    callback_mod                    ::  module(),
+    tree                            ::  bondy_mst:t(),
+    %% Set it to false if you are using a peer service that handles gossip
+    %% When true, every gossip message received will be broadcasted again
+    fwd_broadcast = false           ::  boolean(),
+    %% The interval, measured in milliseconds, between two fwd_broadcasts.
+    fwd_broadcast_interval = 1000       ::  integer(),
+    last_fwd_broadcast_time             ::  integer() | undefined,
+    %% The maximum number of concurrent merges.
+    %% Bounds the size of 'merges'.
+    max_merges = 6                  ::  pos_integer(),
+    %% The maximum number of concurrent merges having the same root.
+    %% This occurs when considering merging with N peers, as two or more of
+    %% them might be in sync and hence having the same root hash.
+    max_merges_per_root = 1         ::  pos_integer(),
+    %% The max number of versions to keep i.e. the version will not be eligible
+    %% for garbage collection.
+    max_versions = 10               ::  pos_integer(),
+    %% The time, measured in milliseconds, after which a version becomes
+    %% eligible for garbage collection.
+    version_ttl = timer:minutes(1)  ::  pos_integer(),
+    %% This map's size is bounded by max_versions.
+    history = #{}                   ::  #{epoch() => hash()},
+    %% A map that tracks the ongoing merge exchanges. Its size is bounded by
+    %% max_merges.
+    merges = #{}                    ::  #{node_id() => hash()},
+    %% A queue containing the latest gossiped roots from peers i.e. candidates
+    %% for merges.
+    %% It colesces base on peer and thus its size is naturally bounded to the
+    %% number of peers in the grove.
+    merge_backlog                   ::  bondy_mst_coalescing_queue:t(),
+    %% A queue of delayed broadcasts.
+    broadcast_backlog               ::  bondy_mst_coalescing_queue:t()
 }).
 
+%% The payload use for broadcasting changes to peers in the grove.
+%% key and value can be 'undefined' when triggering an exchange.
 -record(gossip, {
     from                    ::  node_id(),
     root                    ::  hash(),
@@ -93,18 +123,17 @@
 
 %% Normally a node() but we allow a binary for simulation purposes
 -type node_id()             ::  node() | binary().
-
 -type opts()                ::  [bondy_mst:opt() | opt()]
                                 | opts_map().
 -type opt()                 ::  {max_merges, pos_integer()}
-                                | {max_same_merge, pos_integer()}
+                                | {max_merges_per_root, pos_integer()}
                                 | {callback_mod, module()}.
 -type opts_map()            ::  #{
                                     store => bondy_mst_store:t(),
                                     merger => bondy_mst:merger(),
                                     comparator => bondy_mst:comparator(),
                                     max_merges => pos_integer(),
-                                    max_same_merge => pos_integer(),
+                                    max_merges_per_root => pos_integer(),
                                     callback_mod => module()
                                 }.
 
@@ -116,17 +145,33 @@
                                 | get_cmd()
                                 | put_cmd()
                                 | missing_cmd().
-
+-type gossip_data()         ::  #{
+                                    from => node_id(),
+                                    root => hash(),
+                                    key => undefined,
+                                    value => undefined
+                                }
+                                | #{
+                                    from => node_id(),
+                                    root => hash(),
+                                    key => any(),
+                                    value => any()
+                                }.
 -export_type([t/0]).
 -export_type([gossip/0]).
 -export_type([node_id/0]).
 -export_type([message/0]).
+-export_type([gossip_data/0]).
 
+-export([broadcast_pending/1]).
 -export([cancel_merge/2]).
 -export([gc/1]).
 -export([gc/2]).
 -export([gossip_data/1]).
+-export([gossip_message/2]).
+-export([gossip_message/4]).
 -export([handle/2]).
+-export([is_stale/2]).
 -export([merges/1]).
 -export([new/2]).
 -export([node_id/1]).
@@ -143,20 +188,25 @@
 %% =============================================================================
 
 
-
-%% Called when this module wants to send a message to a peer.
+?DOC("""
+Called when this module wants to send a message to a peer.
+""").
 -callback send(Peer :: node_id(), message()) -> ok | {error, any()}.
 
 
-%% Whenever this module wants to send a gossip message it will call
-%% `Module:broadcast/1'.
-%% The callback `Module' is responsible for sending the gossip to some random
-%% peers, either by implementing or using a peer sampling service e.g.
-%% `partisan_plumtree_broadcast'.
+?DOC("""
+Whenever this module wants to send a gossip message it will call
+`Module:broadcast/1`.
+The callback `Module` is responsible for sending the gossip to some random
+peers, either by implementing or using a peer sampling service e.g.
+`partisan_plumtree_broadcast`.
+""").
 -callback broadcast(Event :: gossip()) -> ok | {error, any()}.
 
 
-%% Called when a merge exchange has finished
+?DOC("""
+Called when a merge exchange has finished.
+""").
 -callback on_merge(Peer :: node()) -> ok.
 
 
@@ -168,10 +218,17 @@
 %% =============================================================================
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Cretes a new grove.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Cretes a new grove.
+
+# Options
+* `store => bondy_mst_store:t()`,
+* `merger => bondy_mst:merger()`,
+* `comparator => bondy_mst:comparator()`,
+* `max_merges => pos_integer()`,
+* `max_merges_per_root => pos_integer()`,
+* `callback_mod => module()`
+""").
 -spec new(node_id(), opts()) -> Grove :: t() | no_return().
 
 new(NodeId, Opts) when is_list(Opts) ->
@@ -184,35 +241,38 @@ new(NodeId, Opts0) when
     Tree = bondy_mst:new(TreeOpts),
 
     %% Configure the grove
-    GroveOpts = maps:with([callback_mod, max_merges, max_same_merge], Opts0),
+    GroveOpts = maps:with(
+        [callback_mod, max_merges, max_merges_per_root], Opts0
+    ),
     CallbackMod = validate_callback_mod(GroveOpts),
     MaxMerges = maps:get(max_merges, GroveOpts, 6),
-    MaxSameMerges = maps:get(max_same_merge, GroveOpts, 1),
+    MaxSameMerges = maps:get(max_merges_per_root, GroveOpts, 1),
 
     #?MODULE{
         node_id = NodeId,
         callback_mod = CallbackMod,
         tree = Tree,
         max_merges = MaxMerges,
-        max_same_merge = MaxSameMerges
+        max_merges_per_root = MaxSameMerges,
+        last_fwd_broadcast_time = erlang:monotonic_time(),
+        merge_backlog = bondy_mst_coalescing_queue:new(),
+        broadcast_backlog = bondy_mst_coalescing_queue:new()
     }.
 
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the grove's local node_id
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the grove's local `node_id`.
+""").
 -spec node_id(t()) -> node_id().
 
 node_id(#?MODULE{node_id = Val}) ->
     Val.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the grove's local tree.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the grove's local tree.
+""").
 -spec tree(t()) -> bondy_mst:t().
 
 tree(#?MODULE{tree = Tree}) ->
@@ -224,120 +284,127 @@ tree(#?MODULE{tree = Tree}) ->
 %% =============================================================================
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the root of the grove's local tree.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the root of the grove's local tree.
+""").
 -spec root(t()) -> hash() | undefined.
 
 root(#?MODULE{tree = Tree}) ->
     bondy_mst:root(Tree).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Calls `bondy_mst:put/3' on the local tree and if the operation changed
-%% the tree (previous and new root differ), it broadcasts the change to the
-%% peers by calling the callback's `Module:broadcast/1' with a `gossip()'.
-%%
-%% When the event is received by the peer it must handle it calling `handle/2'
-%% on its local grove instance.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Calls `bondy_mst:put/3` on the local tree.
+If the operation changed the tree (previous and new root differ), it broadcasts
+the change to the peers by calling the callback's `Module:broadcast/1` with a
+`gossip()`.
+
+When the gossip event is received by the peer it must handle it calling
+`handle/2` on its local grove instance which will merge the value locally and
+possibly trigger an exchange.
+""").
 -spec put(Grove0 :: t(), Key :: any(), Value :: any()) -> Grove1 :: t().
 
 put(Grove, Key, Value) ->
     put(Grove, Key, Value, #{}).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Calls `bondy_mst:put/3' on the local tree and if the operation changed
-%% the tree (previous and new root differ), it broadcasts the change to the
-%% peers by calling the callback's `Module:broadcast/1' with a `gossip()'.
-%%
-%% When the event is received by the peer it must handle it calling `handle/2'
-%% on its local grove instance.
-%%
-%% ## Options
-%%
-%% * `broadcast => boolean` - If `false` it doesn't broadcast the change to
-%% peers. This means you will reply on peers performing periodic anti-entropy
-%% exchanges to learn about the change. Default is `true`.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Calls `bondy_mst:put/3` on the local tree and if the operation changed
+the tree (previous and new root differ), it broadcasts the change to the
+peers by calling the callback's `Module:broadcast/1` with a `gossip()`.
+
+When the event is received by the peer it must handle it calling `handle/2`
+on its local grove instance.
+
+## Options
+
+* `broadcast => boolean` - If `false` it doesn`t broadcast the change to
+peers. This means you will reply on peers performing periodic anti-entropy
+exchanges to learn about the change. Default is `true`.
+""").
 -spec put(Grove0 :: t(), Key :: any(), Value :: any(), Opts :: key_value:t()) ->
     Grove1 :: t().
 
-put(Grove, Key, Value, Opts) ->
-    Store = bondy_mst:store(Grove#?MODULE.tree),
-    NodeId = Grove#?MODULE.node_id,
-    CBMod = Grove#?MODULE.callback_mod,
-    Tree0 = Grove#?MODULE.tree,
-    BCast = key_value:get(broadcast, Opts, true),
+put(Grove0, Key, Value, Opts) ->
+    Store = bondy_mst:store(Grove0#?MODULE.tree),
 
     Fun = fun() ->
+        NodeId = Grove0#?MODULE.node_id,
+        Tree0 = Grove0#?MODULE.tree,
         Root0 = bondy_mst:root(Tree0),
+
+        %% We perform the put and update the grove state
         Tree = bondy_mst:put(Tree0, Key, Value),
+        Grove1 = Grove0#?MODULE{tree = Tree},
+
+        %% We obtain the new root
         Root = bondy_mst:root(Tree),
 
-        case Root0 =/= Root of
-            true when BCast == true ->
-                Msg = #gossip{
+        %% We store the new root on the version history so that is not
+        %% immediately elegible for garbage collection.
+        %% The version will automatically elegible when its TTL is reached or
+        %% when history has reached its maximum size.
+        Grove = add_history(Grove1, Root),
+
+        %% We conditionally broadcast
+        case Root0 =/= Root andalso key_value:get(broadcast, Opts, true) of
+            true ->
+                Gossip = #gossip{
                     from = NodeId,
                     root = Root,
                     key = Key,
                     value = Value
                 },
-                ok = CBMod:broadcast(Msg),
-                Tree;
+                broadcast(Grove, Gossip);
 
             _ ->
-                Tree
+                Grove
         end
+
     end,
-    Tree = bondy_mst_store:transaction(Store, Fun),
-    Grove#?MODULE{tree = Tree}.
+    bondy_mst_store:transaction(Store, Fun).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Triggers a garbage collection.
+Garbage collection removes all pages that are not descendants of either the
+current root or the roots of versions in the history set whose TTL have not been
+reached.
+""").
 -spec gc(t()) -> t().
-
 gc(#?MODULE{} = Grove) ->
-    %% We avoid GC the last tree version and the versions being merged
-    KeepRoots = [root(Grove) | maps:values(Grove#?MODULE.merges)],
-    gc(Grove, KeepRoots).
+    gc(Grove, keep_roots(Grove)).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Triggers a garbage collection overriding the versions to keep.
+Garbage collection removes all pages that are not descendants of either the
+current root or the roots in `KeepRoots`.
+""").
 -spec gc(t(), KeepRoots :: [binary()]) -> t();
         (t(), Epoch :: integer()) -> t().
 
 gc(#?MODULE{} = Grove, Arg) when is_list(Arg) orelse is_integer(Arg) ->
+    %% bondy_mst:gc will add the current root when is_list(Arg)
     Tree = bondy_mst:gc(Grove#?MODULE.tree, Arg),
     Grove#?MODULE{tree = Tree}.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the list of peers that have ongoing merges with this node.
+""").
 -spec merges(t()) -> [node()].
 
 merges(#?MODULE{merges = Merges}) ->
     maps:keys(Merges).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Cancels and ongoing merge (if it exists for peer `Peer`).
-%%
-%% You should use a fault detector to cancel merges when a peer crashes.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Cancels an ongoing merge (if it exists for peer `Peer`).
+
+You should use a fault detector to cancel merges when a peer crashes.
+""").
 -spec cancel_merge(t(), node_id()) -> ok.
 
 cancel_merge(#?MODULE{merges = Merges} = Grove, Peer) ->
@@ -354,11 +421,21 @@ cancel_merge(#?MODULE{merges = Merges} = Grove, Peer) ->
 
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Triggers an exchange by sending the local tree's root to `Peer'.
-%% The exchange might not occur if Peer has reached its `max_merges'.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Broadcasts all gossip messages in the backlog.
+""").
+-spec broadcast_pending(t()) -> t().
+
+broadcast_pending(#?MODULE{} = Grove) ->
+    LastTime = Grove#?MODULE.last_fwd_broadcast_time,
+    Pred = fun({_, Time}) -> LastTime < Time end,
+    broadcast_pending(Grove, Pred).
+
+
+?DOC("""
+Triggers an exchange by sending the local tree's root to `Peer`.
+The exchange might not occur if Peer has reached its `max_merges`.
+""").
 -spec trigger(t(), node_id()) -> ok.
 
 trigger(#?MODULE{node_id = Peer}, Peer) ->
@@ -374,25 +451,66 @@ trigger(#?MODULE{} = Grove, Peer) when is_atom(Peer) ->
     (Grove#?MODULE.callback_mod):send(Peer, Event).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Extracts a key-value pair from the `gossip()' message.
-%% @end
-%% -----------------------------------------------------------------------------
-gossip_data(#gossip{key = Key, value = Value}) ->
-    {Key, Value}.
+?DOC("""
+Returns a map with the contents of a `gossip()` message.
+""").
+-spec gossip_data(gossip()) -> gossip_data().
+
+gossip_data(#gossip{} = Gossip) ->
+    #{
+        from => Gossip#gossip.from,
+        root => Gossip#gossip.root,
+        key => Gossip#gossip.key,
+        value => Gossip#gossip.value
+    }.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Call this function when your node receives a message or broadcast from a
-%% peer.
-%% @end
-%% -----------------------------------------------------------------------------
-handle(Grove0, #gossip{} = Event) ->
+-spec gossip_message(node_id(), hash()) -> gossip().
+
+gossip_message(Peer, Root) ->
+    gossip_message(Peer, Root, undefined, undefined).
+
+
+-spec gossip_message(node_id(), hash(), any(), any()) -> gossip().
+
+gossip_message(Peer, Root, Key, Value) ->
+    #gossip{
+        from = Peer,
+        root = Root,
+        key = Key,
+        value = Value
+    }.
+
+
+?DOC("""
+Returns `true` if `PeerRoot` is not contained in the tree.
+""").
+-spec is_stale(t(), hash()) -> boolean().
+
+is_stale(#?MODULE{} = Grove, PeerRoot) ->
+    Tree = Grove#?MODULE.tree,
+    Root = bondy_mst:root(Tree),
+
+    case Root == PeerRoot of
+        true ->
+            false;
+
+        false ->
+            MissingSet = bondy_mst:missing_set(Tree, PeerRoot),
+            not sets:is_empty(MissingSet)
+    end.
+
+
+?DOC("""
+Call this function when your node receives a message or broadcast from a
+peer.
+""").
+handle(Grove0, #gossip{} = Gossip) ->
     Tree0 = Grove0#?MODULE.tree,
-    Peer = Event#gossip.from,
-    PeerRoot = Event#gossip.root,
-    Key = Event#gossip.key,
-    Value = Event#gossip.value,
+    Peer = Gossip#gossip.from,
+    PeerRoot = Gossip#gossip.root,
+    Key = Gossip#gossip.key,
+    Value = Gossip#gossip.value,
 
     telemetry:execute(
         [bondy_mst, broadcast, recv],
@@ -405,14 +523,13 @@ handle(Grove0, #gossip{} = Event) ->
     case Root == PeerRoot of
         true ->
             ?LOG_INFO(#{
-                message => "Replica in sync",
+                message => <<"No merged required, replicas in sync">>,
                 root => encode_hash(PeerRoot),
                 peer => Peer
             }),
             Grove0;
 
         false when Key == undefined andalso Value == undefined ->
-            %% Full merge
             maybe_merge(Grove0, Peer, PeerRoot);
 
         false ->
@@ -423,14 +540,8 @@ handle(Grove0, #gossip{} = Event) ->
 
             case Root =/= NewRoot of
                 true ->
-                    %% We remove from pending merges
-                    Merges0 = Grove1#?MODULE.merges,
-                    Merges = maps:filter(
-                        fun(_, V) -> V =/= NewRoot end,
-                        Merges0
-                    ),
-                    Grove2 = Grove1#?MODULE{merges = Merges},
-                    Grove3 = maybe_broadcast(Grove2, Event),
+                    Grove2 = cancel_merges(Grove1, NewRoot),
+                    Grove3 = maybe_broadcast(Grove2, Gossip),
 
                     case NewRoot =/= PeerRoot of
                         true ->
@@ -439,8 +550,9 @@ handle(Grove0, #gossip{} = Event) ->
 
                         false ->
                             ?LOG_INFO(#{
-                                message =>
-                                    "Broadcasted data merged, replicas in sync",
+                                message => <<
+                                    "Broadcasted data merged, replicas in sync"
+                                >>,
                                 root => encode_hash(NewRoot),
                                 peer => Peer
                             }),
@@ -455,7 +567,7 @@ handle(Grove0, #gossip{} = Event) ->
 
 handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
     ?LOG_INFO(#{
-        message => "Received GET message",
+        message => <<"Received GET message">>,
         peer => Peer,
         set_size => sets:size(Set)
     }),
@@ -463,7 +575,7 @@ handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
     Tree = Grove#?MODULE.tree,
     Store = bondy_mst:store(Tree),
 
-    %% We determine the hashes we don't have
+    %% We determine the hashes we don`t have
     Missing = sets:filter(
         fun(Hash) -> not bondy_mst_store:has(Store, Hash) end,
         Set
@@ -485,7 +597,7 @@ handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
                 (Grove#?MODULE.callback_mod):send(Peer, Msg);
 
             false ->
-                %% We don't have all the pages, we reply a missing message
+                %% We don`t have all the pages, we reply a missing message
                 Msg = #missing{from = Grove#?MODULE.node_id},
                 (Grove#?MODULE.callback_mod):send(Peer, Msg)
         end,
@@ -502,7 +614,7 @@ handle(Grove, #put{from = Peer, map = Map}) ->
     case maps:is_key(Peer, Grove#?MODULE.merges) of
         true ->
             ?LOG_INFO(#{
-                message => "Received peer data during sync",
+                message => <<"Received peer data">>,
                 peer => Peer,
                 payload_size => maps:size(Map)
             }),
@@ -526,7 +638,9 @@ handle(Grove, #put{from = Peer, map = Map}) ->
 
         false ->
             ?LOG_INFO(#{
-                message => "Ignored PUT message, peer is not in merge buffer",
+                message => <<
+                    "Ignored data from peer. Peer is not in merge set."
+                >>,
                 peer => Peer,
                 payload_size => maps:size(Map)
             }),
@@ -579,24 +693,65 @@ validate_callback_mod(Opts) ->
 
 
 %% @private
--spec maybe_broadcast(t(), gossip() | undefined) -> t().
+-spec maybe_broadcast(t(), gossip()) -> t().
 
-maybe_broadcast(Grove, undefined) ->
-    %% The original paper schedules a broadcast, but we don't
+maybe_broadcast(#?MODULE{fwd_broadcast = false} = Grove, _) ->
     Grove;
 
-maybe_broadcast(Grove, Gossip) ->
+maybe_broadcast(Grove0, #gossip{key = undefined, value = undefined} = Gossip) ->
     Now = erlang:monotonic_time(),
-    case (Grove#?MODULE.callback_mod):broadcast(Gossip) of
+    Elapsed = elapsed(Now, Grove0#?MODULE.last_fwd_broadcast_time),
+
+    %% We make sure we broadcast pending gossip messages first
+    Grove = broadcast_pending(Grove0),
+
+    case Elapsed >= Grove#?MODULE.fwd_broadcast_interval of
+        true ->
+            broadcast(Grove, Gossip);
+
+        false ->
+            %% Delay broadcast, coalescing by Peer
+            Backlog = bondy_mst_coalescing_queue:in(
+                Grove#?MODULE.broadcast_backlog,
+                Gossip#gossip.from,
+                {Gossip, Now}
+            ),
+            Grove#?MODULE{broadcast_backlog = Backlog}
+    end;
+
+maybe_broadcast(Grove0, Gossip) ->
+    %% We make sure we broadcast pending gossip messages first
+    Grove = broadcast_pending(Grove0),
+    broadcast(Grove, Gossip).
+
+
+%% @private
+broadcast(Grove0, Gossip) ->
+    case (Grove0#?MODULE.callback_mod):broadcast(Gossip) of
         ok ->
-            Grove#?MODULE{last_broadcast_time = Now};
+            Grove0#?MODULE{last_fwd_broadcast_time = erlang:monotonic_time()};
 
         {error, Reason} ->
             ?LOG_ERROR(#{
-                message => "Error while broadcasting gossip message",
+                message => <<"Error while broadcasting gossip message">>,
+                data => Gossip,
                 reason => Reason
             }),
-            Grove
+            Grove0
+    end.
+
+
+%% private
+broadcast_pending(#?MODULE{} = Grove, Pred) when is_function(Pred, 1) ->
+    B0 = Grove#?MODULE.broadcast_backlog,
+
+    case bondy_mst_coalescing_queue:out_when(B0, Pred) of
+        {empty, B0} ->
+            Grove;
+
+        {{value, {Gossip, _Time}}, B1} ->
+            _ = broadcast(Grove, Gossip),
+            broadcast_pending(Grove#?MODULE{broadcast_backlog = B1}, Pred)
     end.
 
 
@@ -610,19 +765,31 @@ maybe_merge(#?MODULE{} = Grove, Peer, undefined) ->
 
 maybe_merge(#?MODULE{} = Grove0, Peer, PeerRoot) ->
     Max = Grove0#?MODULE.max_merges,
-    MaxSame = Grove0#?MODULE.max_same_merge,
+    MaxSame = Grove0#?MODULE.max_merges_per_root,
     Merges = Grove0#?MODULE.merges,
     Same = count_same_merges(Merges, PeerRoot),
+    Size = map_size(Merges),
 
-    case Same < MaxSame andalso map_size(Merges) < Max of
+    case Same < MaxSame andalso Size < Max of
         true ->
             Grove = Grove0#?MODULE{merges = maps:put(Peer, PeerRoot, Merges)},
+            ?LOG_INFO(#{
+                message => <<"Starting merge with peer.">>,
+                peer => Peer,
+                merge_count => Size + 1,
+                max_merges => {Max, MaxSame}
+            }),
             merge(Grove, Peer);
 
         false ->
             ?LOG_INFO(#{
-                message => "Skipping merge, limit reached", peer => Peer}
-            ),
+                message => <<
+                    "Skipping merge, merge concurrency limits reached."
+                >>,
+                peer => Peer,
+                merge_count => Size + 1,
+                max_merges => {Max, MaxSame}
+            }),
             Grove0
     end.
 
@@ -643,12 +810,9 @@ count_same_merges(Merges, Root) ->
 
 
 %% @private
+%% This is called directly only when receiving a PUT. Otherwise it is called
+%% by maybe_merge/2.
 merge(Grove0, Peer) ->
-    ?LOG_INFO(#{
-        message => "Starting merge",
-        peer => Peer
-    }),
-
     Tree = Grove0#?MODULE.tree,
 
     PeerRoot = maps:get(Peer, Grove0#?MODULE.merges),
@@ -662,7 +826,10 @@ merge(Grove0, Peer) ->
             %% All pages are locally available, so we perform the merge and
             %% update the local tree.
             ?LOG_INFO(#{
-                message => "All pages locally available",
+                message => <<
+                    "All peer pages are now locally available. "
+                    "Finishing merge."
+                >>,
                 peer => Peer
             }),
             Grove = do_merge(Grove0, Peer, PeerRoot),
@@ -674,7 +841,7 @@ merge(Grove0, Peer) ->
             %% remote reference in a buffer until we receive those pages from
             %% peer.
             ?LOG_INFO(#{
-                message => "Requesting missing pages from peer",
+                message => <<"Requesting missing pages from peer.">>,
                 missing_count => sets:size(MissingSet),
                 peer => Peer
             }),
@@ -710,7 +877,13 @@ do_merge(Grove0, Peer, PeerRoot) ->
 
     case Root =/= NewRoot of
         true ->
-            Grove = maybe_gc(Grove1),
+            %% We store the new root on the version history so that is not
+            %% immediately elegible for garbage collection.
+            %% The version will automatically elegible when its TTL is reached
+            %% or when history has reached its maximum size.
+            Grove2 = add_history(Grove1, NewRoot),
+            Grove = maybe_gc(Grove2),
+
             case NewRoot =/= PeerRoot of
                 true ->
                     Event = #gossip{
@@ -732,9 +905,15 @@ do_merge(Grove0, Peer, PeerRoot) ->
 
 
 %% @private
-on_merge(Grove, Peer) ->
-    try
+on_merge(Grove0, Peer) ->
+    ?LOG_INFO(#{
+        message => <<"Finished merge with peer.">>,
+        peer => Peer
+    }),
 
+    Grove = broadcast_pending(Grove0),
+
+    try
         bondy_mst_utils:apply_lazy(
             Grove#?MODULE.callback_mod,
             on_merge,
@@ -755,11 +934,59 @@ on_merge(Grove, Peer) ->
 
 %% @private
 maybe_gc(Grove) ->
-    %% @TODO.
-    Grove.
+    %% We preserve all roots being merged and all history roots
+    gc(Grove, keep_roots(Grove)).
 
 
 %% @private
 encode_hash(undefined) -> undefined;
 encode_hash(Bin) -> binary:encode_hex(Bin).
+
+
+%% @private
+cancel_merges(Grove, NewRoot) ->
+    %% We remove any ongoing merges matching the merged NewRoot.
+    Merges = maps:filter(fun(_, V) -> V =/= NewRoot end, Grove#?MODULE.merges),
+
+    %% We remove any pending merges matching the merged NewRoot.
+    Backlog = bondy_mst_coalescing_queue:filter(
+        Grove#?MODULE.merge_backlog,
+        fun(_, V) -> V =/= NewRoot end
+    ),
+
+    Grove#?MODULE{merges = Merges, merge_backlog = Backlog}.
+
+
+%% @private
+add_history(#?MODULE{} = Grove, Root) ->
+    Epoch = erlang:monotonic_time(),
+    TTL = Grove#?MODULE.version_ttl,
+
+    %% We purge expired versions
+    H1 = maps:filter(
+        fun(Epoch0, _Root) -> elapsed(Epoch, Epoch0) =< TTL end,
+        Grove#?MODULE.history
+    ),
+    %% We add the new version
+    H = maps:put(Epoch, Root, H1),
+
+    Grove#?MODULE{history = H}.
+
+
+%% @private
+keep_roots(#?MODULE{} = Grove) ->
+    MergeRoots = maps:values(Grove#?MODULE.merges),
+    HistoryRoots = maps:values(Grove#?MODULE.history),
+    MergeRoots ++ HistoryRoots.
+
+
+%% @private
+elapsed(Start, Stop) ->
+    elapsed(Start, Stop, millisecond).
+
+%% @private
+elapsed(Start, Stop, Unit) ->
+    erlang:convert_time_unit(Start - Stop, native, Unit).
+
+
 
