@@ -21,6 +21,8 @@
 %% ===========================================================================
 -module(bondy_mst_coalescing_queue).
 
+-feature(maybe_expr, enable).
+
 -record(?MODULE, {
     map = #{}           :: map(),
     queue = queue:new() :: queue:queue(key())
@@ -39,8 +41,6 @@
 -export([out_when/2]).
 -export([peek/1]).
 -export([size/1]).
-
--compile({feature, maybe_expr, enable}).
 
 
 %% =============================================================================
