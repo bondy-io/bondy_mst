@@ -1,5 +1,5 @@
-%% ===========================================================================
-%%  coalescing_queue.erl -
+%% =============================================================================
+%%  bondy_mst_coalescing_queue.erl -
 %%
 %%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
 %%
@@ -14,11 +14,7 @@
 %%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %%  See the License for the specific language governing permissions and
 %%  limitations under the License.
-%%
-%%  This module contains a port the code written in Elixir for the
-%%  simulations shown in the paper: Merkle Search Trees: Efficient State-Based
-%%  CRDTs in Open Networks by Alex Auvolat, François Taïani
-%% ===========================================================================
+%% =============================================================================
 -module(bondy_mst_coalescing_queue).
 
 -feature(maybe_expr, enable).

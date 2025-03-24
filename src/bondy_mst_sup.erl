@@ -1,4 +1,4 @@
-%% ===========================================================================
+%% =============================================================================
 %%  bondy_mst_sup.erl -
 %%
 %%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
@@ -14,17 +14,18 @@
 %%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %%  See the License for the specific language governing permissions and
 %%  limitations under the License.
-%% ===========================================================================
+%% =============================================================================
 
 
-%%%-------------------------------------------------------------------
-%% @doc bondy_mst top level supervisor.
-%% @end
-%%%-------------------------------------------------------------------
 
 -module(bondy_mst_sup).
 
 -behaviour(supervisor).
+
+-include("bondy_mst.hrl").
+
+-moduledoc #{format => "text/markdown"}.
+?MODULEDOC("bondy_mst top level supervisor.").
 
 -export([start_link/0]).
 

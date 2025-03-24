@@ -1,4 +1,4 @@
-%% ===========================================================================
+%% =============================================================================
 %%  bondy_mst_map_store.erl -
 %%
 %%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
@@ -14,7 +14,7 @@
 %%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %%  See the License for the specific language governing permissions and
 %%  limitations under the License.
-%% ===========================================================================
+%% =============================================================================
 
 -module(bondy_mst_map_store).
 
@@ -23,16 +23,17 @@
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 
+-moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-This module implements the `bondy_mst_store' behaviour using an in-process
-`map'.
+This module implements the `bondy_mst_store` behaviour using an in-process
+`map`.
 
 As opposed to other backend stores, this module does not offer support for
 read concurrency, and as a result:
 
 * Versioning is not implemented, every mutating operation returns a copy of
 the map; and
-* All calls to `free/3' are made effective immediately by removing the pages
+* All calls to `free/3` are made effective immediately by removing the pages
 from the map.
 """).
 

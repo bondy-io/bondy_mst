@@ -1,4 +1,4 @@
-%% ===========================================================================
+%% =============================================================================
 %%  bondy_mst_leveled_store.erl -
 %%
 %%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
@@ -14,18 +14,17 @@
 %%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %%  See the License for the specific language governing permissions and
 %%  limitations under the License.
-%% ===========================================================================
+%% =============================================================================
 
-%% -----------------------------------------------------------------------------
-%% @doc Non-concurrent, MST backend using `leveled'.
-%% @end
-%% -----------------------------------------------------------------------------
 -module(bondy_mst_leveled_store).
 -behaviour(bondy_mst_store).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("leveled/include/leveled.hrl").
 -include("bondy_mst.hrl").
+
+-moduledoc #{format => "text/markdown"}.
+?MODULEDOC("Non-concurrent, MST backend using `leveled`.").
 
 -record(?MODULE, {
     pid                 ::  pid(),
@@ -127,10 +126,7 @@ put(#?MODULE{pid = Pid, name = Name, hashing_algorithm = Algo} = T, Page) ->
 
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+
 -spec delete(T :: t(), Hash :: binary()) -> T :: t().
 
 delete(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
@@ -158,10 +154,7 @@ copy(#?MODULE{pid = Pid, name = Name} = T, OtherStore, Hash) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+
 -spec list(t()) -> [page()].
 
 list(#?MODULE{}) ->
@@ -169,10 +162,7 @@ list(#?MODULE{}) ->
     [].
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+
 -spec free(T :: t(), Hash :: binary(), Page :: page()) -> T :: t().
 
 free(#?MODULE{pid = Pid, name = Name} = T, Hash, _Page) ->

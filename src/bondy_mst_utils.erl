@@ -1,4 +1,4 @@
-%% ===========================================================================
+%% =============================================================================
 %%  bondy_mst_utils.erl -
 %%
 %%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
@@ -14,7 +14,7 @@
 %%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %%  See the License for the specific language governing permissions and
 %%  limitations under the License.
-%% ===========================================================================
+%% =============================================================================
 
 -module(bondy_mst_utils).
 
@@ -39,10 +39,7 @@
 %% =============================================================================
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+
 -spec hash(Term :: term(), Algo :: atom()) -> Digest :: binary().
 
 hash(Term, Algo) ->
@@ -53,7 +50,7 @@ hash(Term, Algo) ->
 %% @doc Ensures a module is loaded.
 %% @end
 %% -----------------------------------------------------------------------------
-ensure_loaded(Mod) ->
+ensure_loaded(Mod) when is_atom(Mod) ->
     erlang:function_exported(Mod, module_info, 0)
         orelse code:ensure_loaded(Mod),
     ok.
@@ -66,9 +63,9 @@ ensure_loaded(Mod) ->
 %% -----------------------------------------------------------------------------
 -spec behaviours(atom()) -> [atom()] | no_return().
 
-behaviours(Module) ->
-    ok = ensure_loaded(Module),
-    Attributes = Module:module_info(attributes),
+behaviours(Mod) when is_atom(Mod) ->
+    ok = ensure_loaded(Mod),
+    Attributes = Mod:module_info(attributes),
     lists:flatten(proplists:get_all_values(behaviour, Attributes)).
 
 
@@ -79,21 +76,18 @@ behaviours(Module) ->
 %% -----------------------------------------------------------------------------
 -spec implements_behaviour(atom(), atom()) -> boolean().
 
-implements_behaviour(Module, Behaviour) ->
-    lists:member(Behaviour, behaviours(Module)).
+implements_behaviour(Mod, Behaviour) when is_atom(Mod), is_atom(Behaviour) ->
+    lists:member(Behaviour, behaviours(Mod)).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+
 -spec implements_callback(
     Module :: module(), FunctionName :: atom(), Arity :: non_neg_integer()) ->
     boolean().
 
-implements_callback(Module, FunctionName, Arity) ->
-    ok = ensure_loaded(Module),
-    erlang:function_exported(Module, FunctionName, Arity).
+implements_callback(Mod, FunctionName, Arity) when is_atom(Mod) ->
+    ok = ensure_loaded(Mod),
+    erlang:function_exported(Mod, FunctionName, Arity).
 
 
 %% -----------------------------------------------------------------------------

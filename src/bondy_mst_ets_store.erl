@@ -1,4 +1,4 @@
-%% ===========================================================================
+%% =============================================================================
 %%  bondy_mst_ets_store.erl -
 %%
 %%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
@@ -14,7 +14,7 @@
 %%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %%  See the License for the specific language governing permissions and
 %%  limitations under the License.
-%% ===========================================================================
+%% =============================================================================
 
 -module(bondy_mst_ets_store).
 
@@ -24,6 +24,7 @@
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 
+-moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
 Read-concurrent, MST backend using `ets`.
 """).
