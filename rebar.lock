@@ -19,7 +19,7 @@
  {<<"key_value">>,
   {git,"https://github.com/leapsight/key_value.git",
        {ref,"cf0143bf3a91c1d41ace9ef938e314307c80bd1f"}},
-  1},
+  0},
  {<<"ksuid">>,
   {git,"https://github.com/leapsight/ksuid.git",
        {ref,"315e954846ec5f8d300bec52b88aca60015a9bc2"}},
