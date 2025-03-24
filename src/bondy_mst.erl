@@ -23,6 +23,8 @@
 
 -module(bondy_mst).
 
+-feature(maybe_expr, enable).
+
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 
