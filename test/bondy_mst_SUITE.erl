@@ -49,31 +49,20 @@ groups() ->
 
 
 init_per_group(local_store, Config) ->
-    Fun = fun(_) -> bondy_mst_store:open(bondy_mst_map_store, sha256, []) end,
-    [{store_fun, Fun}] ++ Config;
+    [{store, bondy_mst_map_store}] ++ Config;
 
 init_per_group(ets_store, Config) ->
-    Fun = fun(Name) ->
-        bondy_mst_store:open(bondy_mst_ets_store, sha256, [{name, Name}])
-    end,
-    [{store_fun, Fun}] ++ Config;
+    [{store, bondy_mst_ets_store}] ++ Config;
 
 
 init_per_group(leveled_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
-
-    Fun = fun(Name) ->
-        bondy_mst_store:open(bondy_mst_leveled_store, sha256, [{name, Name}])
-    end,
-    [{store_fun, Fun}] ++ Config;
+    [{store, bondy_mst_leveled_store}] ++ Config;
 
 init_per_group(rocksdb_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
+    [{store, bondy_mst_rocksdb_store}] ++ Config.
 
-    Fun = fun(Name) ->
-        bondy_mst_store:open(bondy_mst_rocksdb_store, sha256, [{name, Name}])
-    end,
-    [{store_fun, Fun}] ++ Config.
 
 
 end_per_group(_, _Config) ->
@@ -101,41 +90,56 @@ end_per_testcase(_TestCase, _Config) ->
 
 
 commutative_test(Config) ->
-    Fun = ?config(store_fun, Config),
+    Mod = ?config(store, Config),
 
     A = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_comm_a">>)}),
+        bondy_mst:new(#{
+            store => Mod,
+            store_opts => #{name => <<"bondy_mst_comm_a">>}
+        }),
         lists:seq(1, 10)
     ),
 
-    B = bondy_mst:new(#{store => Fun(<<"bondy_mst_comm_b">>)}),
+    B = bondy_mst:new(#{
+        store => Mod,
+        store_opts => #{name => <<"bondy_mst_comm_b">>}
+    }),
 
     M1 = bondy_mst:to_list(bondy_mst:merge(A, B)),
     M2 = bondy_mst:to_list(bondy_mst:merge(B, A)),
     ?assert(M1 == M2).
 
 small_test(Config) ->
-    Fun = ?config(store_fun, Config),
+    Mod = ?config(store, Config),
 
     %% Test for basic MST operations
     A = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_small_a">>)}),
+        bondy_mst:new(#{
+            store => Mod,
+            store_opts => #{name => <<"bondy_mst_small_a">>}
+        }),
         lists:seq(1, 10)
     ),
     ?assertEqual([{1, 10}], ?ISET([K || {K, true} <- bondy_mst:to_list(A)])),
 
     B = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_small_b">>)}),
+        bondy_mst:new(#{
+            store => Mod,
+            store_opts => #{name => <<"bondy_mst_small_b">>}
+        }),
         lists:seq(5, 15)
     ),
     ?assertEqual([{5, 15}], ?ISET([K || {K, true} <- bondy_mst:to_list(B)])),
 
     Z = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_small_z">>)}),
+        bondy_mst:new(#{
+            store => Mod,
+            store_opts => #{name => <<"bondy_mst_small_z">>}
+        }),
         lists:seq(1, 15)
     ),
     ?assertEqual([{1, 15}], ?ISET([K || {K, true} <- bondy_mst:to_list(Z)])),
@@ -198,24 +202,33 @@ small_test(Config) ->
 
 
 large_test(Config) ->
-    Fun = ?config(store_fun, Config),
+    Mod = ?config(store, Config),
 
     %% Test for large MST operations
     ShuffledA = list_shuffle(lists:seq(1, 1000)),
     ShuffledB = list_shuffle(lists:seq(550, 1500)),
      A = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_large_a">>)}),
+        bondy_mst:new(#{
+            store => Mod,
+            store_opts => #{name => <<"bondy_mst_large_a">>}
+        }),
         ShuffledA
     ),
     B = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_large_b">>)}),
+        bondy_mst:new(#{
+            store => Mod,
+            store_opts => #{name => <<"bondy_mst_large_b">>}
+        }),
         ShuffledB
     ),
     Z = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"bondy_mst_large_z">>)}),
+        bondy_mst:new(#{
+            store => Mod,
+            store_opts => #{name => <<"bondy_mst_large_z">>}
+        }),
         lists:seq(1, 1500)
     ),
     C = bondy_mst:merge(A, B),
@@ -254,21 +267,27 @@ large_test(Config) ->
 
 
 first_last_test(Config) ->
-    Fun = ?config(store_fun, Config),
+    Mod = ?config(store, Config),
 
     %% Test for basic MST operations
     A = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
-        bondy_mst:new(#{store => Fun(<<"first_last_test">>)}),
+        bondy_mst:new(#{
+            store => Mod,
+            store_opts => #{name => <<"first_last_test">>}
+        }),
         lists:seq(1, 10)
     ),
     ?assertEqual({1, true}, bondy_mst:first(A)),
     ?assertEqual({10, true}, bondy_mst:last(A)).
 
 persistent_test(Config) ->
-    Fun = ?config(store_fun, Config),
+    Mod = ?config(store, Config),
 
-    T0 = bondy_mst:new(#{store => Fun(<<"persistent_test">>)}),
+    T0 = bondy_mst:new(#{
+        store => Mod,
+        store_opts => #{name => <<"persistent_test">>}
+    }),
 
     T1 = bondy_mst:put(T0, 1),
     R1 = bondy_mst:root(T1),

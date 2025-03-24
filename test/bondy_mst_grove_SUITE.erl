@@ -57,14 +57,14 @@ groups() ->
 init_per_group(set_with_local_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_map_store
+        store => bondy_mst_map_store
     },
     [{grove_opts, Opts}] ++ Config;
 
 init_per_group(set_with_ets_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_ets_store,
+        store => bondy_mst_ets_store,
         persistent => false
     },
     [{grove_opts, Opts}] ++ Config;
@@ -72,7 +72,7 @@ init_per_group(set_with_ets_store, Config) ->
 init_per_group(set_with_ets_persistent_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_ets_store,
+        store => bondy_mst_ets_store,
         persistent => true
     },
     [{grove_opts, Opts}] ++ Config;
@@ -81,21 +81,21 @@ init_per_group(set_with_ets_persistent_store, Config) ->
 init_per_group(set_with_leveled_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_leveled_store
+        store => bondy_mst_leveled_store
     },
     [{grove_opts, Opts}] ++ Config;
 
 init_per_group(set_with_rocksdb_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_rocksdb_store
+        store => bondy_mst_rocksdb_store
     },
     [{grove_opts, Opts}] ++ Config;
 
 init_per_group(set_of_awsets_with_local_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_map_store,
+        store => bondy_mst_map_store,
         merger => fun(_Key, A, B) -> state_awset:merge(A, B) end
     },
     [{grove_opts, Opts}] ++ Config;
@@ -103,7 +103,7 @@ init_per_group(set_of_awsets_with_local_store, Config) ->
 init_per_group(set_of_awsets_with_ets_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_ets_store,
+        store => bondy_mst_ets_store,
         merger => fun(_Key, A, B) -> state_awset:merge(A, B) end
     },
     [{grove_opts, Opts}] ++ Config;
@@ -112,7 +112,7 @@ init_per_group(set_of_awsets_with_ets_store, Config) ->
 init_per_group(set_of_awsets_with_leveled_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_leveled_store,
+        store => bondy_mst_leveled_store,
         merger => fun(_Key, A, B) -> state_awset:merge(A, B) end
     },
     [{grove_opts, Opts}] ++ Config;
@@ -120,7 +120,7 @@ init_per_group(set_of_awsets_with_leveled_store, Config) ->
 init_per_group(set_of_awsets_with_rocksdb_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
-        store_type => bondy_mst_rocksdb_store,
+        store => bondy_mst_rocksdb_store,
         merger => fun(_Key, A, B) -> state_awset:merge(A, B) end
     },
     [{grove_opts, Opts}] ++ Config.
@@ -143,7 +143,7 @@ end_per_suite(_Config) ->
 %% Called before each test case
 init_per_testcase(TestCase, Config) ->
     GroveOpts0 = ?config(grove_opts, Config),
-    GroveOpts = GroveOpts0#{name => atom_to_binary(TestCase)},
+    GroveOpts = GroveOpts0#{store_opts => #{name => atom_to_binary(TestCase)}},
     lists:keyreplace(grove_opts, 1, Config, {grove_opts, GroveOpts}).
 
 %% Called after each test case

@@ -1,4 +1,4 @@
-%% ===========================================================================
+%% =============================================================================
 %%  bondy_mst.erl -
 %%
 %%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
@@ -18,41 +18,57 @@
 %%  This module contains a port the code written in Elixir for the
 %%  simulations shown in the paper: Merkle Search Trees: Efficient State-Based
 %%  CRDTs in Open Networks by Alex Auvolat, François Taïani
-%% ===========================================================================
+%% =============================================================================
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%%  This module implements a Merkle Search Tree (MST), a probabilistic data
-%%  structure optimized for efficient storage and retrieval of key-value pairs.
-%%
-%%  The MST is designed for distributed systems where efficient merging and
-%%  verification of large datasets are required.
-%%
-%%  It supports:
-%%    - Efficient key-value insertion and retrieval.
-%%    - Merkle-based verification for integrity checks.
-%%    - Custom comparators and mergers.
-%% An MST is a search tree, similar to a B-tree in the sense that internal tree
-%% nodes contain several values that define a partition of the keys in which the
-%% children values are separated.
-%%
-%% The tree is divided in layers which are numbered starting at layer 0 which
-%% corresponds to the layer of the leaf nodes.
-%%
-%% The tree nodes in layer `L` are blocks of consecutive items whose boundaries
-%% corresponds to items of layers `L' > L`.
-%%
-%% Deterministic randomness obtained by hashind the values is used to determine
-%% the tree shape. Values stored in the MST are asigned a layer by computing
-%% their hash and writing that value in base `B`. The layer to which an item is
-%% assigned is the layer whose numner is the length of the longest prefix of the
-%% hash.
-%% @end
-%% -----------------------------------------------------------------------------
+
 -module(bondy_mst).
 
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
+
+-moduledoc #{format => "text/markdown"}.
+?MODULEDOC("""
+This module implements a Merkle Search Tree (MST), a probabilistic data
+structure optimised for efficient storage and retrieval of key-value pairs
+proposed and demonstrated by Alex Auvolat and François Taïani in ther paper
+[Merkle Search Trees: Efficient State-Based CRDTs in
+Open Networks](https://inria.hal.science/hal-02303490/document).
+
+An MST is as an efficient, *state-based* Conflict-Free Replicated Data
+Type (CRDT) designed for open, potentially untrusted networks. It is designed
+for distributed systems where efficient merging and verification of large
+datasets are required.
+
+By combining the properties of Merkle trees (for secure hashing and partial
+verification) with search-tree–like organization (for efficient data access and
+updates), MSTs aim to reduce both the *bandwidth overhead* and *update
+complexity* associated with typical CRDTs in large-scale distributed
+environments.
+
+MSTs support:
+- Deterministic contruction - the MST algorithm produces a single possible
+representation for a given set of items
+- Keys are sorted lexicographically
+- Efficient key-value insertion and retrieval
+- Merkle-based verification for integrity checks
+- Custom comparators and mergers
+
+An MST is a search tree, similar to a B-tree in the sense that internal tree
+nodes contain several values that define a partition of the keys in which the
+children values are separated.
+
+The tree is divided in layers which are numbered starting at layer `0` which
+corresponds to the layer of the leaf nodes.
+
+The tree nodes in layer `L` are blocks of consecutive items whose boundaries
+corresponds to items of layers `L' > L`.
+
+Deterministic randomness obtained by hashind the values is used to determine
+the tree shape. Values stored in the MST are asigned a layer by computing
+their hash and writing that value in base `B`. The layer to which an item is
+assigned is the layer whose numner is the length of the longest prefix of the
+hash.
+""").
 
 -record(bondy_mst, {
     store               ::  bondy_mst_store:t(),
@@ -60,21 +76,27 @@
     comparator          ::  comparator(),
     %% `merger` is a function for merging two items that have the same key
     merger              ::  merger(),
+    %% By default we user Erlang External Term Format unless a function is
+    %% provided
+    serializer          ::  optional(bondy_mst_store:serializer()),
     hash_algorithm      ::  atom()
 }).
 
 -type t()               ::  #?MODULE{}.
 -type opts()            ::  [opt()] | opts_map().
--type opt()             ::  {store, bondy_mst_store:t()}
-                            | {hash_algorithm, atom()}
+-type opt()             ::  {hash_algorithm, hash_algorithm()}
+                            | {store_mod, module()}
+                            | {store_opts, key_value:t()}
                             | {merger, merger()}
                             | {comparator, comparator()}.
 -type opts_map()        ::  #{
                                 store => bondy_mst_store:t(),
-                                hash_algorithm => atom(),
+                                hash_algorithm => hash_algorithm(),
+                                store_opts => key_value:t(),
                                 merger => merger(),
                                 comparator => comparator()
                             }.
+-type hash_algorithm()  ::  sha256 | sha512.
 -type comparator()      ::  fun((key(), key()) -> eq | lt | gt).
 -type merger()          ::  fun((key(), value(), value()) -> value()).
 -type key_range()       ::  {key(), key()}
@@ -97,12 +119,14 @@
 -export_type([opts_map/0]).
 -export_type([comparator/0]).
 -export_type([merger/0]).
+-export_type([hash_algorithm/0]).
 
 %% Defined in bondy_mst.hrl
 -export_type([level/0]).
 -export_type([key/0]).
 -export_type([value/0]).
 -export_type([hash/0]).
+
 
 
 -export([delete/1]).
@@ -216,48 +240,68 @@
 
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Create a new Merkle Search Tree using the default store.
-%% The same as calling `new(#{})'.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Create a new Merkle Search Tree using the default store.
+The same as calling `new(#{})`.
+""").
 -spec new() -> t().
 
 new() ->
     new(#{}).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Creates a new MST instance with configurable options.
-%%
-%% This structure can be used as a CRDT set with only true keys (default)
-%% or as a CRDT map if a proper merger function is given.
-%% == Options ==
-%%
-%% <ul>
-%% <li>`store => bondy_mst_store:t()' - Defaults to an instance of
-%% `bondy_mst_map_store'.</li>
-%% <li>`merger => merger()' - a merger function.
-%% Defaults to the grow-only set merger function `merger/3'.</li>
-%% <li>`comparator => comparator()' - a key comparator function.
-%% Defaults to `comparator/2'.</li>
-%% </ul>
-%% @return A new MST instance.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Creates a new MST instance with configurable options.
+
+This structure can be used as a CRDT set with only true keys (default)
+or as a CRDT map if a proper merger function is given.
+### Options
+
+* `store => bondy_mst_store:t()` - Defaults to an instance of
+`bondy_mst_map_store`
+* `merger => merger()` - a merger function.
+Defaults to the grow-only set merger function `merger/3`
+* `comparator => comparator()` - a key comparator function.
+Defaults to `comparator/2`
+
+Returns a new MST instance.
+""").
 -spec new(Opts :: opts()) -> t().
 
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
 
-new(Opts) when is_map(Opts) ->
-    Algo = maps:get(hash_algorithm, Opts, sha256),
-    DefaultStore = fun() ->
-        bondy_mst_store:open(bondy_mst_map_store, Algo, Opts)
-    end,
-    Store = get_option(store, Opts, DefaultStore),
-    Comparator = get_option(comparator, Opts, fun comparator/2),
-    Merger = get_option(merger, Opts, fun merger/3),
+new(Opts) when is_map(Opts); is_list(Opts) ->
+    Comparator = key_value:get(comparator, Opts, fun comparator/2),
+    is_function(Comparator, 2)
+        orelse badarg(
+            Opts, comparator, <<"a 'bondy_mst:comparator()' function.">>
+        ),
+
+    Merger = key_value:get(merger, Opts, fun merger/3),
+    is_function(Merger, 3)
+        orelse badarg(
+            Opts, merger, <<"a 'bondy_mst:merger()' function">>
+        ),
+
+    Algo = key_value:get(hash_algorithm, Opts, sha256),
+    Algo == sha256 orelse Algo == sha512
+        orelse badarg(Opts, hash_algorithm, <<"either 'sha256' or 'sha512'.">>),
+
+    Store =
+        maybe
+            Mod = key_value:get(store, Opts, bondy_mst_map_store),
+            true ?= bondy_mst_utils:implements_behaviour(Mod, bondy_mst_store),
+            StoreOpts = key_value:get(store_opts, Opts, #{}),
+            bondy_mst_store:open(Mod, Algo, StoreOpts)
+        else
+            false ->
+                badarg(
+                    Opts,
+                    store,
+                    <<"a module implementing the 'bondy_mst_store' behaviour.">>
+                )
+        end,
 
     #?MODULE{
         store = Store,
@@ -267,60 +311,54 @@ new(Opts) when is_map(Opts) ->
     }.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Deletes the tree (by deleting its backend store).
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Deletes the tree (by deleting its backend store).
+""").
 -spec delete(t()) -> ok.
 
 delete(#?MODULE{store = Val}) ->
     bondy_mst_store:delete(Val).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the tree's root hash.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the tree's root hash.
+""").
 -spec root(Tree :: t()) -> hash() | undefined.
 
 root(#?MODULE{store = Store}) ->
     bondy_mst_store:get_root(Store).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the tree's store.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the tree's store.
+""").
 -spec store(t()) -> bondy_mst_store:t().
 
 store(#?MODULE{store = Val}) ->
     Val.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the value associated with key `Key'.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the value associated with key `Key`.
+""").
 -spec get(T :: t(), Key :: key()) -> Value :: any().
 
 get(#?MODULE{} = T, Key) ->
     get(T, Key, root(T)).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the first key-value pair in the MST or `undefined' if empty.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the first key-value pair in the MST or `undefined` if empty.
+""").
 -spec first(T :: t()) -> Value :: {key(), value()} | undefined.
 
 first(#?MODULE{} = T) ->
     first(T, root(T)).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the last key-value pair in the MST or `undefined' if empty.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the last key-value pair in the MST or `undefined` if empty.
+""").
 -spec last(T :: t()) -> Value :: {key(), value()} | undefined.
 
 last(#?MODULE{} = T) ->
@@ -341,20 +379,18 @@ get_range(#?MODULE{} = _T, {_From, _To}) ->
     %% ).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc List all items.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+List all items.
+""").
 -spec to_list(t()) -> [{key(), value()}].
 
 to_list(#?MODULE{} = T) ->
     to_list(T, root(T)).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc List all items.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+List all items.
+""").
 -spec to_list(t(), hash() | undefined) -> [{key(), value()}].
 
 to_list(#?MODULE{}, undefined) ->
@@ -366,15 +402,14 @@ to_list(#?MODULE{} = T, Root) when is_binary(Root) ->
     ).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Calls `Fun(Elem)' for each element `Elem' in the tree, starting from its
-%% current root.
-%% This function is used for its side effects and the evaluation order is
-%% defined to be the same as the order of the elements in the tree.
-%%
-%% The same as calling `foreach(T, root(T))'.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Calls `Fun(Elem)` for each element `Elem` in the tree, starting from its
+current root.
+This function is used for its side effects and the evaluation order is
+defined to be the same as the order of the elements in the tree.
+
+The same as calling `foreach(T, root(T))`.
+""").
 -spec foreach(t(), fun(({key(), value()}) -> ok)) -> ok.
 
 foreach(#?MODULE{} = T, Fun) ->
@@ -382,13 +417,12 @@ foreach(#?MODULE{} = T, Fun) ->
 
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Calls `Fun(Elem)' for each element `Elem' in the tree, starting from
-%% `Root'.
-%% This function is used for its side effects and the evaluation order is
-%% defined to be the same as the order of the elements in the tree.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Calls `Fun(Elem)` for each element `Elem` in the tree, starting from
+`Root`.
+This function is used for its side effects and the evaluation order is
+defined to be the same as the order of the elements in the tree.
+""").
 -spec foreach(t(),fun(({key(), value()}) -> ok), Opts :: list()) -> ok.
 
 foreach(#?MODULE{store = Store} = T, Fun, Opts) ->
@@ -396,26 +430,24 @@ foreach(#?MODULE{store = Store} = T, Fun, Opts) ->
     do_foreach(Store, Fun, Opts, Root).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Calls `Fun(Elem, AccIn)'' on successive elements of tree `T', starting
-%% from the current root with `AccIn == Acc0'. `Fun/2' must return a new
-%% accumulator, which is passed to the next call. The function returns the final
-%% value of the accumulator. `Acc0' is returned if the tree is empty.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Calls `Fun(Elem, AccIn)` on successive elements of tree `T`, starting
+from the current root with `AccIn == Acc0`. `Fun/2` must return a new
+accumulator, which is passed to the next call. The function returns the final
+value of the accumulator. `Acc0` is returned if the tree is empty.
+""").
 -spec fold(t(), Fun :: fold_fun(), AccIn :: any()) -> AccOut :: any().
 
 fold(T, Fun, AccIn) ->
     fold(T, Fun, AccIn, []).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Calls `Fun(Elem, AccIn)'' on successive elements of tree `T', starting
-%% from the current root with `AccIn == Acc0'. `Fun/2' must return a new
-%% accumulator, which is passed to the next call. The function returns the final
-%% value of the accumulator. `Acc0' is returned if the tree is empty.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Calls `Fun(Elem, AccIn)` on successive elements of tree `T`, starting
+from the current root with `AccIn == Acc0`. `Fun/2` must return a new
+accumulator, which is passed to the next call. The function returns the final
+value of the accumulator. `Acc0` is returned if the tree is empty.
+""").
 -spec fold(t(), Fun :: fold_fun(), AccIn :: any(), Opts :: fold_opts()) ->
     AccOut :: any().
 
@@ -424,10 +456,9 @@ fold(#?MODULE{store = Store} = T, Fun, AccIn, Opts) ->
     do_fold(Store, Fun, AccIn, Opts, Root).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+
+""").
 -spec fold_pages(
     t(), Fun :: fold_pages_fun(), AccIn :: any(), Opts :: fold_opts()) ->
     AccOut :: any().
@@ -438,20 +469,18 @@ when is_function(Fun, 2) andalso (is_map(Opts) orelse is_list(Opts)) ->
     do_fold_pages(Store, Fun, AccIn, Opts, Root).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc List all items.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+List all items.
+""").
 -spec keys(t()) -> [{key(), value()}].
 
 keys(#?MODULE{} = T) ->
     lists:reverse(fold(T, fun({K, _}, Acc) -> [K | Acc] end, [])).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Computes the difference between two MSTs and returns it as a list.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Computes the difference between two MSTs and returns it as a list.
+""").
 -spec diff_to_list(t(), t()) -> list().
 
 diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
@@ -464,37 +493,34 @@ diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
     ).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Get the last `N' items of the tree, or the last `N' items strictly
-%% before given upper bound `TopBound' if non `undefined'.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Get the last `N` items of the tree, or the last `N` items strictly
+before given upper bound `TopBound` if non `undefined`.
+""").
 last_n(#?MODULE{} = T, TopBound, N) ->
     last_n(T, TopBound, N, root(T)).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Inserts a key in the tree. The same as calling `put(T, Key, true)'.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Inserts a key in the tree. The same as calling `put(T, Key, true)`.
+""").
 -spec put(t(), key()) -> t().
 
 put(#?MODULE{} = T, Key) ->
     put(T, Key, true).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Inserts a key-value pair into the MST.
-%%
-%% If key `Key' already exists in tree `Tree1', the old associated value is
-%% merged with `Value' by calling the configured `merger' function. The function
-%% returns a new map `Tree2' containing the new association and the old
-%% associations in `Tree1'.
-%%
-%% The call fails with an exception if the tree has not been initialised with a
-%% `merger' function supporting the type of `Value'.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Inserts a key-value pair into the MST.
+
+If key `Key` already exists in tree `Tree1`, the old associated value is
+merged with `Value` by calling the configured `merger` function. The function
+returns a new map `Tree2` containing the new association and the old
+associations in `Tree1`.
+
+The call fails with an exception if the tree has not been initialised with a
+`merger` function supporting the type of `Value`.
+""").
 -spec put(Tree1 :: t(), Key :: key(), Value :: value()) -> Tree2 :: t().
 
 put(#?MODULE{store = Store0} = T, Key, Value) ->
@@ -507,10 +533,9 @@ put(#?MODULE{store = Store0} = T, Key, Value) ->
     bondy_mst_store:transaction(Store0, Fun).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+
+""").
 -spec put_page(t(), bondy_mst_page:t()) -> {Hash :: hash(), t()}.
 
 put_page(#?MODULE{store = Store0} = T, Page) ->
@@ -521,20 +546,18 @@ put_page(#?MODULE{store = Store0} = T, Page) ->
     bondy_mst_store:transaction(Store0, Fun).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Merges two MSTs into a single tree.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Merges two MSTs into a single tree.
+""").
 -spec merge(T1 :: t(), T2 :: t()) -> NewT1 :: t().
 
 merge(#?MODULE{} = T1, #?MODULE{} = T2) ->
     merge(T1, T2, root(T2)).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Merges two MSTs into a single tree.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Merges two MSTs into a single tree.
+""").
 -spec merge(T1 :: t(), T2 :: t(), Root :: hash() | undefined) -> NewT1 :: t().
 
 
@@ -557,41 +580,37 @@ when is_binary(Root) orelse Root == undefined ->
 
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the hashes of the pages identified by root hash that are missing
-%% from the store.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the hashes of the pages identified by root hash that are missing
+from the store.
+""").
 -spec missing_set(t(), Root :: binary()) -> [hash()].
 
 missing_set(#?MODULE{store = Store}, Root) ->
     bondy_mst_store:missing_set(Store, Root).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Dumps the structure of the MST for debugging purposes.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Dumps the structure of the MST for debugging purposes.
+""").
 -spec dump(t()) -> ok.
 
 dump(#?MODULE{store = Store} = T) ->
     dump(Store, root(T)).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+
+""").
 -spec gc(t()) -> t().
 
 gc(#?MODULE{} = T) ->
     gc(T, []).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+
+""").
 -spec gc(t(), KeepRoots :: [hash()] | Epoch :: integer()) -> t().
 
 gc(#?MODULE{store = Store0} = T, Arg0)
@@ -627,62 +646,33 @@ format_error(Reason, [{_M, _F, _As, Info} | _]) ->
 
 
 %% =============================================================================
-%% PRIVATE: OPTIONS VALIDATION & DEFAULTS
-%% =============================================================================
-
-%% priv
-get_option(store, #{store := Store} = Opts, _) ->
-    bondy_mst_store:is_type(Store)
-        orelse erlang:error(
-            badarg,
-            [Opts],
-            [{error_info, #{
-                module => ?MODULE,
-                cause => #{
-                    1 =>
-                        "value for option 'store' "
-                        "should be a valid bondy_mst_store:t()"
-                }
-            }}]
-        ),
-
-    Store;
-
-get_option(store, _, Default) ->
-    apply_default(Default);
-
-get_option(comparator, #{comparator := Fun}, _) when is_function(Fun, 2) ->
-    Fun;
-
-get_option(comparator, _, Default) ->
-    apply_default(Default);
-
-get_option(merger, #{merger := Fun}, _) when is_function(Fun, 3) ->
-    Fun;
-
-get_option(merger, _, Default) ->
-    apply_default(Default).
-
-
-apply_default(Default) when is_function(Default, 0) ->
-    Default();
-
-apply_default(Default) ->
-    Default.
-
-
-
-%% =============================================================================
 %% PRIVATE
 %% =============================================================================
 
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc Returns the default comparator function used in the MST.
-%% @end
-%% -----------------------------------------------------------------------------
+badarg(Opts, Opt, Expected) when is_atom(Opt) ->
+    badarg(Opts, atom_to_binary(Opt), Expected);
+
+badarg(Opts, Opt, Expected) when is_binary(Opt) ->
+    erlang:error(
+        badarg,
+        [Opts],
+        [{error_info, #{
+            module => ?MODULE,
+            cause => #{
+                1 => <<
+                    "value for option '", Opt/binary, "' is invalid. ",
+                    "Expected ", Expected/binary
+                    >>
+            }
+        }}]
+    ).
+
+
+%% @private
+%% The default comparator function used in the MST.
 comparator(A, B) when A < B -> lt;
 comparator(A, B) when A == B -> eq;
 comparator(A, B) when A > B -> gt.
@@ -690,10 +680,8 @@ comparator(A, B) when A > B -> gt.
 
 %% -----------------------------------------------------------------------------
 %% @private
-%% @doc Returns the default merger function, assuming MST as a set. (where all
-%% values are `true').
-%% @end
-%% -----------------------------------------------------------------------------
+%% The default merger function, assuming MST as a set. (where all
+%% values are `true`).
 merger(_Key, true, true) ->
     true.
 

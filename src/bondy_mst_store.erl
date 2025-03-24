@@ -42,18 +42,19 @@ and implement different synchronization or caching mechanisms.
 -type t()               ::  #?MODULE{}.
 -type page()            ::  any().
 -type backend()         ::  any().
--type opts()            ::  #{atom() => any()} | [{atom(), any()}].
-
-%% -type iterator_action() ::  first
-%%                             | last
-%%                             | next
-%%                             | prev
-%%                             | binary()
-%%                             | {seek, binary()}
-%%                             | {seek_for_prev, binary()}.
+-type encode_fun()      ::  fun((encode, bondy_mst_page:t()) -> binary()).
+-type decode_fun()      ::  fun((decode, binary()) -> bondy_mst_page:t()).
+-type serializer()      ::  module | encode_fun() | decode_fun().
+-type opt()             ::  {serializer, serializer()} | {atom(), any()}.
+-type opts()            ::  #{
+                                serializer => serializer(),
+                                atom() => any()
+                            }
+                            | [opt()].
 
 -export_type([t/0]).
 -export_type([backend/0]).
+-export_type([serializer/0]).
 -export_type([page/0]).
 -export_type([opts/0]).
 

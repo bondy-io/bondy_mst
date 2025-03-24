@@ -1,3 +1,20 @@
+%% =============================================================================
+%%  bondy_mst_test_grove.erl -
+%%
+%%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
+%%
+%%  Licensed under the Apache License, Version 2.0 (the "License");
+%%  you may not use this file except in compliance with the License.
+%%  You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%%  Unless required by applicable law or agreed to in writing, software
+%%  distributed under the License is distributed on an "AS IS" BASIS,
+%%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%%  See the License for the specific language governing permissions and
+%%  limitations under the License.
+%% =============================================================================
 -module(bondy_mst_test_grove).
 
 -behaviour(bondy_mst_grove).
@@ -39,14 +56,10 @@ start_all(Opts) ->
     start(Opts, peers()).
 
 
-start(#{store_type := StoreType, name := Name0} = Opts, Peers) ->
+start(#{store := _, store_opts := #{name := _}} = Opts, Peers) ->
     Started = [
         begin
-            Name = <<Name0/binary, "-", (atom_to_binary(NodeId))/binary>>,
-            Store = bondy_mst_store:open(
-                StoreType, sha256, [{name, Name}]
-            ),
-            {ok, _} = start_link(NodeId, Opts#{store => Store}),
+            {ok, _} = start_link(NodeId, Opts),
             NodeId
         end
         || NodeId <- Peers
@@ -92,13 +105,17 @@ init([NodeId, Opts0]) ->
     %% supervisor.
     erlang:process_flag(trap_exit, true),
 
+    StoreOpts0 = key_value:get(store_opts, Opts0, #{}),
+    Name0 = key_value:get(name, StoreOpts0),
+    Name = <<Name0/binary, "-", (atom_to_binary(NodeId))/binary>>,
+    StoreOpts = key_value:put(name, Name, StoreOpts0),
+    Opts1 = key_value:put(store_opts, StoreOpts, Opts0),
     Defaults = #{
         callback_mod => ?MODULE,
         max_merges => 3,
         max_same_merge => 1
     },
-
-    Opts = maps:merge(Defaults, Opts0),
+    Opts = maps:merge(Defaults, Opts1),
 
     %% We create an ets-based MST bound to this process.
     %% The ets table will be garbage collected if this process terminates.
