@@ -1,5 +1,5 @@
 %% =============================================================================
-%%  bondy_mst_test_grove.erl -
+%%  bondy_mst_test_crdt_server.erl -
 %%
 %%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
 %%
@@ -15,9 +15,9 @@
 %%  See the License for the specific language governing permissions and
 %%  limitations under the License.
 %% =============================================================================
--module(bondy_mst_test_grove).
+-module(bondy_mst_test_crdt_server).
 
--behaviour(bondy_mst_grove).
+-behaviour(bondy_mst_crdt).
 -behaviour(gen_server).
 
 -include_lib("common_test/include/ct.hrl").
@@ -76,7 +76,7 @@ start_link(NodeId, Opts) when is_atom(NodeId) ->
 
 
 %% =============================================================================
-%% BONDY_MST_GROVE CALLBACKS
+%% bondy_mst_crdt CALLBACKS
 %% =============================================================================
 
 
@@ -119,7 +119,7 @@ init([NodeId, Opts0]) ->
 
     %% We create an ets-based MST bound to this process.
     %% The ets table will be garbage collected if this process terminates.
-    Grove = bondy_mst_grove:new(NodeId, Opts),
+    Grove = bondy_mst_crdt:new(NodeId, Opts),
     {ok, Grove}.
 
 handle_call(ping, _From, Grove) ->
@@ -127,54 +127,54 @@ handle_call(ping, _From, Grove) ->
 
 handle_call(root, _From, Grove) ->
     ct:pal("handling root"),
-    Reply = bondy_mst_grove:root(Grove),
+    Reply = bondy_mst_crdt:root(Grove),
     {reply, Reply, Grove};
 
 handle_call({get, Key}, _From, Grove) ->
     ct:pal("handling get key: ~p", [Key]),
-    Reply = bondy_mst:get(bondy_mst_grove:tree(Grove), Key),
+    Reply = bondy_mst:get(bondy_mst_crdt:tree(Grove), Key),
     {reply, Reply, Grove};
 
 handle_call(gc, _From, Grove0) ->
     ct:pal("Triggering GC on peer"),
-    Grove = bondy_mst_grove:gc(Grove0, [bondy_mst_grove:root(Grove0)]),
+    Grove = bondy_mst_crdt:gc(Grove0, [bondy_mst_crdt:root(Grove0)]),
     {reply, ok, Grove};
 
 handle_call({gc, Epoch}, _From, Grove0) ->
     ct:pal("Triggering GC for Epoch on peer"),
-    Grove = bondy_mst_grove:gc(Grove0, Epoch),
+    Grove = bondy_mst_crdt:gc(Grove0, Epoch),
     {reply, ok, Grove};
 
 handle_call(list, _From, Grove) ->
     ct:pal("handling list"),
-    Reply = bondy_mst:to_list(bondy_mst_grove:tree(Grove)),
+    Reply = bondy_mst:to_list(bondy_mst_crdt:tree(Grove)),
     {reply, Reply, Grove};
 
 handle_call(list_pages, _From, Grove) ->
     ct:pal("handling list_pages"),
-    Store = bondy_mst:store(bondy_mst_grove:tree(Grove)),
+    Store = bondy_mst:store(bondy_mst_crdt:tree(Grove)),
     Reply = bondy_mst_store:list(Store),
     {reply, Reply, Grove};
 
 handle_call({fold_pages, Fun, Acc, Opts}, _From, Grove) ->
     ct:pal("handling fold_pages"),
-    Tree = bondy_mst_grove:tree(Grove),
+    Tree = bondy_mst_crdt:tree(Grove),
     Reply = bondy_mst:fold_pages(Tree, Fun, Acc, Opts),
     {reply, Reply, Grove};
 
 handle_call({put, Key}, _From, Grove0) ->
     ct:pal("handling put key: ~p", [Key]),
-    Grove1 = bondy_mst_grove:put(Grove0, Key, true),
+    Grove1 = bondy_mst_crdt:put(Grove0, Key, true),
     {reply, ok, Grove1};
 
 handle_call({put, Key, Value}, _From, Grove0) ->
     ct:pal("handling put key: ~p, value: ~p", [Key, Value]),
-    Grove1 = bondy_mst_grove:put(Grove0, Key, Value),
+    Grove1 = bondy_mst_crdt:put(Grove0, Key, Value),
     {reply, ok, Grove1};
 
 handle_call({trigger, Peer}, _From, Grove) ->
     ct:pal("Triggering sync on peer: ~p", [Peer]),
-    Reply = bondy_mst_grove:trigger(Grove, Peer),
+    Reply = bondy_mst_crdt:trigger(Grove, Peer),
     {reply, Reply, Grove};
 
 handle_call(_Request, _From, State) ->
@@ -184,9 +184,9 @@ handle_call(_Request, _From, State) ->
 handle_cast({grove_message, Message}, Grove0) ->
     ct:pal(
         "(~p) Handling grove_message: ~p",
-        [bondy_mst_grove:node_id(Grove0), Message]
+        [bondy_mst_crdt:node_id(Grove0), Message]
     ),
-    Grove = bondy_mst_grove:handle(Grove0, Message),
+    Grove = bondy_mst_crdt:handle(Grove0, Message),
     {noreply, Grove};
 
 handle_cast(_Request, Grove) ->

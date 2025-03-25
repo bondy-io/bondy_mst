@@ -1,4 +1,4 @@
--module(bondy_mst_grove_SUITE).
+-module(bondy_mst_crdt_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
@@ -148,7 +148,7 @@ init_per_testcase(TestCase, Config) ->
 
 %% Called after each test case
 end_per_testcase(_TestCase, _Config) ->
-    _ = [catch gen_server:stop(Peer) || Peer <- bondy_mst_test_grove:peers()],
+    _ = [catch gen_server:stop(Peer) || Peer <- bondy_mst_test_crdt_server:peers()],
     ok.
 
 
@@ -166,7 +166,7 @@ set_online_sync(Config) ->
 
     %% We start 3 replicas
     GroveOpts = ?config(grove_opts, Config),
-    {ok, Peers} = bondy_mst_test_grove:start_all(GroveOpts),
+    {ok, Peers} = bondy_mst_test_crdt_server:start_all(GroveOpts),
     [Peer1, Peer2, Peer3] = Peers,
 
     %% We validate they are alive
@@ -385,7 +385,7 @@ set_online_sync(Config) ->
 
 set_online_sync_complex(Config) ->
     GroveOpts = ?config(grove_opts, Config),
-    {ok, Peers} = bondy_mst_test_grove:start_all(GroveOpts),
+    {ok, Peers} = bondy_mst_test_crdt_server:start_all(GroveOpts),
     [Peer1, Peer2, Peer3] = Peers,
 
     L = [
@@ -407,10 +407,10 @@ set_online_sync_complex(Config) ->
 
 set_anti_entropy_fwd(Config) ->
     GroveOpts = ?config(grove_opts, Config),
-    [Peer1 | RestPeers] = bondy_mst_test_grove:peers(),
+    [Peer1 | RestPeers] = bondy_mst_test_crdt_server:peers(),
 
     %% We start Peer1 first
-    {ok, [Peer1]} = bondy_mst_test_grove:start(GroveOpts, [Peer1]),
+    {ok, [Peer1]} = bondy_mst_test_crdt_server:start(GroveOpts, [Peer1]),
 
     %% And put some values
     L = [
@@ -424,7 +424,7 @@ set_anti_entropy_fwd(Config) ->
     ?assertEqual(L, L1),
 
     %% We start the other peers
-    {ok, [Peer2, Peer3]} = bondy_mst_test_grove:start(GroveOpts, RestPeers),
+    {ok, [Peer2, Peer3]} = bondy_mst_test_crdt_server:start(GroveOpts, RestPeers),
 
     %% Trigger sync Peer1 -> [Peer2, Peer3]
     ok = gen_server:call(Peer1, {trigger, Peer2}, ?TIMEOUT_XXL),
@@ -442,10 +442,10 @@ set_anti_entropy_fwd(Config) ->
 
 set_bidirectional_sync(Config) ->
     GroveOpts = ?config(grove_opts, Config),
-    [Peer1, Peer2, Peer3] = bondy_mst_test_grove:peers(),
+    [Peer1, Peer2, Peer3] = bondy_mst_test_crdt_server:peers(),
 
     %% We start Peer2 first
-    {ok, [Peer2]} = bondy_mst_test_grove:start(GroveOpts, [Peer2]),
+    {ok, [Peer2]} = bondy_mst_test_crdt_server:start(GroveOpts, [Peer2]),
 
     %% And put some values
     L = lists:seq(1, 1000),
@@ -454,7 +454,7 @@ set_bidirectional_sync(Config) ->
     ?assertEqual(L, L2),
 
     %% We start Peer1 and trigger sync Peer1 -> Peer2
-    {ok, [Peer1]} = bondy_mst_test_grove:start(GroveOpts, [Peer1]),
+    {ok, [Peer1]} = bondy_mst_test_crdt_server:start(GroveOpts, [Peer1]),
     ok = gen_server:call(Peer1, {trigger, Peer2}, ?TIMEOUT_XXL),
     timer:sleep(5000),
     %% Now Peer1 should have synced the data
@@ -462,7 +462,7 @@ set_bidirectional_sync(Config) ->
     ?assertEqual(L, L1),
 
     %% We start Peer3 and trigger sync Peer2 -> Peer3
-    {ok, [Peer3]} = bondy_mst_test_grove:start(GroveOpts, [Peer3]),
+    {ok, [Peer3]} = bondy_mst_test_crdt_server:start(GroveOpts, [Peer3]),
     ok = gen_server:call(Peer2, {trigger, Peer3}, ?TIMEOUT_XXL),
     timer:sleep(5000),
     %% Now Peer3 should have synced the data
@@ -482,7 +482,7 @@ set_bidirectional_sync(Config) ->
 
 set_of_awsets_online_sync(Config) ->
      GroveOpts = ?config(grove_opts, Config),
-    {ok, Peers} = bondy_mst_test_grove:start_all(GroveOpts),
+    {ok, Peers} = bondy_mst_test_crdt_server:start_all(GroveOpts),
 
     [Peer1, Peer2, Peer3] = Peers,
 
@@ -523,12 +523,12 @@ set_of_awsets_online_sync_complex(_Config) ->
     ok.
 
 set_of_awsets_anti_entropy_fwd(Config) ->
-    meck:new(bondy_mst_test_grove, [passthrough]),
+    meck:new(bondy_mst_test_crdt_server, [passthrough]),
 
     GroveOpts = ?config(grove_opts, Config),
-    [Peer1, Peer2, _Peer3] = bondy_mst_test_grove:peers(),
-    {ok, [Peer1]} = bondy_mst_test_grove:start(GroveOpts, [Peer1]),
-    {ok, [Peer2]} = bondy_mst_test_grove:start(GroveOpts, [Peer2]),
+    [Peer1, Peer2, _Peer3] = bondy_mst_test_crdt_server:peers(),
+    {ok, [Peer1]} = bondy_mst_test_crdt_server:start(GroveOpts, [Peer1]),
+    {ok, [Peer2]} = bondy_mst_test_crdt_server:start(GroveOpts, [Peer2]),
 
     V0 = state_awset:new(),
     {ok, V1} = state_type:mutate({add, foo}, Peer1, V0),
@@ -543,7 +543,7 @@ set_of_awsets_anti_entropy_fwd(Config) ->
 
     %% We override broadcast, this way Peer2 will not receive
     %% the broadcast of the changes, i.e. we simulate they are not connected
-    meck:expect(bondy_mst_test_grove, broadcast, fun(_) ->
+    meck:expect(bondy_mst_test_crdt_server, broadcast, fun(_) ->
         ct:pal("Broadcasting disabled"),
         ok
     end),
@@ -565,7 +565,7 @@ set_of_awsets_anti_entropy_fwd(Config) ->
     ?assertEqual(L2, gen_server:call(Peer2, list, ?TIMEOUT_XXL)),
 
     %% Restore module, any put or merge will broadcast to all peers
-    meck:unload(bondy_mst_test_grove),
+    meck:unload(bondy_mst_test_crdt_server),
 
     %% Trigger sync Peer1 -> Peer2
     ok = gen_server:call(Peer1, {trigger, Peer2}),

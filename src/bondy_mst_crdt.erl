@@ -1,5 +1,5 @@
 %% =============================================================================
-%%  bondy_mst_grove.erl -
+%%  bondy_mst_crdt.erl -
 %%
 %%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
 %%
@@ -20,22 +20,22 @@
 %%  CRDTs in Open Networks by Alex Auvolat, François Taïani
 %% =============================================================================
 
--module(bondy_mst_grove).
+-module(bondy_mst_crdt).
 
 -include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-This module implements a State-based CRDT using a sychronised group of Merkle
-Search Tree replicas across a cluster.
+This module implements the logic for a State-based CRDT using a Merkle Search
+Tree.
 
 Anti-entropy merges are performed in the background and without blocking
 local operations. The underlying tree is not changed until all the remote
 information necessary for the merge is obtained from a peer.
 
 This module allows a set of remote trees that we want to merge with the local
-tree to be kept in the state (`#?bondy_mst_grove.merge_buffer`) and all missing
+tree to be kept in the state (`#?bondy_mst_crdt.merge_buffer`) and all missing
 pages are requested to the remote peers. Once all pages are locally
 available, the merge operation is done without network communication and the
 local tree is updated.

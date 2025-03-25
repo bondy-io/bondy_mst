@@ -4,7 +4,7 @@ An OTP application that implements a Merkle Search Tree as described in the 2019
 
 The implementation extends the original [Elixir prototype](https://gitlab.inria.fr/aauvolat/mst_exp) to support multiple backends, with some backends offering read concurrency through persistent data structures (path copying and epoch-based pruning). 
 
-The library also provides `bondy_mst_grove` that is the core logic required to implement a sychronised group of MST replicas across a cluster. This module implements a the logic for anti-entropy exchanges and makes no assumption as to the underlying networking so it can be used with Distributed Erlang, [Partisan](https://partisan.dev/) or any other alternative.
+The library also provides `bondy_mst_crdt` that is the core logic required to implement a sychronised group of MST replicas across a cluster. This module implements a the logic for anti-entropy exchanges and makes no assumption as to the underlying networking so it can be used with Distributed Erlang, [Partisan](https://partisan.dev/) or any other alternative.
 
 ## Backends
 Backends implement the `bondy_mst_store` behaviour which offers support for transactions.
