@@ -750,14 +750,14 @@ do_get(#?MODULE{} = T, Key, Root) ->
 %% @private
 %% Recursively retrieves a value from the MST.
 do_get(T, Key, Low, []) ->
-    get(T, Key, Low);
+    do_get(T, Key, Low);
 
 do_get(T, Key, Low, [{K, V, Low2} | Rest]) ->
     case compare(T, Key, K) of
         eq ->
             V;
         lt ->
-            get(T, Key, Low);
+            do_get(T, Key, Low);
         gt ->
             do_get(T, Key, Low2, Rest)
     end.
