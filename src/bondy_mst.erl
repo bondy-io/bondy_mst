@@ -347,7 +347,8 @@ Returns the value associated with key `Key`.
 -spec get(T :: t(), Key :: key()) -> Value :: any().
 
 get(#?MODULE{} = T, Key) ->
-    get(T, Key, root(T)).
+    %% Call do get as root might be undefined
+    do_get(T, Key, root(T)).
 
 
 ?DOC("""
