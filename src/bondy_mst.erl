@@ -357,7 +357,7 @@ This allows to read from a previous version.
 -spec get(T :: t(), Key :: key(), Root :: binary()) -> Value :: any().
 
 get(#?MODULE{} = T, Key, Root) when is_binary(Root) ->
-    get(T, Key, Root).
+    do_get(T, Key, Root).
 
 
 ?DOC("""
