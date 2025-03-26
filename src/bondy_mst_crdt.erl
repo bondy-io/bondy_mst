@@ -70,7 +70,7 @@ This CRDT achieves casual consistency without any conditions on the network
 topology as is required by causal broadcast.
 
 ### Eventual Consistency
-If causal consistency is not required, a Grove can operate in `eventual`
+If causal consistency is not required, a CRDT can operate in `eventual`
 consistency mode, by gossiping individual single operations and applying them as
 soon as they are received, while executing periodic merges to ensure
 termination.
@@ -128,13 +128,13 @@ following callbacks:
     %% A queue containing the latest gossiped roots from peers i.e. candidates
     %% for merges.
     %% It colesces base on peer and thus its size is naturally bounded to the
-    %% number of peers in the grove.
+    %% number of peers in the CRDT.
     merge_backlog                   ::  bondy_mst_coalescing_queue:t(),
     %% A queue of delayed broadcasts.
     bcast_backlog                   ::  bondy_mst_coalescing_queue:t()
 }).
 
-%% The payload use for broadcasting changes to peers in the grove.
+%% The payload use for broadcasting changes to peers in the CRDT.
 %% key and value can be 'undefined' when triggering an exchange.
 -record(gossip, {
     from                    ::  node_id(),
@@ -229,6 +229,51 @@ following callbacks:
 
 
 
+
+
+%% =============================================================================
+%% TELEMETRY EVENTS
+%% =============================================================================
+
+
+-telemetry_event #{
+    event => [?MODULE, broadcast, sent],
+    description =>
+    <<"Emitted when the CRDT broadcast's a gossip message">>,
+    measurements => <<
+    "#{system_time => non_neg_integer(), "
+    "monotonic_time => non_neg_integer()}"
+    >>,
+    metadata => <<"#{from => node_id()}">>
+}.
+
+-telemetry_event #{
+    event => [?MODULE, broadcast, recv],
+    description =>
+    <<"Emitted when the CRDT received a gossip message">>,
+    measurements => <<
+    "#{system_time => non_neg_integer(), "
+    "monotonic_time => non_neg_integer()"
+    "count => 1, bytes => integer()"
+    "}"
+    >>,
+    metadata => <<"#{from => node_id()}">>
+}.
+
+
+-telemetry_event #{
+    event => [?MODULE, merge, abandoned],
+    description =>
+    <<"Emitted when the CRDT received a gossip message">>,
+    measurements => <<
+    "#{system_time => non_neg_integer(), "
+    "monotonic_time => non_neg_integer()}"
+    >>,
+    metadata => <<"#{from => node_id()}">>
+}.
+
+
+
 %% =============================================================================
 %% CALLBACKS
 %% =============================================================================
@@ -318,7 +363,7 @@ which a version becomes eligible for garbage collection. Default is `60000`
 (1 minute).
 
 """).
--spec new(node_id(), opts()) -> Grove :: t() | no_return().
+-spec new(node_id(), opts()) -> CRDT :: t() | no_return().
 
 new(NodeId, Opts) when is_list(Opts) ->
     new(NodeId, maps:from_list(Opts));
@@ -396,10 +441,10 @@ When the gossip event is received by the peer it must handle it calling
 `handle/2` on its local grove instance which will merge the value locally and
 possibly trigger an exchange.
 """).
--spec put(Grove0 :: t(), Key :: any(), Value :: any()) -> Grove1 :: t().
+-spec put(CRDT0 :: t(), Key :: any(), Value :: any()) -> CRDT1 :: t().
 
-put(Grove, Key, Value) ->
-    put(Grove, Key, Value, #{}).
+put(CRDT, Key, Value) ->
+    put(CRDT, Key, Value, #{}).
 
 
 ?DOC("""
@@ -413,23 +458,23 @@ on its local grove instance.
 ## Options
 
 * `broadcast => boolean` - If `false` it doesn't broadcast the change to
-peers. This means you will reply on peers performing periodic anti-entropy
-exchanges to learn about the change. Default is `true`.
+peers. This means you will rely on peers performing periodic anti-entropy
+sync exchanges to learn about this change. Default is `true`.
 """).
--spec put(Grove0 :: t(), Key :: any(), Value :: any(), Opts :: key_value:t()) ->
-    Grove1 :: t().
+-spec put(CRDT0 :: t(), Key :: any(), Value :: any(), Opts :: key_value:t()) ->
+    CRDT1 :: t().
 
-put(Grove0, Key, Value, Opts) ->
-    Store = bondy_mst:store(Grove0#?MODULE.tree),
+put(CRDT0, Key, Value, Opts) ->
+    Store = bondy_mst:store(CRDT0#?MODULE.tree),
 
     Fun = fun() ->
-        NodeId = Grove0#?MODULE.node_id,
-        Tree0 = Grove0#?MODULE.tree,
+        NodeId = CRDT0#?MODULE.node_id,
+        Tree0 = CRDT0#?MODULE.tree,
         Root0 = bondy_mst:root(Tree0),
 
         %% We perform the put and update the grove state
         Tree = bondy_mst:put(Tree0, Key, Value),
-        Grove1 = Grove0#?MODULE{tree = Tree},
+        CRDT1 = CRDT0#?MODULE{tree = Tree},
 
         %% We obtain the new root
         Root = bondy_mst:root(Tree),
@@ -438,7 +483,7 @@ put(Grove0, Key, Value, Opts) ->
         %% immediately elegible for garbage collection.
         %% The version will automatically elegible when its TTL is reached or
         %% when history has reached its maximum size.
-        Grove = add_history(Grove1, Root),
+        CRDT = add_history(CRDT1, Root),
 
         %% We conditionally broadcast
         case Root0 =/= Root andalso key_value:get(broadcast, Opts, true) of
@@ -449,10 +494,10 @@ put(Grove0, Key, Value, Opts) ->
                     key = Key,
                     value = Value
                 },
-                broadcast(Grove, Gossip);
+                broadcast(CRDT, Gossip);
 
             _ ->
-                Grove
+                CRDT
         end
 
     end,
@@ -466,8 +511,8 @@ current root or the roots of versions in the history whose TTL have not been
 reached.
 """).
 -spec gc(t()) -> t().
-gc(#?MODULE{} = Grove) ->
-    gc(Grove, keep_roots(Grove)).
+gc(#?MODULE{} = CRDT) ->
+    gc(CRDT, keep_roots(CRDT)).
 
 
 ?DOC("""
@@ -478,10 +523,10 @@ current root or the roots in `KeepRoots`.
 -spec gc(t(), KeepRoots :: [binary()]) -> t();
         (t(), Epoch :: integer()) -> t().
 
-gc(#?MODULE{} = Grove, Arg) when is_list(Arg) orelse is_integer(Arg) ->
+gc(#?MODULE{} = CRDT, Arg) when is_list(Arg) orelse is_integer(Arg) ->
     %% bondy_mst:gc will add the current root when is_list(Arg)
-    Tree = bondy_mst:gc(Grove#?MODULE.tree, Arg),
-    Grove#?MODULE{tree = Tree}.
+    Tree = bondy_mst:gc(CRDT#?MODULE.tree, Arg),
+    CRDT#?MODULE{tree = Tree}.
 
 
 ?DOC("""
@@ -500,11 +545,11 @@ You should use a fault detector to cancel merges when a peer crashes.
 """).
 -spec cancel_merge(t(), node_id()) -> ok.
 
-cancel_merge(#?MODULE{merge_buffer = Merges} = Grove, Peer) ->
+cancel_merge(#?MODULE{merge_buffer = Merges} = CRDT, Peer) ->
     %% TODO This should cleanup all pages stored in the tree that have been
     %% synced but not merged yet. But carefull as pages might be used by
     %% multiple merges
-    Grove#?MODULE{merge_buffer = maps:without([Peer], Merges)}.
+    CRDT#?MODULE{merge_buffer = maps:without([Peer], Merges)}.
 
 
 
@@ -519,10 +564,10 @@ Broadcasts all gossip messages in the backlog.
 """).
 -spec broadcast_pending(t()) -> t().
 
-broadcast_pending(#?MODULE{} = Grove) ->
-    LastTime = Grove#?MODULE.last_fwd_bcast_time,
+broadcast_pending(#?MODULE{} = CRDT) ->
+    LastTime = CRDT#?MODULE.last_fwd_bcast_time,
     Pred = fun({_, Time}) -> LastTime < Time end,
-    broadcast_pending(Grove, Pred).
+    broadcast_pending(CRDT, Pred).
 
 
 ?DOC("""
@@ -534,14 +579,14 @@ The exchange might not occur if Peer has reached its `max_merges`.
 trigger(#?MODULE{node_id = Peer}, Peer) ->
     ok;
 
-trigger(#?MODULE{} = Grove, Peer) when is_atom(Peer) ->
+trigger(#?MODULE{} = CRDT, Peer) when is_atom(Peer) ->
     Event = #gossip{
-        from = Grove#?MODULE.node_id,
-        root = root(Grove),
+        from = CRDT#?MODULE.node_id,
+        root = root(CRDT),
         key = undefined,
         value = undefined
     },
-    (Grove#?MODULE.callback_mod):send(Peer, Event).
+    (CRDT#?MODULE.callback_mod):send(Peer, Event).
 
 
 ?DOC("""
@@ -585,8 +630,8 @@ Returns `true` if `PeerRoot` is not contained in the tree.
 """).
 -spec is_stale(t(), hash()) -> boolean().
 
-is_stale(#?MODULE{} = Grove, PeerRoot) ->
-    Tree = Grove#?MODULE.tree,
+is_stale(#?MODULE{} = CRDT, PeerRoot) ->
+    Tree = CRDT#?MODULE.tree,
     Root = bondy_mst:root(Tree),
 
     case Root == PeerRoot of
@@ -603,8 +648,8 @@ is_stale(#?MODULE{} = Grove, PeerRoot) ->
 Call this function when your node receives a message or broadcast from a
 peer.
 """).
-handle(Grove0, #gossip{} = Gossip) ->
-    Tree0 = Grove0#?MODULE.tree,
+handle(CRDT0, #gossip{} = Gossip) ->
+    Tree0 = CRDT0#?MODULE.tree,
     Peer = Gossip#gossip.from,
     PeerRoot = Gossip#gossip.root,
     Key = Gossip#gossip.key,
@@ -612,8 +657,8 @@ handle(Grove0, #gossip{} = Gossip) ->
 
     telemetry:execute(
         [bondy_mst, broadcast, recv],
-        #{count => 1},
-        #{peer => Peer, pid => self()}
+        #{count => 1, bytes => erlang:external_size(Gossip)},
+        #{from => Peer}
     ),
 
     Root = bondy_mst:root(Tree0),
@@ -625,30 +670,30 @@ handle(Grove0, #gossip{} = Gossip) ->
                 root => encode_hash(PeerRoot),
                 peer => Peer
             }),
-            Grove0;
+            CRDT0;
 
         false when Key == undefined andalso Value == undefined ->
             %% This is a full merge request, so slways try a merge regardless
             %% of consistency model
-            maybe_merge(Grove0, Peer, PeerRoot);
+            maybe_merge(CRDT0, Peer, PeerRoot);
 
         false ->
             %% We insert the broadcasted change and get the new root
             Tree1 = bondy_mst:put(Tree0, Key, Value),
-            Grove1 = Grove0#?MODULE{tree = Tree1},
+            CRDT1 = CRDT0#?MODULE{tree = Tree1},
             NewRoot = bondy_mst:root(Tree1),
             %% We will only do a full merge in case model is causal
-            Model = Grove0#?MODULE.consistency_model,
+            Model = CRDT0#?MODULE.consistency_model,
 
             case Root =/= NewRoot of
                 true when Model == causal ->
-                    Grove2 = cancel_merges(Grove1, NewRoot),
-                    Grove3 = maybe_broadcast(Grove2, Gossip),
+                    CRDT2 = cancel_merges(CRDT1, NewRoot),
+                    CRDT3 = maybe_broadcast(CRDT2, Gossip),
 
                     case NewRoot =/= PeerRoot of
                         true ->
                             %% We have missing data
-                            maybe_merge(Grove3, Peer, PeerRoot);
+                            maybe_merge(CRDT3, Peer, PeerRoot);
 
                         false ->
                             ?LOG_DEBUG(#{
@@ -658,31 +703,31 @@ handle(Grove0, #gossip{} = Gossip) ->
                                 root => encode_hash(NewRoot),
                                 peer => Peer
                             }),
-                            Grove3
+                            CRDT3
                     end;
 
                 true when Model == eventual ->
                     %% We skip a full merge
-                    cancel_merges(Grove1, NewRoot);
+                    cancel_merges(CRDT1, NewRoot);
 
                 false when Model == causal ->
                     %% We have missing data, so we try do a full merge
-                    maybe_merge(Grove1, Peer, PeerRoot);
+                    maybe_merge(CRDT1, Peer, PeerRoot);
 
                 false when Model == eventual ->
                     %% We skip a full merge
-                    Grove1
+                    CRDT1
             end
     end;
 
-handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
+handle(CRDT, #get{from = Peer, root = PeerRoot, set = Set}) ->
     ?LOG_DEBUG(#{
         message => <<"Received GET message">>,
         peer => Peer,
         set_size => sets:size(Set)
     }),
     %% We are being asked to produce a set of pages
-    Tree = Grove#?MODULE.tree,
+    Tree = CRDT#?MODULE.tree,
     Store = bondy_mst:store(Tree),
 
     %% We determine the hashes we don't have
@@ -703,25 +748,25 @@ handle(Grove, #get{from = Peer, root = PeerRoot, set = Set}) ->
                     #{},
                     Set
                 ),
-                Msg = #put{from = Grove#?MODULE.node_id, map = Map},
-                (Grove#?MODULE.callback_mod):send(Peer, Msg);
+                Msg = #put{from = CRDT#?MODULE.node_id, map = Map},
+                (CRDT#?MODULE.callback_mod):send(Peer, Msg);
 
             false ->
                 %% We don't have all the pages, we reply a missing message
-                Msg = #missing{from = Grove#?MODULE.node_id},
-                (Grove#?MODULE.callback_mod):send(Peer, Msg)
+                Msg = #missing{from = CRDT#?MODULE.node_id},
+                (CRDT#?MODULE.callback_mod):send(Peer, Msg)
         end,
 
     case PeerRoot == bondy_mst:root(Tree) of
         true ->
-            Grove;
+            CRDT;
 
         false ->
-            maybe_merge(Grove, Peer, PeerRoot)
+            maybe_merge(CRDT, Peer, PeerRoot)
     end;
 
-handle(Grove, #put{from = Peer, map = Map}) ->
-    case maps:is_key(Peer, Grove#?MODULE.merge_buffer) of
+handle(CRDT, #put{from = Peer, map = Map}) ->
+    case maps:is_key(Peer, CRDT#?MODULE.merge_buffer) of
         true ->
             ?LOG_DEBUG(#{
                 message => <<"Received peer data">>,
@@ -741,10 +786,10 @@ handle(Grove, #put{from = Peer, map = Map}) ->
 
                     Acc
                 end,
-                Grove#?MODULE.tree,
+                CRDT#?MODULE.tree,
                 Map
             ),
-            merge(Grove#?MODULE{tree = Tree}, Peer);
+            merge(CRDT#?MODULE{tree = Tree}, Peer);
 
         false ->
             ?LOG_DEBUG(#{
@@ -756,25 +801,25 @@ handle(Grove, #put{from = Peer, map = Map}) ->
             }),
             %% REVIEW: Will this happen when a previous merge has been evicted
             %% from the merge buffer?
-            Grove
+            CRDT
     end;
 
-handle(Grove, #missing{from = Peer}) ->
-    case maps:take(Peer, Grove#?MODULE.merge_buffer) of
+handle(CRDT, #missing{from = Peer}) ->
+    case maps:take(Peer, CRDT#?MODULE.merge_buffer) of
         {_, Merges} ->
             %% Abandon merge
             telemetry:execute(
                 [bondy_mst, merge, abandoned],
                 #{count => 1},
-                #{peer => Peer, pid => self()}
+                #{peer => Peer, node => CRDT#?MODULE.node_id}
             ),
-            Grove#?MODULE{merge_buffer = Merges};
+            CRDT#?MODULE{merge_buffer = Merges};
 
         error ->
-            Grove
+            CRDT
     end;
 
-handle(_Grove, Msg) ->
+handle(_CRDT, Msg) ->
     error({unknown_event, Msg}).
 
 
@@ -805,41 +850,46 @@ validate_callback_mod(Opts) ->
 %% @private
 -spec maybe_broadcast(t(), gossip()) -> t().
 
-maybe_broadcast(#?MODULE{fwd_bcast = false} = Grove, _) ->
-    Grove;
+maybe_broadcast(#?MODULE{fwd_bcast = false} = CRDT, _) ->
+    CRDT;
 
-maybe_broadcast(Grove0, #gossip{key = undefined, value = undefined} = Gossip) ->
+maybe_broadcast(CRDT0, #gossip{key = undefined, value = undefined} = Gossip) ->
     Now = erlang:monotonic_time(),
-    Elapsed = elapsed(Now, Grove0#?MODULE.last_fwd_bcast_time),
+    Elapsed = elapsed(Now, CRDT0#?MODULE.last_fwd_bcast_time),
 
     %% We make sure we broadcast pending gossip messages first
-    Grove = broadcast_pending(Grove0),
+    CRDT = broadcast_pending(CRDT0),
 
-    case Elapsed >= Grove#?MODULE.fwd_bcast_interval of
+    case Elapsed >= CRDT#?MODULE.fwd_bcast_interval of
         true ->
-            broadcast(Grove, Gossip);
+            broadcast(CRDT, Gossip);
 
         false ->
             %% Delay broadcast, coalescing by Peer
             Backlog = bondy_mst_coalescing_queue:in(
-                Grove#?MODULE.bcast_backlog,
+                CRDT#?MODULE.bcast_backlog,
                 Gossip#gossip.from,
                 {Gossip, Now}
             ),
-            Grove#?MODULE{bcast_backlog = Backlog}
+            CRDT#?MODULE{bcast_backlog = Backlog}
     end;
 
-maybe_broadcast(Grove0, Gossip) ->
+maybe_broadcast(CRDT0, Gossip) ->
     %% We make sure we broadcast pending gossip messages first
-    Grove = broadcast_pending(Grove0),
-    broadcast(Grove, Gossip).
+    CRDT = broadcast_pending(CRDT0),
+    broadcast(CRDT, Gossip).
 
 
 %% @private
-broadcast(Grove0, Gossip) ->
-    case (Grove0#?MODULE.callback_mod):broadcast(Gossip) of
+broadcast(CRDT0, Gossip) ->
+    case (CRDT0#?MODULE.callback_mod):broadcast(Gossip) of
         ok ->
-            Grove0#?MODULE{last_fwd_bcast_time = erlang:monotonic_time()};
+            telemetry:execute(
+                [bondy_mst, broadcast, sent],
+                #{count => 1, bytes => erlang:external_size(Gossip)},
+                #{from => CRDT0#?MODULE.node_id}
+            ),
+            CRDT0#?MODULE{last_fwd_bcast_time = erlang:monotonic_time()};
 
         {error, Reason} ->
             ?LOG_ERROR(#{
@@ -847,42 +897,42 @@ broadcast(Grove0, Gossip) ->
                 data => Gossip,
                 reason => Reason
             }),
-            Grove0
+            CRDT0
     end.
 
 
 %% private
-broadcast_pending(#?MODULE{} = Grove, Pred) when is_function(Pred, 1) ->
-    B0 = Grove#?MODULE.bcast_backlog,
+broadcast_pending(#?MODULE{} = CRDT, Pred) when is_function(Pred, 1) ->
+    B0 = CRDT#?MODULE.bcast_backlog,
 
     case bondy_mst_coalescing_queue:out_when(B0, Pred) of
         {empty, B0} ->
-            Grove;
+            CRDT;
 
         {{value, {Gossip, _Time}}, B1} ->
-            _ = broadcast(Grove, Gossip),
-            broadcast_pending(Grove#?MODULE{bcast_backlog = B1}, Pred)
+            _ = broadcast(CRDT, Gossip),
+            broadcast_pending(CRDT#?MODULE{bcast_backlog = B1}, Pred)
     end.
 
 
 %% @private
 -spec maybe_merge(t(), node_id(), hash() | undefined) -> t().
 
-maybe_merge(#?MODULE{} = Grove, Peer, undefined) ->
+maybe_merge(#?MODULE{} = CRDT, Peer, undefined) ->
     %% Peer is empty, so we trigger an exchange in the other direction
-    ok = trigger(Grove, Peer),
-    Grove;
+    ok = trigger(CRDT, Peer),
+    CRDT;
 
-maybe_merge(#?MODULE{} = Grove0, Peer, PeerRoot) ->
-    Max = Grove0#?MODULE.max_merges,
-    MaxSame = Grove0#?MODULE.max_merges_per_root,
-    Merges = Grove0#?MODULE.merge_buffer,
+maybe_merge(#?MODULE{} = CRDT0, Peer, PeerRoot) ->
+    Max = CRDT0#?MODULE.max_merges,
+    MaxSame = CRDT0#?MODULE.max_merges_per_root,
+    Merges = CRDT0#?MODULE.merge_buffer,
     Same = count_same_merges(Merges, PeerRoot),
     Size = map_size(Merges),
 
     case Same < MaxSame andalso Size < Max of
         true ->
-            Grove = Grove0#?MODULE{
+            CRDT = CRDT0#?MODULE{
                 merge_buffer = maps:put(Peer, PeerRoot, Merges)
             },
             ?LOG_INFO(#{
@@ -891,7 +941,7 @@ maybe_merge(#?MODULE{} = Grove0, Peer, PeerRoot) ->
                 merge_count => Size + 1,
                 max_merges => {Max, MaxSame}
             }),
-            merge(Grove, Peer);
+            merge(CRDT, Peer);
 
         false ->
             ?LOG_DEBUG(#{
@@ -902,7 +952,7 @@ maybe_merge(#?MODULE{} = Grove0, Peer, PeerRoot) ->
                 merge_count => Size + 1,
                 max_merges => {Max, MaxSame}
             }),
-            Grove0
+            CRDT0
     end.
 
 
@@ -924,10 +974,10 @@ count_same_merges(Merges, Root) ->
 %% @private
 %% This is called directly only when receiving a PUT. Otherwise it is called
 %% by maybe_merge/2.
-merge(Grove0, Peer) ->
-    Tree = Grove0#?MODULE.tree,
+merge(CRDT0, Peer) ->
+    Tree = CRDT0#?MODULE.tree,
 
-    PeerRoot = maps:get(Peer, Grove0#?MODULE.merge_buffer),
+    PeerRoot = maps:get(Peer, CRDT0#?MODULE.merge_buffer),
     %% Pre-condition
     true = PeerRoot =/= undefined,
 
@@ -944,9 +994,9 @@ merge(Grove0, Peer) ->
                 >>,
                 peer => Peer
             }),
-            Grove = do_merge(Grove0, Peer, PeerRoot),
-            ok = on_merge(Grove, Peer),
-            Grove;
+            CRDT = do_merge(CRDT0, Peer, PeerRoot),
+            ok = on_merge(CRDT, Peer),
+            CRDT;
 
         false ->
             %% We still have missing pages, so we request them and keep the
@@ -959,18 +1009,18 @@ merge(Grove0, Peer) ->
             }),
             Root = bondy_mst:root(Tree),
             Cmd = #get{
-                from = Grove0#?MODULE.node_id,
+                from = CRDT0#?MODULE.node_id,
                 root = Root,
                 set = MissingSet
             },
-            ok = (Grove0#?MODULE.callback_mod):send(Peer, Cmd),
-            Grove0
+            ok = (CRDT0#?MODULE.callback_mod):send(Peer, Cmd),
+            CRDT0
     end.
 
 
 %% @private
-do_merge(Grove0, Peer, PeerRoot) ->
-    Tree0 = Grove0#?MODULE.tree,
+do_merge(CRDT0, Peer, PeerRoot) ->
+    Tree0 = CRDT0#?MODULE.tree,
     Root = bondy_mst:root(Tree0),
 
     Tree1 = bondy_mst:merge(Tree0, Tree0, PeerRoot),
@@ -982,10 +1032,10 @@ do_merge(Grove0, Peer, PeerRoot) ->
 
     NewMerges = maps:filter(
         fun(_, V) -> V =/= PeerRoot andalso V =/= NewRoot end,
-        Grove0#?MODULE.merge_buffer
+        CRDT0#?MODULE.merge_buffer
     ),
 
-    Grove1 = Grove0#?MODULE{tree = Tree1, merge_buffer = NewMerges},
+    CRDT1 = CRDT0#?MODULE{tree = Tree1, merge_buffer = NewMerges},
 
     case Root =/= NewRoot of
         true ->
@@ -993,41 +1043,41 @@ do_merge(Grove0, Peer, PeerRoot) ->
             %% immediately elegible for garbage collection.
             %% The version will automatically elegible when its TTL is reached
             %% or when history has reached its maximum size.
-            Grove2 = add_history(Grove1, NewRoot),
-            Grove = maybe_gc(Grove2),
+            CRDT2 = add_history(CRDT1, NewRoot),
+            CRDT = maybe_gc(CRDT2),
 
             case NewRoot =/= PeerRoot of
                 true ->
                     Event = #gossip{
-                        from = Grove#?MODULE.node_id,
+                        from = CRDT#?MODULE.node_id,
                         root = NewRoot,
                         key = undefined,
                         value = undefined
                     },
-                    (Grove#?MODULE.callback_mod):send(Peer, Event);
+                    (CRDT#?MODULE.callback_mod):send(Peer, Event);
 
                 false ->
                     ok
             end,
-            Grove;
+            CRDT;
 
         false ->
-            Grove1
+            CRDT1
     end.
 
 
 %% @private
-on_merge(Grove0, Peer) ->
+on_merge(CRDT0, Peer) ->
     ?LOG_INFO(#{
         message => <<"Finished merge with peer.">>,
         peer => Peer
     }),
 
-    Grove = broadcast_pending(Grove0),
+    CRDT = broadcast_pending(CRDT0),
 
     try
         bondy_mst_utils:apply_lazy(
-            Grove#?MODULE.callback_mod,
+            CRDT#?MODULE.callback_mod,
             on_merge,
             1,
             [Peer],
@@ -1045,9 +1095,9 @@ on_merge(Grove0, Peer) ->
 
 
 %% @private
-maybe_gc(Grove) ->
+maybe_gc(CRDT) ->
     %% We preserve all roots being merged and all history roots
-    gc(Grove, keep_roots(Grove)).
+    gc(CRDT, keep_roots(CRDT)).
 
 
 %% @private
@@ -1056,42 +1106,42 @@ encode_hash(Bin) -> binary:encode_hex(Bin).
 
 
 %% @private
-cancel_merges(Grove, NewRoot) ->
+cancel_merges(CRDT, NewRoot) ->
     %% We remove any ongoing merges matching the merged NewRoot.
     Merges = maps:filter(
         fun(_, V) -> V =/= NewRoot end,
-        Grove#?MODULE.merge_buffer
+        CRDT#?MODULE.merge_buffer
     ),
 
     %% We remove any pending merges matching the merged NewRoot.
     Backlog = bondy_mst_coalescing_queue:filter(
-        Grove#?MODULE.merge_backlog,
+        CRDT#?MODULE.merge_backlog,
         fun(_, V) -> V =/= NewRoot end
     ),
 
-    Grove#?MODULE{merge_buffer = Merges, merge_backlog = Backlog}.
+    CRDT#?MODULE{merge_buffer = Merges, merge_backlog = Backlog}.
 
 
 %% @private
-add_history(#?MODULE{} = Grove, Root) ->
+add_history(#?MODULE{} = CRDT, Root) ->
     Epoch = erlang:monotonic_time(),
-    TTL = Grove#?MODULE.version_ttl,
+    TTL = CRDT#?MODULE.version_ttl,
 
     %% We purge expired versions
     H1 = maps:filter(
         fun(Epoch0, _Root) -> elapsed(Epoch, Epoch0) =< TTL end,
-        Grove#?MODULE.history
+        CRDT#?MODULE.history
     ),
     %% We add the new version
     H = maps:put(Epoch, Root, H1),
 
-    Grove#?MODULE{history = H}.
+    CRDT#?MODULE{history = H}.
 
 
 %% @private
-keep_roots(#?MODULE{} = Grove) ->
-    MergeRoots = maps:values(Grove#?MODULE.merge_buffer),
-    HistoryRoots = maps:values(Grove#?MODULE.history),
+keep_roots(#?MODULE{} = CRDT) ->
+    MergeRoots = maps:values(CRDT#?MODULE.merge_buffer),
+    HistoryRoots = maps:values(CRDT#?MODULE.history),
     MergeRoots ++ HistoryRoots.
 
 
