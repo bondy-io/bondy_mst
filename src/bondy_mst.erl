@@ -143,6 +143,7 @@ hash.
 -export([gc/1]).
 -export([gc/2]).
 -export([get/2]).
+-export([get/3]).
 -export([get_range/2]).
 -export([keys/1]).
 -export([last/1]).
@@ -347,6 +348,16 @@ Returns the value associated with key `Key`.
 
 get(#?MODULE{} = T, Key) ->
     get(T, Key, root(T)).
+
+
+?DOC("""
+Returns the value associated with key `Key` starting at root `Root`.
+This allows to read from a previous version.
+""").
+-spec get(T :: t(), Key :: key(), Root :: binary()) -> Value :: any().
+
+get(#?MODULE{} = T, Key, Root) when is_binary(Root) ->
+    get(T, Key, Root).
 
 
 ?DOC("""
@@ -717,13 +728,13 @@ merge_values(#?MODULE{merger = Fun}, Key, A, B) ->
 
 
 %% @private
--spec get(T :: t(), Key :: key(), Root :: binary() | undefined) ->
+-spec do_get(T :: t(), Key :: key(), Root :: binary() | undefined) ->
     Value :: any().
 
-get(#?MODULE{}, _, undefined) ->
+do_get(#?MODULE{}, _, undefined) ->
     undefined;
 
-get(#?MODULE{} = T, Key, Root) ->
+do_get(#?MODULE{} = T, Key, Root) ->
     case bondy_mst_store:get(T#?MODULE.store, Root) of
         undefined ->
             undefined;
