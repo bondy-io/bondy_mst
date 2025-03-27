@@ -236,7 +236,7 @@ when is_list(KeepRoots) ->
             do_gc(T, KeepRoots, Size);
 
         false ->
-            {T, Meta = #{freed_count => 0, freed_bytes => 0}},
+            {T, #{freed_count => 0, freed_bytes => 0}}
     end.
 
 
