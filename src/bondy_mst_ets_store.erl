@@ -229,49 +229,15 @@ when is_integer(Epoch) ->
 
 gc(#?MODULE{opts = #{persistent := _}} = T, KeepRoots)
 when is_list(KeepRoots) ->
-    Tab = T#?MODULE.tab,
-    W0 = ets:info(Tab, memory),
+    Size = ets:info(T#?MODULE.tab, size),
 
-    %% We build a bloomfilter containing all the hases of pages emanating from
-    %% roots in KeepRoots
-    BF0 = bloomfi:new(ets:info(Tab, size)),
+    case Size > 0 of
+        true ->
+            do_gc(T, KeepRoots, Size);
 
-    BF = lists:foldl(
-        fun(Root, Acc) ->
-            Fun = fun({Hash, _}, InnerAcc) -> bloomfi:add(Hash, InnerAcc) end,
-            fold_pages(Tab, Fun, Acc, Root)
-        end,
-        BF0,
-        KeepRoots
-    ),
-    %% We iterate over all the tree hashes and remove any hash not in the bloom
-    %% filter.
-    MS = [{{'$1', '_'}, [{'=/=', '$1', ?ROOT_KEY}], ['$1']}],
-    All = ets:select(Tab, MS),
-
-    Num = lists:foldl(
-        fun(Hash, Acc) ->
-            case bloomfi:member(Hash, BF) of
-                true ->
-                    %% This could be a false positive, which means we will not
-                    %% free the page when we should, but we will eventually in
-                    %% future executions
-                    Acc;
-
-                false ->
-                    %% Definitely not in the set so we free
-                    true = ets:delete(Tab, Hash),
-                    Acc + 1
-            end
-        end,
-        0,
-        All
-    ),
-
-    W1 = ets:info(Tab, memory),
-    Bytes = memory:words(W0 - W1),
-    Meta = #{freed_count => Num, freed_bytes => Bytes},
-    {T, Meta}.
+        false ->
+            T
+    end.
 
 
 -spec missing_set(T :: t(), Root :: binary()) -> sets:set(page()).
@@ -348,4 +314,49 @@ fold_pages(Tab, Fun, AccIn, Root) ->
     end.
 
 
+%% @private
+do_gc(#?MODULE{opts = #{persistent := _}} = T, KeepRoots, Size) ->
+    Tab = T#?MODULE.tab,
+    W0 = ets:info(Tab, memory),
+
+    %% We build a bloomfilter containing all the hases of pages emanating from
+    %% roots in KeepRoots
+    BF0 = bloomfi:new(Size),
+
+    BF = lists:foldl(
+        fun(Root, Acc) ->
+            Fun = fun({Hash, _}, InnerAcc) -> bloomfi:add(Hash, InnerAcc) end,
+            fold_pages(Tab, Fun, Acc, Root)
+        end,
+        BF0,
+        KeepRoots
+    ),
+    %% We iterate over all the tree hashes and remove any hash not in the bloom
+    %% filter.
+    MS = [{{'$1', '_'}, [{'=/=', '$1', ?ROOT_KEY}], ['$1']}],
+    All = ets:select(Tab, MS),
+
+    Num = lists:foldl(
+        fun(Hash, Acc) ->
+            case bloomfi:member(Hash, BF) of
+                true ->
+                    %% This could be a false positive, which means we will not
+                    %% free the page when we should, but we will eventually in
+                    %% future executions
+                    Acc;
+
+                false ->
+                    %% Definitely not in the set so we free
+                    true = ets:delete(Tab, Hash),
+                    Acc + 1
+            end
+        end,
+        0,
+        All
+    ),
+
+    W1 = ets:info(Tab, memory),
+    Bytes = memory:words(W0 - W1),
+    Meta = #{freed_count => Num, freed_bytes => Bytes},
+    {T, Meta}.
 
