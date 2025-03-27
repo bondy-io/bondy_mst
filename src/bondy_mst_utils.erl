@@ -40,9 +40,9 @@
 
 
 
--spec hash(Term :: term(), Algo :: atom()) -> Digest :: binary().
+-spec hash(Term :: term(), Algo :: sha256 | sha512) -> Digest :: binary().
 
-hash(Term, Algo) ->
+hash(Term, Algo) when Algo == sha256 orelse Algo == sha512 ->
     crypto:hash(Algo, erlang:term_to_binary(Term, [{minor_version, 2}])).
 
 
