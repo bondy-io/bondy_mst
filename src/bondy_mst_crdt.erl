@@ -27,8 +27,10 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-This module implements the logic for a State-based CRDT using a Merkle Search
-Tree.
+This module implements the logic for an efficient, *state-based* Conflict-Free
+Replicated Data Type (CRDT) designed for open, potentially untrusted networks.
+It is designed for distributed systems where efficient merging and verification
+of large datasets are required.
 
 Anti-entropy merges are performed in the background and without blocking
 local operations. The underlying tree is not changed until all the remote
@@ -325,8 +327,8 @@ Called when a merge exchange has finished.
 """).
 -callback on_merge(Peer :: node()) -> ok.
 
-
 -optional_callbacks([on_merge/1]).
+
 
 
 %% =============================================================================
@@ -542,13 +544,11 @@ merges(#?MODULE{merge_buffer = Merges}) ->
 Cancels an ongoing merge (if it exists for peer `Peer`).
 
 You should use a fault detector to cancel merges when a peer crashes.
+Cancelled merge pages will be purged on the next garbage collection run.
 """).
 -spec cancel_merge(t(), node_id()) -> ok.
 
 cancel_merge(#?MODULE{merge_buffer = Merges} = CRDT, Peer) ->
-    %% TODO This should cleanup all pages stored in the tree that have been
-    %% synced but not merged yet. But carefull as pages might be used by
-    %% multiple merges
     CRDT#?MODULE{merge_buffer = maps:without([Peer], Merges)}.
 
 
