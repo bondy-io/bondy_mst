@@ -120,7 +120,6 @@ Returns the level of this page in the tree i.e. the logical height.
 level(#?MODULE{level = Val}) -> Val.
 
 
-
 -spec low(t()) -> hash().
 
 low(#?MODULE{low = Val}) -> Val.
