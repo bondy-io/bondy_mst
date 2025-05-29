@@ -319,7 +319,7 @@ do_gc(#?MODULE{opts = #{persistent := _}} = T, KeepRoots, Size) ->
     Tab = T#?MODULE.tab,
     W0 = ets:info(Tab, memory),
 
-    %% We build a bloomfilter containing all the hases of pages emanating from
+    %% We build a bloomfilter containing all the hashes of pages emanating from
     %% roots in KeepRoots
     BF0 = bloomfi:new(Size),
 
