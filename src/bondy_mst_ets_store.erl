@@ -358,5 +358,6 @@ do_gc(#?MODULE{opts = #{persistent := _}} = T, KeepRoots, Size) ->
     W1 = ets:info(Tab, memory),
     Bytes = memory:words(W0 - W1),
     Meta = #{freed_count => Num, freed_bytes => Bytes},
+    Meta = #{name => T#?MODULE.name, freed_count => Num, freed_bytes => Bytes},
     {T, Meta}.
 
