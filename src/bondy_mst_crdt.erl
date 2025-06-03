@@ -325,7 +325,7 @@ broadcast(Gossip) ->
 ?DOC("""
 Called when a merge exchange has finished.
 """).
--callback on_merge(Peer :: node()) -> ok.
+-callback on_merge(Peer :: node_id()) -> ok.
 
 -optional_callbacks([on_merge/1]).
 
