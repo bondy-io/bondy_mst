@@ -58,6 +58,7 @@ Read-concurrent, MST backend using `ets`.
 
 
 %% API
+-export([capabilities/1]).
 -export([close/1]).
 -export([copy/3]).
 -export([delete/1]).
@@ -115,6 +116,15 @@ open(Algo, Opts0) when is_atom(Algo), is_map(Opts0) ->
         tab = Tab,
         hashing_algorithm = Algo,
         opts = Opts
+    }.
+
+
+-spec capabilities(t()) -> map().
+
+capabilities(#?MODULE{} = T) ->
+    #{
+        transactions => false,
+        read_concurrency => maps:get(persistent, T#?MODULE.opts)
     }.
 
 

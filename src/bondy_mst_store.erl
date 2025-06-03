@@ -33,6 +33,11 @@ This behaviour may also be implemented by store proxies that track operations
 and implement different synchronization or caching mechanisms.
 """).
 
+-define(DEFAULT_CAPABILITIES, #{
+    read_concurrency => false,
+    transactions => false
+}).
+
 -record(?MODULE, {
     mod                 ::  module(),
     state               ::  backend(),
@@ -60,6 +65,7 @@ and implement different synchronization or caching mechanisms.
 
 %% API
 -export([close/1]).
+-export([capabilities/1]).
 -export([copy/3]).
 -export([delete/1]).
 -export([delete/2]).
@@ -119,6 +125,11 @@ and implement different synchronization or caching mechanisms.
     any() | no_return().
 
 -optional_callbacks([transaction/2]).
+
+
+-callback capabilities(backend()) -> map().
+
+-optional_callbacks([capabilities/1]).
 
 
 
@@ -292,13 +303,6 @@ delete(#?MODULE{mod = Mod, state = State}) ->
 
 
 
-
-%% =============================================================================
-%% TRANSACTION API
-%% =============================================================================
-
-
-
 -spec transaction(Store :: t(), Fun :: fun(() -> any())) ->
     any() | {error, Reason :: any()}.
 
@@ -308,6 +312,20 @@ transaction(#?MODULE{transactions = true, mod = Mod, state = State}, Fun) ->
 transaction(#?MODULE{transactions = false}, Fun) ->
     Fun().
 
+
+
+-spec capabilities(Store :: t()) -> map().
+
+capabilities(#?MODULE{mod = Mod, state = State}) ->
+    bondy_mst_utils:apply_lazy(
+        Mod, capabilities, 1, [State], fun() ->
+            maps:put(
+                transactions,
+                supports_transactions(Mod),
+                ?DEFAULT_CAPABILITIES
+            )
+        end
+    ).
 
 
 %% =============================================================================

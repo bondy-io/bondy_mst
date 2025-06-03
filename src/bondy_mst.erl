@@ -130,7 +130,7 @@ hash.
 -export_type([hash/0]).
 
 
-
+-export([capabilities/1]).
 -export([delete/1]).
 -export([diff_to_list/2]).
 -export([dump/1]).
@@ -160,6 +160,7 @@ hash.
 -export([store/1]).
 -export([to_list/1]).
 -export([to_list/2]).
+
 
 -export([format_error/2]).
 
@@ -312,6 +313,15 @@ new(Opts) when is_map(Opts); is_list(Opts) ->
         merger = Merger,
         hash_algorithm = Algo
     }.
+
+
+?DOC("""
+Returns the store capabilities.
+""").
+-spec capabilities(t()) -> map().
+
+capabilities(#?MODULE{store = Store}) ->
+    bondy_mst_store:capabilities(Store).
 
 
 ?DOC("""
@@ -634,7 +644,7 @@ when is_list(Arg0) orelse is_integer(Arg0) ->
         #{},
         fun() ->
             Fun = fun() ->
-                %% Protect the current version when receiving a list
+                %% Protect the current version when receiving a list of roots
                 Arg = case is_list(Arg0) of
                     true ->
                         [root(T) | Arg0];

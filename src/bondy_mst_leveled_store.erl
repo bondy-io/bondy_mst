@@ -41,6 +41,7 @@
 
 
 %% API
+-export([capabilities/1]).
 -export([close/1]).
 -export([copy/3]).
 -export([delete/1]).
@@ -81,6 +82,15 @@ open(Algo, Opts) when is_atom(Algo), is_map(Opts) ->
         pid = Pid,
         name = Name,
         hashing_algorithm = Algo
+    }.
+
+
+-spec capabilities(t()) -> map().
+
+capabilities(#?MODULE{}) ->
+    #{
+        transactions => false,
+        read_concurrency => false
     }.
 
 

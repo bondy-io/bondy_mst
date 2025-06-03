@@ -53,6 +53,7 @@ from the map.
 
 
 -export([close/1]).
+-export([capabilities/1]).
 -export([copy/3]).
 -export([delete/1]).
 -export([delete/2]).
@@ -88,6 +89,15 @@ open(Algo, Opts0) when is_atom(Algo), is_map(Opts0) ->
     #?MODULE{
         hashing_algorithm = Algo,
         opts = Opts
+    }.
+
+
+-spec capabilities(t()) -> map().
+
+capabilities(#?MODULE{}) ->
+    #{
+        transactions => false,
+        read_concurrency => false
     }.
 
 
