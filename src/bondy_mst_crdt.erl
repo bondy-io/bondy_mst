@@ -107,7 +107,7 @@ following callbacks:
     last_fwd_bcast_time             ::  integer(),
     %% The maximum number of concurrent merges.
     %% Bounds the size of 'merge_buffer'.
-    max_merges = 6                  ::  pos_integer(),
+    max_merges = 1                  ::  pos_integer(),
     %% The maximum number of concurrent merges having the same root.
     %% This occurs when considering merging with N peers, as two or more of
     %% them might be in sync and hence having the same root hash.
