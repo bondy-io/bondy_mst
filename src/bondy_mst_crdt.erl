@@ -65,23 +65,40 @@ observe these events in the same causal order.
 In simpler terms, if action A causes action B, every node in the distributed
 system will always see action A before it sees action B.
 
-In `causal` consistency mode, a full state merge is performed at every gossip
-event.
+In `causal` consistency mode, a full state sync is performed at every gossip
+event with the sender's replica.
 
 This CRDT achieves casual consistency without any conditions on the network
 topology as is required by causal broadcast.
 
 ### Eventual Consistency
-If causal consistency is not required, a CRDT can operate in `eventual`
+If causal consistency is not required, the CRDT can operate in `eventual`
 consistency mode, by gossiping individual single operations and applying them as
-soon as they are received, while executing periodic merges to ensure
+soon as they are received, while executing periodic syncs to ensure
 termination.
 
 # How To Use
 
-This module implements the logic for anti-entropy merges. The idea is
-for the user to choose the right infrastructure e.g. using this module as
-helper for a `gen_server` or `gen_statem`.
+This module implements the state and logic for anti-entropy synchronization
+exchanges.
+The idea is for the user to choose the right processinfrastructure e.g. using
+this module as helper for a `gen_server`, `gen_statem` or alternatives e.g.
+Partisan equivalents or standard processes.
+
+## Synchronization Messages
+
+Synchronisation messages should be handled by calling `handle/2`. However, it’s
+important to note that most messages cannot be handled concurrently. In general,
+an MST supports a single writer, so write operations must be serialised by an
+Erlang process. However, some write operations that occur during a sync can be
+handled concurrently depending on the backend store used.
+
+|Message Type|Purpose|Can be handled concurrently|
+|===|===|===|
+|`gossip()`|Initiate a full sync or notify a key value change|No|
+|`get_cmd()`|Obtain missing data from replica|Yes|
+|`put_cmd()`|Responds to a `get_cmd()`|Yes|
+|`missing_cmd()`|Responds to a `get_cmd()`|No|
 
 ## Network Operations
 This module relies on a callback module provided by you that implements the
@@ -95,6 +112,7 @@ following callbacks:
 """).
 
 -record(?MODULE, {
+    %% Normally node() but it can be a binary when testing
     node_id                         ::  node_id(),
     callback_mod                    ::  module(),
     tree                            ::  bondy_mst:t(),
@@ -337,7 +355,7 @@ Called when a merge exchange has finished.
 
 
 ?DOC("""
-Cretes a new grove.
+Cretes a new MST-based CRDT.
 
 # Options
 * `store => bondy_mst_store:t()` - the backend store for this grove
@@ -648,6 +666,8 @@ is_stale(#?MODULE{} = CRDT, PeerRoot) ->
 Call this function when your node receives a message or broadcast from a
 peer.
 """).
+-spec handle(t(), message()) -> t().
+
 handle(CRDT0, #gossip{} = Gossip) ->
     Tree0 = CRDT0#?MODULE.tree,
     Peer = Gossip#gossip.from,
@@ -762,6 +782,8 @@ handle(CRDT, #get{from = Peer, root = PeerRoot, set = Set}) ->
             CRDT;
 
         false ->
+            %% TODO split this into a separate action executed by the wrapping
+            %% server, so that the GET can be handled concurrently
             maybe_merge(CRDT, Peer, PeerRoot)
     end;
 
@@ -789,6 +811,8 @@ handle(CRDT, #put{from = Peer, map = Map}) ->
                 CRDT#?MODULE.tree,
                 Map
             ),
+            %% TODO split this into a separate action executed by the wrapping
+            %% server, so that the GET can be handled concurrently
             merge(CRDT#?MODULE{tree = Tree}, Peer);
 
         false ->
