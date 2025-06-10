@@ -164,6 +164,8 @@ purposes.
 """).
 hash(#?MODULE{} = T, Algo) when is_atom(Algo) ->
     #?MODULE{level = Level, low = Low, list = List} = T,
+    %% Notice we are not including any metadata which would be local to this
+    %% tree replica.
     bondy_mst_utils:hash({Level, Low, List}, Algo).
 
 
