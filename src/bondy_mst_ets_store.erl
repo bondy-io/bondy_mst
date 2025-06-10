@@ -218,32 +218,18 @@ free(#?MODULE{tab = Tab, opts = #{persistent := false}} = T, Hash, _Page) ->
 -spec gc(T :: t(), KeepRoots :: [list()] | epoch()) ->
     {T :: t(), Metadata :: map()}.
 
-gc(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Epoch)
-when is_integer(Epoch) ->
-    Idx = bondy_mst_page:field_index(freed_at),
-    Var = list_to_atom("$" ++ integer_to_list(Idx)),
-    VPattern = setelement(Idx, bondy_mst_page:pattern(), Var),
-    MatchSpec = [
-        {
-            {'_', VPattern},
-            [{'=<', Var, {const, Epoch}}],
-            [true]
-        }
-    ],
-    W0 = ets:info(Tab, memory),
-    Num = ets:select_delete(Tab, MatchSpec),
-    W1 = ets:info(Tab, memory),
-    Bytes = memory:words(W0 - W1),
-    Meta = #{freed_count => Num, freed_bytes => Bytes},
-    {T, Meta};
+gc(#?MODULE{opts = #{persistent := true}} = T, Epoch) when is_integer(Epoch) ->
+    %% When the tree is marked as persistent we have several roots sharing
+    %% subtrees. During destructive operations we mark freed pages with an
+    %% epoch (freed_at) so that we can prune them here
+    prune_freed(T, Epoch);
 
 gc(#?MODULE{opts = #{persistent := _}} = T, KeepRoots)
 when is_list(KeepRoots) ->
-    Size = ets:info(T#?MODULE.tab, size),
-
-    case Size > 0 of
+    %% The algorithmm found in the paper, which is suboptimal to say the least
+    case ets:info(T#?MODULE.tab, size) > 0 of
         true ->
-            do_gc(T, KeepRoots, Size);
+            prune_unreachable(T, KeepRoots);
 
         false ->
             {T, #{freed_count => 0, freed_bytes => 0}}
@@ -324,23 +310,40 @@ fold_pages(Tab, Fun, AccIn, Root) ->
     end.
 
 
+
+%% =============================================================================
+%% PRIVATE: GARBAGE COLLECTION
+%% =============================================================================
+
+
+
 %% @private
-do_gc(#?MODULE{opts = #{persistent := _}} = T, KeepRoots, Size) ->
+bloom_filter(T, KeepRoots) ->
+    Size = estimate_bloomfi_capacity(T),
+    lists:foldl(
+        fun(Root, Acc) ->
+            Fun = fun({Hash, _}, InnerAcc) -> bloomfi:add(Hash, InnerAcc) end,
+            fold_pages(T#?MODULE.tab, Fun, Acc, Root)
+        end,
+        bloomfi:new(Size),
+        KeepRoots
+    ).
+
+
+%% @private
+estimate_bloomfi_capacity(#?MODULE{} = T) ->
+    ets:info(T#?MODULE.tab, size).
+
+
+%% @private
+prune_unreachable(#?MODULE{opts = #{persistent := _}} = T, KeepRoots) ->
+    %% We build a bloomfilter containing all the hashes of pages emanating from
+    %% roots in KeepRoots
+    BF = bloom_filter(T, KeepRoots),
+
     Tab = T#?MODULE.tab,
     W0 = ets:info(Tab, memory),
 
-    %% We build a bloomfilter containing all the hashes of pages emanating from
-    %% roots in KeepRoots
-    BF0 = bloomfi:new(Size),
-
-    BF = lists:foldl(
-        fun(Root, Acc) ->
-            Fun = fun({Hash, _}, InnerAcc) -> bloomfi:add(Hash, InnerAcc) end,
-            fold_pages(Tab, Fun, Acc, Root)
-        end,
-        BF0,
-        KeepRoots
-    ),
     %% We iterate over all the tree hashes and remove any hash not in the bloom
     %% filter.
     MS = [{{'$1', '_'}, [{'=/=', '$1', ?ROOT_KEY}], ['$1']}],
@@ -367,7 +370,28 @@ do_gc(#?MODULE{opts = #{persistent := _}} = T, KeepRoots, Size) ->
 
     W1 = ets:info(Tab, memory),
     Bytes = memory:words(W0 - W1),
-    Meta = #{freed_count => Num, freed_bytes => Bytes},
+    Meta = #{name => T#?MODULE.name, freed_count => Num, freed_bytes => Bytes},
+    {T, Meta}.
+
+
+%% @private
+prune_freed(#?MODULE{} = T, Epoch) ->
+    Tab = T#?MODULE.tab,
+    Idx = bondy_mst_page:field_index(freed_at),
+    Var = list_to_atom("$" ++ integer_to_list(Idx)),
+    VPattern = setelement(Idx, bondy_mst_page:pattern(), Var),
+    MatchSpec = [
+        {
+            {'_', VPattern},
+            [{'=<', Var, {const, Epoch}}],
+            [true]
+        }
+    ],
+    W0 = ets:info(Tab, memory),
+    Num = ets:select_delete(Tab, MatchSpec),
+    W1 = ets:info(Tab, memory),
+    Bytes = memory:words(W0 - W1),
+
     Meta = #{name => T#?MODULE.name, freed_count => Num, freed_bytes => Bytes},
     {T, Meta}.
 
