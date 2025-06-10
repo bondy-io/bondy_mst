@@ -71,8 +71,8 @@ init([]) ->
     ok = bondy_mst_config:init(),
     SupFlags = #{
         strategy => one_for_all,
-        intensity => 0,
-        period => 1
+        intensity => 5,
+        period => 10
     },
     ChildSpecs = maybe_append_leveled([]),
 
