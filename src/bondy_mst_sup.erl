@@ -45,14 +45,8 @@
 start_link() ->
     case supervisor:start_link({local, ?SERVER}, ?MODULE, []) of
         {ok, _} = OK ->
-            Children = supervisor:which_children(?MODULE),
-            case lists:keyfind(leveled, 1, Children) of
-                {leveled, Pid, worker, _} ->
-                    _ = persistent_term:put({bondy_mst, leveled}, Pid),
-                    OK;
-                false ->
-                    OK
-            end;
+            OK;
+
         Error ->
             Error
     end.
@@ -74,27 +68,9 @@ init([]) ->
         intensity => 5,
         period => 10
     },
-    ChildSpecs = maybe_append_leveled([]),
+    ChildSpecs = [],
 
     {ok, {SupFlags, ChildSpecs}}.
-
-
-maybe_append_leveled(Acc) ->
-    case bondy_mst_config:get([store, leveled], []) of
-            [] ->
-                Acc;
-            Opts ->
-                [
-                    #{
-                        id => leveled,
-                        start => {leveled_bookie, book_start, [Opts]},
-                        restart => permanent,
-                        shutdown => 5_000,
-                        type => worker,
-                        modules => [leveled_bookie]
-                    } | Acc
-                ]
-    end.
 
 %% maybe_append_rocksdb_manager(Acc) ->
 %%     case bondy_mst_config:get([store, rocksdb], []) of
