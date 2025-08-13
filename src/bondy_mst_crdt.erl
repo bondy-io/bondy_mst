@@ -863,7 +863,7 @@ validate_callback_mod(Opts) ->
 
     bondy_mst_utils:implements_behaviour(CallbackMod, ?MODULE)
         orelse error(
-            iolib:format(
+            io_lib:format(
                 "Expected ~p to implement behaviour ~p",
                 [CallbackMod, ?MODULE]
             )
