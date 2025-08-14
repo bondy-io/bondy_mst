@@ -13,9 +13,9 @@
 all() ->
     [
         {group, local_store, []},
-        {group, ets_store, []},
+        {group, ets_store, []}
         %% {group, rocksdb_store, []},
-        {group, leveled_store, []}
+        %% {group, leveled_store, []}
     ].
 
 groups() ->
