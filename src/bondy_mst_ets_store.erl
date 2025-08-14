@@ -232,7 +232,7 @@ when is_list(KeepRoots) ->
             prune_unreachable(T, KeepRoots);
 
         false ->
-            {T, #{freed_count => 0, freed_bytes => 0}}
+            {T, #{name => T#?MODULE.name, freed_count => 0, freed_bytes => 0}}
     end.
 
 
