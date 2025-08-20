@@ -892,8 +892,8 @@ call_callback(#?MODULE{callback_mod = CallbackMod, callback_mfa = undefined}, Fu
         when CallbackMod =/= undefined ->
     erlang:apply(CallbackMod, Function, Args);
 
-call_callback(#?MODULE{callback_mod = undefined, callback_mfa = {Mod, Fun, ExtraArgs}}, _Function, Args) ->
-    erlang:apply(Mod, Fun, ExtraArgs ++ Args);
+call_callback(#?MODULE{callback_mod = undefined, callback_mfa = {Mod, Fun, ExtraArgs}}, Function, Args) ->
+    erlang:apply(Mod, Fun, ExtraArgs ++ [Function, Args]);
 
 call_callback(CRDT, Function, _Args) ->
     error({invalid_callback_configuration, CRDT#?MODULE.callback_mod, CRDT#?MODULE.callback_mfa, Function}).
