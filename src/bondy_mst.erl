@@ -652,6 +652,12 @@ when is_list(Arg0) orelse is_integer(Arg0) ->
                         Arg0
                 end,
                 {Store, Meta} = bondy_mst_store:gc(Store0, Arg),
+                ?LOG_NOTICE(#{
+                    description => "Garbage collection completed",
+                    name => maps:get(name, Meta, <<"unknown">>),
+                    freed_count => maps:get(freed_count, Meta, 0),
+                    freed_bytes => maps:get(freed_bytes, Meta, 0)
+                }),
                 {T#?MODULE{store = Store}, Meta}
             end,
             bondy_mst_store:transaction(Store0, Fun)
