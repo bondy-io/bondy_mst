@@ -408,10 +408,9 @@ new(NodeId, Opts0) when
         [callback_mod, callback_args, max_merges, max_merges_per_root], Opts0
     ),
 
-    CallbackMod = validate_callback_mod(Opts),
     #?MODULE{
         node_id = NodeId,
-        callback_mod = CallbackMod,
+        callback_mod = validate_callback_mod(Opts),
         callback_args = key_value:get(callback_args, Opts, []),
         tree = Tree,
         consistency_model = key_value:get(consistency_model, Opts, causal),
