@@ -114,8 +114,8 @@ following callbacks:
 -record(?MODULE, {
     %% Normally node() but it can be a binary when testing
     node_id                         ::  node_id(),
-    callback_mod                    ::  module() | undefined,
-    callback_mfa                    ::  {module(), atom(), list()} | undefined,
+    callback_mod                    ::  module(),
+    callback_args                   ::  list(),
     tree                            ::  bondy_mst:t(),
     consistency_model               ::  consistency_model(),
     %% Set it to false if you are using a peer service that handles gossip
@@ -192,7 +192,7 @@ following callbacks:
                                 | {max_merges, pos_integer()}
                                 | {max_merges_per_root, pos_integer()}
                                 | {callback_mod, module()}
-                                | {callback_mfa, {module(), atom(), list()}}.
+                                | {callback_args, list()}.
 -type opts_map()            ::  #{
                                 %% bondy_mst
                                 store => bondy_mst_store:t(),
@@ -204,7 +204,7 @@ following callbacks:
                                 max_merges => pos_integer(),
                                 max_merges_per_root => pos_integer(),
                                 callback_mod => module(),
-                                callback_mfa => {module(), atom(), list()}
+                                callback_args => list()
                             }.
 -type gossip()              ::  #gossip{}.
 -type get_cmd()             ::  #get{}.
@@ -348,7 +348,12 @@ Called when a merge exchange has finished.
 """).
 -callback on_merge(Peer :: node_id()) -> ok.
 
--optional_callbacks([on_merge/1]).
+%% Extended callbacks (when using callback_args)
+-callback send(ExtraArg :: term(), Peer :: node_id(), message()) -> ok | {error, any()}.
+-callback broadcast(ExtraArg :: term(), Gossip :: gossip()) -> ok | {error, any()}.
+-callback on_merge(ExtraArg :: term(), Peer :: node_id()) -> ok.
+
+-optional_callbacks([on_merge/1, send/3, broadcast/2, on_merge/2]).
 
 
 
@@ -367,7 +372,7 @@ values of a key. See `bondy_mst:merger()`
 * `comparator => bondy_mst:comparator()` - the function used by the tree to
 compare keys for sorting. See `bondy_mst:comparator()`
 * `callback_mod => module()` - The module implementing this modules' callbacks
-* `callback_mfa => {module(), atom(), list()}` - Alternative to callback_mod, specifies module, function, and extra arguments. The function will be called with the extra arguments plus the callback-specific arguments
+* `callback_args => list()` - Optional extra arguments to be passed to all callback functions
 * `consistency_model => causal | eventual` - if `causal`, a full merge will be
 done on each update. If `eventual` full merges will only occur then triggered
 via `trigger/2`. Default is `causal`
@@ -400,14 +405,14 @@ new(NodeId, Opts0) when
 
     %% Configure the grove
     Opts = maps:with(
-        [callback_mod, callback_mfa, max_merges, max_merges_per_root], Opts0
+        [callback_mod, callback_args, max_merges, max_merges_per_root], Opts0
     ),
 
-    {CallbackMod, CallbackMFA} = validate_callback(Opts),
+    CallbackMod = validate_callback_mod(Opts),
     #?MODULE{
         node_id = NodeId,
         callback_mod = CallbackMod,
-        callback_mfa = CallbackMFA,
+        callback_args = key_value:get(callback_args, Opts, []),
         tree = Tree,
         consistency_model = key_value:get(consistency_model, Opts, causal),
         fwd_bcast = key_value:get(fwd_bcast, Opts, false),
@@ -861,42 +866,25 @@ handle(_CRDT, Msg) ->
 
 
 %% @private
-validate_callback(Opts) ->
-    case {maps:get(callback_mod, Opts, undefined), maps:get(callback_mfa, Opts, undefined)} of
-        {undefined, undefined} ->
-            error({badarg, "Either callback_mod or callback_mfa must be provided"});
-            
-        {CallbackMod, undefined} when is_atom(CallbackMod) ->
-            bondy_mst_utils:implements_behaviour(CallbackMod, ?MODULE)
-                orelse error(
-                    io_lib:format(
-                        "Expected ~p to implement behaviour ~p",
-                        [CallbackMod, ?MODULE]
-                    )
-                ),
-            {CallbackMod, undefined};
-            
-        {undefined, {Mod, Fun, Args} = CallbackMFA} when is_atom(Mod), is_atom(Fun), is_list(Args) ->
-            {undefined, CallbackMFA};
-            
-        {CallbackMod, _} when CallbackMod =/= undefined ->
-            error({badarg, "Cannot specify both callback_mod and callback_mfa"});
-            
-        {_, CallbackMFA} ->
-            error({badarg, [{callback_mfa, CallbackMFA}]})
-    end.
+validate_callback_mod(Opts) ->
+    CallbackMod = maps:get(callback_mod, Opts),
+
+    is_atom(CallbackMod)
+        orelse error({badarg, [{callback_mod, CallbackMod}]}),
+
+    bondy_mst_utils:implements_behaviour(CallbackMod, ?MODULE)
+        orelse error(
+            io_lib:format(
+                "Expected ~p to implement behaviour ~p",
+                [CallbackMod, ?MODULE]
+            )
+        ),
+    CallbackMod.
 
 
 %% @private
-call_callback(#?MODULE{callback_mod = CallbackMod, callback_mfa = undefined}, Function, Args) 
-        when CallbackMod =/= undefined ->
-    erlang:apply(CallbackMod, Function, Args);
-
-call_callback(#?MODULE{callback_mod = undefined, callback_mfa = {Mod, Fun, ExtraArgs}}, Function, Args) ->
-    erlang:apply(Mod, Fun, ExtraArgs ++ [Function, Args]);
-
-call_callback(CRDT, Function, _Args) ->
-    error({invalid_callback_configuration, CRDT#?MODULE.callback_mod, CRDT#?MODULE.callback_mfa, Function}).
+call_callback(#?MODULE{callback_mod = CallbackMod, callback_args = ExtraArgs}, Function, Args) ->
+    erlang:apply(CallbackMod, Function, ExtraArgs ++ Args).
 
 
 %% @private
@@ -1128,21 +1116,13 @@ on_merge(CRDT0, Peer) ->
     CRDT = broadcast_pending(CRDT0),
 
     try
-        case {CRDT#?MODULE.callback_mod, CRDT#?MODULE.callback_mfa} of
-            {undefined, undefined} ->
-                ok;
-            {CallbackMod, undefined} when CallbackMod =/= undefined ->
-                bondy_mst_utils:apply_lazy(
-                    CallbackMod,
-                    on_merge,
-                    1,
-                    [Peer],
-                    fun() -> ok end
-                );
-            {undefined, {Mod, Fun, ExtraArgs}} ->
-                %% For callback_mfa, call the function with extra args + [on_merge, [Peer]]
-                erlang:apply(Mod, Fun, ExtraArgs ++ [on_merge, [Peer]])
-        end
+        bondy_mst_utils:apply_lazy(
+            CRDT#?MODULE.callback_mod,
+            on_merge,
+            1,
+            CRDT#?MODULE.callback_args ++ [Peer],
+            fun() -> ok end
+        )
     catch
         Class:Reason:Stacktrace ->
             ?LOG_ERROR(#{
