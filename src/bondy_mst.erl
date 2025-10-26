@@ -132,6 +132,7 @@ hash.
 
 -export([capabilities/1]).
 -export([delete/1]).
+-export([delete/2]).
 -export([diff_to_list/2]).
 -export([dump/1]).
 -export([first/1]).
@@ -553,6 +554,41 @@ put(#?MODULE{store = Store0} = T, Key, Value) ->
         {Root, Store1} = put_at(T, Key, Value, Level),
         Store = bondy_mst_store:set_root(Store1, Root),
         T#?MODULE{store = Store}
+    end,
+    bondy_mst_store:transaction(Store0, Fun).
+
+
+?DOC("""
+Structurally deletes a key from the MST.
+
+This performs a true structural deletion, removing the key-value pair from the
+tree and merging affected subtrees. This is primarily used for garbage
+collection of tombstones.
+
+If the key is not found in the tree, the tree is returned unchanged.
+
+Returns a new tree with the key removed.
+""").
+-spec delete(Tree1 :: t(), Key :: key()) -> Tree2 :: t().
+
+delete(#?MODULE{store = Store0} = T, Key) ->
+    Fun = fun() ->
+        case root(T) of
+            undefined ->
+                T;
+            Root ->
+                Level = calc_level(T, Key),
+                case delete_at(T, Key, Level, Store0, Root) of
+                    not_found ->
+                        T;
+                    {undefined, Store1} ->
+                        %% Tree became empty, handle undefined root
+                        T#?MODULE{store = Store1};
+                    {NewRoot, Store1} when is_binary(NewRoot) ->
+                        Store = bondy_mst_store:set_root(Store1, NewRoot),
+                        T#?MODULE{store = Store}
+                end
+        end
     end,
     bondy_mst_store:transaction(Store0, Fun).
 
@@ -1367,6 +1403,249 @@ dump(Store, Root, Space) ->
         end
         || {K, V, R} <- List
     ].
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% Navigate to the appropriate level to delete the key
+%% -----------------------------------------------------------------------------
+delete_at(T, Key, KeyLevel, Store0, Hash) when is_binary(Hash) ->
+    Page = bondy_mst_store:get(Store0, Hash),
+    PageLevel = bondy_mst_page:level(Page),
+
+    if
+        PageLevel < KeyLevel ->
+            %% Key should be at a higher level, doesn't exist here
+            not_found;
+
+        PageLevel == KeyLevel ->
+            %% Delete from this level
+            Store1 = bondy_mst_store:free(Store0, Hash, Page),
+            delete_from_level(T, Key, Page, Store1);
+
+        PageLevel > KeyLevel ->
+            %% Descend into subtrees to find the key
+            Store1 = bondy_mst_store:free(Store0, Hash, Page),
+            delete_below_level(T, Key, KeyLevel, Page, Store1)
+    end;
+
+delete_at(_, _, _, _, undefined) ->
+    not_found.
+
+
+%% @private
+%% Delete key from this level (key's calculated level matches page level)
+delete_from_level(T, Key, Page, Store0) ->
+    Level = bondy_mst_page:level(Page),
+    Low = bondy_mst_page:low(Page),
+    List = bondy_mst_page:list(Page),
+
+    delete_from_list(T, Key, Level, Low, List, Store0).
+
+
+%% @private
+%% Scan the list to find and remove the key
+delete_from_list(T, Key, _Level, Low, [{K, _V, R}], Store0) ->
+    case compare(T, Key, K) of
+        eq ->
+            %% Only entry in page, merge Low with R and return merged tree
+            %% The page disappears
+            merge_subtrees(T, Store0, Low, R);
+
+        _ ->
+            not_found
+    end;
+
+delete_from_list(T, Key, Level, Low, [{K, V, R} | Rest], Store0) ->
+    case compare(T, Key, K) of
+        eq ->
+            %% First entry matches, merge Low with R
+            {NewLow, Store1} = merge_subtrees(T, Store0, Low, R),
+            %% Create page with merged low and remaining entries
+            NewPage = bondy_mst_page:new(Level, NewLow, Rest),
+            bondy_mst_store:put(Store1, NewPage);
+
+        lt ->
+            %% Key should be before first entry, doesn't exist
+            not_found;
+
+        gt ->
+            %% Continue searching in rest of list, accumulating entries before
+            %% the match
+            delete_in_list_tail(
+                T, Key, Level, Low, [{K, V, R}], Rest, Store0
+            )
+    end;
+
+delete_from_list(_, _, _, _, [], _) ->
+    not_found.
+
+
+%% @private
+%% Search for key in the tail of the list, accumulating entries before the match
+delete_in_list_tail(T, Key, Level, Low, Before, [{K, _V, R}], Store0) ->
+    case compare(T, Key, K) of
+        eq ->
+            %% Found it as last entry
+            %% Get the R from the previous entry
+            {_, _, PrevR} = lists:last(Before),
+            %% Merge PrevR with R
+            {MergedR, Store1} = merge_subtrees(T, Store0, PrevR, R),
+            %% Update the last entry in Before to point to MergedR
+            BeforeInit = lists:droplast(Before),
+            {PrevK, PrevV, _} = lists:last(Before),
+            NewList = BeforeInit ++ [{PrevK, PrevV, MergedR}],
+            NewPage = bondy_mst_page:new(Level, Low, NewList),
+            bondy_mst_store:put(Store1, NewPage);
+
+        lt ->
+            not_found;
+
+        gt ->
+            not_found
+    end;
+
+delete_in_list_tail(T, Key, Level, Low, Before, [{K, V, R} | Rest], Store0) ->
+    case compare(T, Key, K) of
+        eq ->
+            %% Found it in middle
+            %% Get the R from the previous entry
+            {_, _, PrevR} = lists:last(Before),
+            %% Merge PrevR with R
+            {MergedR, Store1} = merge_subtrees(T, Store0, PrevR, R),
+            %% Update the last entry in Before to point to MergedR
+            BeforeInit = lists:droplast(Before),
+            {PrevK, PrevV, _} = lists:last(Before),
+            NewList = BeforeInit ++ [{PrevK, PrevV, MergedR} | Rest],
+            NewPage = bondy_mst_page:new(Level, Low, NewList),
+            bondy_mst_store:put(Store1, NewPage);
+
+        lt ->
+            not_found;
+
+        gt ->
+            %% Keep searching, accumulate this entry
+            delete_in_list_tail(T, Key, Level, Low, Before ++ [{K, V, R}], Rest, Store0)
+    end.
+
+
+%% @private
+%% Delete key from a subtree below this level
+delete_below_level(T, Key, KeyLevel, Page, Store0) ->
+    Level = bondy_mst_page:level(Page),
+    Low = bondy_mst_page:low(Page),
+    List = bondy_mst_page:list(Page),
+    [{K0, _, _} | _] = List,
+
+    case compare(T, Key, K0) of
+        lt ->
+            %% Key is in Low subtree
+            case delete_at(T, Key, KeyLevel, Store0, Low) of
+                not_found ->
+                    not_found;
+
+                {NewLow, Store1} ->
+                    NewPage = bondy_mst_page:new(Level, NewLow, List),
+                    bondy_mst_store:put(Store1, NewPage)
+            end;
+        _ ->
+            %% Key is in one of the list entries' subtrees
+            delete_sub_after_first(T, Key, KeyLevel, Level, Low, Store0, List)
+    end.
+
+
+%% @private
+%% Navigate through list entries to find which subtree contains the key
+delete_sub_after_first(T, Key, KeyLevel, PageLevel, Low, Store0, [{K, V, R}]) ->
+    %% Must be in this last subtree R
+    case delete_at(T, Key, KeyLevel, Store0, R) of
+        not_found ->
+            not_found;
+
+        {NewR, Store1} ->
+            NewList = [{K, V, NewR}],
+            NewPage = bondy_mst_page:new(PageLevel, Low, NewList),
+            bondy_mst_store:put(Store1, NewPage)
+    end;
+
+delete_sub_after_first(T, Key, KeyLevel, PageLevel, Low, Store0,
+                       [{K1, V1, R1}, {K2, V2, R2} | Rest]) ->
+    case compare(T, Key, K2) of
+        lt ->
+            %% Key is in R1 subtree (between K1 and K2)
+            case delete_at(T, Key, KeyLevel, Store0, R1) of
+                not_found ->
+                    not_found;
+
+                {NewR1, Store1} ->
+                    NewList = [{K1, V1, NewR1}, {K2, V2, R2} | Rest],
+                    NewPage = bondy_mst_page:new(PageLevel, Low, NewList),
+                    bondy_mst_store:put(Store1, NewPage)
+            end;
+
+        _ ->
+            %% Key is after K2, continue searching
+            delete_sub_after_first_cont(
+                T, Key, KeyLevel, PageLevel, Low,
+                [{K1, V1, R1}], Store0, [{K2, V2, R2} | Rest]
+            )
+    end.
+
+
+%% @private
+delete_sub_after_first_cont(
+    T, Key, KeyLevel, PageLevel, Low, Before, Store0, [{K, V, R}]) ->
+    %% Must be in this last subtree
+    case delete_at(T, Key, KeyLevel, Store0, R) of
+        not_found ->
+            not_found;
+
+        {NewR, Store1} ->
+            NewList = Before ++ [{K, V, NewR}],
+            NewPage = bondy_mst_page:new(PageLevel, Low, NewList),
+            bondy_mst_store:put(Store1, NewPage)
+    end;
+
+delete_sub_after_first_cont(
+    T, Key, KeyLevel, PageLevel, Low, Before, Store0,
+    [{K1, V1, R1}, {K2, V2, R2} | Rest]) ->
+    case compare(T, Key, K2) of
+        lt ->
+            %% Key is in R1 subtree
+            case delete_at(T, Key, KeyLevel, Store0, R1) of
+                not_found ->
+                    not_found;
+
+                {NewR1, Store1} ->
+                    NewList = Before ++ [{K1, V1, NewR1}, {K2, V2, R2} | Rest],
+                    NewPage = bondy_mst_page:new(PageLevel, Low, NewList),
+                    bondy_mst_store:put(Store1, NewPage)
+            end;
+
+        _ ->
+            %% Continue searching
+            delete_sub_after_first_cont(
+                T, Key, KeyLevel, PageLevel, Low,
+                Before ++ [{K1, V1, R1}], Store0,
+                [{K2, V2, R2} | Rest]
+            )
+    end.
+
+
+%% @private
+%% Merge two subtrees using the existing merge algorithm
+merge_subtrees(_T, Store, undefined, undefined) ->
+    {undefined, Store};
+
+merge_subtrees(_T, Store, Hash, undefined) ->
+    {Hash, Store};
+
+merge_subtrees(_T, Store, undefined, Hash) ->
+    {Hash, Store};
+
+merge_subtrees(T, Store, Hash1, Hash2) ->
+    %% Reuse the existing merge_aux to combine the two subtrees
+    merge_aux(T, T, Store, Hash1, Hash2).
 
 
 
