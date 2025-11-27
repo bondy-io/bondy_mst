@@ -115,6 +115,7 @@ following callbacks:
     %% Normally node() but it can be a binary when testing
     node_id                         ::  node_id(),
     callback_mod                    ::  module(),
+    callback_args                   ::  list(),
     tree                            ::  bondy_mst:t(),
     consistency_model               ::  consistency_model(),
     %% Set it to false if you are using a peer service that handles gossip
@@ -190,7 +191,8 @@ following callbacks:
 -type opt()                 ::  bondy_mst:opt()
                                 | {max_merges, pos_integer()}
                                 | {max_merges_per_root, pos_integer()}
-                                | {callback_mod, module()}.
+                                | {callback_mod, module()}
+                                | {callback_args, list()}.
 -type opts_map()            ::  #{
                                 %% bondy_mst
                                 store => bondy_mst_store:t(),
@@ -201,7 +203,8 @@ following callbacks:
                                 %%
                                 max_merges => pos_integer(),
                                 max_merges_per_root => pos_integer(),
-                                callback_mod => module()
+                                callback_mod => module(),
+                                callback_args => list()
                             }.
 -type gossip()              ::  #gossip{}.
 -type get_cmd()             ::  #get{}.
@@ -345,7 +348,12 @@ Called when a merge exchange has finished.
 """).
 -callback on_merge(Peer :: node_id()) -> ok.
 
--optional_callbacks([on_merge/1]).
+%% Extended callbacks (when using callback_args)
+-callback send(ExtraArg :: term(), Peer :: node_id(), message()) -> ok | {error, any()}.
+-callback broadcast(ExtraArg :: term(), Gossip :: gossip()) -> ok | {error, any()}.
+-callback on_merge(ExtraArg :: term(), Peer :: node_id()) -> ok.
+
+-optional_callbacks([on_merge/1, send/3, broadcast/2, on_merge/2]).
 
 
 
@@ -364,6 +372,7 @@ values of a key. See `bondy_mst:merger()`
 * `comparator => bondy_mst:comparator()` - the function used by the tree to
 compare keys for sorting. See `bondy_mst:comparator()`
 * `callback_mod => module()` - The module implementing this modules' callbacks
+* `callback_args => list()` - Optional extra arguments to be passed to all callback functions
 * `consistency_model => causal | eventual` - if `causal`, a full merge will be
 done on each update. If `eventual` full merges will only occur then triggered
 via `trigger/2`. Default is `causal`
@@ -396,12 +405,13 @@ new(NodeId, Opts0) when
 
     %% Configure the grove
     Opts = maps:with(
-        [callback_mod, max_merges, max_merges_per_root], Opts0
+        [callback_mod, callback_args, max_merges, max_merges_per_root], Opts0
     ),
 
     #?MODULE{
         node_id = NodeId,
         callback_mod = validate_callback_mod(Opts),
+        callback_args = key_value:get(callback_args, Opts, []),
         tree = Tree,
         consistency_model = key_value:get(consistency_model, Opts, causal),
         fwd_bcast = key_value:get(fwd_bcast, Opts, false),
@@ -604,7 +614,7 @@ trigger(#?MODULE{} = CRDT, Peer) when is_atom(Peer) ->
         key = undefined,
         value = undefined
     },
-    (CRDT#?MODULE.callback_mod):send(Peer, Event).
+    call_callback(CRDT, send, [Peer, Event]).
 
 
 ?DOC("""
@@ -769,12 +779,12 @@ handle(CRDT, #get{from = Peer, root = PeerRoot, set = Set}) ->
                     Set
                 ),
                 Msg = #put{from = CRDT#?MODULE.node_id, map = Map},
-                (CRDT#?MODULE.callback_mod):send(Peer, Msg);
+                call_callback(CRDT, send, [Peer, Msg]);
 
             false ->
                 %% We don't have all the pages, we reply a missing message
                 Msg = #missing{from = CRDT#?MODULE.node_id},
-                (CRDT#?MODULE.callback_mod):send(Peer, Msg)
+                call_callback(CRDT, send, [Peer, Msg])
         end,
 
     case PeerRoot == bondy_mst:root(Tree) of
@@ -872,6 +882,11 @@ validate_callback_mod(Opts) ->
 
 
 %% @private
+call_callback(#?MODULE{callback_mod = CallbackMod, callback_args = ExtraArgs}, Function, Args) ->
+    erlang:apply(CallbackMod, Function, ExtraArgs ++ Args).
+
+
+%% @private
 -spec maybe_broadcast(t(), gossip()) -> t().
 
 maybe_broadcast(#?MODULE{fwd_bcast = false} = CRDT, _) ->
@@ -906,7 +921,7 @@ maybe_broadcast(CRDT0, Gossip) ->
 
 %% @private
 broadcast(CRDT0, Gossip) ->
-    case (CRDT0#?MODULE.callback_mod):broadcast(Gossip) of
+    case call_callback(CRDT0, broadcast, [Gossip]) of
         ok ->
             telemetry:execute(
                 [bondy_mst, broadcast, sent],
@@ -1037,7 +1052,7 @@ merge(CRDT0, Peer) ->
                 root = Root,
                 set = MissingSet
             },
-            ok = (CRDT0#?MODULE.callback_mod):send(Peer, Cmd),
+            ok = call_callback(CRDT0, send, [Peer, Cmd]),
             CRDT0
     end.
 
@@ -1078,7 +1093,7 @@ do_merge(CRDT0, Peer, PeerRoot) ->
                         key = undefined,
                         value = undefined
                     },
-                    (CRDT#?MODULE.callback_mod):send(Peer, Event);
+                    call_callback(CRDT, send, [Peer, Event]);
 
                 false ->
                     ok
@@ -1104,7 +1119,7 @@ on_merge(CRDT0, Peer) ->
             CRDT#?MODULE.callback_mod,
             on_merge,
             1,
-            [Peer],
+            CRDT#?MODULE.callback_args ++ [Peer],
             fun() -> ok end
         )
     catch
