@@ -8,10 +8,8 @@
 
 -compile(export_all).
 
-
 all() ->
     [
-
         {group, set_with_local_store, []},
         {group, set_with_ets_store, []},
         {group, set_with_ets_persistent_store, []},
@@ -53,14 +51,12 @@ groups() ->
         {set_of_awsets_with_leveled_store, [], set_of_awsets_test_cases()}
     ].
 
-
 init_per_group(set_with_local_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
         store => bondy_mst_map_store
     },
     [{grove_opts, Opts}] ++ Config;
-
 init_per_group(set_with_ets_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
@@ -68,7 +64,6 @@ init_per_group(set_with_ets_store, Config) ->
         persistent => false
     },
     [{grove_opts, Opts}] ++ Config;
-
 init_per_group(set_with_ets_persistent_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
@@ -76,22 +71,18 @@ init_per_group(set_with_ets_persistent_store, Config) ->
         persistent => true
     },
     [{grove_opts, Opts}] ++ Config;
-
-
 init_per_group(set_with_leveled_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
         store => bondy_mst_leveled_store
     },
     [{grove_opts, Opts}] ++ Config;
-
 init_per_group(set_with_rocksdb_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
         store => bondy_mst_rocksdb_store
     },
     [{grove_opts, Opts}] ++ Config;
-
 init_per_group(set_of_awsets_with_local_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
@@ -99,7 +90,6 @@ init_per_group(set_of_awsets_with_local_store, Config) ->
         merger => fun(_Key, A, B) -> state_awset:merge(A, B) end
     },
     [{grove_opts, Opts}] ++ Config;
-
 init_per_group(set_of_awsets_with_ets_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
@@ -107,8 +97,6 @@ init_per_group(set_of_awsets_with_ets_store, Config) ->
         merger => fun(_Key, A, B) -> state_awset:merge(A, B) end
     },
     [{grove_opts, Opts}] ++ Config;
-
-
 init_per_group(set_of_awsets_with_leveled_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
@@ -116,7 +104,6 @@ init_per_group(set_of_awsets_with_leveled_store, Config) ->
         merger => fun(_Key, A, B) -> state_awset:merge(A, B) end
     },
     [{grove_opts, Opts}] ++ Config;
-
 init_per_group(set_of_awsets_with_rocksdb_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     Opts = #{
@@ -127,7 +114,6 @@ init_per_group(set_of_awsets_with_rocksdb_store, Config) ->
 
 end_per_group(_, _Config) ->
     ok.
-
 
 %% Setup and teardown functions
 
@@ -148,16 +134,15 @@ init_per_testcase(TestCase, Config) ->
 
 %% Called after each test case
 end_per_testcase(_TestCase, _Config) ->
-    _ = [catch gen_server:stop(Peer) || Peer <- bondy_mst_test_crdt_server:peers()],
+    _ = [
+        catch gen_server:stop(Peer)
+     || Peer <- bondy_mst_test_crdt_server:peers()
+    ],
     ok.
-
-
-
 
 %% =============================================================================
 %% TEST CASES: SET
 %% =============================================================================
-
 
 set_online_sync(Config) ->
     N1 = 10,
@@ -173,8 +158,8 @@ set_online_sync(Config) ->
     ?assert(
         lists:all(
             fun(Peer) ->
-                erlang:is_process_alive(erlang:whereis(Peer))
-                andalso pong == gen_server:call(Peer, ping)
+                erlang:is_process_alive(erlang:whereis(Peer)) andalso
+                    pong == gen_server:call(Peer, ping)
             end,
             Peers
         )
@@ -183,7 +168,7 @@ set_online_sync(Config) ->
     %% We add data to replica at Peer1
     _ = [
         gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL)
-        || X <- suffled_seq(1, N1)
+     || X <- suffled_seq(1, N1)
     ],
     timer:sleep(5000),
 
@@ -194,7 +179,7 @@ set_online_sync(Config) ->
         ?ISET([K || {K, true} <- gen_server:call(Peer1, list, ?TIMEOUT_XXL)]),
         "Peer1 should have all the elements we put"
     ),
-     ?assertEqual(
+    ?assertEqual(
         E1,
         ?ISET([K || {K, true} <- gen_server:call(Peer2, list, ?TIMEOUT_XXL)]),
         "Peer2 should have all the elements via replication"
@@ -209,14 +194,14 @@ set_online_sync(Config) ->
     _ = spawn(fun() ->
         _ = [
             gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL)
-            || X <- suffled_seq(N1 + 1, N2)
+         || X <- suffled_seq(N1 + 1, N2)
         ]
     end),
 
     _ = spawn(fun() ->
         _ = [
             gen_server:call(Peer3, {put, X}, ?TIMEOUT_XXL)
-            || X <- suffled_seq(N2 + 1, N3)
+         || X <- suffled_seq(N2 + 1, N3)
         ]
     end),
 
@@ -229,7 +214,7 @@ set_online_sync(Config) ->
         ?ISET([K || {K, true} <- gen_server:call(Peer1, list, ?TIMEOUT_XXL)]),
         "Peer1 should have all the elements via replication"
     ),
-     ?assertEqual(
+    ?assertEqual(
         E2,
         ?ISET([K || {K, true} <- gen_server:call(Peer2, list, ?TIMEOUT_XXL)]),
         "Peer2 should have all the elements via replication"
@@ -244,19 +229,19 @@ set_online_sync(Config) ->
     _ = spawn(fun() ->
         _ = [
             gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL)
-            || X <- suffled_seq(N1 + 1, N2)
+         || X <- suffled_seq(N1 + 1, N2)
         ]
     end),
     _ = spawn(fun() ->
         _ = [
             gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL)
-            || X <- suffled_seq(N2 + 1, N3)
+         || X <- suffled_seq(N2 + 1, N3)
         ]
     end),
     _ = spawn(fun() ->
         _ = [
             gen_server:call(Peer3, {put, X}, ?TIMEOUT_XXL)
-            || X <- suffled_seq(1, N1)
+         || X <- suffled_seq(1, N1)
         ]
     end),
 
@@ -267,7 +252,7 @@ set_online_sync(Config) ->
         ?ISET([K || {K, true} <- gen_server:call(Peer1, list, ?TIMEOUT_XXL)]),
         "Peer1 should have all the elements via replication"
     ),
-     ?assertEqual(
+    ?assertEqual(
         E2,
         ?ISET([K || {K, true} <- gen_server:call(Peer2, list, ?TIMEOUT_XXL)]),
         "Peer2 should have all the elements via replication"
@@ -289,7 +274,6 @@ set_online_sync(Config) ->
         NewRoot,
         gen_server:call(Peer3, root, ?TIMEOUT_XXL)
     ),
-
 
     %%  GC
     %% Epoch = erlang:monotonic_time(),
@@ -382,7 +366,6 @@ set_online_sync(Config) ->
 
     ok.
 
-
 set_online_sync_complex(Config) ->
     GroveOpts = ?config(grove_opts, Config),
     {ok, Peers} = bondy_mst_test_crdt_server:start_all(GroveOpts),
@@ -390,10 +373,13 @@ set_online_sync_complex(Config) ->
 
     L = [
         #{id => X, pid => self(), timestamp => erlang:monotonic_time()}
-        || X <- lists:seq(1, 1000)
+     || X <- lists:seq(1, 1000)
     ],
 
-    _ = [gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL) || X <- list_shuffle(L)],
+    _ = [
+        gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL)
+     || X <- list_shuffle(L)
+    ],
 
     L1 = [K || {K, true} <- gen_server:call(Peer1, list, ?TIMEOUT_XXL)],
     L2 = [K || {K, true} <- gen_server:call(Peer2, list, ?TIMEOUT_XXL)],
@@ -403,7 +389,6 @@ set_online_sync_complex(Config) ->
     ?assertEqual(L1, L2),
     ?assertEqual(L2, L3),
     ok.
-
 
 set_anti_entropy_fwd(Config) ->
     GroveOpts = ?config(grove_opts, Config),
@@ -415,16 +400,21 @@ set_anti_entropy_fwd(Config) ->
     %% And put some values
     L = [
         #{id => X, pid => self(), timestamp => erlang:monotonic_time()}
-        || X <- lists:seq(1, 1000)
+     || X <- lists:seq(1, 1000)
     ],
 
-    _ = [gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL) || X <- list_shuffle(L)],
+    _ = [
+        gen_server:call(Peer1, {put, X}, ?TIMEOUT_XXL)
+     || X <- list_shuffle(L)
+    ],
 
     L1 = [K || {K, true} <- gen_server:call(Peer1, list, ?TIMEOUT_XXL)],
     ?assertEqual(L, L1),
 
     %% We start the other peers
-    {ok, [Peer2, Peer3]} = bondy_mst_test_crdt_server:start(GroveOpts, RestPeers),
+    {ok, [Peer2, Peer3]} = bondy_mst_test_crdt_server:start(
+        GroveOpts, RestPeers
+    ),
 
     %% Trigger sync Peer1 -> [Peer2, Peer3]
     ok = gen_server:call(Peer1, {trigger, Peer2}, ?TIMEOUT_XXL),
@@ -449,7 +439,10 @@ set_bidirectional_sync(Config) ->
 
     %% And put some values
     L = lists:seq(1, 1000),
-    _ = [gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL) || X <- list_shuffle(L)],
+    _ = [
+        gen_server:call(Peer2, {put, X}, ?TIMEOUT_XXL)
+     || X <- list_shuffle(L)
+    ],
     L2 = [K || {K, true} <- gen_server:call(Peer2, list, ?TIMEOUT_XXL)],
     ?assertEqual(L, L2),
 
@@ -471,17 +464,12 @@ set_bidirectional_sync(Config) ->
 
     ok.
 
-
-
-
 %% =============================================================================
 %% TEST CASES: SET
 %% =============================================================================
 
-
-
 set_of_awsets_online_sync(Config) ->
-     GroveOpts = ?config(grove_opts, Config),
+    GroveOpts = ?config(grove_opts, Config),
     {ok, Peers} = bondy_mst_test_crdt_server:start_all(GroveOpts),
 
     [Peer1, Peer2, Peer3] = Peers,
@@ -492,8 +480,8 @@ set_of_awsets_online_sync(Config) ->
     ?assert(
         lists:all(
             fun(Peer) ->
-                erlang:is_process_alive(erlang:whereis(Peer))
-                andalso pong == gen_server:call(Peer, ping)
+                erlang:is_process_alive(erlang:whereis(Peer)) andalso
+                    pong == gen_server:call(Peer, ping)
             end,
             Peers
         )
@@ -507,7 +495,7 @@ set_of_awsets_online_sync(Config) ->
         lists:usort(gen_server:call(Peer1, list, ?TIMEOUT_XXL)),
         "Peer1 should have all the elements we put"
     ),
-     ?assertEqual(
+    ?assertEqual(
         E1,
         lists:usort(gen_server:call(Peer2, list, ?TIMEOUT_XXL)),
         "Peer2 should have all the elements via replication"
@@ -550,7 +538,7 @@ set_of_awsets_anti_entropy_fwd(Config) ->
 
     _ = [
         gen_server:call(Peer1, {put, K, V}, ?TIMEOUT_XXL)
-        || {K, V} <- list_shuffle(L1)
+     || {K, V} <- list_shuffle(L1)
     ],
 
     ?assertEqual(L1, gen_server:call(Peer1, list, ?TIMEOUT_XXL)),
@@ -558,7 +546,7 @@ set_of_awsets_anti_entropy_fwd(Config) ->
 
     _ = [
         gen_server:call(Peer2, {put, K, V}, ?TIMEOUT_XXL)
-        || {K, V} <- list_shuffle(L2)
+     || {K, V} <- list_shuffle(L2)
     ],
 
     ?assertEqual(L1, gen_server:call(Peer1, list, ?TIMEOUT_XXL)),
@@ -601,14 +589,11 @@ set_of_awsets_anti_entropy_fwd(Config) ->
 
     ok.
 
-
-
 %% =============================================================================
 %% PRIVATE VALIDATIONS
 %% =============================================================================
 
 %% no_dangling_garbage(T) ->
-
 
 %% =============================================================================
 %% PRIVATE UTILS
@@ -618,17 +603,15 @@ set_of_awsets_anti_entropy_fwd(Config) ->
 suffled_seq(N, M) ->
     list_shuffle(lists:seq(N, M)).
 
-
 %% @private
 randomize(1, List) ->
     randomize(List);
-
 randomize(T, List) ->
     lists:foldl(
         fun(_E, Acc) -> randomize(Acc) end,
         randomize(List),
-        lists:seq(1, (T - 1))).
-
+        lists:seq(1, (T - 1))
+    ).
 
 %% @private
 randomize(List) ->
@@ -643,8 +626,6 @@ randomize(List) ->
 %% -----------------------------------------------------------------------------
 list_shuffle([]) ->
     [];
-
 list_shuffle(List) ->
     %% Determine the log n portion then randomize the list.
     randomize(round(math:log(length(List)) + 0.5), List).
-

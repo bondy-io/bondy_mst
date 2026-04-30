@@ -27,18 +27,17 @@
 ?MODULEDOC("Non-concurrent, MST backend using `leveled`.").
 
 -record(?MODULE, {
-    pid                 ::  pid(),
-    name                ::  atom() | binary(),
-    hashing_algorithm   ::  atom()
+    pid :: pid(),
+    name :: atom() | binary(),
+    hashing_algorithm :: atom()
 }).
 
--type t()               ::  #?MODULE{}.
--type page()            ::  bondy_mst_page:t().
--type opts()            ::  #{} | [].
+-type t() :: #?MODULE{}.
+-type page() :: bondy_mst_page:t().
+-type opts() :: #{} | [].
 
 -export_type([t/0]).
 -export_type([page/0]).
-
 
 %% API
 -export([capabilities/1]).
@@ -58,19 +57,14 @@
 -export([put/2]).
 -export([set_root/2]).
 
-
-
 %% =============================================================================
 %% BONDY_MST_STORE CALLBACKS
 %% =============================================================================
-
-
 
 -spec open(Algo :: atom(), Opts :: opts()) -> t() | no_return().
 
 open(Algo, Opts) when is_atom(Algo), is_list(Opts) ->
     open(Algo, maps:from_list(Opts));
-
 open(Algo, Opts) when is_atom(Algo), is_map(Opts) ->
     Name = maps:get(name, Opts, undefined),
     Name =/= undefined orelse error(badarg),
@@ -84,7 +78,6 @@ open(Algo, Opts) when is_atom(Algo), is_map(Opts) ->
         hashing_algorithm = Algo
     }.
 
-
 -spec capabilities(t()) -> map().
 
 capabilities(#?MODULE{}) ->
@@ -93,7 +86,6 @@ capabilities(#?MODULE{}) ->
         read_concurrency => false
     }.
 
-
 -spec close(t()) -> ok.
 
 close(#?MODULE{}) ->
@@ -101,12 +93,10 @@ close(#?MODULE{}) ->
     %% to create a dedicated instance or have shared store
     ok.
 
-
 -spec get_root(T :: t()) -> Root :: hash() | undefined.
 
 get_root(#?MODULE{pid = Pid, name = Name}) ->
     do_get(Pid, Name, ?ROOT_KEY).
-
 
 -spec set_root(T :: t(), Hash :: hash()) -> t().
 
@@ -114,18 +104,15 @@ set_root(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
     ok = leveled_bookie:book_put(Pid, Name, ?ROOT_KEY, Hash, []),
     T.
 
-
 -spec get(T :: t(), Hash :: binary()) -> Page :: page() | undefined.
 
 get(#?MODULE{pid = Pid, name = Name}, Hash) ->
     do_get(Pid, Name, Hash).
 
-
 -spec has(T :: t(), Hash :: binary()) -> boolean().
 
 has(#?MODULE{pid = Pid, name = Name}, Hash) ->
     leveled_bookie:book_head(Pid, Name, Hash) /= not_found.
-
 
 -spec put(T :: t(), Page :: page()) -> {Hash :: binary(), T :: t()}.
 
@@ -134,24 +121,18 @@ put(#?MODULE{pid = Pid, name = Name, hashing_algorithm = Algo} = T, Page) ->
     ok = leveled_bookie:book_put(Pid, Name, Hash, Page, []),
     {Hash, T}.
 
-
-
-
 -spec delete(T :: t(), Hash :: binary()) -> T :: t().
 
 delete(#?MODULE{pid = Pid, name = Name} = T, Hash) ->
     ok = leveled_bookie:book_delete(Pid, Name, Hash, []),
     T.
 
-
 -spec copy(t(), OtherStore :: bondy_mst_store:t(), Hash :: binary()) -> t().
 
 copy(#?MODULE{pid = Pid, name = Name} = T, OtherStore, Hash) ->
-
     case bondy_mst_store:get(OtherStore, Hash) of
         undefined ->
             T;
-
         Page ->
             Refs = bondy_mst_store:page_refs(OtherStore, Page),
             T = lists:foldl(
@@ -163,15 +144,11 @@ copy(#?MODULE{pid = Pid, name = Name} = T, OtherStore, Hash) ->
             T
     end.
 
-
-
 -spec list(t()) -> [page()].
 
 list(#?MODULE{}) ->
     %% TODO
     [].
-
-
 
 -spec free(T :: t(), Hash :: binary(), Page :: page()) -> T :: t().
 
@@ -180,7 +157,6 @@ free(#?MODULE{pid = Pid, name = Name} = T, Hash, _Page) ->
     ok = leveled_bookie:book_delete(Pid, Name, Hash, []),
     T.
 
-
 -spec gc(T :: t(), KeepRoots :: [list()] | epoch()) ->
     {T :: t(), Metadata :: map()}.
 
@@ -188,14 +164,12 @@ gc(#?MODULE{} = T, _) ->
     %% Do nothing, we free instead
     {T, #{}}.
 
-
 -spec missing_set(T :: t(), Root :: binary()) -> sets:set(page()).
 
 missing_set(T, Root) ->
     case get(T, Root) of
         undefined ->
             sets:from_list([Root], [{version, 2}]);
-
         Page ->
             lists:foldl(
                 fun(P, Acc) -> sets:union(Acc, missing_set(T, P)) end,
@@ -204,12 +178,10 @@ missing_set(T, Root) ->
             )
     end.
 
-
 -spec page_refs(Page :: page()) -> [binary()].
 
 page_refs(Page) ->
     bondy_mst_page:refs(Page).
-
 
 -spec delete(t()) -> ok.
 
@@ -217,22 +189,15 @@ delete(#?MODULE{pid = _Pid, name = _Name}) ->
     %% TODO fold over bucket (name) elements and delete them
     ok.
 
-
-
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
-
-
 
 %% @private
 do_get(Pid, Name, Hash) when is_binary(Hash) orelse Hash =:= ?ROOT_KEY ->
     case leveled_bookie:book_get(Pid, Name, Hash) of
         {ok, Page} ->
             Page;
-
         not_found ->
             undefined
     end.
-
-

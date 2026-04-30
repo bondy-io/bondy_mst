@@ -55,47 +55,50 @@ hash.
 """).
 
 -record(bondy_mst, {
-    store               ::  bondy_mst_store:t(),
+    store :: bondy_mst_store:t(),
     %% `comparator` is a compare function for keys
-    comparator          ::  comparator(),
+    comparator :: comparator(),
     %% `merger` is a function for merging two items that have the same key
-    merger              ::  merger(),
+    merger :: merger(),
     %% By default we user Erlang External Term Format unless a function is
     %% provided
-    serializer          ::  optional(bondy_mst_store:serializer()),
-    hash_algorithm      ::  atom()
+    serializer :: optional(bondy_mst_store:serializer()),
+    hash_algorithm :: atom()
 }).
 
--type t()               ::  #?MODULE{}.
--type opts()            ::  [opt()] | opts_map().
--type opt()             ::  {hash_algorithm, hash_algorithm()}
-                            | {store_mod, module()}
-                            | {store_opts, key_value:t()}
-                            | {merger, merger()}
-                            | {comparator, comparator()}.
--type opts_map()        ::  #{
-                                store => bondy_mst_store:t(),
-                                hash_algorithm => hash_algorithm(),
-                                store_opts => key_value:t(),
-                                merger => merger(),
-                                comparator => comparator()
-                            }.
--type hash_algorithm()  ::  sha256 | sha512.
--type comparator()      ::  fun((key(), key()) -> eq | lt | gt).
--type merger()          ::  fun((key(), value(), value()) -> value()).
--type key_range()       ::  {key(), key()}
-                            | {first, key()}
-                            | {key(), undefined}.
+-type t() :: #?MODULE{}.
+-type opts() :: [opt()] | opts_map().
+-type opt() ::
+    {hash_algorithm, hash_algorithm()}
+    | {store_mod, module()}
+    | {store_opts, key_value:t()}
+    | {merger, merger()}
+    | {comparator, comparator()}.
+-type opts_map() :: #{
+    store => bondy_mst_store:t(),
+    hash_algorithm => hash_algorithm(),
+    store_opts => key_value:t(),
+    merger => merger(),
+    comparator => comparator()
+}.
+-type hash_algorithm() :: sha256 | sha512.
+-type comparator() :: fun((key(), key()) -> eq | lt | gt).
+-type merger() :: fun((key(), value(), value()) -> value()).
+-type key_range() ::
+    {key(), key()}
+    | {first, key()}
+    | {key(), undefined}.
 %% Fold
--type fold_fun()        ::  fun(({key(), value()}, any()) -> any()).
--type fold_opts()       ::  [fold_opt()].
--type fold_opt()        ::  {root, hash()}
-                            | {first, key()}
-                            | {match_spec, term()}
-                            | {stop, key()}
-                            | {keys_only, boolean()}
-                            | {limit, pos_integer() | infinity}.
--type fold_pages_fun()  ::  fun(({hash(), bondy_mst_page:t()}, any()) -> any()).
+-type fold_fun() :: fun(({key(), value()}, any()) -> any()).
+-type fold_opts() :: [fold_opt()].
+-type fold_opt() ::
+    {root, hash()}
+    | {first, key()}
+    | {match_spec, term()}
+    | {stop, key()}
+    | {keys_only, boolean()}
+    | {limit, pos_integer() | infinity}.
+-type fold_pages_fun() :: fun(({hash(), bondy_mst_page:t()}, any()) -> any()).
 
 -export_type([t/0]).
 -export_type([opt/0]).
@@ -110,7 +113,6 @@ hash.
 -export_type([key/0]).
 -export_type([value/0]).
 -export_type([hash/0]).
-
 
 -export([capabilities/1]).
 -export([delete/1]).
@@ -144,88 +146,81 @@ hash.
 -export([to_list/1]).
 -export([to_list/2]).
 
-
 -export([format_error/2]).
-
 
 %% =============================================================================
 %% TELEMETRY EVENTS
 %% =============================================================================
 
-
--telemetry_event #{
+-telemetry_event(#{
     event => [?MODULE, gc, start],
     description =>
-    <<"Emitted at the start of the garbage collection execution">>,
+        <<"Emitted at the start of the garbage collection execution">>,
     measurements => <<
-    "#{system_time => non_neg_integer(), "
-    "monotonic_time => non_neg_integer()}"
+        "#{system_time => non_neg_integer(), "
+        "monotonic_time => non_neg_integer()}"
     >>,
     metadata => <<"#{}">>
-}.
+}).
 
--telemetry_event #{
+-telemetry_event(#{
     event => [?MODULE, gc, stop],
     description =>
-    <<"Emitted at the end of the garbage collection execution">>,
+        <<"Emitted at the end of the garbage collection execution">>,
     measurements => <<
-    "#{system_time => non_neg_integer(), "
-    "monotonic_time => non_neg_integer()}"
+        "#{system_time => non_neg_integer(), "
+        "monotonic_time => non_neg_integer()}"
     >>,
     metadata => <<"#{freed_count := integer(), freed_bytes := integer()}">>
-}.
+}).
 
--telemetry_event #{
+-telemetry_event(#{
     event => [?MODULE, gc, exception],
     description =>
-    <<"Emitted when garbage collection fails">>,
+        <<"Emitted when garbage collection fails">>,
     measurements => <<
-    "#{system_time => non_neg_integer(), "
-    "monotonic_time => non_neg_integer()}"
+        "#{system_time => non_neg_integer(), "
+        "monotonic_time => non_neg_integer()}"
     >>,
     metadata => <<"#{}">>
-}.
+}).
 
--telemetry_event #{
+-telemetry_event(#{
     event => [?MODULE, merge, start],
     description =>
-    <<"Emitted at the start of the merge execution">>,
+        <<"Emitted at the start of the merge execution">>,
     measurements => <<
-    "#{system_time => non_neg_integer(), "
-    "monotonic_time => non_neg_integer()}"
+        "#{system_time => non_neg_integer(), "
+        "monotonic_time => non_neg_integer()}"
     >>,
     metadata => <<"#{}">>
-}.
+}).
 
--telemetry_event #{
+-telemetry_event(#{
     event => [?MODULE, merge, stop],
     description =>
-    <<"Emitted at the end of the merge execution">>,
+        <<"Emitted at the end of the merge execution">>,
     measurements => <<
-    "#{system_time => non_neg_integer(), "
-    "monotonic_time => non_neg_integer()}"
+        "#{system_time => non_neg_integer(), "
+        "monotonic_time => non_neg_integer()}"
     >>,
     metadata => <<"#{}">>
-}.
+}).
 
--telemetry_event #{
+-telemetry_event(#{
     event => [?MODULE, merge, exception],
     description =>
-    <<"Emitted when merge fails">>,
+        <<"Emitted when merge fails">>,
     measurements => <<
-    "#{system_time => non_neg_integer(), "
-    "monotonic_time => non_neg_integer()}"
+        "#{system_time => non_neg_integer(), "
+        "monotonic_time => non_neg_integer()}"
     >>,
     metadata => <<"#{}">>
-}.
-
-
+}).
 
 %% =============================================================================
 %% API
 %% =============================================================================
-
-
 
 ?DOC("""
 Create a new Merkle Search Tree using the default store.
@@ -235,7 +230,6 @@ The same as calling `new(#{})`.
 
 new() ->
     new(#{}).
-
 
 ?DOC("""
 Creates a new MST instance with configurable options.
@@ -257,23 +251,22 @@ Returns a new MST instance.
 
 new(Opts) when is_list(Opts) ->
     new(maps:from_list(Opts));
-
 new(Opts) when is_map(Opts); is_list(Opts) ->
     Comparator = key_value:get(comparator, Opts, fun comparator/2),
-    is_function(Comparator, 2)
-        orelse badarg(
+    is_function(Comparator, 2) orelse
+        badarg(
             Opts, comparator, <<"a 'bondy_mst:comparator()' function.">>
         ),
 
     Merger = key_value:get(merger, Opts, fun merger/3),
-    is_function(Merger, 3)
-        orelse badarg(
+    is_function(Merger, 3) orelse
+        badarg(
             Opts, merger, <<"a 'bondy_mst:merger()' function">>
         ),
 
     Algo = key_value:get(hash_algorithm, Opts, sha256),
-    Algo == sha256 orelse Algo == sha512
-        orelse badarg(Opts, hash_algorithm, <<"either 'sha256' or 'sha512'.">>),
+    Algo == sha256 orelse Algo == sha512 orelse
+        badarg(Opts, hash_algorithm, <<"either 'sha256' or 'sha512'.">>),
 
     Store =
         maybe
@@ -297,7 +290,6 @@ new(Opts) when is_map(Opts); is_list(Opts) ->
         hash_algorithm = Algo
     }.
 
-
 ?DOC("""
 Returns the store capabilities.
 """).
@@ -305,7 +297,6 @@ Returns the store capabilities.
 
 capabilities(#?MODULE{store = Store}) ->
     bondy_mst_store:capabilities(Store).
-
 
 ?DOC("""
 Deletes the tree (by deleting its backend store).
@@ -315,7 +306,6 @@ Deletes the tree (by deleting its backend store).
 delete(#?MODULE{store = Val}) ->
     bondy_mst_store:delete(Val).
 
-
 ?DOC("""
 Returns the tree's root hash.
 """).
@@ -324,7 +314,6 @@ Returns the tree's root hash.
 root(#?MODULE{store = Store}) ->
     bondy_mst_store:get_root(Store).
 
-
 ?DOC("""
 Returns the tree's store.
 """).
@@ -332,7 +321,6 @@ Returns the tree's store.
 
 store(#?MODULE{store = Val}) ->
     Val.
-
 
 ?DOC("""
 Returns the value associated with key `Key`.
@@ -343,7 +331,6 @@ get(#?MODULE{} = T, Key) ->
     %% Call do get as root might be undefined
     do_get(T, Key, root(T)).
 
-
 ?DOC("""
 Returns the value associated with key `Key` starting at root `Root`.
 This allows to read from a previous version.
@@ -353,7 +340,6 @@ This allows to read from a previous version.
 get(#?MODULE{} = T, Key, Root) when is_binary(Root) ->
     do_get(T, Key, Root).
 
-
 ?DOC("""
 Returns the first key-value pair in the MST or `undefined` if empty.
 """).
@@ -361,7 +347,6 @@ Returns the first key-value pair in the MST or `undefined` if empty.
 
 first(#?MODULE{} = T) ->
     first(T, root(T)).
-
 
 ?DOC("""
 Returns the last key-value pair in the MST or `undefined` if empty.
@@ -371,20 +356,17 @@ Returns the last key-value pair in the MST or `undefined` if empty.
 last(#?MODULE{} = T) ->
     last(T, root(T)).
 
-
-
 -spec get_range(T :: t(), Range :: key_range()) -> Value :: any().
 
 get_range(#?MODULE{} = _T, {_From, _To}) ->
     error(not_implemented).
-    %% Opts = [{first, From}, {stop, To}],
-    %% fold(
-    %%     T,
-    %%     fun(K, V, Acc) -> [{K, V} | Acc] end,
-    %%     [],
-    %%     Opts
-    %% ).
-
+%% Opts = [{first, From}, {stop, To}],
+%% fold(
+%%     T,
+%%     fun(K, V, Acc) -> [{K, V} | Acc] end,
+%%     [],
+%%     Opts
+%% ).
 
 ?DOC("""
 List all items.
@@ -394,7 +376,6 @@ List all items.
 to_list(#?MODULE{} = T) ->
     to_list(T, root(T)).
 
-
 ?DOC("""
 List all items.
 """).
@@ -402,12 +383,10 @@ List all items.
 
 to_list(#?MODULE{}, undefined) ->
     [];
-
 to_list(#?MODULE{} = T, Root) when is_binary(Root) ->
     lists:reverse(
         fold(T, fun(E, Acc) -> [E | Acc] end, [], [{root, Root}])
     ).
-
 
 ?DOC("""
 Calls `Fun(Elem)` for each element `Elem` in the tree, starting from its
@@ -422,20 +401,17 @@ The same as calling `foreach(T, root(T))`.
 foreach(#?MODULE{} = T, Fun) ->
     foreach(T, Fun, []).
 
-
-
 ?DOC("""
 Calls `Fun(Elem)` for each element `Elem` in the tree, starting from
 `Root`.
 This function is used for its side effects and the evaluation order is
 defined to be the same as the order of the elements in the tree.
 """).
--spec foreach(t(),fun(({key(), value()}) -> ok), Opts :: list()) -> ok.
+-spec foreach(t(), fun(({key(), value()}) -> ok), Opts :: list()) -> ok.
 
 foreach(#?MODULE{store = Store} = T, Fun, Opts) ->
     Root = key_value:get_lazy(root, Opts, fun() -> root(T) end),
     do_foreach(Store, Fun, Opts, Root).
-
 
 ?DOC("""
 Calls `Fun(Elem, AccIn)` on successive elements of tree `T`, starting
@@ -447,7 +423,6 @@ value of the accumulator. `Acc0` is returned if the tree is empty.
 
 fold(T, Fun, AccIn) ->
     fold(T, Fun, AccIn, []).
-
 
 ?DOC("""
 Calls `Fun(Elem, AccIn)` on successive elements of tree `T`, starting
@@ -462,19 +437,19 @@ fold(#?MODULE{store = Store} = T, Fun, AccIn, Opts) ->
     Root = key_value:get_lazy(root, Opts, fun() -> root(T) end),
     do_fold(Store, Fun, AccIn, Opts, Root).
 
-
 ?DOC("""
 
 """).
 -spec fold_pages(
-    t(), Fun :: fold_pages_fun(), AccIn :: any(), Opts :: fold_opts()) ->
+    t(), Fun :: fold_pages_fun(), AccIn :: any(), Opts :: fold_opts()
+) ->
     AccOut :: any().
 
-fold_pages(#?MODULE{store = Store} = T, Fun, AccIn, Opts)
-when is_function(Fun, 2) andalso (is_map(Opts) orelse is_list(Opts)) ->
+fold_pages(#?MODULE{store = Store} = T, Fun, AccIn, Opts) when
+    is_function(Fun, 2) andalso (is_map(Opts) orelse is_list(Opts))
+->
     Root = key_value:get_lazy(root, Opts, fun() -> root(T) end),
     do_fold_pages(Store, Fun, AccIn, Opts, Root).
-
 
 ?DOC("""
 List all items.
@@ -483,7 +458,6 @@ List all items.
 
 keys(#?MODULE{} = T) ->
     lists:reverse(fold(T, fun({K, _}, Acc) -> [K | Acc] end, [])).
-
 
 ?DOC("""
 Computes the difference between two MSTs and returns it as a list.
@@ -499,14 +473,12 @@ diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
         root(T2)
     ).
 
-
 ?DOC("""
 Get the last `N` items of the tree, or the last `N` items strictly
 before given upper bound `TopBound` if non `undefined`.
 """).
 last_n(#?MODULE{} = T, TopBound, N) ->
     last_n(T, TopBound, N, root(T)).
-
 
 ?DOC("""
 Inserts a key in the tree. The same as calling `put(T, Key, true)`.
@@ -515,7 +487,6 @@ Inserts a key in the tree. The same as calling `put(T, Key, true)`.
 
 put(#?MODULE{} = T, Key) ->
     put(T, Key, true).
-
 
 ?DOC("""
 Inserts a key-value pair into the MST.
@@ -538,7 +509,6 @@ put(#?MODULE{store = Store0} = T, Key, Value) ->
         T#?MODULE{store = Store}
     end,
     bondy_mst_store:transaction(Store0, Fun).
-
 
 ?DOC("""
 Structurally deletes a key from the MST.
@@ -574,7 +544,6 @@ delete(#?MODULE{store = Store0} = T, Key) ->
     end,
     bondy_mst_store:transaction(Store0, Fun).
 
-
 ?DOC("""
 
 """).
@@ -587,7 +556,6 @@ put_page(#?MODULE{store = Store0} = T, Page) ->
     end,
     bondy_mst_store:transaction(Store0, Fun).
 
-
 ?DOC("""
 Merges two MSTs into a single tree.
 """).
@@ -596,15 +564,14 @@ Merges two MSTs into a single tree.
 merge(#?MODULE{} = T1, #?MODULE{} = T2) ->
     merge(T1, T2, root(T2)).
 
-
 ?DOC("""
 Merges two MSTs into a single tree.
 """).
 -spec merge(T1 :: t(), T2 :: t(), Root :: hash() | undefined) -> NewT1 :: t().
 
-
-merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2, Root)
-when is_binary(Root) orelse Root == undefined ->
+merge(#?MODULE{store = Store0} = T1, #?MODULE{} = T2, Root) when
+    is_binary(Root) orelse Root == undefined
+->
     telemetry:span(
         [bondy_mst, merge],
         #{},
@@ -619,9 +586,6 @@ when is_binary(Root) orelse Root == undefined ->
         end
     ).
 
-
-
-
 ?DOC("""
 Returns the hashes of the pages identified by root hash that are missing
 from the store.
@@ -631,7 +595,6 @@ from the store.
 missing_set(#?MODULE{store = Store}, Root) ->
     bondy_mst_store:missing_set(Store, Root).
 
-
 ?DOC("""
 Dumps the structure of the MST for debugging purposes.
 """).
@@ -639,7 +602,6 @@ Dumps the structure of the MST for debugging purposes.
 
 dump(#?MODULE{store = Store} = T) ->
     dump(Store, root(T)).
-
 
 ?DOC("""
 
@@ -649,26 +611,27 @@ dump(#?MODULE{store = Store} = T) ->
 gc(#?MODULE{} = T) ->
     gc(T, []).
 
-
 ?DOC("""
 
 """).
 -spec gc(t(), KeepRoots :: [hash()] | Epoch :: integer()) -> t().
 
-gc(#?MODULE{store = Store0} = T, Arg0)
-when is_list(Arg0) orelse is_integer(Arg0) ->
+gc(#?MODULE{store = Store0} = T, Arg0) when
+    is_list(Arg0) orelse is_integer(Arg0)
+->
     telemetry:span(
         [bondy_mst, gc],
         #{},
         fun() ->
             Fun = fun() ->
                 %% Protect the current version when receiving a list of roots
-                Arg = case is_list(Arg0) of
-                    true ->
-                        [root(T) | Arg0];
-                    false ->
-                        Arg0
-                end,
+                Arg =
+                    case is_list(Arg0) of
+                        true ->
+                            [root(T) | Arg0];
+                        false ->
+                            Arg0
+                    end,
                 {Store, Meta} = bondy_mst_store:gc(Store0, Arg),
                 ?LOG_DEBUG(#{
                     description => "Garbage collection completed",
@@ -682,7 +645,6 @@ when is_list(Arg0) orelse is_integer(Arg0) ->
         end
     ).
 
-
 format_error(Reason, [{_M, _F, _As, Info} | _]) ->
     ErrorInfo = proplists:get_value(error_info, Info, #{}),
     ErrorMap = maps:get(cause, ErrorInfo),
@@ -691,40 +653,38 @@ format_error(Reason, [{_M, _F, _As, Info} | _]) ->
         reason => io_lib:format("~p: ~p", [?MODULE, Reason])
     }.
 
-
-
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
 
-
-
 %% @private
 badarg(Opts, Opt, Expected) when is_atom(Opt) ->
     badarg(Opts, atom_to_binary(Opt), Expected);
-
 badarg(Opts, Opt, Expected) when is_binary(Opt) ->
     erlang:error(
         badarg,
         [Opts],
-        [{error_info, #{
-            module => ?MODULE,
-            cause => #{
-                1 => <<
-                    "value for option '", Opt/binary, "' is invalid. ",
-                    "Expected ", Expected/binary
+        [
+            {error_info, #{
+                module => ?MODULE,
+                cause => #{
+                    1 => <<
+                        "value for option '",
+                        Opt/binary,
+                        "' is invalid. ",
+                        "Expected ",
+                        Expected/binary
                     >>
-            }
-        }}]
+                }
+            }}
+        ]
     ).
-
 
 %% @private
 %% The default comparator function used in the MST.
 comparator(A, B) when A < B -> lt;
 comparator(A, B) when A == B -> eq;
 comparator(A, B) when A > B -> gt.
-
 
 %% -----------------------------------------------------------------------------
 %% @private
@@ -733,34 +693,28 @@ comparator(A, B) when A > B -> gt.
 merger(_Key, true, true) ->
     true.
 
-
 %% @private
 %% Computes the level of a key by hashing and counting leading zeroes.
 calc_level(#?MODULE{hash_algorithm = Algo}, Key) ->
     Hash = binary:encode_hex(bondy_mst_utils:hash(Key, Algo)),
     count_leading_zeroes(Hash, 0).
 
-
 %% @private
 %% Counts leading zeroes in a binary hash.
 count_leading_zeroes(<<"0", Rest/binary>>, Acc) ->
     count_leading_zeroes(Rest, Acc + 1);
-
 count_leading_zeroes(_, Acc) ->
     Acc.
-
 
 %% @private
 %% Compares two keys using the MST’s configured comparator.
 compare(#?MODULE{comparator = Fun}, A, B) ->
     Fun(A, B).
 
-
 %% @private
 %% Merges two values using the MST’s configured merger function.
 merge_values(#?MODULE{merger = Fun}, Key, A, B) ->
     Fun(Key, A, B).
-
 
 %% @private
 -spec do_get(T :: t(), Key :: key(), Root :: binary() | undefined) ->
@@ -768,24 +722,20 @@ merge_values(#?MODULE{merger = Fun}, Key, A, B) ->
 
 do_get(#?MODULE{}, _, undefined) ->
     undefined;
-
 do_get(#?MODULE{} = T, Key, Root) ->
     case bondy_mst_store:get(T#?MODULE.store, Root) of
         undefined ->
             undefined;
-
         Page ->
             Low = bondy_mst_page:low(Page),
             List = bondy_mst_page:list(Page),
             do_get(T, Key, Low, List)
     end.
 
-
 %% @private
 %% Recursively retrieves a value from the MST.
 do_get(T, Key, Low, []) ->
     do_get(T, Key, Low);
-
 do_get(T, Key, Low, [{K, V, Low2} | Rest]) ->
     case compare(T, Key, K) of
         eq ->
@@ -796,22 +746,18 @@ do_get(T, Key, Low, [{K, V, Low2} | Rest]) ->
             do_get(T, Key, Low2, Rest)
     end.
 
-
 first(#?MODULE{}, undefined) ->
     undefined;
-
 first(#?MODULE{} = T, Root) ->
     case bondy_mst_store:get(T#?MODULE.store, Root) of
         undefined ->
             undefined;
-
         Page ->
             case bondy_mst_page:low(Page) of
                 Low when is_binary(Low) ->
                     %% Anything reachable from `low` has keys smaller
                     %% than the leftmost entry — descend.
                     first(T, Low);
-
                 undefined ->
                     %% No left subtree: the first entry's key IS the
                     %% leftmost. Its right-subtree (`_R`) is irrelevant
@@ -819,33 +765,30 @@ first(#?MODULE{} = T, Root) ->
                     %% pages whose `low` was emptied by a prior
                     %% `delete/2` and is `undefined` only on leaves.
                     case bondy_mst_page:list(Page) of
-                        []                -> undefined;
-                        [{K, V, _R} | _]  -> {K, V}
+                        [] ->
+                            undefined;
+                        [{K, V, _R} | _] ->
+                            {K, V}
                     end
             end
     end.
 
-
 last(#?MODULE{}, undefined) ->
     undefined;
-
 last(#?MODULE{} = T, Root) ->
     case bondy_mst_store:get(T#?MODULE.store, Root) of
         undefined ->
             undefined;
-
         Page ->
             case bondy_mst_page:list(Page) of
                 [] ->
                     undefined;
-
                 L ->
                     case lists:last(L) of
                         {K, V, undefined} ->
                             %% No right subtree: this entry's key is
                             %% the rightmost.
                             {K, V};
-
                         {_K, _V, Next} when is_binary(Next) ->
                             %% Right subtree exists — descend.
                             last(T, Next)
@@ -853,27 +796,22 @@ last(#?MODULE{} = T, Root) ->
             end
     end.
 
-
 %% @private
 last_n(#?MODULE{}, _, _, undefined) ->
     [];
-
 last_n(#?MODULE{} = T, TopBound, N, Root) ->
     case bondy_mst_store:get(T#?MODULE.store, Root) of
         undefined ->
             [];
-
         Page ->
             Low = bondy_mst_page:low(Page),
             List = bondy_mst_page:list(Page),
             do_last_n(T, TopBound, N, Low, List)
     end.
 
-
 %% @private
 do_last_n(T, TopBound, N, Low, []) ->
     last_n(T, TopBound, N, Low);
-
 do_last_n(T, TopBound, N, Low, [{K, V, Low2} | Rest]) ->
     case TopBound == undefined orelse compare(T, TopBound, K) == gt of
         true ->
@@ -896,17 +834,14 @@ do_last_n(T, TopBound, N, Low, [{K, V, Low2} | Rest]) ->
             last_n(T, TopBound, N, Low)
     end.
 
-
 %% @private
 put_at(T, Key, Value, Level) ->
     put_at(T, Key, Value, Level, T#?MODULE.store, root(T)).
-
 
 %% @private
 put_at(_T, Key, Value, Level, Store, undefined) ->
     NewPage = bondy_mst_page:new(Level, undefined, [{Key, Value, undefined}]),
     bondy_mst_store:put(Store, NewPage);
-
 put_at(T, Key, Value, Level, Store0, Hash) when is_binary(Hash) ->
     Page = bondy_mst_store:get(Store0, Hash),
     [First | _] = bondy_mst_page:list(Page),
@@ -914,23 +849,19 @@ put_at(T, Key, Value, Level, Store0, Hash) when is_binary(Hash) ->
     case bondy_mst_page:level(Page) of
         PageLevel when PageLevel < Level ->
             put_above(T, Key, Value, Level, Hash, Store0);
-
         PageLevel when PageLevel == Level ->
             Store = bondy_mst_store:free(Store0, Hash, Page),
             put_alongside(T, Key, Value, Level, First, Store, Page);
-
         PageLevel when PageLevel > Level ->
             Store = bondy_mst_store:free(Store0, Hash, Page),
             put_below(T, Key, Value, Level, First, Store, Page)
     end.
-
 
 %% @private
 put_above(T, Key, Value, Level, Root, Store0) ->
     {Low, High, Store} = split(T, Store0, Root, Key),
     NewRootPage = bondy_mst_page:new(Level, Low, [{Key, Value, High}]),
     bondy_mst_store:put(Store, NewRootPage).
-
 
 %% @private
 put_alongside(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
@@ -944,13 +875,11 @@ put_alongside(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
             List = [{Key, Value, LowB} | List0],
             NewPage = bondy_mst_page:new(Level, LowA, List),
             bondy_mst_store:put(Store, NewPage);
-
         Other when Other == gt orelse Other == eq ->
             {List1, Store} = put_after_first(T, Key, Value, Store0, List0),
             NewPage = bondy_mst_page:new(PageLevel, Low, List1),
             bondy_mst_store:put(Store, NewPage)
     end.
-
 
 %% @private
 put_below(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
@@ -963,7 +892,6 @@ put_below(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
             {Low, Store} = put_at(T, Key, Value, Level, Store0, Low0),
             NewPage = bondy_mst_page:new(PageLevel, Low, List0),
             bondy_mst_store:put(Store, NewPage);
-
         gt ->
             {List, Store} = put_sub_after_first(
                 T, Key, Value, Store0, Level, List0
@@ -972,20 +900,17 @@ put_below(T, Key, Value, Level, {K0, _, _}, Store0, Page) ->
             bondy_mst_store:put(Store, NewPage)
     end.
 
-
 %% @private
 put_after_first(T, Key, Value, Store0, [{K1, V1, R1}]) ->
     case compare(T, Key, K1) of
         eq ->
             List = [{K1, merge_values(T, Key, V1, Value), R1}],
             {List, Store0};
-
         gt ->
             {R1A, R1B, Store} = split(T, Store0, R1, Key),
             List = [{K1, V1, R1A}, {Key, Value, R1B}],
             {List, Store}
     end;
-
 put_after_first(T, Key, Value, Store0, [First, Second | Rest0]) ->
     {K1, V1, R1} = First,
     {K2, _, _} = Second,
@@ -994,38 +919,31 @@ put_after_first(T, Key, Value, Store0, [First, Second | Rest0]) ->
         eq ->
             List = [{K1, merge_values(T, K1, V1, Value), R1}, Second | Rest0],
             {List, Store0};
-
         gt ->
             case compare(T, Key, K2) of
                 lt ->
                     {R1A, R1B, Store} = split(T, Store0, R1, Key),
                     List = [{K1, V1, R1A}, {Key, Value, R1B}, Second | Rest0],
                     {List, Store};
-
                 _ ->
                     {Rest, Store} = put_after_first(
                         T, Key, Value, Store0, [Second | Rest0]
                     ),
                     List = [First | Rest],
                     {List, Store}
-
             end
     end.
-
 
 %% @private
 put_sub_after_first(T, Key, Value, Store0, Level, [{K1, V1, R1}]) ->
     case compare(T, K1, Key) of
         eq ->
             error(inconsistency);
-
         _ ->
             {R, Store} = put_at(T, Key, Value, Level, Store0, R1),
             List = [{K1, V1, R}],
             {List, Store}
     end;
-
-
 put_sub_after_first(T, Key, Value, Store0, Level, [First, Second | Rest0]) ->
     {K1, V1, R1} = First,
     {K2, _, _} = Second,
@@ -1033,7 +951,6 @@ put_sub_after_first(T, Key, Value, Store0, Level, [First, Second | Rest0]) ->
     case compare(T, K1, Key) of
         eq ->
             error(inconsistency);
-
         _ ->
             case compare(T, Key, K2) of
                 lt ->
@@ -1049,11 +966,9 @@ put_sub_after_first(T, Key, Value, Store0, Level, [First, Second | Rest0]) ->
             end
     end.
 
-
 %% @private
 split(_, Store, undefined, _) ->
     {undefined, undefined, Store};
-
 split(T, Store0, Hash, Key) ->
     Page = get_page(T, Store0, Hash),
     Level = bondy_mst_page:level(Page),
@@ -1068,7 +983,6 @@ split(T, Store0, Hash, Key) ->
             NewPage = bondy_mst_page:new(Level, LowHi, List0),
             {NewPageHash, Store} = bondy_mst_store:put(Store2, NewPage),
             {LowLow, NewPageHash, Store};
-
         gt ->
             {List, P2, Store2} = split_aux(T, Store1, Key, Level, List0),
             NewPage = bondy_mst_page:new(Level, Low, List),
@@ -1076,19 +990,15 @@ split(T, Store0, Hash, Key) ->
             {NewPageHash, P2, Store}
     end.
 
-
 %% @private
 split_aux(T, Store0, Key, _, [{K1, V1, R1}]) ->
     case compare(T, K1, Key) of
         eq ->
             error(inconsistency);
-
         _ ->
             {R1L, R1H, Store} = split(T, Store0, R1, Key),
             {[{K1, V1, R1L}], R1H, Store}
     end;
-
-
 split_aux(T, Store0, Key, Level, [First, Second | Rest0]) ->
     {K1, V1, R1} = First,
     {K2, _, _} = Second,
@@ -1096,13 +1006,11 @@ split_aux(T, Store0, Key, Level, [First, Second | Rest0]) ->
     case compare(T, Key, K2) of
         eq ->
             error(inconsistency);
-
         lt ->
             {R1L, R1H, Store1} = split(T, Store0, R1, Key),
             NewPage = bondy_mst_page:new(Level, R1H, [Second | Rest0]),
             {NewPageHash, Store} = bondy_mst_store:put(Store1, NewPage),
             {[{K1, V1, R1L}], NewPageHash, Store};
-
         gt ->
             {Rest, Hi, Store} = split_aux(
                 T, Store0, Key, Level, [Second | Rest0]
@@ -1110,17 +1018,14 @@ split_aux(T, Store0, Key, Level, [First, Second | Rest0]) ->
             {[First | Rest], Hi, Store}
     end.
 
-
 %% @private
 get_page(T, Store, Hash) ->
     case bondy_mst_store:get(Store, Hash) of
         undefined ->
             bondy_mst_store:get(T#?MODULE.store, Hash);
-
         Page ->
             Page
     end.
-
 
 %% @private
 -spec merge_aux(
@@ -1128,19 +1033,17 @@ get_page(T, Store, Hash) ->
     B :: t(),
     Store :: bondy_mst_store:t(),
     ARoot :: hash(),
-    BRoot :: hash()) ->
+    BRoot :: hash()
+) ->
     {NewRootHash :: hash(), NewStore :: bondy_mst_store:t()}.
 
 merge_aux(_, _, Store0, Root, Root) ->
     {Root, Store0};
-
 merge_aux(_, _, Store0, ARoot, undefined) ->
     {ARoot, Store0};
-
 merge_aux(_, B, Store0, undefined, BRoot) ->
     Store = bondy_mst_store:copy(Store0, B#?MODULE.store, BRoot),
     {BRoot, Store};
-
 merge_aux(A, B, Store0, ARoot, BRoot) ->
     APage = bondy_mst_store:get(Store0, ARoot),
     ALevel = bondy_mst_page:level(APage),
@@ -1173,24 +1076,20 @@ merge_aux(A, B, Store0, ARoot, BRoot) ->
     NewPage = bondy_mst_page:new(Level, Low, List),
     bondy_mst_store:put(Store, NewPage).
 
-
 %% @private
 merge_aux_rec(A, B, Store0, ALow, [], BLow, []) ->
     {Hash, Store} = merge_aux(A, B, Store0, ALow, BLow),
     {Hash, [], Store};
-
 merge_aux_rec(A, B, Store0, ALow, [], BLow, [{K, V, R} | BRest]) ->
     {ALowL, ALowH, Store1} = split(A, Store0, ALow, K),
     {NewLow, Store2} = merge_aux(A, B, Store1, ALowL, BLow),
     {NewR, NewRest, Store} = merge_aux_rec(A, B, Store2, ALowH, [], R, BRest),
     {NewLow, [{K, V, NewR} | NewRest], Store};
-
 merge_aux_rec(A, B, Store0, ALow, [{K, V, R} | ARest], BLow, []) ->
     {BLowL, BLowH, Store1} = split(B, Store0, BLow, K),
     {NewLow, Store2} = merge_aux(A, B, Store1, ALow, BLowL),
     {NewR, NewRest, Store} = merge_aux_rec(A, B, Store2, R, ARest, BLowH, []),
     {NewLow, [{K, V, NewR} | NewRest], Store};
-
 merge_aux_rec(
     A,
     B,
@@ -1198,7 +1097,8 @@ merge_aux_rec(
     ALow,
     [{AKey, AValue, ARoot} | ARest] = AEntries,
     BLow,
-    [{BKey, BValue, BRoot} | BRest] = BEntries) ->
+    [{BKey, BValue, BRoot} | BRest] = BEntries
+) ->
     case compare(A, AKey, BKey) of
         lt ->
             {BLowL, BLowH, Store1} = split(B, Store0, BLow, AKey),
@@ -1207,7 +1107,6 @@ merge_aux_rec(
                 A, B, Store2, ARoot, ARest, BLowH, BEntries
             ),
             {NewLow, [{AKey, AValue, NewR} | NewRest], Store};
-
         gt ->
             {ALowL, ALowH, Store1} = split(A, Store0, ALow, BKey),
             {NewLow, Store2} = merge_aux(A, B, Store1, ALowL, BLow),
@@ -1215,7 +1114,6 @@ merge_aux_rec(
                 A, B, Store2, ALowH, AEntries, BRoot, BRest
             ),
             {NewLow, [{BKey, BValue, NewR} | NewRest], Store};
-
         eq ->
             {NewLow, Store1} = merge_aux(A, B, Store0, ALow, BLow),
             NewV = merge_values(A, AKey, AValue, BValue),
@@ -1225,17 +1123,14 @@ merge_aux_rec(
             {NewLow, [{AKey, NewV, NewR} | NewRest], Store}
     end.
 
-
 %% @private
 %% Iterates over the MST and applies a function to each element.
 do_fold(_, _, AccIn, _, undefined) ->
     AccIn;
-
 do_fold(Store, Fun, AccIn, Opts, Root) ->
     case bondy_mst_store:get(Store, Root) of
         undefined ->
             AccIn;
-
         Page ->
             Low = bondy_mst_page:low(Page),
             AccOut = do_fold(Store, Fun, AccIn, Opts, Low),
@@ -1249,17 +1144,14 @@ do_fold(Store, Fun, AccIn, Opts, Root) ->
             )
     end.
 
-
 %% @private
 %% Iterates over the MST and applies a function to each element.
 do_fold_pages(_, _, Acc, _, undefined) ->
     Acc;
-
 do_fold_pages(Store, Fun, AccIn, Opts, Root) ->
     case bondy_mst_store:get(Store, Root) of
         undefined ->
             AccIn;
-
         Page ->
             Low = bondy_mst_page:low(Page),
             AccOut = do_fold_pages(Store, Fun, AccIn, Opts, Low),
@@ -1272,16 +1164,13 @@ do_fold_pages(Store, Fun, AccIn, Opts, Root) ->
             )
     end.
 
-
 %% @private
 do_foreach(_, _, _, undefined) ->
     ok;
-
 do_foreach(Store, Fun, Opts, Root) ->
     case bondy_mst_store:get(Store, Root) of
         undefined ->
             ok;
-
         Page ->
             Low = bondy_mst_page:low(Page),
             ok = do_foreach(Store, Fun, Opts, Low),
@@ -1294,20 +1183,15 @@ do_foreach(Store, Fun, Opts, Root) ->
             )
     end.
 
-
-
 %% @private
 diff_to_list(_, _, R, _, R) ->
     [];
-
 diff_to_list(_, _, undefined, _, _) ->
     [];
-
 diff_to_list(_, Store1, ARoot, _, undefined) ->
     lists:reverse(
         do_fold(Store1, fun(E, Acc) -> [E | Acc] end, [], [], ARoot)
     );
-
 diff_to_list(T, Store1, ARoot, Store2, BRoot) ->
     APage = bondy_mst_store:get(Store1, ARoot),
     ALow = bondy_mst_page:low(APage),
@@ -1322,30 +1206,23 @@ diff_to_list(T, Store1, ARoot, Store2, BRoot) ->
     case BLevel of
         ALevel ->
             diff_to_list_rec(T, Store1, ALow, AEntries, Store2, BLow, BEntries);
-
         BLevel when ALevel > BLevel ->
             diff_to_list_rec(T, Store1, ALow, AEntries, Store2, BRoot, []);
-
         BLevel when ALevel < BLevel ->
             diff_to_list_rec(T, Store1, ARoot, [], Store2, BLow, BEntries)
     end.
 
-
-
 %% @private
 diff_to_list_rec(T, Store1, ALow, [], Store2, BLow, []) ->
     diff_to_list(T, Store1, ALow, Store2, BLow);
-
 diff_to_list_rec(T, Store1_0, ALow, [], Store2, BLow, [{K, _, R} | Rest2]) ->
     {ALowL, ALowH, Store1} = split(T, Store1_0, ALow, K),
     diff_to_list(T, Store1, ALowL, Store2, BLow) ++
-    diff_to_list_rec(T, Store1, ALowH, [], Store2, R, Rest2);
-
+        diff_to_list_rec(T, Store1, ALowH, [], Store2, R, Rest2);
 diff_to_list_rec(T, Store1, ALow, [{K, V, R} | Rest1], Store2_0, BLow, []) ->
     {BLowL, BLowH, Store2} = split(T, Store2_0, BLow, K),
     diff_to_list(T, Store1, ALow, Store2, BLowL) ++
-    [{K, V} | diff_to_list_rec(T, Store1, R, Rest1, Store2, BLowH, [])];
-
+        [{K, V} | diff_to_list_rec(T, Store1, R, Rest1, Store2, BLowH, [])];
 diff_to_list_rec(T, Store1_0, ALow, AEntries, Store2_0, BLow, BEntries) ->
     [{K1, V1, ARoot} | Rest1] = AEntries,
     [{K2, V2, BRoot} | Rest2] = BEntries,
@@ -1353,43 +1230,40 @@ diff_to_list_rec(T, Store1_0, ALow, AEntries, Store2_0, BLow, BEntries) ->
     case compare(T, K1, K2) of
         lt ->
             {BLowL, BLowH, Store2} = split(T, Store2_0, BLow, K1),
-            diff_to_list(T, Store1_0, ALow, Store2, BLowL)
-            ++ [
-                {K1, V1}
-                | diff_to_list_rec(
-                    T, Store1_0, ARoot, Rest1, Store2, BLowH, BEntries
-                )
-            ];
-
+            diff_to_list(T, Store1_0, ALow, Store2, BLowL) ++
+                [
+                    {K1, V1}
+                    | diff_to_list_rec(
+                        T, Store1_0, ARoot, Rest1, Store2, BLowH, BEntries
+                    )
+                ];
         gt ->
             {ALowL, ALowH, Store1} = split(T, Store1_0, ALow, K2),
-            diff_to_list(T, Store1, ALowL, Store2_0, BLow)
-            ++ diff_to_list_rec(T, Store1, ALowH, AEntries, Store2_0, BRoot, Rest2);
-
+            diff_to_list(T, Store1, ALowL, Store2_0, BLow) ++
+                diff_to_list_rec(
+                    T, Store1, ALowH, AEntries, Store2_0, BRoot, Rest2
+                );
         eq ->
-            L0 = diff_to_list_rec(T, Store1_0, ARoot, Rest1, Store2_0, BRoot, Rest2),
+            L0 = diff_to_list_rec(
+                T, Store1_0, ARoot, Rest1, Store2_0, BRoot, Rest2
+            ),
 
             case V1 == V2 of
                 true ->
                     diff_to_list(T, Store1_0, ALow, Store2_0, BLow) ++ L0;
-
                 false ->
                     L = [{K1, V1} | L0],
                     diff_to_list(T, Store1_0, ALow, Store2_0, BLow) ++ L
-
             end
     end.
-
 
 %% @private
 dump(Store, R) ->
     dump(Store, R, "").
 
-
 %% @private
 dump(_, undefined, _) ->
     ok;
-
 dump(Store, Root, Space) ->
     Page = bondy_mst_store:get(Store, Root),
     Low = bondy_mst_page:low(Page),
@@ -1403,9 +1277,8 @@ dump(Store, Root, Space) ->
             io:format("~s- ~p => ~p~n", [Space, K, V]),
             dump(Store, R, Space ++ [$\s, $\s])
         end
-        || {K, V, R} <- List
+     || {K, V, R} <- List
     ].
-
 
 %% -----------------------------------------------------------------------------
 %% @private
@@ -1419,21 +1292,17 @@ delete_at(T, Key, KeyLevel, Store0, Hash) when is_binary(Hash) ->
         PageLevel < KeyLevel ->
             %% Key should be at a higher level, doesn't exist here
             not_found;
-
         PageLevel == KeyLevel ->
             %% Delete from this level
             Store1 = bondy_mst_store:free(Store0, Hash, Page),
             delete_from_level(T, Key, Page, Store1);
-
         PageLevel > KeyLevel ->
             %% Descend into subtrees to find the key
             Store1 = bondy_mst_store:free(Store0, Hash, Page),
             delete_below_level(T, Key, KeyLevel, Page, Store1)
     end;
-
 delete_at(_, _, _, _, undefined) ->
     not_found.
-
 
 %% @private
 %% Delete key from this level (key's calculated level matches page level)
@@ -1444,7 +1313,6 @@ delete_from_level(T, Key, Page, Store0) ->
 
     delete_from_list(T, Key, Level, Low, List, Store0).
 
-
 %% @private
 %% Scan the list to find and remove the key
 delete_from_list(T, Key, _Level, Low, [{K, _V, R}], Store0) ->
@@ -1453,11 +1321,9 @@ delete_from_list(T, Key, _Level, Low, [{K, _V, R}], Store0) ->
             %% Only entry in page, merge Low with R and return merged tree
             %% The page disappears
             merge_subtrees(T, Store0, Low, R);
-
         _ ->
             not_found
     end;
-
 delete_from_list(T, Key, Level, Low, [{K, V, R} | Rest], Store0) ->
     case compare(T, Key, K) of
         eq ->
@@ -1466,11 +1332,9 @@ delete_from_list(T, Key, Level, Low, [{K, V, R} | Rest], Store0) ->
             %% Create page with merged low and remaining entries
             NewPage = bondy_mst_page:new(Level, NewLow, Rest),
             bondy_mst_store:put(Store1, NewPage);
-
         lt ->
             %% Key should be before first entry, doesn't exist
             not_found;
-
         gt ->
             %% Continue searching in rest of list, accumulating entries before
             %% the match
@@ -1478,10 +1342,8 @@ delete_from_list(T, Key, Level, Low, [{K, V, R} | Rest], Store0) ->
                 T, Key, Level, Low, [{K, V, R}], Rest, Store0
             )
     end;
-
 delete_from_list(_, _, _, _, [], _) ->
     not_found.
-
 
 %% @private
 %% Search for key in the tail of the list, accumulating entries before the match
@@ -1499,14 +1361,11 @@ delete_in_list_tail(T, Key, Level, Low, Before, [{K, _V, R}], Store0) ->
             NewList = BeforeInit ++ [{PrevK, PrevV, MergedR}],
             NewPage = bondy_mst_page:new(Level, Low, NewList),
             bondy_mst_store:put(Store1, NewPage);
-
         lt ->
             not_found;
-
         gt ->
             not_found
     end;
-
 delete_in_list_tail(T, Key, Level, Low, Before, [{K, V, R} | Rest], Store0) ->
     case compare(T, Key, K) of
         eq ->
@@ -1521,15 +1380,14 @@ delete_in_list_tail(T, Key, Level, Low, Before, [{K, V, R} | Rest], Store0) ->
             NewList = BeforeInit ++ [{PrevK, PrevV, MergedR} | Rest],
             NewPage = bondy_mst_page:new(Level, Low, NewList),
             bondy_mst_store:put(Store1, NewPage);
-
         lt ->
             not_found;
-
         gt ->
             %% Keep searching, accumulate this entry
-            delete_in_list_tail(T, Key, Level, Low, Before ++ [{K, V, R}], Rest, Store0)
+            delete_in_list_tail(
+                T, Key, Level, Low, Before ++ [{K, V, R}], Rest, Store0
+            )
     end.
-
 
 %% @private
 %% Delete key from a subtree below this level
@@ -1545,7 +1403,6 @@ delete_below_level(T, Key, KeyLevel, Page, Store0) ->
             case delete_at(T, Key, KeyLevel, Store0, Low) of
                 not_found ->
                     not_found;
-
                 {NewLow, Store1} ->
                     NewPage = bondy_mst_page:new(Level, NewLow, List),
                     bondy_mst_store:put(Store1, NewPage)
@@ -1555,7 +1412,6 @@ delete_below_level(T, Key, KeyLevel, Page, Store0) ->
             delete_sub_after_first(T, Key, KeyLevel, Level, Low, Store0, List)
     end.
 
-
 %% @private
 %% Navigate through list entries to find which subtree contains the key
 delete_sub_after_first(T, Key, KeyLevel, PageLevel, Low, Store0, [{K, V, R}]) ->
@@ -1563,91 +1419,101 @@ delete_sub_after_first(T, Key, KeyLevel, PageLevel, Low, Store0, [{K, V, R}]) ->
     case delete_at(T, Key, KeyLevel, Store0, R) of
         not_found ->
             not_found;
-
         {NewR, Store1} ->
             NewList = [{K, V, NewR}],
             NewPage = bondy_mst_page:new(PageLevel, Low, NewList),
             bondy_mst_store:put(Store1, NewPage)
     end;
-
-delete_sub_after_first(T, Key, KeyLevel, PageLevel, Low, Store0,
-                       [{K1, V1, R1}, {K2, V2, R2} | Rest]) ->
+delete_sub_after_first(
+    T,
+    Key,
+    KeyLevel,
+    PageLevel,
+    Low,
+    Store0,
+    [{K1, V1, R1}, {K2, V2, R2} | Rest]
+) ->
     case compare(T, Key, K2) of
         lt ->
             %% Key is in R1 subtree (between K1 and K2)
             case delete_at(T, Key, KeyLevel, Store0, R1) of
                 not_found ->
                     not_found;
-
                 {NewR1, Store1} ->
                     NewList = [{K1, V1, NewR1}, {K2, V2, R2} | Rest],
                     NewPage = bondy_mst_page:new(PageLevel, Low, NewList),
                     bondy_mst_store:put(Store1, NewPage)
             end;
-
         _ ->
             %% Key is after K2, continue searching
             delete_sub_after_first_cont(
-                T, Key, KeyLevel, PageLevel, Low,
-                [{K1, V1, R1}], Store0, [{K2, V2, R2} | Rest]
+                T,
+                Key,
+                KeyLevel,
+                PageLevel,
+                Low,
+                [{K1, V1, R1}],
+                Store0,
+                [{K2, V2, R2} | Rest]
             )
     end.
 
-
 %% @private
 delete_sub_after_first_cont(
-    T, Key, KeyLevel, PageLevel, Low, Before, Store0, [{K, V, R}]) ->
+    T, Key, KeyLevel, PageLevel, Low, Before, Store0, [{K, V, R}]
+) ->
     %% Must be in this last subtree
     case delete_at(T, Key, KeyLevel, Store0, R) of
         not_found ->
             not_found;
-
         {NewR, Store1} ->
             NewList = Before ++ [{K, V, NewR}],
             NewPage = bondy_mst_page:new(PageLevel, Low, NewList),
             bondy_mst_store:put(Store1, NewPage)
     end;
-
 delete_sub_after_first_cont(
-    T, Key, KeyLevel, PageLevel, Low, Before, Store0,
-    [{K1, V1, R1}, {K2, V2, R2} | Rest]) ->
+    T,
+    Key,
+    KeyLevel,
+    PageLevel,
+    Low,
+    Before,
+    Store0,
+    [{K1, V1, R1}, {K2, V2, R2} | Rest]
+) ->
     case compare(T, Key, K2) of
         lt ->
             %% Key is in R1 subtree
             case delete_at(T, Key, KeyLevel, Store0, R1) of
                 not_found ->
                     not_found;
-
                 {NewR1, Store1} ->
                     NewList = Before ++ [{K1, V1, NewR1}, {K2, V2, R2} | Rest],
                     NewPage = bondy_mst_page:new(PageLevel, Low, NewList),
                     bondy_mst_store:put(Store1, NewPage)
             end;
-
         _ ->
             %% Continue searching
             delete_sub_after_first_cont(
-                T, Key, KeyLevel, PageLevel, Low,
-                Before ++ [{K1, V1, R1}], Store0,
+                T,
+                Key,
+                KeyLevel,
+                PageLevel,
+                Low,
+                Before ++ [{K1, V1, R1}],
+                Store0,
                 [{K2, V2, R2} | Rest]
             )
     end.
-
 
 %% @private
 %% Merge two subtrees using the existing merge algorithm
 merge_subtrees(_T, Store, undefined, undefined) ->
     {undefined, Store};
-
 merge_subtrees(_T, Store, Hash, undefined) ->
     {Hash, Store};
-
 merge_subtrees(_T, Store, undefined, Hash) ->
     {Hash, Store};
-
 merge_subtrees(T, Store, Hash1, Hash2) ->
     %% Reuse the existing merge_aux to combine the two subtrees
     merge_aux(T, T, Store, Hash1, Hash2).
-
-
-

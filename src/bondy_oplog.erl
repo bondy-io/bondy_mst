@@ -1,0 +1,367 @@
+%% =============================================================================
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
+%% =============================================================================
+
+-module(bondy_oplog).
+
+-include("bondy_mst.hrl").
+-include("bondy_oplog.hrl").
+
+-moduledoc #{format => "text/markdown"}.
+?MODULEDOC("""
+Public façade for the MST replication library
+(`_design/10_new_design.md` §11.4).
+
+Lifecycle primitives are intentionally minimal: `start_instance/1,2`,
+`stop_instance/1,2`, `list_instances/0`, `discover_instances/1`. The
+library does not impose lifecycle policy — *when* and *how often* to
+call these is the consumer's choice. Lazy loading, LRU eviction,
+cold-tier offload, and per-tenant policies belong to the consumer.
+
+Per-instance event operations pass through to
+`bondy_oplog_instance`.
+""").
+
+%% Lifecycle
+-export([start_instance/1]).
+-export([start_instance/2]).
+-export([stop_instance/1]).
+-export([stop_instance/2]).
+-export([list_instances/0]).
+-export([discover_instances/1]).
+-export([discover_instances/2]).
+
+%% Per-instance API (pass-through to bondy_oplog_instance)
+-export([append/2]).
+-export([append/3]).
+-export([append_many/2]).
+-export([append_remote/2]).
+-export([get/2]).
+-export([root_hash/1]).
+-export([fold_range/5]).
+-export([range/3]).
+-export([truncate_prefix/2]).
+-export([size/1]).
+-export([first_key/1]).
+-export([latest_key/1]).
+-export([origin/1]).
+-export([info/1]).
+
+%% Sync
+-export([sync/2]).
+-export([sync/3]).
+-export([sync_async/2]).
+-export([sync_async/3]).
+-export([bootstrap/2]).
+-export([bootstrap/3]).
+
+%% GC / queries
+-export([compact/1]).
+-export([current_watermark/1]).
+-export([snapshot/1]).
+-export([query/2]).
+-export([query_stable/2]).
+
+%% =============================================================================
+%% LIFECYCLE
+%% =============================================================================
+
+?DOC("""
+Starts an instance with default options.
+""").
+-spec start_instance(instance_id()) -> {ok, pid()} | {error, term()}.
+
+start_instance(InstanceId) when is_binary(InstanceId) ->
+    start_instance(InstanceId, #{}).
+
+?DOC("""
+Starts an instance. Returns the pid of the per-instance supervisor.
+Idempotent: re-starting a running instance returns its existing
+sup pid.
+""").
+-spec start_instance(
+    instance_id(),
+    bondy_oplog_instance:opts()
+) -> {ok, pid()} | {error, term()}.
+
+start_instance(InstanceId, Opts) when
+    is_binary(InstanceId), is_map(Opts)
+->
+    bondy_oplog_instance_dyn_sup:start_instance(InstanceId, Opts).
+
+-spec stop_instance(instance_id()) -> ok | {error, not_found}.
+
+stop_instance(InstanceId) ->
+    stop_instance(InstanceId, #{}).
+
+?DOC("""
+Stops an instance. The `Opts` map is currently unused; a future
+`destroy => true` option to also delete the instance's on-disk state
+is reserved.
+""").
+-spec stop_instance(instance_id(), map()) -> ok | {error, not_found}.
+
+stop_instance(InstanceId, _Opts) when is_binary(InstanceId) ->
+    case bondy_oplog_instance_dyn_sup:stop_instance(InstanceId) of
+        ok ->
+            %% Drop node-shared registry rows for the now-gone instance.
+            %% Best-effort: if a registry isn't running (e.g. tests
+            %% bring up only part of the tree) we silently skip.
+            _ =
+                catch bondy_oplog_peer_state:forget_instance(
+                    InstanceId
+                ),
+            _ =
+                catch bondy_oplog_quarantine:forget_instance(
+                    InstanceId
+                ),
+            ok;
+        Other ->
+            Other
+    end.
+
+?DOC("""
+Lists currently-running instances on this node. Order unspecified.
+""").
+-spec list_instances() -> [instance_id()].
+
+list_instances() ->
+    Children = supervisor:which_children(
+        bondy_oplog_instance_dyn_sup
+    ),
+    [
+        InstanceId
+     || {_Id, WorkerPid, worker, _} <- Children,
+        is_pid(WorkerPid),
+        #{instance_id := InstanceId} <-
+            [bondy_oplog_instance:info(WorkerPid)]
+    ].
+
+?DOC("""
+Discovers instances on disk under `BaseDir`, using the sharded path
+strategy (the library default). Suitable for boot-time enumeration.
+""").
+-spec discover_instances(BaseDir :: binary()) -> [instance_id()].
+
+discover_instances(BaseDir) ->
+    discover_instances(BaseDir, bondy_oplog_path_sharded).
+
+-spec discover_instances(BaseDir :: binary(), Strategy :: module()) ->
+    [instance_id()].
+
+discover_instances(BaseDir, Strategy) when
+    is_binary(BaseDir), is_atom(Strategy)
+->
+    Strategy:discover(BaseDir).
+
+%% =============================================================================
+%% PER-INSTANCE API
+%% =============================================================================
+
+-spec append(instance_id(), bondy_oplog_event:op()) ->
+    bondy_oplog_event:event_key().
+
+append(InstanceId, Op) ->
+    bondy_oplog_instance:append(InstanceId, Op).
+
+-spec append(
+    instance_id(),
+    bondy_oplog_event:op(),
+    bondy_oplog_event:meta()
+) -> bondy_oplog_event:event_key().
+
+append(InstanceId, Op, Meta) ->
+    bondy_oplog_instance:append(InstanceId, Op, Meta).
+
+-spec append_many(
+    instance_id(),
+    [{bondy_oplog_event:op(), bondy_oplog_event:meta()}]
+) -> [bondy_oplog_event:event_key()].
+
+append_many(InstanceId, Items) ->
+    bondy_oplog_instance:append_many(InstanceId, Items).
+
+-spec append_remote(instance_id(), bondy_oplog_event:t()) ->
+    ok | {error, term()}.
+
+append_remote(InstanceId, Event) ->
+    bondy_oplog_instance:append_remote(InstanceId, Event).
+
+-spec get(instance_id(), bondy_oplog_event:event_key()) ->
+    {ok, bondy_oplog_event:t()} | not_found.
+
+get(InstanceId, Key) ->
+    bondy_oplog_instance:get(InstanceId, Key).
+
+-spec root_hash(instance_id()) -> binary() | undefined.
+
+root_hash(InstanceId) ->
+    bondy_oplog_instance:root_hash(InstanceId).
+
+-spec fold_range(
+    instance_id(),
+    From :: bondy_oplog_event:event_key(),
+    To :: bondy_oplog_event:event_key(),
+    fun((bondy_oplog_event:t(), Acc) -> Acc),
+    Acc
+) -> Acc when Acc :: term().
+
+fold_range(InstanceId, From, To, Fun, Acc0) ->
+    bondy_oplog_instance:fold_range(InstanceId, From, To, Fun, Acc0).
+
+-spec range(
+    instance_id(),
+    From :: bondy_oplog_event:event_key(),
+    To :: bondy_oplog_event:event_key()
+) -> [bondy_oplog_event:t()].
+
+range(InstanceId, From, To) ->
+    bondy_oplog_instance:range(InstanceId, From, To).
+
+-spec truncate_prefix(instance_id(), bondy_oplog_event:event_key()) ->
+    non_neg_integer().
+
+truncate_prefix(InstanceId, Watermark) ->
+    bondy_oplog_instance:truncate_prefix(InstanceId, Watermark).
+
+-spec size(instance_id()) -> non_neg_integer().
+
+size(InstanceId) ->
+    bondy_oplog_instance:size(InstanceId).
+
+-spec first_key(instance_id()) ->
+    {ok, bondy_oplog_event:event_key()} | empty.
+
+first_key(InstanceId) ->
+    bondy_oplog_instance:first_key(InstanceId).
+
+-spec latest_key(instance_id()) ->
+    {ok, bondy_oplog_event:event_key()} | empty.
+
+latest_key(InstanceId) ->
+    bondy_oplog_instance:latest_key(InstanceId).
+
+-spec origin(instance_id()) -> bondy_oplog_origin:t().
+
+origin(InstanceId) ->
+    bondy_oplog_instance:origin(InstanceId).
+
+-spec info(instance_id()) -> map().
+
+info(InstanceId) ->
+    bondy_oplog_instance:info(InstanceId).
+
+%% =============================================================================
+%% SYNC
+%% =============================================================================
+
+?DOC("""
+Synchronously pulls events from `Peer` into `InstanceId`.
+
+A successful pull merges the peer's tree into ours; a converse pull
+(initiated by the peer) is needed to bring the peer up to date. This
+is the single-direction primitive; consumers that want full
+convergence call sync in both directions or rely on the default
+schedulers running on both replicas.
+
+Returns `{ok, FinalRoot}` on success.
+""").
+-spec sync(instance_id(), peer_id()) ->
+    {ok, bondy_mst:hash() | undefined} | {error, term()}.
+
+sync(InstanceId, Peer) ->
+    sync(InstanceId, Peer, #{}).
+
+-spec sync(
+    instance_id(),
+    peer_id(),
+    bondy_oplog_sync_session:opts()
+) -> {ok, bondy_mst:hash() | undefined} | {error, term()}.
+
+sync(InstanceId, Peer, Opts) ->
+    bondy_oplog_sync_session:run(InstanceId, Peer, Opts).
+
+-spec sync_async(instance_id(), peer_id()) -> {ok, pid()}.
+
+sync_async(InstanceId, Peer) ->
+    sync_async(InstanceId, Peer, #{}).
+
+-spec sync_async(
+    instance_id(),
+    peer_id(),
+    bondy_oplog_sync_session:opts()
+) -> {ok, pid()}.
+
+sync_async(InstanceId, Peer, Opts) ->
+    bondy_oplog_sync_session:start(InstanceId, Peer, Opts).
+
+?DOC("""
+Bootstraps `InstanceId` from `Peer` — fetches the peer's snapshot,
+installs it locally, then runs a regular sync for events past the
+watermark. Suitable for fresh or far-behind replicas joining a
+long-running cluster.
+
+Falls back to plain `sync/2,3` semantics if the peer reports no
+snapshot.
+""").
+-spec bootstrap(instance_id(), peer_id()) ->
+    {ok, bondy_mst:hash() | undefined} | {error, term()}.
+
+bootstrap(InstanceId, Peer) ->
+    bootstrap(InstanceId, Peer, #{}).
+
+-spec bootstrap(
+    instance_id(),
+    peer_id(),
+    bondy_oplog_sync_session:opts()
+) -> {ok, bondy_mst:hash() | undefined} | {error, term()}.
+
+bootstrap(InstanceId, Peer, Opts) ->
+    bondy_oplog_sync_session:bootstrap(InstanceId, Peer, Opts).
+
+%% =============================================================================
+%% GC / QUERIES
+%% =============================================================================
+
+?DOC("""
+Runs one compaction cycle on `InstanceId`. See
+`bondy_oplog_compaction:compact/1`.
+""").
+-spec compact(instance_id()) ->
+    {ok, no_change}
+    | {ok, {compacted, bondy_oplog_event:event_key(), non_neg_integer()}}
+    | {error, term()}.
+
+compact(InstanceId) ->
+    bondy_oplog_compaction:compact(InstanceId).
+
+-spec current_watermark(instance_id()) ->
+    undefined | bondy_oplog_event:event_key().
+
+current_watermark(InstanceId) ->
+    bondy_oplog_instance:current_watermark(InstanceId).
+
+-spec snapshot(instance_id()) ->
+    {ok, bondy_oplog_event:event_key(), term()} | not_found.
+
+snapshot(InstanceId) ->
+    bondy_oplog_instance:snapshot(InstanceId).
+
+?DOC("""
+Hot query: snapshot + live events. See
+`bondy_oplog_query:query/2`.
+""").
+-spec query(instance_id(), Query :: term()) -> term().
+
+query(InstanceId, Query) ->
+    bondy_oplog_query:query(InstanceId, Query).
+
+?DOC("""
+Stable query: snapshot only. See
+`bondy_oplog_query:query_stable/2`.
+""").
+-spec query_stable(instance_id(), Query :: term()) -> term().
+
+query_stable(InstanceId, Query) ->
+    bondy_oplog_query:query_stable(InstanceId, Query).

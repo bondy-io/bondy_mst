@@ -3,7 +3,6 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
-
 -define(ISET(L), interval_sets:from_list(L)).
 
 -compile(export_all).
@@ -62,27 +61,19 @@ groups() ->
         ]}
     ].
 
-
 init_per_group(local_store, Config) ->
     [{store, bondy_mst_map_store}] ++ Config;
-
 init_per_group(ets_store, Config) ->
     [{store, bondy_mst_ets_store}] ++ Config;
-
-
 init_per_group(leveled_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     [{store, bondy_mst_leveled_store}] ++ Config;
-
 init_per_group(rocksdb_store, Config) ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     [{store, bondy_mst_rocksdb_store}] ++ Config.
 
-
-
 end_per_group(_, _Config) ->
     ok.
-
 
 %% Setup and teardown functions
 
@@ -102,7 +93,6 @@ init_per_testcase(_TestCase, Config) ->
 %% Called after each test case
 end_per_testcase(_TestCase, _Config) ->
     ok.
-
 
 commutative_test(Config) ->
     Mod = ?config(store, Config),
@@ -204,17 +194,14 @@ small_test(Config) ->
                 ?ISET(lists:seq(1, 4)),
                 ?ISET(lists:sort(DAB))
             );
-
         false ->
             ?assertEqual(A, C),
             ?assertEqual(D, B)
     end,
 
-
     ok = bondy_mst:delete(A),
     ok = bondy_mst:delete(B),
     ok = bondy_mst:delete(Z).
-
 
 large_test(Config) ->
     Mod = ?config(store, Config),
@@ -222,7 +209,7 @@ large_test(Config) ->
     %% Test for large MST operations
     ShuffledA = list_shuffle(lists:seq(1, 1000)),
     ShuffledB = list_shuffle(lists:seq(550, 1500)),
-     A = lists:foldl(
+    A = lists:foldl(
         fun(N, Acc) -> bondy_mst:put(Acc, N) end,
         bondy_mst:new(#{
             store => Mod,
@@ -251,12 +238,13 @@ large_test(Config) ->
 
     case C =/= A of
         true ->
-
             ?assertEqual(bondy_mst:root(C), bondy_mst:root(D)),
             ?assertEqual(bondy_mst:root(C), bondy_mst:root(Z)),
 
             FullList = [K || {K, _} <- bondy_mst:to_list(C)],
-            ?assertEqual(?ISET(lists:seq(1, 1500)), ?ISET(lists:sort(FullList))),
+            ?assertEqual(
+                ?ISET(lists:seq(1, 1500)), ?ISET(lists:sort(FullList))
+            ),
 
             DCA = [K || {K, _} <- bondy_mst:diff_to_list(C, A)],
             ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DCA)),
@@ -270,7 +258,6 @@ large_test(Config) ->
             ?assertEqual(?ISET(lists:seq(1001, 1500)), ?ISET(DBA)),
             DAB = [K || {K, _} <- bondy_mst:diff_to_list(A, B)],
             ?assertEqual(?ISET(lists:seq(1, 549)), ?ISET(DAB));
-
         false ->
             ?assertEqual(A, C),
             ?assertEqual(D, B)
@@ -279,7 +266,6 @@ large_test(Config) ->
     ok = bondy_mst:delete(A),
     ok = bondy_mst:delete(B),
     ok = bondy_mst:delete(Z).
-
 
 first_last_test(Config) ->
     Mod = ?config(store, Config),
@@ -315,12 +301,10 @@ persistent_test(Config) ->
     E3 = erlang:monotonic_time(),
     R3 = bondy_mst:root(T3),
 
-
     ?assertEqual([{1, true}], bondy_mst:to_list(T1, R1)),
     ?assertEqual([{1, true}, {2, true}], bondy_mst:to_list(T2, R2)),
     ?assertEqual([{1, true}, {2, true}, {3, true}], bondy_mst:to_list(T3, R3)),
     ?assertEqual(bondy_mst:to_list(T3, R3), bondy_mst:to_list(T3)),
-
 
     %% GC
     T4 = bondy_mst:gc(T3, E2),
@@ -332,7 +316,6 @@ persistent_test(Config) ->
 
     ?assertEqual([{1, true}, {2, true}, {3, true}], bondy_mst:to_list(T5, R3)),
     ?assertEqual(bondy_mst:to_list(T5, R3), bondy_mst:to_list(T5)).
-
 
 delete_simple_test(Config) ->
     Mod = ?config(store, Config),
@@ -350,8 +333,10 @@ delete_simple_test(Config) ->
     ),
 
     %% Verify all elements are present
-    ?assertEqual([{1, true}, {2, true}, {3, true}, {4, true}, {5, true}],
-                 bondy_mst:to_list(T1)),
+    ?assertEqual(
+        [{1, true}, {2, true}, {3, true}, {4, true}, {5, true}],
+        bondy_mst:to_list(T1)
+    ),
 
     %% Delete element 3
     T2 = bondy_mst:delete(T1, 3),
@@ -370,7 +355,6 @@ delete_simple_test(Config) ->
     %% Delete last element
     T4 = bondy_mst:delete(T3, 5),
     ?assertEqual([{2, true}, {4, true}], bondy_mst:to_list(T4)).
-
 
 delete_multiple_test(Config) ->
     Mod = ?config(store, Config),
@@ -412,7 +396,6 @@ delete_multiple_test(Config) ->
     Expected = [{N, true} || N <- Remaining],
     ?assertEqual(Expected, bondy_mst:to_list(T2)).
 
-
 delete_not_found_test(Config) ->
     Mod = ?config(store, Config),
 
@@ -442,7 +425,6 @@ delete_not_found_test(Config) ->
     T4 = bondy_mst:delete(T3, 1),
     ?assertEqual([], bondy_mst:to_list(T4)),
     ?assertEqual(undefined, bondy_mst:root(T4)).
-
 
 delete_all_test(Config) ->
     Mod = ?config(store, Config),
@@ -487,7 +469,6 @@ delete_all_test(Config) ->
     ?assertEqual([], bondy_mst:to_list(T4)),
     ?assertEqual(undefined, bondy_mst:root(T4)).
 
-
 delete_and_read_test(Config) ->
     Mod = ?config(store, Config),
 
@@ -510,8 +491,10 @@ delete_and_read_test(Config) ->
     %% Re-add element 3
     T3 = bondy_mst:put(T2, 3),
     ?assertEqual(true, bondy_mst:get(T3, 3)),
-    ?assertEqual([{1, true}, {2, true}, {3, true}, {4, true}, {5, true}],
-                 bondy_mst:to_list(T3)),
+    ?assertEqual(
+        [{1, true}, {2, true}, {3, true}, {4, true}, {5, true}],
+        bondy_mst:to_list(T3)
+    ),
 
     %% Delete multiple and re-add in different order
     T4 = bondy_mst:delete(T3, 2),
@@ -520,25 +503,24 @@ delete_and_read_test(Config) ->
 
     T6 = bondy_mst:put(T5, 4),
     T7 = bondy_mst:put(T6, 2),
-    ?assertEqual([{1, true}, {2, true}, {3, true}, {4, true}, {5, true}],
-                 bondy_mst:to_list(T7)).
-
+    ?assertEqual(
+        [{1, true}, {2, true}, {3, true}, {4, true}, {5, true}],
+        bondy_mst:to_list(T7)
+    ).
 
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
 
-
 %% @private
 randomize(1, List) ->
     randomize(List);
-
 randomize(T, List) ->
     lists:foldl(
         fun(_E, Acc) -> randomize(Acc) end,
         randomize(List),
-        lists:seq(1, (T - 1))).
-
+        lists:seq(1, (T - 1))
+    ).
 
 %% @private
 randomize(List) ->
@@ -553,8 +535,6 @@ randomize(List) ->
 %% -----------------------------------------------------------------------------
 list_shuffle([]) ->
     [];
-
 list_shuffle(List) ->
     %% Determine the log n portion then randomize the list.
     randomize(round(math:log(length(List)) + 0.5), List).
-
