@@ -12,21 +12,29 @@ no coordination required during writes.
 
 The library has two layers, used independently or together:
 
-1. **`bondy_mst`** — a Merkle Search Tree (MST) primitive (Auvolat &
-   Taïani, 2019). A balanced, content-addressed search tree where the
-   structural shape is determined deterministically by item hashes, so
-   two replicas with the same set of items have the same root hash.
-   Useful as a building block for anti-entropy and integrity
-   verification.
+1. **`bondy_mst`** — a Merkle Search Tree (MST) primitive based on Alex
+   Auvolat & François Taïani's 2019 paper [*Merkle Search Trees:
+   Efficient State-Based CRDTs in Open
+   Networks*](https://inria.hal.science/hal-02303490/document). A
+   balanced, content-addressed search tree where the structural shape is
+   determined deterministically by item hashes, so two replicas with
+   the same set of items have the same root hash. Useful as a building
+   block for anti-entropy and integrity verification.
 2. **`bondy_oplog`** — a coordination-free CRDT replication
-   *framework* built on top. Each replicated value is an **instance**:
-   an append-only event log keyed by `{HLC, Origin, Seq}`, stored as an
-   MST. Replicas synchronise by exchanging missing MST pages; stable
-   prefixes collapse into snapshots through a consumer-defined
-   `interpret_cog/2` function. The framework is agnostic to event
-   payload semantics, transport (Distributed Erlang, Partisan, gRPC,
-   ...), durability (in-memory, file, RocksDB, ...), and trust model
-   (closed cluster, Byzantine-tolerant).
+   *framework* built on top. The MST is used as the storage substrate
+   for an append-only operation log keyed by `{HLC, Origin, Seq}`.
+   Stable prefixes of the log collapse into snapshots through a
+   consumer-defined `interpret_cog/2` function. The Concurrent
+   Operation Group (COG) abstraction and the operation-log architecture
+   are taken from Preston McCrary's 2022 paper [*Canteen: A
+   Partially-Ordered Log Abstraction for the Emerging CRDT
+   Datastore*](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2022/EECS-2022-160.html)
+   (UC Berkeley); we replace Canteen's hash-chained DAG with the
+   Auvolat & Taïani MST, adapting COG truncation to a tree-shaped log.
+   The framework is agnostic to event payload semantics, transport
+   (Distributed Erlang, Partisan, gRPC, ...), durability (in-memory,
+   file, RocksDB, ...), and trust model (closed cluster,
+   Byzantine-tolerant).
 
 The replication layer is the modern API and the focus of this README.
 The MST primitive is reused under the hood.
@@ -81,17 +89,28 @@ trades them away for availability and partition tolerance.
 
 ## Background: MSTs and COGs
 
-This library combines two ideas: **Merkle Search Trees** for efficient
-anti-entropy, and **Concurrent Operation Groups** for bounded log size.
-Understanding both makes the rest of the document much clearer.
+This library combines two ideas from the literature:
+
+- **Merkle Search Trees** (Auvolat & Taïani, 2019) — for efficient
+  anti-entropy by Merkle-hash comparison.
+- **Concurrent Operation Groups** (McCrary, *Canteen*, 2022) — for
+  collapsing stable prefixes of an operation log into snapshots, so
+  storage cost is bounded by churn rather than history.
+
+We adapt both: Canteen's COG abstraction is layered over an MST
+instead of Canteen's hash-chained DAG. See `_design/1_mst_cogs_idea.md`
+in this repository for the full design rationale on why we made that
+choice and what we trade off.
 
 ### Merkle Search Trees (MSTs)
 
-A Merkle Search Tree is a balanced search tree in which the *shape* of
+The MST construction is from Auvolat & Taïani's 2019 paper
+[*Merkle Search Trees: Efficient State-Based CRDTs in Open
+Networks*](https://inria.hal.science/hal-02303490/document) (Inria
+HAL-02303490). It is a balanced search tree in which the *shape* of
 the tree is determined by the *content* of the items, not by their
-insertion order. The construction (see Auvolat & Taïani's
-[2019 paper](https://inria.hal.science/hal-02303490/document)) uses
-item hashes to deterministically pick which layer each item lives on:
+insertion order. The construction uses item hashes to deterministically
+pick which layer each item lives on:
 
 - Compute `hash(item)` and read it in some base `B`.
 - Count the leading zero "digits" — that's the item's layer number.
@@ -146,6 +165,17 @@ The total order is what `interpret_cog/2` consumes: events arrive in
 this order regardless of when they were inserted into local storage.
 
 ### Concurrent Operation Groups (COGs)
+
+The COG abstraction comes from Preston McCrary's 2022 master's thesis
+[*Canteen: A Partially-Ordered Log Abstraction for the Emerging CRDT
+Datastore*](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2022/EECS-2022-160.html)
+(UC Berkeley, EECS-2022-160). Canteen organises operations into a
+hash-chained DAG and exposes COGs as a partially-ordered log
+abstraction; CRDT semantics layer on top.
+
+This library adopts the COG abstraction but uses an MST as the
+underlying log substrate instead of Canteen's DAG — see
+`_design/1_mst_cogs_idea.md` for the rationale.
 
 A **Concurrent Operation Group** is a maximal contiguous batch of
 events that is *stable* — no event with a key inside the batch's range
@@ -870,6 +900,35 @@ This is the building block. The replication layer is built on top.
 The library is an OTP application. Its supervision tree starts on
 `application:ensure_all_started(bondy_mst, permanent)` and brings up the
 node-shared registries, the responder, and the schedulers.
+
+---
+
+## Credits
+
+This library builds directly on two pieces of academic work, and would
+not exist without them:
+
+- **Alex Auvolat** and **François Taïani** (Univ. Rennes, Inria, IRISA,
+  CNRS), *"Merkle Search Trees: Efficient State-Based CRDTs in Open
+  Networks"*, **SRDS 2019**.
+  [Inria HAL-02303490](https://inria.hal.science/hal-02303490/document)
+  · [Reference Elixir
+  prototype](https://gitlab.inria.fr/aauvolat/mst_exp).
+  This is the source of the MST construction used by the `bondy_mst`
+  primitive.
+
+- **Preston McCrary** (UC Berkeley), *"Canteen: A Partially-Ordered Log
+  Abstraction for the Emerging CRDT Datastore"*, Master's thesis,
+  **2022**.
+  [EECS-2022-160](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2022/EECS-2022-160.html).
+  This is the source of the COG abstraction, the operation-log
+  framing, and the Byzantine-fault-tolerance approach via
+  hash-chaining used by `bondy_oplog`. We replace Canteen's DAG with
+  an MST as the underlying log substrate; see
+  `_design/1_mst_cogs_idea.md` for the rationale and trade-offs.
+
+Any errors in this library's interpretation or adaptation of the above
+work are ours, not theirs.
 
 ---
 

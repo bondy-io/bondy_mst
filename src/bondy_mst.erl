@@ -12,11 +12,18 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-This module implements a Merkle Search Tree (MST), a probabilistic data
-structure optimised for efficient storage and retrieval of key-value pairs
-proposed and demonstrated by Alex Auvolat and François Taïani in ther paper
-[Merkle Search Trees: Efficient State-Based CRDTs in
-Open Networks](https://inria.hal.science/hal-02303490/document).
+This module implements a Merkle Search Tree (MST), a probabilistic
+data structure optimised for efficient storage and retrieval of
+key-value pairs.
+
+The MST construction is from Alex Auvolat and François Taïani's
+2019 paper [*Merkle Search Trees: Efficient State-Based CRDTs in
+Open Networks*](https://inria.hal.science/hal-02303490/document)
+(SRDS 2019, Inria HAL-02303490). This Erlang implementation was
+ported from the authors' [reference Elixir
+prototype](https://gitlab.inria.fr/aauvolat/mst_exp) and extended
+with additional features (multiple storage backends, configurable
+GC, deletion).
 
 An MST is as an efficient, *state-based* Conflict-Free Replicated Data
 Type (CRDT) designed for open, potentially untrusted networks. It is designed

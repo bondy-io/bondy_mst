@@ -15,6 +15,14 @@
 Cryptographic event validator for Byzantine-tolerant deployments
 (`_design/10_new_design.md` §10.1, §10.4).
 
+The hash-chain + signature approach to detecting equivocation —
+where a malicious origin signing two events with the same identity
+produces a verifiable proof — is from Preston McCrary's *Canteen*
+(UC Berkeley, 2022 — EECS-2022-160), §6 (BFT). We adapt it to a
+per-Origin chain on the *signing* side; full strict-order
+verification on the receiving side is deferred (see "Loose chain
+enforcement" below).
+
 ## Identity
 
 Each replica has an Ed25519 key pair. The public key is the replica's

@@ -12,10 +12,15 @@
 ?MODULEDOC("""
 Behaviour for consumer-defined CRDTs (`_design/10_new_design.md` §9).
 
-A *CRDT module* binds an MST instance to a domain semantics. The
+A *CRDT module* binds an oplog instance to a domain semantics. The
 library is otherwise agnostic to event payload meaning; it is the
 CRDT module — through its `interpret_cog/2` callback — that decides
 what an event "means" and how concurrent operations are resolved.
+
+The Concurrent Operation Group (COG) abstraction and the
+`interpret_cog` interface come from Preston McCrary's *Canteen*
+(UC Berkeley, 2022 — EECS-2022-160). The library carries the COG
+machinery; the consumer supplies the interpretation function.
 
 ## Required callbacks
 

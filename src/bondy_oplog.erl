@@ -10,8 +10,24 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-Public façade for the MST replication library
+Public façade for the operation-log replication framework
 (`_design/10_new_design.md` §11.4).
+
+Each replicated value is an **instance**: an append-only operation log
+keyed by `{HLC, Origin, Seq}`, stored in a Merkle Search Tree. Stable
+prefixes of the log collapse into snapshots through a
+consumer-defined `interpret_cog/2` function.
+
+## Attribution
+
+The Concurrent Operation Group (COG) abstraction, the operation-log
+framing, and the equivocation-tolerance approach via hash-chaining
+are taken from Preston McCrary's *Canteen* (UC Berkeley, 2022 —
+EECS-2022-160). The MST substrate underneath comes from Auvolat &
+Taïani (Inria/IRISA, SRDS 2019 — HAL-02303490). See `README.md`
+"Credits" for full references.
+
+## API surface
 
 Lifecycle primitives are intentionally minimal: `start_instance/1,2`,
 `stop_instance/1,2`, `list_instances/0`, `discover_instances/1`. The
