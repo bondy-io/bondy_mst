@@ -1,25 +1,7 @@
 %% =============================================================================
-%%  bondy_mst.erl -
-%%
-%%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
-%%
-%%  Licensed under the Apache License, Version 2.0 (the "License");
-%%  you may not use this file except in compliance with the License.
-%%  You may obtain a copy of the License at
-%%
-%%     http://www.apache.org/licenses/LICENSE-2.0
-%%
-%%  Unless required by applicable law or agreed to in writing, software
-%%  distributed under the License is distributed on an "AS IS" BASIS,
-%%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-%%  See the License for the specific language governing permissions and
-%%  limitations under the License.
-%%
-%%  This module contains a port the code written in Elixir for the
-%%  simulations shown in the paper: Merkle Search Trees: Efficient State-Based
-%%  CRDTs in Open Networks by Alex Auvolat, François Taïani
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
-
 
 -module(bondy_mst).
 
@@ -819,19 +801,28 @@ first(#?MODULE{}, undefined) ->
     undefined;
 
 first(#?MODULE{} = T, Root) ->
-    Page = bondy_mst_store:get(T#?MODULE.store, Root),
-    case bondy_mst_page:low(Page) of
+    case bondy_mst_store:get(T#?MODULE.store, Root) of
         undefined ->
-            case bondy_mst_page:list(Page) of
-                [] ->
-                    undefined;
+            undefined;
 
-                [{K, V, undefined} | _] ->
-                    {K, V}
-            end;
+        Page ->
+            case bondy_mst_page:low(Page) of
+                Low when is_binary(Low) ->
+                    %% Anything reachable from `low` has keys smaller
+                    %% than the leftmost entry — descend.
+                    first(T, Low);
 
-        Low ->
-            first(T, Low)
+                undefined ->
+                    %% No left subtree: the first entry's key IS the
+                    %% leftmost. Its right-subtree (`_R`) is irrelevant
+                    %% for this lookup — `R` may be a hash on internal
+                    %% pages whose `low` was emptied by a prior
+                    %% `delete/2` and is `undefined` only on leaves.
+                    case bondy_mst_page:list(Page) of
+                        []                -> undefined;
+                        [{K, V, _R} | _]  -> {K, V}
+                    end
+            end
     end.
 
 
@@ -839,21 +830,26 @@ last(#?MODULE{}, undefined) ->
     undefined;
 
 last(#?MODULE{} = T, Root) ->
-    Page = bondy_mst_store:get(T#?MODULE.store, Root),
-    case Page == undefined orelse bondy_mst_page:list(Page) of
-        true ->
+    case bondy_mst_store:get(T#?MODULE.store, Root) of
+        undefined ->
             undefined;
 
-        [] ->
-            undefined;
+        Page ->
+            case bondy_mst_page:list(Page) of
+                [] ->
+                    undefined;
 
-        L when is_list(L) ->
-            case lists:last(L) of
-                {K, V, undefined} ->
-                    {K, V};
+                L ->
+                    case lists:last(L) of
+                        {K, V, undefined} ->
+                            %% No right subtree: this entry's key is
+                            %% the rightmost.
+                            {K, V};
 
-                {_, _, Next} ->
-                    last(T, Next)
+                        {_K, _V, Next} when is_binary(Next) ->
+                            %% Right subtree exists — descend.
+                            last(T, Next)
+                    end
             end
     end.
 
