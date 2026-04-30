@@ -31,14 +31,12 @@
 -export([send/2]).
 -export([broadcast/1]).
 
-
 %% GEN_SERVER CALLBACKS
 -export([init/1]).
 -export([handle_call/3]).
 -export([handle_cast/2]).
 -export([handle_info/2]).
 -export([terminate/2]).
-
 
 %% =============================================================================
 %% API
@@ -51,10 +49,8 @@ peers() ->
         peer3
     ].
 
-
 start_all(Opts) ->
     start(Opts, peers()).
-
 
 start(#{store := _, store_opts := #{name := _}} = Opts, Peers) ->
     Started = [
@@ -62,10 +58,9 @@ start(#{store := _, store_opts := #{name := _}} = Opts, Peers) ->
             {ok, _} = start_link(NodeId, Opts),
             NodeId
         end
-        || NodeId <- Peers
+     || NodeId <- Peers
     ],
     {ok, Started}.
-
 
 start_link(NodeId, Opts) when is_atom(NodeId) ->
     ServerOpts = [
@@ -73,17 +68,12 @@ start_link(NodeId, Opts) when is_atom(NodeId) ->
     ],
     gen_server:start_link({local, NodeId}, ?MODULE, [NodeId, Opts], ServerOpts).
 
-
-
 %% =============================================================================
 %% bondy_mst_crdt CALLBACKS
 %% =============================================================================
 
-
-
 send(Peer, Message) ->
     gen_server:cast(Peer, {grove_message, Message}).
-
 
 broadcast(Gossip) ->
     Myself = element(2, Gossip),
@@ -93,12 +83,9 @@ broadcast(Gossip) ->
     _ = [send(Peer, Gossip) || Peer <- Peers],
     ok.
 
-
-
 %% =============================================================================
 %% GEN_SERVER BEHAVIOR CALLBACKS
 %% ============================================================================
-
 
 init([NodeId, Opts0]) ->
     %% Trap exists otherwise terminate/1 won't be called when shutdown by
@@ -124,62 +111,50 @@ init([NodeId, Opts0]) ->
 
 handle_call(ping, _From, Grove) ->
     {reply, pong, Grove};
-
 handle_call(root, _From, Grove) ->
     ct:pal("handling root"),
     Reply = bondy_mst_crdt:root(Grove),
     {reply, Reply, Grove};
-
 handle_call({get, Key}, _From, Grove) ->
     ct:pal("handling get key: ~p", [Key]),
     Reply = bondy_mst:get(bondy_mst_crdt:tree(Grove), Key),
     {reply, Reply, Grove};
-
 handle_call(gc, _From, Grove0) ->
     ct:pal("Triggering GC on peer"),
     Grove = bondy_mst_crdt:gc(Grove0, [bondy_mst_crdt:root(Grove0)]),
     {reply, ok, Grove};
-
 handle_call({gc, Epoch}, _From, Grove0) ->
     ct:pal("Triggering GC for Epoch on peer"),
     Grove = bondy_mst_crdt:gc(Grove0, Epoch),
     {reply, ok, Grove};
-
 handle_call(list, _From, Grove) ->
     ct:pal("handling list"),
     Reply = bondy_mst:to_list(bondy_mst_crdt:tree(Grove)),
     {reply, Reply, Grove};
-
 handle_call(list_pages, _From, Grove) ->
     ct:pal("handling list_pages"),
     Store = bondy_mst:store(bondy_mst_crdt:tree(Grove)),
     Reply = bondy_mst_store:list(Store),
     {reply, Reply, Grove};
-
 handle_call({fold_pages, Fun, Acc, Opts}, _From, Grove) ->
     ct:pal("handling fold_pages"),
     Tree = bondy_mst_crdt:tree(Grove),
     Reply = bondy_mst:fold_pages(Tree, Fun, Acc, Opts),
     {reply, Reply, Grove};
-
 handle_call({put, Key}, _From, Grove0) ->
     ct:pal("handling put key: ~p", [Key]),
     Grove1 = bondy_mst_crdt:put(Grove0, Key, true),
     {reply, ok, Grove1};
-
 handle_call({put, Key, Value}, _From, Grove0) ->
     ct:pal("handling put key: ~p, value: ~p", [Key, Value]),
     Grove1 = bondy_mst_crdt:put(Grove0, Key, Value),
     {reply, ok, Grove1};
-
 handle_call({trigger, Peer}, _From, Grove) ->
     ct:pal("Triggering sync on peer: ~p", [Peer]),
     Reply = bondy_mst_crdt:trigger(Grove, Peer),
     {reply, Reply, Grove};
-
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
-
 
 handle_cast({grove_message, Message}, Grove0) ->
     ct:pal(
@@ -188,14 +163,11 @@ handle_cast({grove_message, Message}, Grove0) ->
     ),
     Grove = bondy_mst_crdt:handle(Grove0, Message),
     {noreply, Grove};
-
 handle_cast(_Request, Grove) ->
     {noreply, Grove}.
 
-
 handle_info(_, Grove) ->
     {noreply, Grove}.
-
 
 terminate(_Reason, _Grove) ->
     ok.

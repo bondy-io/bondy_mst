@@ -1,30 +1,18 @@
 %% =============================================================================
-%%  bondy_mst_coalescing_queue.erl -
-%%
-%%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
-%%
-%%  Licensed under the Apache License, Version 2.0 (the "License");
-%%  you may not use this file except in compliance with the License.
-%%  You may obtain a copy of the License at
-%%
-%%     http://www.apache.org/licenses/LICENSE-2.0
-%%
-%%  Unless required by applicable law or agreed to in writing, software
-%%  distributed under the License is distributed on an "AS IS" BASIS,
-%%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-%%  See the License for the specific language governing permissions and
-%%  limitations under the License.
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
+
 -module(bondy_mst_coalescing_queue).
 
 -feature(maybe_expr, enable).
 
 -record(?MODULE, {
-    map = #{}           :: map(),
+    map = #{} :: map(),
     queue = queue:new() :: queue:queue(key())
 }).
 
--type t()   :: #?MODULE{}.
+-type t() :: #?MODULE{}.
 -type key() :: any().
 
 -export_type([t/0]).
@@ -38,23 +26,19 @@
 -export([peek/1]).
 -export([size/1]).
 
-
 %% =============================================================================
 %% API
 %% =============================================================================
-
 
 -spec new() -> t().
 
 new() ->
     #?MODULE{}.
 
-
 -spec size(t()) -> non_neg_integer().
 
 size(#?MODULE{map = M}) ->
     maps:size(M).
-
 
 -spec in(t(), key(), any()) -> t().
 
@@ -65,13 +49,11 @@ in(#?MODULE{} = T, Key, Elem) ->
                 map = maps:put(Key, Elem, T#?MODULE.map),
                 queue = queue:in(Key, T#?MODULE.queue)
             };
-
         _ ->
             T#?MODULE{
                 map = maps:put(Key, Elem, T#?MODULE.map)
             }
     end.
-
 
 -spec out(t()) -> {{value, any()}, t()} | {empty, t()}.
 
@@ -80,13 +62,12 @@ out(#?MODULE{} = T) ->
         {{value, Key}, Q} ->
             {Elem, Map} = maps:take(Key, T#?MODULE.map),
             {{value, Elem}, T#?MODULE{map = Map, queue = Q}};
-
         {empty, _} = Result ->
             Result
     end.
 
-
--spec out_when(t(), fun((Elem :: any()) -> boolean())) -> {value, any()} | empty.
+-spec out_when(t(), fun((Elem :: any()) -> boolean())) ->
+    {value, any()} | empty.
 
 out_when(#?MODULE{} = T, Pred) when is_function(Pred, 1) ->
     maybe
@@ -96,15 +77,12 @@ out_when(#?MODULE{} = T, Pred) when is_function(Pred, 1) ->
         {_, Q} ?= queue:out(T#?MODULE.queue),
         M = maps:remove(K, T#?MODULE.map),
         {{value, V}, T#?MODULE{map = M, queue = Q}}
-
     else
         empty ->
             {empty, T};
-
         false ->
             {empty, T}
     end.
-
 
 -spec peek(t()) -> {value, any()} | empty.
 
@@ -112,11 +90,9 @@ peek(#?MODULE{} = T) ->
     case queue:peek(T#?MODULE.queue) of
         {value, Key} ->
             {value, maps:get(Key, T#?MODULE.map)};
-
         empty ->
             empty
     end.
-
 
 -spec delete(t(), key()) -> t().
 
@@ -124,7 +100,6 @@ delete(#?MODULE{} = T, Key) ->
     case maps:get(Key, T#?MODULE.map, undefined) of
         undefined ->
             T;
-
         _ ->
             T#?MODULE{
                 map = maps:remove(Key, T#?MODULE.map),
@@ -132,16 +107,15 @@ delete(#?MODULE{} = T, Key) ->
             }
     end.
 
-
--spec filter(t(), fun((key()) -> boolean())) -> t();
-            (t(), fun((key(), any()) -> boolean())) -> t().
+-spec filter
+    (t(), fun((key()) -> boolean())) -> t();
+    (t(), fun((key(), any()) -> boolean())) -> t().
 
 filter(#?MODULE{} = T, Fun) when is_function(Fun, 1) ->
     T#?MODULE{
         map = maps:filter(fun(K, _) -> Fun(K) end, T#?MODULE.map),
         queue = queue:filter(Fun, T#?MODULE.queue)
     };
-
 filter(#?MODULE{} = T, Fun) when is_function(Fun, 2) ->
     {Map, Queue} =
         maps:fold(
@@ -149,10 +123,9 @@ filter(#?MODULE{} = T, Fun) when is_function(Fun, 2) ->
                 case Fun(K, V) of
                     true ->
                         {maps:put(K, V, M), Q};
-
                     false ->
                         {M, queue:delete(Q, V)}
-                    end
+                end
             end,
             {#{}, T#?MODULE.queue},
             T#?MODULE.map
@@ -162,5 +135,3 @@ filter(#?MODULE{} = T, Fun) when is_function(Fun, 2) ->
         map = Map,
         queue = Queue
     }.
-
-

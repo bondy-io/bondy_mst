@@ -1,20 +1,8 @@
 %% =============================================================================
-%%  bondy_mst_page.erl -
-%%
-%%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
-%%
-%%  Licensed under the Apache License, Version 2.0 (the "License");
-%%  you may not use this file except in compliance with the License.
-%%  You may obtain a copy of the License at
-%%
-%%     http://www.apache.org/licenses/LICENSE-2.0
-%%
-%%  Unless required by applicable law or agreed to in writing, software
-%%  distributed under the License is distributed on an "AS IS" BASIS,
-%%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-%%  See the License for the specific language governing permissions and
-%%  limitations under the License.
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
+
 -module(bondy_mst_page).
 
 -include("bondy_mst.hrl").
@@ -26,14 +14,14 @@ pagestore and that may reference other data pages by their hash.
 """).
 
 -record(?MODULE, {
-    level               ::  level(),
-    low                 ::  hash() | undefined,
-    list                ::  [entry()],
-    freed_at            ::  epoch() | undefined
+    level :: level(),
+    low :: hash() | undefined,
+    list :: [entry()],
+    freed_at :: epoch() | undefined
 }).
 
--type t()               ::  #?MODULE{}.
--type entry()           ::  {key(), value(), hash() | undefined}.
+-type t() :: #?MODULE{}.
+-type entry() :: {key(), value(), hash() | undefined}.
 
 -export_type([t/0]).
 -export_type([entry/0]).
@@ -59,12 +47,9 @@ pagestore and that may reference other data pages by their hash.
 -export([refs/1]).
 -export([set_freed_at/2]).
 
-
-
 %% =============================================================================
 %% API
 %% =============================================================================
-
 
 ?DOC("""
 Creates a new page
@@ -79,7 +64,6 @@ new(Level, Low, List) when is_integer(Level), is_list(List) ->
         freed_at = undefined
     }.
 
-
 ?DOC("""
 Creates a new page
 """).
@@ -88,12 +72,15 @@ Creates a new page
 pattern() ->
     {
         ?MODULE,
-        '_', % level
-        '_', % low
-        '_', % list
-        '_'  % freed_at
+        % level
+        '_',
+        % low
+        '_',
+        % list
+        '_',
+        % freed_at
+        '_'
     }.
-
 
 ?DOC("""
 Returns true if `Arg` is a page.
@@ -103,14 +90,12 @@ Returns true if `Arg` is a page.
 is_type(#?MODULE{}) -> true;
 is_type(_) -> false.
 
-
 -spec field_index(atom()) -> pos_integer().
 
 field_index(level) -> #?MODULE.level;
 field_index(low) -> #?MODULE.low;
 field_index(list) -> #?MODULE.list;
 field_index(freed_at) -> #?MODULE.freed_at.
-
 
 ?DOC("""
 Returns the level of this page in the tree i.e. the logical height.
@@ -119,11 +104,9 @@ Returns the level of this page in the tree i.e. the logical height.
 
 level(#?MODULE{level = Val}) -> Val.
 
-
 -spec low(t()) -> hash().
 
 low(#?MODULE{low = Val}) -> Val.
-
 
 ?DOC("""
 Returns the epoch number at which this page has been freed or
@@ -133,7 +116,6 @@ Returns the epoch number at which this page has been freed or
 
 freed_at(#?MODULE{freed_at = Val}) -> Val.
 
-
 ?DOC("""
 Sets the version number at which this page has been freed.
 """).
@@ -141,7 +123,6 @@ Sets the version number at which this page has been freed.
 
 set_freed_at(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
     T#?MODULE{freed_at = Epoch}.
-
 
 ?DOC("""
 Returns `true` if the page is referenced at `Epoch`.
@@ -151,10 +132,8 @@ Otherwise, returns `false`.
 
 is_referenced_at(#?MODULE{freed_at = undefined}, _) ->
     true;
-
 is_referenced_at(#?MODULE{freed_at = LastEpoch}, Epoch) ->
     LastEpoch >= Epoch.
-
 
 ?DOC("""
 Computes the hash of the page using algorithm `Algo`.
@@ -168,15 +147,12 @@ hash(#?MODULE{} = T, Algo) when is_atom(Algo) ->
     %% tree replica.
     bondy_mst_utils:hash({Level, Low, List}, Algo).
 
-
 ?DOC("""
 Returns the list of entries in this page.
 """).
 -spec list(t()) -> [entry()].
 
 list(#?MODULE{list = Val}) -> Val.
-
-
 
 ?DOC("""
 Calls `Fun(Entry, AccIn)` on successive entries of the page, starting
@@ -189,13 +165,10 @@ to the next call. The function returns the final value of the accumulator.
 fold(#?MODULE{list = List}, Fun, Acc) ->
     lists:foldl(Fun, Acc, List).
 
-
-
 -spec foreach(t(), fun((entry()) -> any())) -> ok.
 
 foreach(#?MODULE{list = List}, Fun) ->
     lists:foreach(Fun, List).
-
 
 ?DOC("""
 Returns the hashes of all pages referenced by this page.
@@ -208,9 +181,6 @@ refs(#?MODULE{list = List, low = Low}) ->
     case Low =/= undefined of
         true ->
             [Low | Refs];
-
         false ->
             Refs
     end.
-
-

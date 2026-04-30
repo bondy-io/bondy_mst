@@ -1,25 +1,7 @@
 %% =============================================================================
-%%  bondy_mst_store.erl -
-%%
-%%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
-%%
-%%  Licensed under the Apache License, Version 2.0 (the "License");
-%%  you may not use this file except in compliance with the License.
-%%  You may obtain a copy of the License at
-%%
-%%     http://www.apache.org/licenses/LICENSE-2.0
-%%
-%%  Unless required by applicable law or agreed to in writing, software
-%%  distributed under the License is distributed on an "AS IS" BASIS,
-%%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-%%  See the License for the specific language governing permissions and
-%%  limitations under the License.
-%%
-%%  This module contains a port the code written in Elixir for the
-%%  simulations shown in the paper: Merkle Search Trees: Efficient State-Based
-%%  CRDTs in Open Networks by Alex Auvolat, François Taïani
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
-
 
 -module(bondy_mst_store).
 
@@ -39,23 +21,24 @@ and implement different synchronization or caching mechanisms.
 }).
 
 -record(?MODULE, {
-    mod                 ::  module(),
-    state               ::  backend(),
-    transactions        ::  boolean()
+    mod :: module(),
+    state :: backend(),
+    transactions :: boolean()
 }).
 
--type t()               ::  #?MODULE{}.
--type page()            ::  any().
--type backend()         ::  any().
--type encode_fun()      ::  fun((encode, bondy_mst_page:t()) -> binary()).
--type decode_fun()      ::  fun((decode, binary()) -> bondy_mst_page:t()).
--type serializer()      ::  module | encode_fun() | decode_fun().
--type opt()             ::  {serializer, serializer()} | {atom(), any()}.
--type opts()            ::  #{
-                                serializer => serializer(),
-                                atom() => any()
-                            }
-                            | [opt()].
+-type t() :: #?MODULE{}.
+-type page() :: any().
+-type backend() :: any().
+-type encode_fun() :: fun((encode, bondy_mst_page:t()) -> binary()).
+-type decode_fun() :: fun((decode, binary()) -> bondy_mst_page:t()).
+-type serializer() :: module | encode_fun() | decode_fun().
+-type opt() :: {serializer, serializer()} | {atom(), any()}.
+-type opts() ::
+    #{
+        serializer => serializer(),
+        atom() => any()
+    }
+    | [opt()].
 
 -export_type([t/0]).
 -export_type([backend/0]).
@@ -84,11 +67,9 @@ and implement different synchronization or caching mechanisms.
 -export([set_root/2]).
 -export([transaction/2]).
 
-
 %% =============================================================================
 %% CALLBACKS
 %% =============================================================================
-
 
 -callback open(HashAlgorithm :: atom(), Opts :: opts()) -> backend().
 
@@ -126,45 +107,37 @@ and implement different synchronization or caching mechanisms.
 
 -optional_callbacks([transaction/2]).
 
-
 -callback capabilities(backend()) -> map().
 
 -optional_callbacks([capabilities/1]).
-
-
 
 %% =============================================================================
 %% API
 %% =============================================================================
 
-
-
 -spec open(Mod :: module(), HashAlgo :: atom(), Opts :: map() | list()) ->
     t() | no_return().
 
-open(Mod, HashAlgo, Opts)
-when is_atom(Mod)
-andalso is_atom(HashAlgo)
-andalso (is_map(Opts) orelse is_list(Opts)) ->
+open(Mod, HashAlgo, Opts) when
+    is_atom(Mod) andalso
+        is_atom(HashAlgo) andalso
+        (is_map(Opts) orelse is_list(Opts))
+->
     #?MODULE{
         mod = Mod,
         state = Mod:open(HashAlgo, Opts),
         transactions = supports_transactions(Mod)
     }.
 
-
-
 -spec close(t()) -> ok.
 
 close(#?MODULE{mod = Mod, state = State}) ->
     Mod:close(State).
 
-
 -spec is_type(any()) -> boolean().
 
 is_type(#?MODULE{}) -> true;
 is_type(_) -> false.
-
 
 ?DOC("""
 Get the root hash.
@@ -174,8 +147,6 @@ Returns hash or `undefined`.
 
 get_root(#?MODULE{mod = Mod, state = State}) ->
     Mod:get_root(State).
-
-
 
 ?DOC("""
 Get the root hash.
@@ -188,7 +159,6 @@ Returns hash or `undefined`.
 set_root(#?MODULE{} = T, Hash) when is_binary(Hash) ->
     do_set_root(T, Hash).
 
-
 ?DOC("""
 Get a page referenced by its hash.
 Returns page or `undefined`.
@@ -198,13 +168,10 @@ Returns page or `undefined`.
 get(#?MODULE{mod = Mod, state = State}, Hash) ->
     Mod:get(State, Hash).
 
-
-
 -spec has(Store :: t(), Hash :: hash()) -> boolean().
 
 has(#?MODULE{mod = Mod, state = State}, Hash) ->
     Mod:has(State, Hash).
-
 
 ?DOC("""
 Returns the list of all the pages in the store.
@@ -213,7 +180,6 @@ Returns the list of all the pages in the store.
 
 list(#?MODULE{mod = Mod, state = State}) ->
     Mod:list(State).
-
 
 ?DOC("""
 Returns the list of pages which have root `Root`.
@@ -224,10 +190,9 @@ list(#?MODULE{} = Store, Root) when is_binary(Root) ->
     fold_descendants(
         Store,
         Root,
-        fun({_, P}, Acc) -> [P|Acc] end,
+        fun({_, P}, Acc) -> [P | Acc] end,
         []
     ).
-
 
 ?DOC("""
 Put a page. Argument is the content of the page, returns the
@@ -239,7 +204,6 @@ put(#?MODULE{mod = Mod, state = State0} = T, Page) ->
     {Hash, State} = Mod:put(State0, Page),
     {Hash, T#?MODULE{state = State}}.
 
-
 ?DOC("""
 Deletes a page.
 """).
@@ -248,14 +212,10 @@ Deletes a page.
 delete(#?MODULE{mod = Mod, state = State} = T, Page) ->
     T#?MODULE{state = Mod:delete(State, Page)}.
 
-
-
 -spec copy(Store :: t(), OtherStore :: t(), Hash :: hash()) -> Store :: t().
 
 copy(#?MODULE{mod = Mod, state = State0} = T, OtherStore, Hash) ->
     T#?MODULE{state = Mod:copy(State0, OtherStore, Hash)}.
-
-
 
 -spec free(Store :: t(), Hash :: hash(), Page :: page()) -> Store :: t().
 
@@ -268,8 +228,6 @@ free(#?MODULE{mod = Mod, state = State0} = T0, Hash, Page) ->
             T
     end.
 
-
-
 -spec gc(Store :: t(), KeepRoots :: [hash()] | Epoch :: integer()) ->
     {Store :: t(), Metadata :: map()}.
 
@@ -277,13 +235,10 @@ gc(#?MODULE{mod = Mod, state = State0} = T, KeepRoots) ->
     {State, Meta} = Mod:gc(State0, KeepRoots),
     {T#?MODULE{state = State}, Meta}.
 
-
-
 -spec page_refs(Store :: t(), Page :: page()) -> Refs :: [binary()].
 
 page_refs(#?MODULE{mod = Mod}, Page) ->
     Mod:page_refs(Page).
-
 
 ?DOC("""
 Returns the hashes of the pages identified by root hash that are missing
@@ -294,25 +249,18 @@ from the store.
 missing_set(#?MODULE{mod = Mod, state = State}, Root) ->
     Mod:missing_set(State, Root).
 
-
-
 -spec delete(Store :: t()) -> ok.
 
 delete(#?MODULE{mod = Mod, state = State}) ->
     Mod:delete(State).
-
-
 
 -spec transaction(Store :: t(), Fun :: fun(() -> any())) ->
     any() | {error, Reason :: any()}.
 
 transaction(#?MODULE{transactions = true, mod = Mod, state = State}, Fun) ->
     Mod:transaction(State, Fun);
-
 transaction(#?MODULE{transactions = false}, Fun) ->
     Fun().
-
-
 
 -spec capabilities(Store :: t()) -> map().
 
@@ -327,33 +275,27 @@ capabilities(#?MODULE{mod = Mod, state = State}) ->
         end
     ).
 
-
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
-
-
 
 supports_transactions(Mod) ->
     ok = bondy_mst_utils:ensure_loaded(Mod),
     erlang:function_exported(Mod, transaction, 2).
 
-
-do_set_root(#?MODULE{mod = Mod, state = State0} = T, Hash)
-when is_binary(Hash) orelse Hash == undefined ->
+do_set_root(#?MODULE{mod = Mod, state = State0} = T, Hash) when
+    is_binary(Hash) orelse Hash == undefined
+->
     State = Mod:set_root(State0, Hash),
     T#?MODULE{state = State}.
-
 
 %% @private
 fold_descendants(_, undefined, _, Acc) ->
     Acc;
-
 fold_descendants(Store, Root, Fun, AccIn) ->
     case ?MODULE:get(Store, Root) of
         undefined ->
             AccIn;
-
         Page ->
             Low = bondy_mst_page:low(Page),
             AccOut = fold_descendants(Store, Low, Fun, AccIn),

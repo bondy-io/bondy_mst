@@ -1,22 +1,7 @@
 %% =============================================================================
-%%  bondy_mst_sup.erl -
-%%
-%%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
-%%
-%%  Licensed under the Apache License, Version 2.0 (the "License");
-%%  you may not use this file except in compliance with the License.
-%%  You may obtain a copy of the License at
-%%
-%%     http://www.apache.org/licenses/LICENSE-2.0
-%%
-%%  Unless required by applicable law or agreed to in writing, software
-%%  distributed under the License is distributed on an "AS IS" BASIS,
-%%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-%%  See the License for the specific language governing permissions and
-%%  limitations under the License.
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
-
-
 
 -module(bondy_mst_sup).
 
@@ -33,33 +18,21 @@
 
 -define(SERVER, ?MODULE).
 
-
-
-
 %% =============================================================================
 %% API
 %% =============================================================================
-
-
 
 start_link() ->
     case supervisor:start_link({local, ?SERVER}, ?MODULE, []) of
         {ok, _} = OK ->
             OK;
-
         Error ->
             Error
     end.
 
-
-
-
 %% =============================================================================
 %% SUPERVISOR CALLBACKS
 %% =============================================================================
-
-
-
 
 init([]) ->
     ok = bondy_mst_config:init(),
@@ -68,27 +41,15 @@ init([]) ->
         intensity => 5,
         period => 10
     },
-    ChildSpecs = [],
+    ChildSpecs = [
+        #{
+            id => bondy_oplog_sup,
+            start => {bondy_oplog_sup, start_link, []},
+            restart => permanent,
+            shutdown => infinity,
+            type => supervisor,
+            modules => [bondy_oplog_sup]
+        }
+    ],
 
     {ok, {SupFlags, ChildSpecs}}.
-
-%% maybe_append_rocksdb_manager(Acc) ->
-%%     case bondy_mst_config:get([store, rocksdb], []) of
-%%         [] ->
-%%             Acc;
-%%         Opts ->
-%%             [
-%%                 #{
-%%                     id => bondy_mst_rocksdb_manager,
-%%                     start => {
-%%                         bondy_mst_rocksdb_manager,
-%%                         start_link,
-%%                         [Opts]
-%%                     },
-%%                     restart => permanent,
-%%                     shutdown => 5000,
-%%                     type => worker,
-%%                     modules => [bondy_mst_rocksdb_manager]
-%%                 } | Acc
-%%             ]
-%%     end.

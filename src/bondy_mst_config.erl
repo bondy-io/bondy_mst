@@ -1,21 +1,7 @@
 %% =============================================================================
-%%  bondy_mst_config.erl -
-%%
-%%  Copyright (c) 2016-2021 Leapsight. All rights reserved.
-%%
-%%  Licensed under the Apache License, Version 2.0 (the "License");
-%%  you may not use this file except in compliance with the License.
-%%  You may obtain a copy of the License at
-%%
-%%     http://www.apache.org/licenses/LICENSE-2.0
-%%
-%%  Unless required by applicable law or agreed to in writing, software
-%%  distributed under the License is distributed on an "AS IS" BASIS,
-%%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-%%  See the License for the specific language governing permissions and
-%%  limitations under the License.
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
-
 
 -module(bondy_mst_config).
 -behaviour(app_config).
@@ -25,15 +11,12 @@
 
 -define(APP, bondy_mst).
 -define(ERROR, '$error_badarg').
--define(FUN_WITH_ARITY(N),
-    fun
-        ({Mod, Fun}) when is_atom(Mod); is_atom(Fun) ->
-            erlang:function_exported(Mod, Fun, N);
-        (_) ->
-            false
-    end
-).
-
+-define(FUN_WITH_ARITY(N), fun
+    ({Mod, Fun}) when is_atom(Mod); is_atom(Fun) ->
+        erlang:function_exported(Mod, Fun, N);
+    (_) ->
+        false
+end).
 
 -export([get/1]).
 -export([get/2]).
@@ -44,13 +27,9 @@
 
 -compile({no_auto_import, [get/1]}).
 
-
-
 %% =============================================================================
 %% API
 %% =============================================================================
-
-
 
 ?DOC("Initialises bondy_mst configuration").
 init() ->
@@ -60,28 +39,20 @@ init() ->
     }),
     ok.
 
-
-
 -spec get(Key :: list() | atom() | tuple()) -> term().
 
 get(Key) ->
     app_config:get(?APP, Key).
-
-
 
 -spec get(Key :: list() | atom() | tuple(), Default :: term()) -> term().
 
 get(Key, Default) ->
     app_config:get(?APP, Key, Default).
 
-
-
 -spec set(Key :: key_value:key() | tuple(), Value :: term()) -> ok.
 
 set(Key, Value) ->
     app_config:set(?APP, Key, Value).
-
-
 
 -spec will_set(Key :: key_value:key(), Value :: any()) ->
     ok | {ok, NewValue :: any()} | {error, Reason :: any()}.
@@ -89,19 +60,11 @@ set(Key, Value) ->
 will_set(_, _) ->
     ok.
 
-
-
 -spec on_set(Key :: key_value:key(), Value :: any()) -> ok.
 
 on_set(_, _) ->
     ok.
 
-
-
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
-
-
-
-

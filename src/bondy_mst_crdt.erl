@@ -1,23 +1,6 @@
 %% =============================================================================
-%%  bondy_mst_crdt.erl -
-%%
-%%  Copyright (c) 2023-2025 Leapsight. All rights reserved.
-%%
-%%  Licensed under the Apache License, Version 2.0 (the "License");
-%%  you may not use this file except in compliance with the License.
-%%  You may obtain a copy of the License at
-%%
-%%     http://www.apache.org/licenses/LICENSE-2.0
-%%
-%%  Unless required by applicable law or agreed to in writing, software
-%%  distributed under the License is distributed on an "AS IS" BASIS,
-%%  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-%%  See the License for the specific language governing permissions and
-%%  limitations under the License.
-%%
-%%  This module contains a port the code written in Elixir for the
-%%  simulations shown in the paper: Merkle Search Trees: Efficient State-Based
-%%  CRDTs in Open Networks by Alex Auvolat, François Taïani
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
 
 -module(bondy_mst_crdt).
@@ -113,119 +96,121 @@ following callbacks:
 
 -record(?MODULE, {
     %% Normally node() but it can be a binary when testing
-    node_id                         ::  node_id(),
-    callback_mod                    ::  module(),
-    callback_args                   ::  list(),
-    tree                            ::  bondy_mst:t(),
-    consistency_model               ::  consistency_model(),
+    node_id :: node_id(),
+    callback_mod :: module(),
+    callback_args :: list(),
+    tree :: bondy_mst:t(),
+    consistency_model :: consistency_model(),
     %% Set it to false if you are using a peer service that handles gossip
     %% When true, every gossip message received will be broadcasted again
-    fwd_bcast = false               ::  boolean(),
+    fwd_bcast = false :: boolean(),
     %% The interval, measured in milliseconds, between two fwd_bcasts.
-    fwd_bcast_interval = 1000       ::  integer(),
-    last_fwd_bcast_time             ::  integer(),
+    fwd_bcast_interval = 1000 :: integer(),
+    last_fwd_bcast_time :: integer(),
     %% The maximum number of concurrent merges.
     %% Bounds the size of 'merge_buffer'.
-    max_merges = 1                  ::  pos_integer(),
+    max_merges = 1 :: pos_integer(),
     %% The maximum number of concurrent merges having the same root.
     %% This occurs when considering merging with N peers, as two or more of
     %% them might be in sync and hence having the same root hash.
-    max_merges_per_root = 1         ::  pos_integer(),
+    max_merges_per_root = 1 :: pos_integer(),
     %% max_versions
     %% The max number of versions to keep i.e. the version will not be eligible
     %% for garbage collection.
-    max_versions = 10               ::  pos_integer(),
+    max_versions = 10 :: pos_integer(),
     %% version_ttl
     %% The time, measured in milliseconds, after which a version becomes
     %% eligible for garbage collection.
-    version_ttl                     ::  pos_integer(),
+    version_ttl :: pos_integer(),
     %% history
     %% This map's size is bounded by max_versions.
-    history = #{}                   ::  #{epoch() => hash()},
+    history = #{} :: #{epoch() => hash()},
     %% merge_buffer
     %% A buffer of the remote MSTs we are merging with.
     %% Its size is bounded by max_merges.
-    merge_buffer = #{}              ::  #{node_id() => hash()},
+    merge_buffer = #{} :: #{node_id() => hash()},
     %% A queue containing the latest gossiped roots from peers i.e. candidates
     %% for merges.
     %% It colesces base on peer and thus its size is naturally bounded to the
     %% number of peers in the CRDT.
-    merge_backlog                   ::  bondy_mst_coalescing_queue:t(),
+    merge_backlog :: bondy_mst_coalescing_queue:t(),
     %% A queue of delayed broadcasts.
-    bcast_backlog                   ::  bondy_mst_coalescing_queue:t()
+    bcast_backlog :: bondy_mst_coalescing_queue:t()
 }).
 
 %% The payload use for broadcasting changes to peers in the CRDT.
 %% key and value can be 'undefined' when triggering an exchange.
 -record(gossip, {
-    from                    ::  node_id(),
-    root                    ::  hash(),
-    key                     ::  any(),
-    value                   ::  any()
+    from :: node_id(),
+    root :: hash(),
+    key :: any(),
+    value :: any()
 }).
 
 -record(get, {
-    from                    ::  node_id(),
-    root                    ::  hash(),
-    set                     ::  sets:set(hash())
+    from :: node_id(),
+    root :: hash(),
+    set :: sets:set(hash())
 }).
 
 -record(put, {
-    from                    ::  node_id(),
-    map                     ::  #{hash() := bondy_mst_page:t()}
+    from :: node_id(),
+    map :: #{hash() := bondy_mst_page:t()}
 }).
 
 -record(missing, {
-    from                    ::  node_id()
+    from :: node_id()
 }).
 
-
--type t()                   ::  #?MODULE{}.
-
+-type t() :: #?MODULE{}.
 
 %% Normally a node() but we allow a binary for simulation purposes
--type node_id()             ::  node() | binary().
--type consistency_model()   ::  causal | eventual.
--type opts()                ::  [bondy_mst:opt() | opt()]
-                                | opts_map().
--type opt()                 ::  bondy_mst:opt()
-                                | {max_merges, pos_integer()}
-                                | {max_merges_per_root, pos_integer()}
-                                | {callback_mod, module()}
-                                | {callback_args, list()}.
--type opts_map()            ::  #{
-                                %% bondy_mst
-                                store => bondy_mst_store:t(),
-                                hash_algorithm => bondy_mst:hash_algorithm(),
-                                store_opts => bondy_mst_store:opts(),
-                                merger => bondy_mst:merger(),
-                                comparator => bondy_mst:comparator(),
-                                %%
-                                max_merges => pos_integer(),
-                                max_merges_per_root => pos_integer(),
-                                callback_mod => module(),
-                                callback_args => list()
-                            }.
--type gossip()              ::  #gossip{}.
--type get_cmd()             ::  #get{}.
--type missing_cmd()         ::  #missing{}.
--type put_cmd()             ::  #put{}.
--type message()             ::  gossip()
-                                | get_cmd()
-                                | put_cmd()
-                                | missing_cmd().
--type gossip_data()         ::  #{
-                                    from => node_id(),
-                                    root => hash(),
-                                    key => undefined,
-                                    value => undefined
-                                }
-                                | #{
-                                    from => node_id(),
-                                    root => hash(),
-                                    key => any(),
-                                    value => any()
-                                }.
+-type node_id() :: node() | binary().
+-type consistency_model() :: causal | eventual.
+-type opts() ::
+    [bondy_mst:opt() | opt()]
+    | opts_map().
+-type opt() ::
+    bondy_mst:opt()
+    | {max_merges, pos_integer()}
+    | {max_merges_per_root, pos_integer()}
+    | {callback_mod, module()}
+    | {callback_args, list()}.
+-type opts_map() :: #{
+    %% bondy_mst
+    store => bondy_mst_store:t(),
+    hash_algorithm => bondy_mst:hash_algorithm(),
+    store_opts => bondy_mst_store:opts(),
+    merger => bondy_mst:merger(),
+    comparator => bondy_mst:comparator(),
+    %%
+    max_merges => pos_integer(),
+    max_merges_per_root => pos_integer(),
+    callback_mod => module(),
+    callback_args => list()
+}.
+-type gossip() :: #gossip{}.
+-type get_cmd() :: #get{}.
+-type missing_cmd() :: #missing{}.
+-type put_cmd() :: #put{}.
+-type message() ::
+    gossip()
+    | get_cmd()
+    | put_cmd()
+    | missing_cmd().
+-type gossip_data() ::
+    #{
+        from => node_id(),
+        root => hash(),
+        key => undefined,
+        value => undefined
+    }
+    | #{
+        from => node_id(),
+        root => hash(),
+        key => any(),
+        value => any()
+    }.
 -export_type([t/0]).
 -export_type([gossip/0]).
 -export_type([node_id/0]).
@@ -250,57 +235,48 @@ following callbacks:
 -export([tree/1]).
 -export([trigger/2]).
 
-
-
-
-
 %% =============================================================================
 %% TELEMETRY EVENTS
 %% =============================================================================
 
-
--telemetry_event #{
+-telemetry_event(#{
     event => [?MODULE, broadcast, sent],
     description =>
-    <<"Emitted when the CRDT broadcast's a gossip message">>,
+        <<"Emitted when the CRDT broadcast's a gossip message">>,
     measurements => <<
-    "#{system_time => non_neg_integer(), "
-    "monotonic_time => non_neg_integer()}"
+        "#{system_time => non_neg_integer(), "
+        "monotonic_time => non_neg_integer()}"
     >>,
     metadata => <<"#{from => node_id()}">>
-}.
+}).
 
--telemetry_event #{
+-telemetry_event(#{
     event => [?MODULE, broadcast, recv],
     description =>
-    <<"Emitted when the CRDT received a gossip message">>,
+        <<"Emitted when the CRDT received a gossip message">>,
     measurements => <<
-    "#{system_time => non_neg_integer(), "
-    "monotonic_time => non_neg_integer()"
-    "count => 1, bytes => integer()"
-    "}"
+        "#{system_time => non_neg_integer(), "
+        "monotonic_time => non_neg_integer()"
+        "count => 1, bytes => integer()"
+        "}"
     >>,
     metadata => <<"#{from => node_id()}">>
-}.
+}).
 
-
--telemetry_event #{
+-telemetry_event(#{
     event => [?MODULE, merge, abandoned],
     description =>
-    <<"Emitted when the CRDT received a gossip message">>,
+        <<"Emitted when the CRDT received a gossip message">>,
     measurements => <<
-    "#{system_time => non_neg_integer(), "
-    "monotonic_time => non_neg_integer()}"
+        "#{system_time => non_neg_integer(), "
+        "monotonic_time => non_neg_integer()}"
     >>,
     metadata => <<"#{from => node_id()}">>
-}.
-
-
+}).
 
 %% =============================================================================
 %% CALLBACKS
 %% =============================================================================
-
 
 ?DOC("""
 Called when this module wants to send a message to a peer.
@@ -325,7 +301,6 @@ send(Peer, Msg) ->
 """).
 -callback send(Peer :: node_id(), message()) -> ok | {error, any()}.
 
-
 ?DOC("""
 Whenever this module wants to send a gossip message it will call
 `Module:broadcast/1`.
@@ -342,25 +317,23 @@ broadcast(Gossip) ->
 """).
 -callback broadcast(Gossip :: gossip()) -> ok | {error, any()}.
 
-
 ?DOC("""
 Called when a merge exchange has finished.
 """).
 -callback on_merge(Peer :: node_id()) -> ok.
 
 %% Extended callbacks (when using callback_args)
--callback send(ExtraArg :: term(), Peer :: node_id(), message()) -> ok | {error, any()}.
--callback broadcast(ExtraArg :: term(), Gossip :: gossip()) -> ok | {error, any()}.
+-callback send(ExtraArg :: term(), Peer :: node_id(), message()) ->
+    ok | {error, any()}.
+-callback broadcast(ExtraArg :: term(), Gossip :: gossip()) ->
+    ok | {error, any()}.
 -callback on_merge(ExtraArg :: term(), Peer :: node_id()) -> ok.
 
 -optional_callbacks([on_merge/1, send/3, broadcast/2, on_merge/2]).
 
-
-
 %% =============================================================================
 %% API
 %% =============================================================================
-
 
 ?DOC("""
 Cretes a new MST-based CRDT.
@@ -396,9 +369,9 @@ which a version becomes eligible for garbage collection. Default is `60000`
 
 new(NodeId, Opts) when is_list(Opts) ->
     new(NodeId, maps:from_list(Opts));
-
 new(NodeId, Opts0) when
-(is_atom(NodeId) orelse is_binary(NodeId)) andalso is_map(Opts0) ->
+    (is_atom(NodeId) orelse is_binary(NodeId)) andalso is_map(Opts0)
+->
     %% Configure the tree
     TreeOpts = maps:with([store, store_opts, merger, comparator], Opts0),
     Tree = bondy_mst:new(TreeOpts),
@@ -427,8 +400,6 @@ new(NodeId, Opts0) when
         bcast_backlog = bondy_mst_coalescing_queue:new()
     }.
 
-
-
 ?DOC("""
 Returns the grove's local `node_id`.
 """).
@@ -436,7 +407,6 @@ Returns the grove's local `node_id`.
 
 node_id(#?MODULE{node_id = Val}) ->
     Val.
-
 
 ?DOC("""
 Returns the grove's local tree.
@@ -446,11 +416,9 @@ Returns the grove's local tree.
 tree(#?MODULE{tree = Tree}) ->
     Tree.
 
-
 %% =============================================================================
 %% API: TREE API
 %% =============================================================================
-
 
 ?DOC("""
 Returns the root of the grove's local tree.
@@ -459,7 +427,6 @@ Returns the root of the grove's local tree.
 
 root(#?MODULE{tree = Tree}) ->
     bondy_mst:root(Tree).
-
 
 ?DOC("""
 Calls `bondy_mst:put/3` on the local tree.
@@ -475,7 +442,6 @@ possibly trigger an exchange.
 
 put(CRDT, Key, Value) ->
     put(CRDT, Key, Value, #{}).
-
 
 ?DOC("""
 Calls `bondy_mst:put/3` on the local tree and if the operation changed
@@ -525,14 +491,11 @@ put(CRDT0, Key, Value, Opts) ->
                     value = Value
                 },
                 broadcast(CRDT, Gossip);
-
             _ ->
                 CRDT
         end
-
     end,
     bondy_mst_store:transaction(Store, Fun).
-
 
 ?DOC("""
 Triggers a garbage collection.
@@ -544,20 +507,19 @@ reached.
 gc(#?MODULE{} = CRDT) ->
     gc(CRDT, keep_roots(CRDT)).
 
-
 ?DOC("""
 Triggers a garbage collection overriding the versions to keep.
 Garbage collection removes all pages that are not descendants of either the
 current root or the roots in `KeepRoots`.
 """).
--spec gc(t(), KeepRoots :: [binary()]) -> t();
-        (t(), Epoch :: integer()) -> t().
+-spec gc
+    (t(), KeepRoots :: [binary()]) -> t();
+    (t(), Epoch :: integer()) -> t().
 
 gc(#?MODULE{} = CRDT, Arg) when is_list(Arg) orelse is_integer(Arg) ->
     %% bondy_mst:gc will add the current root when is_list(Arg)
     Tree = bondy_mst:gc(CRDT#?MODULE.tree, Arg),
     CRDT#?MODULE{tree = Tree}.
-
 
 ?DOC("""
 Returns the list of peers that have ongoing merges with this node.
@@ -566,7 +528,6 @@ Returns the list of peers that have ongoing merges with this node.
 
 merges(#?MODULE{merge_buffer = Merges}) ->
     maps:keys(Merges).
-
 
 ?DOC("""
 Cancels an ongoing merge (if it exists for peer `Peer`).
@@ -579,13 +540,9 @@ Cancelled merge pages will be purged on the next garbage collection run.
 cancel_merge(#?MODULE{merge_buffer = Merges} = CRDT, Peer) ->
     CRDT#?MODULE{merge_buffer = maps:without([Peer], Merges)}.
 
-
-
 %% =============================================================================
 %% API: ANTI-ENTROPY EXCHANGE PROTOCOL
 %% =============================================================================
-
-
 
 ?DOC("""
 Broadcasts all gossip messages in the backlog.
@@ -597,7 +554,6 @@ broadcast_pending(#?MODULE{} = CRDT) ->
     Pred = fun({_, Time}) -> LastTime < Time end,
     broadcast_pending(CRDT, Pred).
 
-
 ?DOC("""
 Triggers a full merge by sending the local tree's root to `Peer`.
 The exchange might not occur if Peer has reached its `max_merges`.
@@ -606,7 +562,6 @@ The exchange might not occur if Peer has reached its `max_merges`.
 
 trigger(#?MODULE{node_id = Peer}, Peer) ->
     ok;
-
 trigger(#?MODULE{} = CRDT, Peer) when is_atom(Peer) ->
     Event = #gossip{
         from = CRDT#?MODULE.node_id,
@@ -615,7 +570,6 @@ trigger(#?MODULE{} = CRDT, Peer) when is_atom(Peer) ->
         value = undefined
     },
     call_callback(CRDT, send, [Peer, Event]).
-
 
 ?DOC("""
 Returns a map with the contents of a `gossip()` message.
@@ -638,7 +592,6 @@ Creates a gossip message.
 gossip_message(Peer, Root) ->
     gossip_message(Peer, Root, undefined, undefined).
 
-
 ?DOC("""
 Creates a gossip message.
 """).
@@ -652,7 +605,6 @@ gossip_message(Peer, Root, Key, Value) ->
         value = Value
     }.
 
-
 ?DOC("""
 Returns `true` if `PeerRoot` is not contained in the tree.
 """).
@@ -665,12 +617,10 @@ is_stale(#?MODULE{} = CRDT, PeerRoot) ->
     case Root == PeerRoot of
         true ->
             false;
-
         false ->
             MissingSet = bondy_mst:missing_set(Tree, PeerRoot),
             not sets:is_empty(MissingSet)
     end.
-
 
 ?DOC("""
 Call this function when your node receives a message or broadcast from a
@@ -701,12 +651,10 @@ handle(CRDT0, #gossip{} = Gossip) ->
                 peer => Peer
             }),
             CRDT0;
-
         false when Key == undefined andalso Value == undefined ->
             %% This is a full merge request, so slways try a merge regardless
             %% of consistency model
             maybe_merge(CRDT0, Peer, PeerRoot);
-
         false ->
             %% We insert the broadcasted change and get the new root
             Tree1 = bondy_mst:put(Tree0, Key, Value),
@@ -724,7 +672,6 @@ handle(CRDT0, #gossip{} = Gossip) ->
                         true ->
                             %% We have missing data
                             maybe_merge(CRDT3, Peer, PeerRoot);
-
                         false ->
                             ?LOG_DEBUG(#{
                                 message => <<
@@ -735,21 +682,17 @@ handle(CRDT0, #gossip{} = Gossip) ->
                             }),
                             CRDT3
                     end;
-
                 true when Model == eventual ->
                     %% We skip a full merge
                     cancel_merges(CRDT1, NewRoot);
-
                 false when Model == causal ->
                     %% We have missing data, so we try do a full merge
                     maybe_merge(CRDT1, Peer, PeerRoot);
-
                 false when Model == eventual ->
                     %% We skip a full merge
                     CRDT1
             end
     end;
-
 handle(CRDT, #get{from = Peer, root = PeerRoot, set = Set}) ->
     ?LOG_DEBUG(#{
         message => <<"Received GET message">>,
@@ -780,7 +723,6 @@ handle(CRDT, #get{from = Peer, root = PeerRoot, set = Set}) ->
                 ),
                 Msg = #put{from = CRDT#?MODULE.node_id, map = Map},
                 call_callback(CRDT, send, [Peer, Msg]);
-
             false ->
                 %% We don't have all the pages, we reply a missing message
                 Msg = #missing{from = CRDT#?MODULE.node_id},
@@ -790,13 +732,11 @@ handle(CRDT, #get{from = Peer, root = PeerRoot, set = Set}) ->
     case PeerRoot == bondy_mst:root(Tree) of
         true ->
             CRDT;
-
         false ->
             %% TODO split this into a separate action executed by the wrapping
             %% server, so that the GET can be handled concurrently
             maybe_merge(CRDT, Peer, PeerRoot)
     end;
-
 handle(CRDT, #put{from = Peer, map = Map}) ->
     case maps:is_key(Peer, CRDT#?MODULE.merge_buffer) of
         true ->
@@ -813,8 +753,8 @@ handle(CRDT, #put{from = Peer, map = Map}) ->
                     %% A difference might occur when the peer runs a different
                     %% implementation or when is using a different hashing
                     %% algorithm, in which case we fail.
-                    Hash0 == Hash1
-                        orelse error({inconsistency, Hash0, Page, Hash1}),
+                    Hash0 == Hash1 orelse
+                        error({inconsistency, Hash0, Page, Hash1}),
 
                     Acc
                 end,
@@ -824,7 +764,6 @@ handle(CRDT, #put{from = Peer, map = Map}) ->
             %% TODO split this into a separate action executed by the wrapping
             %% server, so that the GET can be handled concurrently
             merge(CRDT#?MODULE{tree = Tree}, Peer);
-
         false ->
             ?LOG_DEBUG(#{
                 message => <<
@@ -837,7 +776,6 @@ handle(CRDT, #put{from = Peer, map = Map}) ->
             %% from the merge buffer?
             CRDT
     end;
-
 handle(CRDT, #missing{from = Peer}) ->
     case maps:take(Peer, CRDT#?MODULE.merge_buffer) of
         {_, Merges} ->
@@ -848,31 +786,25 @@ handle(CRDT, #missing{from = Peer}) ->
                 #{peer => Peer, node => CRDT#?MODULE.node_id}
             ),
             CRDT#?MODULE{merge_buffer = Merges};
-
         error ->
             CRDT
     end;
-
 handle(_CRDT, Msg) ->
     error({unknown_event, Msg}).
-
-
-
 
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
 
-
 %% @private
 validate_callback_mod(Opts) ->
     CallbackMod = maps:get(callback_mod, Opts),
 
-    is_atom(CallbackMod)
-        orelse error({badarg, [{callback_mod, CallbackMod}]}),
+    is_atom(CallbackMod) orelse
+        error({badarg, [{callback_mod, CallbackMod}]}),
 
-    bondy_mst_utils:implements_behaviour(CallbackMod, ?MODULE)
-        orelse error(
+    bondy_mst_utils:implements_behaviour(CallbackMod, ?MODULE) orelse
+        error(
             io_lib:format(
                 "Expected ~p to implement behaviour ~p",
                 [CallbackMod, ?MODULE]
@@ -880,18 +812,19 @@ validate_callback_mod(Opts) ->
         ),
     CallbackMod.
 
-
 %% @private
-call_callback(#?MODULE{callback_mod = CallbackMod, callback_args = ExtraArgs}, Function, Args) ->
+call_callback(
+    #?MODULE{callback_mod = CallbackMod, callback_args = ExtraArgs},
+    Function,
+    Args
+) ->
     erlang:apply(CallbackMod, Function, ExtraArgs ++ Args).
-
 
 %% @private
 -spec maybe_broadcast(t(), gossip()) -> t().
 
 maybe_broadcast(#?MODULE{fwd_bcast = false} = CRDT, _) ->
     CRDT;
-
 maybe_broadcast(CRDT0, #gossip{key = undefined, value = undefined} = Gossip) ->
     Now = erlang:monotonic_time(),
     Elapsed = elapsed(Now, CRDT0#?MODULE.last_fwd_bcast_time),
@@ -902,7 +835,6 @@ maybe_broadcast(CRDT0, #gossip{key = undefined, value = undefined} = Gossip) ->
     case Elapsed >= CRDT#?MODULE.fwd_bcast_interval of
         true ->
             broadcast(CRDT, Gossip);
-
         false ->
             %% Delay broadcast, coalescing by Peer
             Backlog = bondy_mst_coalescing_queue:in(
@@ -912,12 +844,10 @@ maybe_broadcast(CRDT0, #gossip{key = undefined, value = undefined} = Gossip) ->
             ),
             CRDT#?MODULE{bcast_backlog = Backlog}
     end;
-
 maybe_broadcast(CRDT0, Gossip) ->
     %% We make sure we broadcast pending gossip messages first
     CRDT = broadcast_pending(CRDT0),
     broadcast(CRDT, Gossip).
-
 
 %% @private
 broadcast(CRDT0, Gossip) ->
@@ -929,7 +859,6 @@ broadcast(CRDT0, Gossip) ->
                 #{from => CRDT0#?MODULE.node_id}
             ),
             CRDT0#?MODULE{last_fwd_bcast_time = erlang:monotonic_time()};
-
         {error, Reason} ->
             ?LOG_ERROR(#{
                 message => <<"Error while broadcasting gossip message">>,
@@ -939,7 +868,6 @@ broadcast(CRDT0, Gossip) ->
             CRDT0
     end.
 
-
 %% private
 broadcast_pending(#?MODULE{} = CRDT, Pred) when is_function(Pred, 1) ->
     B0 = CRDT#?MODULE.bcast_backlog,
@@ -947,12 +875,10 @@ broadcast_pending(#?MODULE{} = CRDT, Pred) when is_function(Pred, 1) ->
     case bondy_mst_coalescing_queue:out_when(B0, Pred) of
         {empty, B0} ->
             CRDT;
-
         {{value, {Gossip, _Time}}, B1} ->
             _ = broadcast(CRDT, Gossip),
             broadcast_pending(CRDT#?MODULE{bcast_backlog = B1}, Pred)
     end.
-
 
 %% @private
 -spec maybe_merge(t(), node_id(), hash() | undefined) -> t().
@@ -961,7 +887,6 @@ maybe_merge(#?MODULE{} = CRDT, Peer, undefined) ->
     %% Peer is empty, so we trigger an exchange in the other direction
     ok = trigger(CRDT, Peer),
     CRDT;
-
 maybe_merge(#?MODULE{} = CRDT0, Peer, PeerRoot) ->
     Max = CRDT0#?MODULE.max_merges,
     MaxSame = CRDT0#?MODULE.max_merges_per_root,
@@ -981,7 +906,6 @@ maybe_merge(#?MODULE{} = CRDT0, Peer, PeerRoot) ->
                 max_merges => {Max, MaxSame}
             }),
             merge(CRDT, Peer);
-
         false ->
             ?LOG_DEBUG(#{
                 message => <<
@@ -994,21 +918,18 @@ maybe_merge(#?MODULE{} = CRDT0, Peer, PeerRoot) ->
             CRDT0
     end.
 
-
 %% @private
 count_same_merges(Merges, Root) ->
-     maps:fold(
+    maps:fold(
         fun
             (_, V, Acc) when V == Root ->
                 Acc + 1;
-
             (_, _, Acc) ->
                 Acc
         end,
         0,
         Merges
     ).
-
 
 %% @private
 %% This is called directly only when receiving a PUT. Otherwise it is called
@@ -1036,7 +957,6 @@ merge(CRDT0, Peer) ->
             CRDT = do_merge(CRDT0, Peer, PeerRoot),
             ok = on_merge(CRDT, Peer),
             CRDT;
-
         false ->
             %% We still have missing pages, so we request them and keep the
             %% remote reference in a buffer until we receive those pages from
@@ -1056,7 +976,6 @@ merge(CRDT0, Peer) ->
             CRDT0
     end.
 
-
 %% @private
 do_merge(CRDT0, Peer, PeerRoot) ->
     Tree0 = CRDT0#?MODULE.tree,
@@ -1064,7 +983,6 @@ do_merge(CRDT0, Peer, PeerRoot) ->
 
     Tree1 = bondy_mst:merge(Tree0, Tree0, PeerRoot),
     NewRoot = bondy_mst:root(Tree1),
-
 
     %% Post-condition
     true = sets:is_empty(bondy_mst:missing_set(Tree1, NewRoot)),
@@ -1094,16 +1012,13 @@ do_merge(CRDT0, Peer, PeerRoot) ->
                         value = undefined
                     },
                     call_callback(CRDT, send, [Peer, Event]);
-
                 false ->
                     ok
             end,
             CRDT;
-
         false ->
             CRDT1
     end.
-
 
 %% @private
 on_merge(CRDT0, Peer) ->
@@ -1132,17 +1047,14 @@ on_merge(CRDT0, Peer) ->
             })
     end.
 
-
 %% @private
 maybe_gc(CRDT) ->
     %% We preserve all roots being merged and all history roots
     gc(CRDT, keep_roots(CRDT)).
 
-
 %% @private
 encode_hash(undefined) -> undefined;
 encode_hash(Bin) -> binary:encode_hex(Bin).
-
 
 %% @private
 cancel_merges(CRDT, NewRoot) ->
@@ -1160,7 +1072,6 @@ cancel_merges(CRDT, NewRoot) ->
 
     CRDT#?MODULE{merge_buffer = Merges, merge_backlog = Backlog}.
 
-
 %% @private
 add_history(#?MODULE{} = CRDT, Root) ->
     Epoch = erlang:monotonic_time(),
@@ -1176,13 +1087,11 @@ add_history(#?MODULE{} = CRDT, Root) ->
 
     CRDT#?MODULE{history = H}.
 
-
 %% @private
 keep_roots(#?MODULE{} = CRDT) ->
     MergeRoots = maps:values(CRDT#?MODULE.merge_buffer),
     HistoryRoots = maps:values(CRDT#?MODULE.history),
     MergeRoots ++ HistoryRoots.
-
 
 %% @private
 elapsed(Start, Stop) ->
@@ -1191,6 +1100,3 @@ elapsed(Start, Stop) ->
 %% @private
 elapsed(Start, Stop, Unit) ->
     erlang:convert_time_unit(Start - Stop, native, Unit).
-
-
-
