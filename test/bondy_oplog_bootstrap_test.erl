@@ -36,7 +36,7 @@ bootstrap_test_() ->
 %% B's post-snapshot events. Final A query == final B query.
 bootstrap_from_peer_with_snapshot() ->
     {A, B} = mk_pair(counter_opts()),
-    %% Phase 1: append a batch and compact on B.
+    %% Step 1: append a batch and compact on B.
     [bondy_oplog:append(B, {inc, 1}) || _ <- lists:seq(1, 10)],
     LocalRoot = bondy_oplog:root_hash(B),
     bondy_oplog_peer_state:record_sync_complete(
@@ -44,7 +44,7 @@ bootstrap_from_peer_with_snapshot() ->
     ),
     bondy_oplog_peer_state:sync(),
     {ok, {compacted, _, 10}} = bondy_oplog:compact(B),
-    %% Phase 2: more events, NOT compacted.
+    %% Step 2: more events, NOT compacted.
     [bondy_oplog:append(B, {inc, 5}) || _ <- lists:seq(1, 3)],
     BValue = bondy_oplog:query(B, value),
     %% A starts fresh; bootstrap from B.
