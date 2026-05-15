@@ -18,15 +18,18 @@ Node-shared per-instance read-snapshot registry.
 A single ETS `set` table per node, keyed by `instance_id()`, holding
 the latest read-relevant state of every running instance:
 
-| Field         | Refreshed on |
+| Field          | Refreshed on |
 |---|---|
-| `pid`         | `init/terminate` of the instance gen_server |
-| `origin`      | `init` (immutable thereafter) |
-| `mst`         | every state-mutating handle_call |
-| `watermark`   | compact / load_snapshot |
-| `snapshot`    | compact / load_snapshot |
-| `crdt_module` | `init` (immutable thereafter) |
-| `live_size`   | every state-mutating handle_call |
+| `instance_pid` | `init/terminate` of the instance gen_server |
+| `origin`       | `init` (immutable thereafter) |
+| `mst`          | every state-mutating handle_call |
+| `watermark`    | compact / load_snapshot |
+| `snapshot`     | compact / load_snapshot |
+| `crdt_module`  | `init` (immutable thereafter) |
+| `live_size`    | every state-mutating handle_call |
+| `wal_pid`      | `bondy_oplog_wal:init/1` |
+| `applier_pid`  | `bondy_oplog_applier:init/1` |
+| `sup_pid`      | `bondy_oplog_instance_dyn_sup:start_instance/2` |
 
 ## Why ETS, not persistent_term
 
@@ -52,26 +55,42 @@ table's lifecycle tied to a supervisor child.
 
 -record(entry, {
     instance_id :: instance_id(),
-    pid :: pid(),
+    instance_pid :: pid(),
     origin :: bondy_oplog_origin:t(),
     mst :: bondy_mst:t(),
     watermark :: undefined | bondy_oplog_event:event_key(),
     snapshot :: undefined | {bondy_oplog_event:event_key(), term()},
     crdt_module :: module() | undefined,
-    live_size :: non_neg_integer()
+    live_size :: non_neg_integer(),
+    %% Filled in by `bondy_oplog_wal:init/1` after the row exists.
+    %% Stays `undefined` between an instance gen_server start and the
+    %% WAL writer's first publish, and after a one_for_all subtree
+    %% restart between the instance's init and the WAL's init.
+    wal_pid :: pid() | undefined,
+    %% Filled in by `bondy_oplog_applier:init/1` once the applier has
+    %% resolved its siblings and opened its reader.
+    applier_pid :: pid() | undefined,
+    %% Filled in by `bondy_oplog_instance_dyn_sup:start_instance/2`
+    %% after `supervisor:start_child/2` returns. Used by the dyn_sup
+    %% to make `start_instance/2` idempotent and to stop the whole
+    %% per-instance subtree on `stop_instance/1`.
+    sup_pid :: pid() | undefined
 }).
 
 -record(state, {}).
 
 -type entry() :: #{
     instance_id := instance_id(),
-    pid := pid(),
+    instance_pid := pid(),
     origin := bondy_oplog_origin:t(),
     mst := bondy_mst:t(),
     watermark := undefined | bondy_oplog_event:event_key(),
     snapshot := undefined | {bondy_oplog_event:event_key(), term()},
     crdt_module := module() | undefined,
-    live_size := non_neg_integer()
+    live_size := non_neg_integer(),
+    wal_pid => pid() | undefined,
+    applier_pid => pid() | undefined,
+    sup_pid => pid() | undefined
 }.
 
 -export_type([entry/0]).
@@ -87,13 +106,22 @@ table's lifecycle tied to a supervisor child.
 
 %% Reads
 -export([lookup/1]).
--export([pid/1]).
+-export([instance_pid/1]).
 -export([origin/1]).
 -export([mst/1]).
 -export([watermark/1]).
 -export([snapshot/1]).
 -export([crdt_module/1]).
 -export([live_size/1]).
+-export([wal_pid/1]).
+-export([applier_pid/1]).
+-export([sup_pid/1]).
+-export([instance_id_by_sup_pid/1]).
+
+%% Sibling pid management
+-export([set_wal_pid/2]).
+-export([set_applier_pid/2]).
+-export([set_sup_pid/2]).
 
 %% gen_server callbacks
 -export([init/1]).
@@ -150,14 +178,35 @@ unregister(InstanceId) when is_binary(InstanceId) ->
     ok.
 
 ?DOC("""
-Republishes the row for an instance. Same shape as `register/1`;
-named differently for readability at call sites — `publish` is the
-hot-path operation done after every state-mutating handle_call.
+Updates the mutable per-instance fields in place (`instance_pid`,
+`mst`, `watermark`, `snapshot`, `crdt_module`, `live_size`). Called
+by the instance gen_server after every state-mutating handle_call.
+Leaves `wal_pid`, `applier_pid`, and `sup_pid` alone so a publish
+from the instance doesn't clobber a sibling's pid set independently
+by the WAL writer, applier, or dyn supervisor.
+
+If no row exists yet (e.g. the very first `init/1` call sequence),
+falls back to `register/1` so the row is created from this snapshot.
+
+`instance_pid` IS published here (it's the field this gen_server
+owns); `wal_pid`, `applier_pid`, and `sup_pid` are not — those are
+owned by other processes and updated via their dedicated setters.
 """).
 -spec publish(entry()) -> ok.
 
-publish(Entry) ->
-    register(Entry).
+publish(#{instance_id := Id} = Entry) ->
+    Updates = [
+        {#entry.instance_pid, maps:get(instance_pid, Entry)},
+        {#entry.mst, maps:get(mst, Entry)},
+        {#entry.watermark, maps:get(watermark, Entry)},
+        {#entry.snapshot, maps:get(snapshot, Entry)},
+        {#entry.crdt_module, maps:get(crdt_module, Entry)},
+        {#entry.live_size, maps:get(live_size, Entry)}
+    ],
+    case update_element_safe(Id, Updates) of
+        true -> ok;
+        false -> register(Entry)
+    end.
 
 %% =============================================================================
 %% READS
@@ -175,10 +224,10 @@ lookup(InstanceId) when is_binary(InstanceId) ->
         [] -> not_found
     end.
 
--spec pid(instance_id()) -> pid() | undefined.
+-spec instance_pid(instance_id()) -> pid() | undefined.
 
-pid(InstanceId) ->
-    field(InstanceId, #entry.pid).
+instance_pid(InstanceId) ->
+    field(InstanceId, #entry.instance_pid).
 
 -spec origin(instance_id()) -> bondy_oplog_origin:t() | undefined.
 
@@ -211,6 +260,75 @@ crdt_module(InstanceId) ->
 
 live_size(InstanceId) ->
     field(InstanceId, #entry.live_size).
+
+-spec wal_pid(instance_id()) -> pid() | undefined.
+
+wal_pid(InstanceId) ->
+    field(InstanceId, #entry.wal_pid).
+
+-spec applier_pid(instance_id()) -> pid() | undefined.
+
+applier_pid(InstanceId) ->
+    field(InstanceId, #entry.applier_pid).
+
+-spec sup_pid(instance_id()) -> pid() | undefined.
+
+sup_pid(InstanceId) ->
+    field(InstanceId, #entry.sup_pid).
+
+?DOC("""
+Reverse lookup: returns the `instance_id()` whose registry row has
+the given `sup_pid`, or `undefined`. Used by the dyn supervisor's
+`stop_instance(Pid)` path to drop the row alongside the supervisor
+child.
+""").
+-spec instance_id_by_sup_pid(pid()) -> instance_id() | undefined.
+
+instance_id_by_sup_pid(SupPid) when is_pid(SupPid) ->
+    MatchSpec = [
+        {#entry{instance_id = '$1', sup_pid = SupPid, _ = '_'},
+         [],
+         ['$1']}
+    ],
+    case ets:select(?TABLE, MatchSpec, 1) of
+        {[Id], _Cont} -> Id;
+        '$end_of_table' -> undefined;
+        _ -> undefined
+    end.
+
+?DOC("""
+Records the per-instance WAL writer pid. Called by the WAL writer's
+`init/1` after the row has been created by the instance gen_server.
+Silently returns `ok` if the row is absent (e.g. the subtree is
+shutting down) so the WAL doesn't crash on a benign race.
+""").
+-spec set_wal_pid(instance_id(), pid()) -> ok.
+
+set_wal_pid(InstanceId, Pid) when is_binary(InstanceId), is_pid(Pid) ->
+    _ = update_field(InstanceId, #entry.wal_pid, Pid),
+    ok.
+
+?DOC("""
+Records the per-instance applier pid. Same contract as
+`set_wal_pid/2`.
+""").
+-spec set_applier_pid(instance_id(), pid()) -> ok.
+
+set_applier_pid(InstanceId, Pid) when is_binary(InstanceId), is_pid(Pid) ->
+    _ = update_field(InstanceId, #entry.applier_pid, Pid),
+    ok.
+
+?DOC("""
+Records the per-instance subtree supervisor pid. Called by
+`bondy_oplog_instance_dyn_sup:start_instance/2` after the supervisor
+returns. Same tolerance as the sibling setters — a missing row is a
+benign no-op.
+""").
+-spec set_sup_pid(instance_id(), pid()) -> ok.
+
+set_sup_pid(InstanceId, Pid) when is_binary(InstanceId), is_pid(Pid) ->
+    _ = update_field(InstanceId, #entry.sup_pid, Pid),
+    ok.
 
 %% =============================================================================
 %% gen_server CALLBACKS
@@ -253,45 +371,63 @@ field(InstanceId, FieldPos) when is_binary(InstanceId) ->
     end.
 
 %% @private
-to_record(#{
-    instance_id := Id,
-    pid := Pid,
-    origin := Origin,
-    mst := MST,
-    watermark := W,
-    snapshot := S,
-    crdt_module := C,
-    live_size := L
-}) ->
+%% Wraps `ets:update_element/3` with badarg suppression so a missing
+%% row (subtree torn down, instance never registered) is treated as a
+%% benign no-op. Returns `true` on success and `false` when the row
+%% does not exist; the caller normally discards both.
+update_element_safe(Key, Updates) ->
+    try
+        ets:update_element(?TABLE, Key, Updates)
+    catch
+        error:badarg -> false
+    end.
+
+%% @private
+update_field(InstanceId, FieldPos, Value) ->
+    update_element_safe(InstanceId, [{FieldPos, Value}]).
+
+%% @private
+%% Allow the optional `wal_pid` / `applier_pid` / `sup_pid` keys to be
+%% omitted by pre-existing callers — they default to `undefined`.
+to_record(#{instance_id := Id} = M) ->
     #entry{
         instance_id = Id,
-        pid = Pid,
-        origin = Origin,
-        mst = MST,
-        watermark = W,
-        snapshot = S,
-        crdt_module = C,
-        live_size = L
+        instance_pid = maps:get(instance_pid, M),
+        origin = maps:get(origin, M),
+        mst = maps:get(mst, M),
+        watermark = maps:get(watermark, M),
+        snapshot = maps:get(snapshot, M),
+        crdt_module = maps:get(crdt_module, M),
+        live_size = maps:get(live_size, M),
+        wal_pid = maps:get(wal_pid, M, undefined),
+        applier_pid = maps:get(applier_pid, M, undefined),
+        sup_pid = maps:get(sup_pid, M, undefined)
     }.
 
 %% @private
 to_map(#entry{
     instance_id = Id,
-    pid = Pid,
+    instance_pid = InstancePid,
     origin = O,
     mst = M,
     watermark = W,
     snapshot = S,
     crdt_module = C,
-    live_size = L
+    live_size = L,
+    wal_pid = WalPid,
+    applier_pid = ApplierPid,
+    sup_pid = SupPid
 }) ->
     #{
         instance_id => Id,
-        pid => Pid,
+        instance_pid => InstancePid,
         origin => O,
         mst => M,
         watermark => W,
         snapshot => S,
         crdt_module => C,
-        live_size => L
+        live_size => L,
+        wal_pid => WalPid,
+        applier_pid => ApplierPid,
+        sup_pid => SupPid
     }.

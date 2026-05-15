@@ -303,7 +303,7 @@ encode_header(#?MODULE{
 write_and_sync(Fd, HeaderBin, Path) ->
     case prim_file:write(Fd, HeaderBin) of
         ok ->
-            case prim_file:datasync(Fd) of
+            case bondy_oplog_wal_io:datasync(Fd) of
                 ok ->
                     bondy_oplog_wal_io:fsync_dir(filename:dirname(Path));
                 {error, _} = E ->

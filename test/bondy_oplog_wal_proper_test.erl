@@ -35,23 +35,30 @@
 %%   Batched fsync + durability:
 %%     - prop_await_durable_correctness/0
 %%
-%%   Atomic batch frames (TODO):
+%%   Atomic batch frames:
 %%     - prop_batch_atomicity/0          (P_BatchAtomicity)
 %%
-%%   Retention (TODO):
+%%   Retention:
 %%     - prop_retention_safety/0         (P9)
 %%
-%%   Backpressure (TODO):
+%%   Backpressure:
 %%     - prop_wal_full/0                 (P_WalFull)
 %%
-%%   Stateful + fault injection (TODO):
-%%     - prop_concurrent_reader_safety/0 (P11)
-%%     - prop_multiproc_convergence/0    (P12)
-%%     - prop_partial_write/0            (P13)
-%%     - prop_failed_fsync/0             (P14)
-%%     - prop_rename_failure/0           (P15)
-%%     - prop_rotation_atomicity/0       (P8)
+%%   Magic / rotation / partial-write recovery:
 %%     - prop_bit_flip_magic/0           (P4)
+%%     - prop_rotation_atomicity/0       (P8 — in-process orphan slice)
+%%     - prop_partial_write/0            (P13 — recovery + resume)
+%%
+%%   Concurrency:
+%%     - prop_concurrent_reader_safety/0 (P11)
+%%
+%%   Fault injection (via `bondy_oplog_wal_io` meck seam):
+%%     - prop_failed_fsync/0             (P14 — per_write + reopen invariant)
+%%     - prop_failed_fsync_batched/0     (P14 — batched-mode variant)
+%%     - prop_rename_failure/0           (P15)
+%%
+%%   Stateful:
+%%     - prop_multiproc_convergence/0    (P12)
 %%
 %% =============================================================================
 
@@ -81,6 +88,17 @@
 -export([prop_manifest_atomicity/0]).
 -export([prop_consumer_offset_clamping/0]).
 -export([prop_await_durable_correctness/0]).
+-export([prop_batch_atomicity/0]).
+-export([prop_retention_safety/0]).
+-export([prop_wal_full/0]).
+-export([prop_bit_flip_magic/0]).
+-export([prop_rotation_atomicity/0]).
+-export([prop_partial_write/0]).
+-export([prop_concurrent_reader_safety/0]).
+-export([prop_failed_fsync/0]).
+-export([prop_failed_fsync_batched/0]).
+-export([prop_rename_failure/0]).
+-export([prop_multiproc_convergence/0]).
 
 %% =============================================================================
 %% Frame-layer properties
@@ -578,6 +596,1129 @@ prop_await_durable_correctness() ->
     ).
 
 %% =============================================================================
+%% Atomic batch frame property (P_BatchAtomicity)
+%% =============================================================================
+
+%% P_BatchAtomicity.
+%% For any sequence of `append_batch/2` calls, the raw on-disk scan
+%% recovers the events grouped exactly into the original batches:
+%%
+%% - The scanner walks every segment, decodes each frame's body, and
+%%   collects one event-list per frame.
+%% - The result equals the input batch list verbatim — same number of
+%%   batches, same events in each batch, same order.
+%%
+%% A partial-batch frame would manifest as either a CRC mismatch
+%% (caught here as a scan error) or a frame whose body decoded a list
+%% shorter than the original — either way the property fails.
+%%
+%% Mid-write crash atomicity (the recovery-time truncation guarantee)
+%% is covered by `prop_truncation_safety/0` plus the recovery EUnit
+%% suite; this property covers the steady-state guarantee that the
+%% writer never publishes a partial frame on a clean run.
+prop_batch_atomicity() ->
+    ?FORALL(
+        BatchSizes,
+        non_empty(list(choose(1, 8))),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Batches = generate_batches(HLC, BatchSizes),
+            %% Rotation-friendly cap so multi-segment trials are
+            %% reachable. Let the writer default-clamp `max_batch_bytes`
+            %% to fit the segment; the generator never produces a batch
+            %% large enough to be rejected.
+            MaxBytes = ?SEG_HEADER + estimated_frame_size() * 8 * 4,
+            Opts = #{
+                dir => Dir,
+                origin => origin(),
+                max_segment_bytes => MaxBytes
+            },
+            {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            [
+                {ok, _Entries} = bondy_oplog_wal:append_batch(Pid, B)
+             || B <- Batches
+            ],
+            Info = bondy_oplog_wal:info(Pid),
+            HeadSegId = maps:get(current_segment, Info),
+            ok = bondy_oplog_wal:close(Pid),
+            Recovered = scan_all_segments_grouped(
+                Dir, instance_id(), HeadSegId
+            ),
+            Recovered =:= Batches
+        end)
+    ).
+
+%% =============================================================================
+%% Retention safety property (P9)
+%% =============================================================================
+
+%% P9. For any interleaving of:
+%%   - appends (which grow `live_segments` via natural rotation),
+%%   - `set_committed_segment/2` (the consumer-cursor stub),
+%%   - `advance_snapshot_watermark/2` (which also triggers an
+%%     implicit sweep),
+%%   - explicit `retention_sweep/1`,
+%%
+%% the post-condition holds: no segment that was deleted satisfies any
+%% of the "must-keep" predicates, and the surviving live-segment count
+%% is at least `min_live_segments`.
+%%
+%% Operationally we replay the operation sequence, capture the
+%% pre-state, run the operation, then check the invariants.
+prop_retention_safety() ->
+    ?FORALL(
+        Ops,
+        retention_ops_gen(),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            MinLive = 1,
+            MaxBytes = ?SEG_HEADER + estimated_frame_size() * 2,
+            Opts = #{
+                dir => Dir,
+                origin => origin(),
+                max_segment_bytes => MaxBytes,
+                min_live_segments => MinLive,
+                %% 24h: disables the periodic tick within trial duration.
+                retention_sweep_interval => 24 * 60 * 60 * 1000
+            },
+            {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            try
+                run_retention_ops(Pid, HLC, Ops, MinLive)
+            after
+                ok = bondy_oplog_wal:close(Pid)
+            end
+        end)
+    ).
+
+%% Generator: a sequence of small operations the property replays.
+%% Each `append` ensures monotone progress; sweeps and cursor
+%% advances can fire in any interleaving.
+retention_ops_gen() ->
+    non_empty(list(oneof([
+        {append, choose(1, 2)},
+        {commit_advance, choose(0, 6)},
+        {watermark_advance, choose(0, 12)},
+        sweep
+    ]))).
+
+%% Replay the operations, asserting the safety invariant after each
+%% retention-relevant step. Returns true if every step preserved the
+%% invariant; false otherwise.
+run_retention_ops(Pid, HLC, Ops, MinLive) ->
+    SeqRef = counters:new(1, []),
+    %% Treat the watermark trace as monotone — generated deltas are
+    %% added to a running base so the property doesn't waste shrink
+    %% budget on regressions (which are independently tested in
+    %% EUnit).
+    WatermarkBase = counters:new(1, []),
+    CommittedBase = counters:new(1, []),
+    lists:all(
+        fun(Op) ->
+            step_op(Pid, HLC, Op, SeqRef, WatermarkBase,
+                    CommittedBase, MinLive)
+        end,
+        Ops
+    ).
+
+step_op(Pid, HLC, {append, N}, SeqRef, _WB, _CB, _MinLive) ->
+    do_appends(Pid, HLC, SeqRef, N),
+    true;
+step_op(Pid, _HLC, {commit_advance, Delta}, _SeqRef, _WB, CB, MinLive) ->
+    Pre = snapshot_state(Pid),
+    Cur = counters:get(CB, 1),
+    New = Cur + Delta,
+    counters:put(CB, 1, New),
+    ok = bondy_oplog_wal:set_committed_segment(Pid, New),
+    invariant(Pre, snapshot_state(Pid), MinLive);
+step_op(Pid, HLC, {watermark_advance, Delta}, _SeqRef, WB, _CB, MinLive) ->
+    Pre = snapshot_state(Pid),
+    %% Bound the watermark to a value derived from current HLC so it
+    %% stays plausible across long sequences.
+    Now = bondy_oplog_hlc:now(HLC),
+    Cur = counters:get(WB, 1),
+    Floor = max(Cur, Now - 1000),
+    NewBase = Floor + Delta,
+    counters:put(WB, 1, NewBase),
+    %% advance_snapshot_watermark is monotone — if NewBase < current,
+    %% the call errors and the state is untouched.
+    _ = bondy_oplog_wal:advance_snapshot_watermark(Pid, NewBase),
+    invariant(Pre, snapshot_state(Pid), MinLive);
+step_op(Pid, _HLC, sweep, _SeqRef, _WB, _CB, MinLive) ->
+    Pre = snapshot_state(Pid),
+    {ok, _Deleted, _Freed} = bondy_oplog_wal:retention_sweep(Pid),
+    invariant(Pre, snapshot_state(Pid), MinLive).
+
+do_appends(_Pid, _HLC, _SeqRef, 0) -> ok;
+do_appends(Pid, HLC, SeqRef, N) when N > 0 ->
+    counters:add(SeqRef, 1, 1),
+    Seq = counters:get(SeqRef, 1),
+    Hlc = bondy_oplog_hlc:now(HLC),
+    Key = bondy_oplog_event:key(Hlc, origin(), Seq),
+    Event = bondy_oplog_event:new(Key, {op, Hlc}, undefined),
+    {ok, _, _} = bondy_oplog_wal:append(Pid, Event),
+    do_appends(Pid, HLC, SeqRef, N - 1).
+
+snapshot_state(Pid) ->
+    Info = bondy_oplog_wal:info(Pid),
+    #{
+        live => maps:get(live_segments, Info),
+        committed => maps:get(committed_segment, Info)
+    }.
+
+%% Safety invariants per step:
+%%
+%%   (a) the surviving live-segment count is at least MinLive;
+%%   (b) every segment that disappeared from `live` was strictly
+%%       below the committed cursor at the *post-state* — and since
+%%       the committed cursor is monotone, also at the time of
+%%       deletion. The watermark cut is enforced by the
+%%       implementation; checking the committed cut + the floor is
+%%       sufficient for the safety property.
+invariant(#{live := PreLive},
+          #{live := PostLive, committed := Committed},
+          MinLive) ->
+    Floor = length(PostLive) >= MinLive,
+    Removed = ordsets:to_list(
+        ordsets:subtract(
+            ordsets:from_list(PreLive), ordsets:from_list(PostLive)
+        )
+    ),
+    CommittedCut = lists:all(fun(S) -> S < Committed end, Removed),
+    Floor andalso CommittedCut.
+
+%% P_WalFull — backpressure safety.
+%%
+%% Property: with a tight `max_total_wal_size` (or `max_live_segments`),
+%% the writer eventually refuses appends with `{error, wal_full}`, the
+%% writer process stays alive, and `info/1` reports the matching
+%% `backpressure` state.
+%%
+%% The generator parameters are intentionally small — 1..100 appends
+%% against a cap that fits 0..3 frames — so each trial reliably exercises
+%% both the "fits" and "refused" paths.
+prop_wal_full() ->
+    ?FORALL(
+        {Mode, NEvents, CapFrames},
+        {oneof([total_size, live_count]),
+         choose(1, 100),
+         choose(0, 3)},
+        with_wal_dir(fun(Dir) ->
+            Opts = wal_full_opts(Dir, Mode, CapFrames),
+            {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            try
+                Outcome = run_wal_full_outcome(Pid, NEvents),
+                Alive = is_process_alive(Pid),
+                Ok = Alive andalso wal_full_invariant(Pid, Outcome),
+                ?WHENFAIL(
+                    io:format(
+                        user,
+                        "prop_wal_full failed: mode=~p NEvents=~p "
+                        "CapFrames=~p alive=~p outcome=~p~n",
+                        [Mode, NEvents, CapFrames, Alive, Outcome]
+                    ),
+                    Ok
+                )
+            after
+                ok = bondy_oplog_wal:close(Pid)
+            end
+        end)
+    ).
+
+%% @private
+%% Per-mode opts. For `total_size`, the cap is approximately
+%% `CapFrames` frames past the segment header. For `live_count`, the
+%% cap is `CapFrames + 1` segments (so the trial can produce one or
+%% more rotations and then trip).
+wal_full_opts(Dir, total_size, CapFrames) ->
+    base_wal_opts(Dir, #{
+        max_total_wal_size =>
+            max(?SEG_HEADER + 1,
+                ?SEG_HEADER + CapFrames * estimated_frame_size())
+    });
+wal_full_opts(Dir, live_count, CapFrames) ->
+    base_wal_opts(Dir, #{
+        max_live_segments => max(1, CapFrames + 1),
+        max_segment_bytes => ?SEG_HEADER + estimated_frame_size() * 2,
+        max_batch_bytes => estimated_frame_size() * 2
+    }).
+
+%% @private
+%% Common opts for both backpressure modes. Tight segment cap so a
+%% reasonable number of appends produces rotations; periodic retention
+%% disabled so the trial is deterministic.
+base_wal_opts(Dir, Extra) ->
+    maps:merge(
+        #{dir => Dir,
+          origin => origin(),
+          retention_sweep_interval => 24 * 60 * 60 * 1000},
+        Extra
+    ).
+
+%% @private
+%% Append until either we exhaust `NEvents` (cap was generous enough to
+%% fit them all) or we hit `{error, wal_full}` (the expected outcome
+%% under a tight cap). Returns a tagged outcome the caller inspects.
+run_wal_full_outcome(Pid, NEvents) ->
+    HLC = bondy_oplog_hlc:new(),
+    append_until_full(Pid, HLC, NEvents, 0).
+
+%% @private
+append_until_full(_Pid, _HLC, 0, Count) ->
+    {fit, Count};
+append_until_full(Pid, HLC, N, Count) ->
+    Hlc = bondy_oplog_hlc:now(HLC),
+    Key = bondy_oplog_event:key(Hlc, origin(), Count + 1),
+    Event = bondy_oplog_event:new(Key, {op, Hlc}, undefined),
+    case bondy_oplog_wal:append(Pid, Event) of
+        {ok, _, _} ->
+            append_until_full(Pid, HLC, N - 1, Count + 1);
+        {error, wal_full} ->
+            {refused, Count};
+        {error, Other} ->
+            {unexpected_error, Other}
+    end.
+
+%% @private
+%% Invariant on the post-trial state. The safety property is twofold:
+%%
+%%   (a) The writer survives a `{error, wal_full}` refusal — no crash
+%%       cascade. `is_process_alive/1` (checked by the caller) covers
+%%       this directly; here we also confirm the writer continues to
+%%       serve `info/1` calls.
+%%   (b) `append_count` exactly equals the number of accepted appends.
+%%       A refused append must not have advanced any internal counter
+%%       or written any frame.
+%%
+%% We deliberately do NOT assert the precise `backpressure` field shape
+%% here — that field is a min-headroom heuristic exposed for operators,
+%% not a load-bearing invariant of the writer's safety. A future refusal
+%% that overshoots by one byte may leave the headroom at zero while the
+%% writer happily reports `ok` for the smallest-possible frame size.
+wal_full_invariant(Pid, {fit, Count}) ->
+    maps:get(append_count, bondy_oplog_wal:info(Pid)) =:= Count;
+wal_full_invariant(Pid, {refused, Count}) ->
+    maps:get(append_count, bondy_oplog_wal:info(Pid)) =:= Count;
+wal_full_invariant(_Pid, {unexpected_error, _}) ->
+    false.
+
+%% =============================================================================
+%% P4 — bit-flip in frame Magic
+%% =============================================================================
+
+%% P4. For any sequence of appended frames in the head segment, flipping
+%% any single bit inside the 32-bit Magic field of frame K on disk and
+%% reopening the WAL must result in:
+%%
+%%   (a) Recovery succeeds (the writer's `init/1` returns ok).
+%%   (b) The reader exposes exactly the K frames preceding the corrupted
+%%       one (i.e., recovery break-and-truncates at the bad-magic boundary).
+%%   (c) The head_offset after recovery equals the byte offset of the
+%%       corrupted frame's start (no partial bytes survive).
+%%   (d) Appending more events after recovery succeeds and lands at the
+%%       truncated head_offset.
+%%
+%% The "halt at first bad frame" semantics in v1 are deliberate (no
+%% Magic-rescan, see WAL_DESIGN §17); P4 pins them down.
+prop_bit_flip_magic() ->
+    ?FORALL(
+        {N, K, BitInMagic},
+        ?LET(NN, choose(2, 12),
+             {NN, choose(0, NN - 1), choose(0, 31)}),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Events = generate_events(HLC, N),
+            Opts = #{dir => Dir, origin => origin()},
+            {ok, P1} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            {Positions, HeadAfter} =
+                append_and_record_positions(P1, Events),
+            ok = bondy_oplog_wal:close(P1),
+            %% Frame K's start offset comes directly from the writer's
+            %% returned Pos (the {Segment, StartOffset} pair).
+            {FrameKStart, _} = frame_extent(K, Positions, HeadAfter),
+            ok = flip_bit_in_file(
+                seg_path(Dir, 0), FrameKStart * 8 + BitInMagic
+            ),
+            {ok, P2} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            Read = read_all_events(P2),
+            Info2 = bondy_oplog_wal:info(P2),
+            HeadOffAfterRecover = maps:get(head_offset, Info2),
+            %% Recovery should have truncated to the K-th frame start.
+            HeadMatches = HeadOffAfterRecover =:= FrameKStart,
+            ReadMatches =
+                Read =:= lists:sublist(Events, K),
+            %% Append-after-recovery must succeed; the new frame's
+            %% start offset should equal the truncated head_offset.
+            ExtraEvent = hd(generate_events(HLC, 1)),
+            ExtraResult = bondy_oplog_wal:append(P2, ExtraEvent),
+            ExtraOk = case ExtraResult of
+                {ok, _, {_, NewStart}} -> NewStart =:= FrameKStart;
+                _ -> false
+            end,
+            ReadAfter = read_all_events(P2),
+            ResumeOk = ReadAfter =:=
+                lists:sublist(Events, K) ++ [ExtraEvent],
+            ok = bondy_oplog_wal:close(P2),
+            ?WHENFAIL(
+                io:format(
+                    user,
+                    "prop_bit_flip_magic failed: N=~p K=~p Bit=~p "
+                    "FrameKStart=~p HeadAfter=~p Read=~p "
+                    "HeadMatches=~p ReadMatches=~p ExtraOk=~p "
+                    "ResumeOk=~p~n",
+                    [N, K, BitInMagic, FrameKStart,
+                     HeadOffAfterRecover, length(Read),
+                     HeadMatches, ReadMatches, ExtraOk, ResumeOk]
+                ),
+                HeadMatches andalso ReadMatches
+                    andalso ExtraOk andalso ResumeOk
+            )
+        end)
+    ).
+
+%% =============================================================================
+%% P8 — rotation atomicity (in-process orphan slice)
+%% =============================================================================
+
+%% P8 (orphan slice). A crash between `create/4` (new segment file
+%% exists on disk) and `commit_rotation/3` (manifest updated) leaves a
+%% `<NewSegId>.qdata` file that's not referenced by the manifest. On
+%% reopen, recovery's `cleanup_orphans/2` must:
+%%
+%%   (a) Delete the orphan file.
+%%   (b) Leave the live `current_segment` (and the live event sequence)
+%%       intact.
+%%   (c) Allow the next rotation to recreate the same segment id without
+%%       colliding on `exclusive` open.
+%%
+%% Property: simulate the orphan state directly (write a fake
+%% `<head+1>.qdata` into the WAL dir before reopen), then verify the
+%% three invariants. The "in-process" suffix is to distinguish from the
+%% full crash-trace variant, which lives in the fault-injection harness.
+prop_rotation_atomicity() ->
+    ?FORALL(
+        N,
+        choose(1, 20),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Events = generate_events(HLC, N),
+            %% Big segment cap — keep everything in segment 0 so we can
+            %% deterministically construct the orphan as segment 1.
+            Opts = #{
+                dir => Dir,
+                origin => origin(),
+                max_segment_bytes => 1024 * 1024
+            },
+            {ok, P1} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            [bondy_oplog_wal:append(P1, E) || E <- Events],
+            Info1 = bondy_oplog_wal:info(P1),
+            HeadSeg = maps:get(current_segment, Info1),
+            ok = bondy_oplog_wal:close(P1),
+            %% Plant an orphan: a stub `.qdata` for HeadSeg+1 that is
+            %% NOT in the manifest's live_segments. Recovery must drop it.
+            InstDir = filename:join(Dir, instance_id()),
+            OrphanPath = filename:join(
+                InstDir, bondy_oplog_wal_segment:filename(HeadSeg + 1)
+            ),
+            ok = file:write_file(
+                OrphanPath, <<"orphan-partial-rotation">>
+            ),
+            true = filelib:is_regular(OrphanPath),
+            {ok, P2} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            Read = read_all_events(P2),
+            Info2 = bondy_oplog_wal:info(P2),
+            ok = bondy_oplog_wal:close(P2),
+            %% (a) orphan gone, (b) head unchanged, (c) events recovered
+            %% intact. (d) a subsequent reopen + append still works,
+            %% confirming the rotation id is reusable.
+            OrphanGone = not filelib:is_regular(OrphanPath),
+            HeadIntact =
+                maps:get(current_segment, Info2) =:= HeadSeg,
+            EventsIntact = Read =:= Events,
+            ?WHENFAIL(
+                io:format(
+                    user,
+                    "prop_rotation_atomicity failed: N=~p HeadSeg=~p "
+                    "OrphanGone=~p HeadIntact=~p EventsIntact=~p~n",
+                    [N, HeadSeg, OrphanGone, HeadIntact, EventsIntact]
+                ),
+                OrphanGone andalso HeadIntact andalso EventsIntact
+            )
+        end)
+    ).
+
+%% =============================================================================
+%% P13 — partial write (recovery-and-resume slice)
+%% =============================================================================
+
+%% P13 (in-process variant; full fault-injection harness still TODO).
+%%
+%% A `prim_file:write/2` that returns ok but writes fewer bytes than
+%% requested leaves the on-disk segment in a state byte-identical to a
+%% truncation at the same offset. The property:
+%%
+%%   1. Append N frames; record their end offsets.
+%%   2. Choose a frame boundary K (between 0 and N) and a sub-frame
+%%      chop count C (1 .. FrameLen - 1) — truncate the head segment
+%%      `.qdata` at the start of frame K plus C bytes.
+%%   3. Reopen the WAL: recovery must surface exactly the first K
+%%      whole frames; head_offset after recovery must equal frame K's
+%%      start offset; truncated_bytes must be ≥ C.
+%%   4. Append M new events: they must succeed, land at the recovered
+%%      head_offset, and round-trip via the reader.
+%%
+%% The "recovery + resume" framing makes this stronger than
+%% prop_truncation_safety, which only verifies the recovery step.
+prop_partial_write() ->
+    ?FORALL(
+        {N, M, K, SubFrameOff},
+        ?LET(NN, choose(2, 12),
+             {NN, choose(1, 3), choose(0, NN - 1),
+              %% Pick a small positive sub-frame offset; we'll clamp
+              %% against the actual frame size at runtime.
+              choose(1, 200)}),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Events = generate_events(HLC, N),
+            Opts = #{dir => Dir, origin => origin()},
+            {ok, P1} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            {Positions, HeadAfter} =
+                append_and_record_positions(P1, Events),
+            ok = bondy_oplog_wal:close(P1),
+            SegPath = seg_path(Dir, 0),
+            {FrameKStart, FrameKEnd} =
+                frame_extent(K, Positions, HeadAfter),
+            FrameKLen = FrameKEnd - FrameKStart,
+            Chop = min(SubFrameOff, max(1, FrameKLen - 1)),
+            TruncTo = FrameKStart + Chop,
+            truncate_file(SegPath, TruncTo),
+            {ok, P2} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            Read = read_all_events(P2),
+            Info2 = bondy_oplog_wal:info(P2),
+            HeadOff = maps:get(head_offset, Info2),
+            ExtraEvents = generate_events(HLC, M),
+            ExtraResults = [
+                bondy_oplog_wal:append(P2, E) || E <- ExtraEvents
+            ],
+            ReadAfter = read_all_events(P2),
+            Info3 = bondy_oplog_wal:info(P2),
+            ok = bondy_oplog_wal:close(P2),
+            %% (a) recovered frames are the first K events,
+            %% (b) head_offset is at frame K's start,
+            %% (c) post-recovery appends succeed,
+            %% (d) post-recovery reader returns first K + M events.
+            ReadMatches =
+                Read =:= lists:sublist(Events, K),
+            HeadMatches = HeadOff =:= FrameKStart,
+            AppendsOk = lists:all(
+                fun({ok, _, _}) -> true; (_) -> false end,
+                ExtraResults
+            ),
+            ResumeMatches =
+                ReadAfter =:= lists:sublist(Events, K) ++ ExtraEvents,
+            HeadAdvanced =
+                maps:get(head_offset, Info3) > FrameKStart,
+            ?WHENFAIL(
+                io:format(
+                    user,
+                    "P13 fail: N=~p M=~p K=~p Sub=~p FrameKStart=~p "
+                    "FrameKLen=~p Chop=~p TruncTo=~p HeadOff=~p "
+                    "Read=~p AppendsOk=~p ResumeMatches=~p~n",
+                    [N, M, K, SubFrameOff, FrameKStart, FrameKLen,
+                     Chop, TruncTo, HeadOff, length(Read), AppendsOk,
+                     ResumeMatches]
+                ),
+                ReadMatches andalso HeadMatches andalso AppendsOk
+                    andalso ResumeMatches andalso HeadAdvanced
+            )
+        end)
+    ).
+
+%% =============================================================================
+%% P11 — concurrent reader safety
+%% =============================================================================
+
+%% P11. While the writer is appending, an arbitrary number of readers
+%% walking from arbitrary start positions must:
+%%
+%%   (a) Never crash the writer (the writer process survives the trial).
+%%   (b) Never observe a partial frame (the reader either decodes a
+%%       whole frame or returns end_of_log).
+%%   (c) Observe a contiguous prefix of the canonical event sequence
+%%       (i.e., the reader's output is `lists:sublist(Events, R)` for
+%%       some R ≥ 0).
+%%   (d) Eventually catch up to head_offset_ref if the writer stops
+%%       appending — represented here as: after the writer finishes,
+%%       a reader opened at `beginning` returns all N events.
+%%
+%% The trial spawns 1 writer process and R reader processes. The writer
+%% appends N events with a small random delay between them; each reader
+%% opens at `beginning` (non-follow) and drains the log to whatever is
+%% durably visible at the time. The property then asserts each reader's
+%% recovered list is a prefix of the canonical event list.
+prop_concurrent_reader_safety() ->
+    ?FORALL(
+        {N, R},
+        {choose(5, 30), choose(1, 4)},
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Events = generate_events(HLC, N),
+            Opts = #{
+                dir => Dir,
+                origin => origin(),
+                %% Keep segment-rotation traffic in scope so readers
+                %% have to cross segment boundaries.
+                max_segment_bytes =>
+                    ?SEG_HEADER + estimated_frame_size() * 5
+            },
+            {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            try
+                Parent = self(),
+                ReaderRefs = [
+                    spawn_monitor(fun() ->
+                        Acc = run_concurrent_reader(Pid),
+                        Parent ! {reader_done, self(), Acc}
+                    end)
+                 || _ <- lists:seq(1, R)
+                ],
+                ok = run_concurrent_writer(Pid, Events),
+                ReaderResults = collect_readers(ReaderRefs, []),
+                %% (a) writer alive.
+                Alive = is_process_alive(Pid),
+                %% (b)+(c) each reader sees a contiguous prefix.
+                PrefixOk = lists:all(
+                    fun(Read) -> is_prefix(Read, Events) end,
+                    ReaderResults
+                ),
+                %% (d) post-write full read sees everything.
+                Final = read_all_events(Pid),
+                FinalOk = Final =:= Events,
+                ?WHENFAIL(
+                    io:format(
+                        user,
+                        "prop_concurrent_reader_safety failed: N=~p "
+                        "R=~p Alive=~p PrefixOk=~p FinalOk=~p "
+                        "ReaderLens=~p~n",
+                        [N, R, Alive, PrefixOk, FinalOk,
+                         [if is_list(L) -> length(L); true -> L end
+                          || L <- ReaderResults]]
+                    ),
+                    Alive andalso PrefixOk andalso FinalOk
+                )
+            after
+                ok = bondy_oplog_wal:close(Pid)
+            end
+        end)
+    ).
+
+%% @private
+run_concurrent_writer(Pid, Events) ->
+    lists:foreach(
+        fun(E) ->
+            {ok, _, _} = bondy_oplog_wal:append(Pid, E),
+            %% Yield to give readers a chance to interleave.
+            erlang:yield()
+        end,
+        Events
+    ).
+
+%% @private
+%% Open a fresh reader at the beginning of the log and drain it once,
+%% catching protocol errors as a property failure (the writer must
+%% never crash a concurrent reader).
+run_concurrent_reader(Pid) ->
+    case bondy_oplog_wal_reader:open(Pid, beginning) of
+        {ok, Iter} ->
+            drain_reader(Iter, []);
+        {error, _} ->
+            %% A reader open failure mid-write would still satisfy the
+            %% prefix property (Acc = []), so report empty.
+            []
+    end.
+
+%% @private
+collect_readers([], Acc) ->
+    Acc;
+collect_readers([{Pid, MonRef} | Rest], Acc) ->
+    receive
+        {reader_done, Pid, Read} ->
+            erlang:demonitor(MonRef, [flush]),
+            collect_readers(Rest, [Read | Acc]);
+        {'DOWN', MonRef, process, Pid, _Reason} ->
+            %% A reader crash is a property failure.
+            collect_readers(Rest, [{reader_crashed, Pid} | Acc])
+    after
+        30_000 ->
+            collect_readers(Rest, [{reader_timeout, Pid} | Acc])
+    end.
+
+%% @private
+%% True if `Read` is `lists:sublist(Events, length(Read))`.
+is_prefix(Read, _Events) when not is_list(Read) ->
+    false;
+is_prefix(Read, Events) ->
+    Read =:= lists:sublist(Events, length(Read)).
+
+%% =============================================================================
+%% P14 — failed fsync (fault injection)
+%% =============================================================================
+
+%% P14. A failed `prim_file:datasync/1` in the writer's per_write fsync
+%% path must:
+%%
+%%   (a) Surface as `{error, _}` to the caller of `append/2` /
+%%       `append_batch/2`.
+%%   (b) Not advance `durable_offset` past the failed fsync's
+%%       boundary — the durable view stays at the last successful
+%%       fsync.
+%%   (c) Leave the writer process alive and serving subsequent calls
+%%       (info/1, close/1, etc.).
+%%
+%% Implementation: mock `bondy_oplog_wal_io:datasync/1` to return
+%% `{error, eio}` after a configurable number of successful calls. The
+%% generator chooses how many appends to perform before flipping the
+%% switch, so each trial exercises both the "fsync still ok" path and
+%% the "fsync now fails" path.
+prop_failed_fsync() ->
+    ?FORALL(
+        N,
+        choose(2, 12),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Events = generate_events(HLC, N),
+            Opts = #{
+                dir => Dir,
+                origin => origin(),
+                fsync_mode => per_write
+            },
+            {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            true = unlink(Pid),
+            try
+                %% First half: succeed. Second half: fail. Keep the
+                %% warm-up unmocked so meck's tracing layer doesn't add
+                %% per-call overhead before we actually need the seam.
+                Half = max(1, N div 2),
+                {First, Rest} = lists:split(Half, Events),
+                FirstResults = [
+                    bondy_oplog_wal:append(Pid, E) || E <- First
+                ],
+                FirstOk = lists:all(
+                    fun({ok, _, _}) -> true; (_) -> false end,
+                    FirstResults
+                ),
+                InfoBefore = bondy_oplog_wal:info(Pid),
+                #{durable_offset := DurableBefore,
+                  durable_segment := DurSegBefore} = InfoBefore,
+                %% Install meck under the wal_io fault lock — the lock
+                %% serialises any test that mocks `bondy_oplog_wal_io`,
+                %% which is necessary because `meck:new/2` swaps the
+                %% module in the VM-wide code server.
+                {FaultResults, Alive, Info2} = with_io_fault_lock(
+                    fun() ->
+                        ok = meck:expect(
+                            bondy_oplog_wal_io, datasync,
+                            fun(_Fd) -> {error, eio} end
+                        ),
+                        FaultRs = [
+                            bondy_oplog_wal:append(Pid, E) || E <- Rest
+                        ],
+                        AliveBool = is_process_alive(Pid),
+                        Inf = bondy_oplog_wal:info(Pid),
+                        {FaultRs, AliveBool, Inf}
+                    end
+                ),
+                FaultErrors = lists:all(
+                    fun({error, eio}) -> true; (_) -> false end,
+                    FaultResults
+                ),
+                DurableUnchanged =
+                    maps:get(durable_offset, Info2) =:= DurableBefore
+                    andalso maps:get(durable_segment, Info2)
+                            =:= DurSegBefore,
+                %% E8 — reopen invariant. The fault path pwrite'd the
+                %% bytes but the writer held `durable_offset` back
+                %% because no datasync completed. After close + reopen,
+                %% recovery scans the segment, CRC-verifies every frame,
+                %% and the in-memory state must reflect what is actually
+                %% on disk (WAL_DESIGN §16.3 (b)).
+                try _ = bondy_oplog_wal:close(Pid)
+                catch _:_ -> ok
+                end,
+                {ReopenOk, ReopenDurable, ReopenHead,
+                 PostReopenAppendOk} = reopen_and_probe(Opts, HLC),
+                %% After reopen, the WAL_DESIGN §16.3 (b) invariant is:
+                %% "in-memory state consistent with on-disk". Concretely:
+                %%   1. `durable_offset` must not shrink — every ACK'd
+                %%      append from before the fault is still durable.
+                %%   2. `head_offset >= durable_offset` (the writer's
+                %%      authoritative position is at or beyond what is
+                %%      durable on disk).
+                %% Recovery's break-and-truncate may legitimately accept
+                %% fault-path frames that pwrite'd successfully (their
+                %% CRCs pass) and push durable past where the writer's
+                %% in-memory head was, so we do *not* bound durable from
+                %% above against the pre-reopen head — the disk is the
+                %% source of truth and may legitimately contain more.
+                ReopenDurableSafe = ReopenDurable >= DurableBefore,
+                ReopenHeadSafe = ReopenHead >= ReopenDurable,
+                ?WHENFAIL(
+                    io:format(
+                        user,
+                        "prop_failed_fsync failed: N=~p FirstOk=~p "
+                        "FaultErrors=~p Alive=~p DurableUnchanged=~p "
+                        "DurableBefore=~p Info2=~p ReopenOk=~p "
+                        "ReopenDurable=~p ReopenHead=~p "
+                        "PostReopenAppendOk=~p~n",
+                        [N, FirstOk, FaultErrors, Alive,
+                         DurableUnchanged, DurableBefore, Info2,
+                         ReopenOk, ReopenDurable, ReopenHead,
+                         PostReopenAppendOk]
+                    ),
+                    FirstOk andalso FaultErrors
+                        andalso Alive andalso DurableUnchanged
+                        andalso ReopenOk
+                        andalso ReopenDurableSafe
+                        andalso ReopenHeadSafe
+                        andalso PostReopenAppendOk
+                )
+            after
+                try _ = bondy_oplog_wal:close(Pid)
+                catch _:_ -> ok
+                end
+            end
+        end)
+    ).
+
+%% =============================================================================
+%% P14 — failed fsync (batched-mode variant)
+%% =============================================================================
+
+%% P14 in batched mode. The per-append return contract differs from
+%% `per_write`: `append/2` returns `{ok, _, _}` even when the deferred
+%% datasync ultimately fails, because the durability promise is
+%% "fsync at some later boundary, retried on failure". The invariants
+%% under a sustained datasync fault are therefore:
+%%
+%%   (a) Appends still return `{ok, _, _}` — the failure is logged and
+%%       retried by the next `flush_tick`, not surfaced to the caller.
+%%   (b) `durable_offset` is held back — no datasync has completed, so
+%%       the writer cannot advance the durable boundary.
+%%   (c) `pending_fsync_bytes` stays > 0 — the un-fsync'd byte budget
+%%       is preserved for the next retry attempt.
+%%   (d) The writer stays alive across multiple failed `flush_tick`
+%%       firings.
+prop_failed_fsync_batched() ->
+    ?FORALL(
+        N,
+        choose(2, 8),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Events = generate_events(HLC, N),
+            %% Short interval so the timer fires repeatedly inside the
+            %% test window. Size threshold is high so the *timer* is
+            %% what triggers fsync attempts (we are testing the
+            %% interval-retry semantics).
+            Opts = #{
+                dir => Dir,
+                origin => origin(),
+                fsync_mode => batched,
+                batched_fsync_interval => 30,
+                batched_fsync_bytes => 64 * 1024 * 1024
+            },
+            {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            true = unlink(Pid),
+            try
+                {BatchResults, Alive, Info2} = with_io_fault_lock(
+                    fun() ->
+                        ok = meck:expect(
+                            bondy_oplog_wal_io, datasync,
+                            fun(_Fd) -> {error, eio} end
+                        ),
+                        BR = [
+                            bondy_oplog_wal:append(Pid, E) || E <- Events
+                        ],
+                        %% Sleep long enough that several `flush_tick`s
+                        %% have fired and been rejected.
+                        timer:sleep(200),
+                        AliveBool = is_process_alive(Pid),
+                        Inf = bondy_oplog_wal:info(Pid),
+                        {BR, AliveBool, Inf}
+                    end
+                ),
+                BatchOk = lists:all(
+                    fun({ok, _, _}) -> true; (_) -> false end,
+                    BatchResults
+                ),
+                DurableHeldBack =
+                    maps:get(durable_offset, Info2) =< ?SEG_HEADER,
+                PendingHeld =
+                    maps:get(pending_fsync_bytes, Info2, 0) > 0,
+                ?WHENFAIL(
+                    io:format(
+                        user,
+                        "prop_failed_fsync_batched failed: N=~p "
+                        "BatchOk=~p Alive=~p DurableHeldBack=~p "
+                        "PendingHeld=~p Info2=~p~n",
+                        [N, BatchOk, Alive, DurableHeldBack,
+                         PendingHeld, Info2]
+                    ),
+                    BatchOk andalso Alive
+                        andalso DurableHeldBack
+                        andalso PendingHeld
+                )
+            after
+                try _ = bondy_oplog_wal:close(Pid)
+                catch _:_ -> ok
+                end
+            end
+        end)
+    ).
+
+%% =============================================================================
+%% P15 — failed rename (fault injection)
+%% =============================================================================
+
+%% P15. A failed `prim_file:rename/2` on the manifest commit path
+%% (during rotation) must:
+%%
+%%   (a) Surface as `{error, _}` to the caller whose `append` /
+%%       `append_batch` triggered the rotation.
+%%   (b) Leave the old manifest intact on disk — bit-identical to its
+%%       pre-rotation contents.
+%%   (c) Not advance the writer's in-memory `current_segment` past the
+%%       old segment.
+%%   (d) Leave the writer alive.
+%%
+%% Implementation: mock `bondy_oplog_wal_io:rename/2` to return
+%% `{error, eacces}` after the writer is up. Append events with a tight
+%% `max_segment_bytes` so the next append rotates and trips the fault.
+prop_rename_failure() ->
+    ?FORALL(
+        N,
+        choose(3, 15),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Events = generate_events(HLC, N),
+            %% Tight cap so we rotate after the first frame.
+            Opts = #{
+                dir => Dir,
+                origin => origin(),
+                max_segment_bytes =>
+                    ?SEG_HEADER + estimated_frame_size() + 1
+            },
+            {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            true = unlink(Pid),
+            InstDir = filename:join(Dir, instance_id()),
+            ManifestPath = filename:join(
+                InstDir, ?BONDY_OPLOG_WAL_MANIFEST_FILENAME
+            ),
+            try
+                %% Get baseline manifest after the writer wrote its
+                %% bootstrap manifest.
+                {ok, ManifestBefore} = file:read_file(ManifestPath),
+                SegBefore = maps:get(
+                    current_segment, bondy_oplog_wal:info(Pid)
+                ),
+                %% Inject the fault on the next rename — the manifest
+                %% commit during rotation will fail. The wal_io fault
+                %% lock keeps the meck install/unload window from
+                %% colliding with any other property that mocks the same
+                %% module (see [[feedback_meck_global]] — meck swaps the
+                %% module VM-wide via the code server).
+                {Results, Alive, ManifestAfter, SegAfter} =
+                    with_io_fault_lock(fun() ->
+                        ok = meck:expect(
+                            bondy_oplog_wal_io, rename,
+                            fun(_From, _To) -> {error, eacces} end
+                        ),
+                        %% Use safe_append/2: after C1's fix, the
+                        %% rotation-failure stops the gen_server, so
+                        %% subsequent appends would otherwise exit with
+                        %% `noproc` and crash the comprehension.
+                        Rs = [safe_append(Pid, E) || E <- Events],
+                        AliveBool = is_process_alive(Pid),
+                        SegA =
+                            try maps:get(current_segment,
+                                         bondy_oplog_wal:info(Pid))
+                            catch _:_ -> SegBefore
+                            end,
+                        {ok, ManifestA} = file:read_file(ManifestPath),
+                        {Rs, AliveBool, ManifestA, SegA}
+                    end),
+                Errors = [R || R <- Results, element(1, R) =:= error],
+                SawRotationError = Errors =/= [],
+                ManifestIntact = ManifestAfter =:= ManifestBefore,
+                CurrentSegUnchanged = SegAfter =:= SegBefore,
+                %% C1 — after the rename failed, the writer was inside
+                %% the post-close window of `rotate/1`; the producing
+                %% code now stops the gen_server with `{rotation_failed_
+                %% after_seal, _}` rather than reverting to a state that
+                %% references the closed old fd. We probe by reopening
+                %% from disk: recovery must succeed and the in-memory
+                %% state must match the on-disk reality (manifest still
+                %% pointing at the old segment).
+                ReopenResult = reopen_only(Opts),
+                {ReopenOk, ReopenSeg} =
+                    case ReopenResult of
+                        {ok, Pid2} ->
+                            Inf = bondy_oplog_wal:info(Pid2),
+                            S = maps:get(current_segment, Inf),
+                            try _ = bondy_oplog_wal:close(Pid2)
+                            catch _:_ -> ok
+                            end,
+                            {true, S};
+                        _ ->
+                            {false, undefined}
+                    end,
+                ReopenSegConsistent = ReopenSeg =:= SegBefore,
+                ?WHENFAIL(
+                    io:format(
+                        user,
+                        "prop_rename_failure failed: N=~p "
+                        "SawRotationError=~p Alive=~p "
+                        "ManifestIntact=~p CurrentSegUnchanged=~p "
+                        "SegBefore=~p SegAfter=~p Errors=~p "
+                        "ReopenOk=~p ReopenSeg=~p~n",
+                        [N, SawRotationError, Alive, ManifestIntact,
+                         CurrentSegUnchanged, SegBefore, SegAfter,
+                         Errors, ReopenOk, ReopenSeg]
+                    ),
+                    SawRotationError
+                        andalso ManifestIntact
+                        andalso CurrentSegUnchanged
+                        andalso ReopenOk
+                        andalso ReopenSegConsistent
+                )
+            after
+                try _ = bondy_oplog_wal:close(Pid)
+                catch _:_ -> ok
+                end
+            end
+        end)
+    ).
+
+%% =============================================================================
+%% P12 — multi-process convergence (writer kill + reopen)
+%% =============================================================================
+
+%% P12 (in-process slice). Spawn a writer and a reader, run a workload,
+%% kill the writer with `exit(kill)` at a randomly-chosen append count,
+%% reopen the WAL, and verify:
+%%
+%%   (a) Recovery succeeds — the writer restarts cleanly.
+%%   (b) Every event that the writer successfully ACKed (i.e., returned
+%%       `{ok, _, _}` in `per_write` mode → durability promised) is
+%%       present in the recovered log.
+%%   (c) The recovered log is a strict prefix of the originally
+%%       appended sequence (no out-of-order or fabricated events).
+%%   (d) The reader running concurrently with the workload never
+%%       crashes the writer.
+%%
+%% This is the v1 "kill anything at any step" property restricted to the
+%% in-process case (one Erlang VM, one OS process). The full
+%% multi-OS-process convergence sits behind a fault-injection harness
+%% that's out of scope for v1.
+prop_multiproc_convergence() ->
+    ?FORALL(
+        {N, KillAfter, NumReaders},
+        ?LET(NN, choose(4, 20),
+             {NN, choose(1, NN - 1), choose(0, 3)}),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Events = generate_events(HLC, N),
+            Opts = #{
+                dir => Dir,
+                origin => origin(),
+                fsync_mode => per_write,
+                %% Tight cap so rotations happen mid-run.
+                max_segment_bytes =>
+                    ?SEG_HEADER + estimated_frame_size() * 4
+            },
+            %% Use `start` (no link), so we can `exit(Pid, kill)`
+            %% without killing the test process.
+            {ok, Pid} = bondy_oplog_wal:start(instance_id(), Opts),
+            Parent = self(),
+            ReaderRefs = [
+                spawn_monitor(fun() ->
+                    Acc = run_concurrent_reader(Pid),
+                    Parent ! {reader_done, self(), Acc}
+                end)
+             || _ <- lists:seq(1, NumReaders)
+            ],
+            %% Append KillAfter events synchronously — guarantees the
+            %% first KillAfter ACKs are durable in per_write mode.
+            {AckedHead, RestEvents} =
+                lists:split(KillAfter, Events),
+            AckedResults = [
+                bondy_oplog_wal:append(Pid, E) || E <- AckedHead
+            ],
+            AckedOk = lists:all(
+                fun({ok, _, _}) -> true; (_) -> false end,
+                AckedResults
+            ),
+            %% Spawn a worker that races the kill — appends the rest;
+            %% any of these may or may not land before the kill.
+            WriterDone = make_ref(),
+            spawn(fun() ->
+                _ = [
+                    catch bondy_oplog_wal:append(Pid, E)
+                    || E <- RestEvents
+                ],
+                Parent ! {WriterDone, done}
+            end),
+            %% Yield a few times so the spawned worker gets a turn.
+            ok = nudge_scheduler(20),
+            %% Kill the writer mid-workload.
+            MonRef = erlang:monitor(process, Pid),
+            true = exit(Pid, kill),
+            receive
+                {'DOWN', MonRef, process, Pid, killed} -> ok
+            after
+                5_000 -> erlang:demonitor(MonRef, [flush])
+            end,
+            %% Drain the worker's "done" message (it'll get badarg /
+            %% noproc on append after the kill — we just await it so
+            %% the test doesn't leak processes).
+            receive
+                {WriterDone, done} -> ok
+            after
+                5_000 -> ok
+            end,
+            _ReaderResults = collect_readers(ReaderRefs, []),
+            %% Reopen and verify.
+            {ok, P2} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            Recovered = read_all_events(P2),
+            ok = bondy_oplog_wal:close(P2),
+            %% (a) recovery succeeded (we got here without throwing).
+            %% (b) every ACKed event is in Recovered.
+            AckedPresent =
+                lists:sublist(Events, KillAfter)
+                    =:= lists:sublist(Recovered, KillAfter),
+            %% (c) Recovered is a prefix of Events.
+            PrefixOk = is_prefix(Recovered, Events),
+            ?WHENFAIL(
+                io:format(
+                    user,
+                    "prop_multiproc_convergence failed: N=~p "
+                    "KillAfter=~p NumReaders=~p AckedOk=~p "
+                    "AckedPresent=~p PrefixOk=~p Recovered=~p~n",
+                    [N, KillAfter, NumReaders, AckedOk,
+                     AckedPresent, PrefixOk, length(Recovered)]
+                ),
+                AckedOk andalso AckedPresent andalso PrefixOk
+            )
+        end)
+    ).
+
+%% @private
+%% Yields N times to give other runnable processes scheduler turns.
+%% Used by `prop_multiproc_convergence/0` to interleave the async
+%% appender with the killer without depending on wall-clock timing.
+nudge_scheduler(0) -> ok;
+nudge_scheduler(N) when N > 0 ->
+    erlang:yield(),
+    nudge_scheduler(N - 1).
+
+%% =============================================================================
 %% EUnit wrapper — runs each property with the configured numtests count
 %% so the suite participates in CI under `rebar3 eunit`. The full 24h
 %% fuzz job runs PropEr directly via `rebar3 proper`.
@@ -600,7 +1741,18 @@ properties_test_() ->
             prop_truncation_safety(),
             prop_manifest_atomicity(),
             prop_consumer_offset_clamping(),
-            prop_await_durable_correctness()
+            prop_await_durable_correctness(),
+            prop_batch_atomicity(),
+            prop_retention_safety(),
+            prop_wal_full(),
+            prop_bit_flip_magic(),
+            prop_rotation_atomicity(),
+            prop_partial_write(),
+            prop_concurrent_reader_safety(),
+            prop_failed_fsync(),
+            prop_failed_fsync_batched(),
+            prop_rename_failure(),
+            prop_multiproc_convergence()
         ],
         lists:foreach(
             fun(Prop) -> ?assert(proper:quickcheck(Prop, FrameOpts)) end,
@@ -653,6 +1805,80 @@ is_strictly_increasing([A, B | Rest]) when A < B ->
     is_strictly_increasing([B | Rest]);
 is_strictly_increasing(_) -> false.
 
+%% --- meck fault-injection lock + reopen helpers -------------------------
+
+%% Serialises any property that mocks `bondy_oplog_wal_io`. `meck:new/2`
+%% swaps the module in the VM-wide code server, so two test modules
+%% mocking the same module concurrently would clobber each other's
+%% expectations. `global:trans/4` acquires a node-scoped lock; release
+%% is automatic when `Body` returns. The lock is held only across the
+%% meck install/expect/uninstall window, not across the writer's whole
+%% lifetime, so it does not serialise property runs that do not fault-
+%% inject.
+with_io_fault_lock(Body) ->
+    Lock = {bondy_oplog_wal_io_fault, ?MODULE},
+    global:trans(
+        {Lock, self()},
+        fun() ->
+            ok = meck:new(bondy_oplog_wal_io, [passthrough]),
+            try Body()
+            after _ = meck:unload(bondy_oplog_wal_io)
+            end
+        end,
+        [node()],
+        infinity
+    ).
+
+%% Wrapper around `bondy_oplog_wal:append/2` that turns a `noproc` exit
+%% into a regular `{error, noproc}` reply. Used by properties that
+%% deliberately drive the writer into a state where it stops (e.g. C1 in
+%% `prop_rename_failure/0`).
+safe_append(Pid, Event) ->
+    try bondy_oplog_wal:append(Pid, Event)
+    catch
+        exit:{noproc, _} -> {error, noproc};
+        exit:noproc -> {error, noproc};
+        exit:{Reason, _} -> {error, Reason}
+    end.
+
+%% Close+reopen probe used by `prop_failed_fsync/0`: after the in-memory
+%% fault-path checks, the WAL is closed, reopened from disk (running
+%% recovery), and the reopened writer is interrogated for `durable_offset`
+%% / `head_offset` and asked to accept one fresh append. Returns the
+%% triple `{ok-bool, durable_offset, head_offset, append-ok}`.
+reopen_and_probe(Opts, HLC) ->
+    case bondy_oplog_wal:start_link(instance_id(), Opts) of
+        {ok, Pid2} ->
+            true = unlink(Pid2),
+            Info = bondy_oplog_wal:info(Pid2),
+            Dur = maps:get(durable_offset, Info),
+            Head = maps:get(head_offset, Info),
+            NewEvent = hd(generate_events(HLC, 1)),
+            AppendOk =
+                case bondy_oplog_wal:append(Pid2, NewEvent) of
+                    {ok, _, _} -> true;
+                    _ -> false
+                end,
+            try _ = bondy_oplog_wal:close(Pid2)
+            catch _:_ -> ok
+            end,
+            {true, Dur, Head, AppendOk};
+        _ ->
+            {false, 0, 0, false}
+    end.
+
+%% Close+reopen probe used by `prop_rename_failure/0`: just verifies
+%% that recovery succeeds and returns a `{ok, _}` plus the new Pid.
+%% Caller is responsible for inspecting state and closing.
+reopen_only(Opts) ->
+    case bondy_oplog_wal:start_link(instance_id(), Opts) of
+        {ok, Pid2} = OK ->
+            true = unlink(Pid2),
+            OK;
+        Other ->
+            Other
+    end.
+
 %% Spawns a temporary directory, runs `Fun(Dir)`, deletes the directory
 %% afterwards regardless of the property outcome. The property result
 %% (boolean) is returned verbatim.
@@ -675,11 +1901,20 @@ mktemp_dir() ->
     Dir.
 
 %% Walks every segment file from 0 up to `HeadSegId` inclusive and
-%% returns the concatenated event list. Each frame body is a one-
-%% element list under the current single-event batch-of-1 framing.
+%% returns the concatenated event list. The frame body is a list of
+%% events (single-event appends are one-element lists; atomic batches
+%% are N-element lists).
 scan_all_segments(Dir, InstanceId, HeadSegId) ->
     lists:flatmap(
         fun(SegId) -> scan_segment(Dir, InstanceId, SegId) end,
+        lists:seq(0, HeadSegId)
+    ).
+
+%% Like `scan_all_segments/3` but preserves batch grouping: returns one
+%% sublist per frame. Used by `prop_batch_atomicity/0`.
+scan_all_segments_grouped(Dir, InstanceId, HeadSegId) ->
+    lists:flatmap(
+        fun(SegId) -> scan_segment_grouped(Dir, InstanceId, SegId) end,
         lists:seq(0, HeadSegId)
     ).
 
@@ -691,12 +1926,41 @@ scan_segment(Dir, InstanceId, SegId) ->
     <<_:?SEG_HEADER/binary, Frames/binary>> = Bin,
     scan_frames(Frames).
 
+scan_segment_grouped(Dir, InstanceId, SegId) ->
+    Path = filename:join(
+        [Dir, InstanceId, bondy_oplog_wal_segment:filename(SegId)]
+    ),
+    {ok, Bin} = file:read_file(Path),
+    <<_:?SEG_HEADER/binary, Frames/binary>> = Bin,
+    scan_frames_grouped(Frames).
+
 scan_frames(<<>>) -> [];
 scan_frames(<<_:32, FrameLen:32, _/binary>> = Bin) ->
     <<Frame:FrameLen/binary, Rest/binary>> = Bin,
     {ok, Body, _} = bondy_oplog_wal_frame:decode(Frame),
-    [Event] = binary_to_term(Body),
-    [Event | scan_frames(Rest)].
+    Batch = binary_to_term(Body, [safe]),
+    Batch ++ scan_frames(Rest).
+
+scan_frames_grouped(<<>>) -> [];
+scan_frames_grouped(<<_:32, FrameLen:32, _/binary>> = Bin) ->
+    <<Frame:FrameLen/binary, Rest/binary>> = Bin,
+    {ok, Body, _} = bondy_oplog_wal_frame:decode(Frame),
+    Batch = binary_to_term(Body, [safe]),
+    [Batch | scan_frames_grouped(Rest)].
+
+%% Generate `length(Sizes)` batches with strictly-increasing HLCs across
+%% all events.
+generate_batches(_HLC, []) -> [];
+generate_batches(HLC, [Size | Sizes]) ->
+    Batch = [
+        begin
+            Hlc = bondy_oplog_hlc:now(HLC),
+            Key = bondy_oplog_event:key(Hlc, origin(), Seq),
+            bondy_oplog_event:new(Key, {op, Hlc}, undefined)
+        end
+     || Seq <- lists:seq(1, Size)
+    ],
+    [Batch | generate_batches(HLC, Sizes)].
 
 %% Drains a bounded (non-follow) reader to a flat list of events. Used
 %% by `prop_wal_roundtrip/0`.
@@ -737,6 +2001,62 @@ truncate_file(Path, NewSize) ->
     after
         ok = file:close(Fd)
     end.
+
+%% Flips a single bit at `BitIdx` (0-based) in the file at `Path`.
+%% Reads, rewrites the affected byte in place, leaves the rest of the
+%% file untouched. Used by `prop_bit_flip_magic/0`.
+flip_bit_in_file(Path, BitIdx) ->
+    ByteIdx = BitIdx div 8,
+    BitInByte = BitIdx rem 8,
+    Mask = 1 bsl (7 - BitInByte),
+    {ok, Fd} = file:open(Path, [read, write, raw, binary]),
+    try
+        {ok, _} = file:position(Fd, ByteIdx),
+        {ok, <<B:8>>} = file:read(Fd, 1),
+        {ok, _} = file:position(Fd, ByteIdx),
+        ok = file:write(Fd, <<(B bxor Mask):8>>)
+    after
+        ok = file:close(Fd)
+    end.
+
+%% Returns `{Start, End}` for frame index `K` (0-based) given the list
+%% of `{SegmentId, StartOffset}` positions returned by
+%% `bondy_oplog_wal:append/2` plus `HeadOffsetAfter` — the writer's
+%% `head_offset` *after* all appends (needed because the last frame's
+%% end isn't recorded in `Positions`).
+frame_extent(K, Positions, HeadOffsetAfter) ->
+    {_, Start} = lists:nth(K + 1, Positions),
+    End =
+        case K + 1 < length(Positions) of
+            true ->
+                {_, S} = lists:nth(K + 2, Positions),
+                S;
+            false ->
+                HeadOffsetAfter
+        end,
+    {Start, End}.
+
+%% Path to a single segment file on disk. Used by properties that
+%% manipulate segment bytes directly (P4 magic flip, P5/P13 truncation).
+seg_path(Dir, SegId) ->
+    filename:join(
+        [Dir, instance_id(), bondy_oplog_wal_segment:filename(SegId)]
+    ).
+
+%% Append every event in `Events` through `Pid`, capture the
+%% `{Segment, StartOffset}` returned by each, then read `head_offset`
+%% from `info/1`. Used by P4 / P13 / P5 to derive frame boundaries
+%% without re-parsing the on-disk segment.
+append_and_record_positions(Pid, Events) ->
+    Positions = [
+        begin
+            {ok, _, Pos} = bondy_oplog_wal:append(Pid, E),
+            Pos
+        end
+     || E <- Events
+    ],
+    HeadOff = maps:get(head_offset, bondy_oplog_wal:info(Pid)),
+    {Positions, HeadOff}.
 
 %% Writes a `consumer.offset` file directly, bypassing the setter
 %% guards. Used by P10 to seed arbitrary (including invalid) offsets

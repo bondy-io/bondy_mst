@@ -310,6 +310,9 @@ classify_file(Name, LiveIds) ->
         ?BONDY_OPLOG_WAL_CONSUMER_OFFSET_FILENAME -> keep;
         ?BONDY_OPLOG_WAL_CONSUMER_OFFSET_TMP_FILENAME ->
             {drop, consumer_offset_tmp};
+        ?BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_FILENAME -> keep;
+        ?BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_TMP_FILENAME ->
+            {drop, snapshot_watermark_tmp};
         _ ->
             case lists:suffix(".tmp", Name) of
                 true -> {drop, generic_tmp};
@@ -620,7 +623,7 @@ truncate_head_if_needed(Fd, LastValid) ->
             {ok, _} = prim_file:position(Fd, LastValid),
             case prim_file:truncate(Fd) of
                 ok ->
-                    case prim_file:datasync(Fd) of
+                    case bondy_oplog_wal_io:datasync(Fd) of
                         ok -> {ok, Size - LastValid};
                         {error, _} = E -> E
                     end;

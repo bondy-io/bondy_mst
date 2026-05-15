@@ -81,7 +81,26 @@ without protocol changes.
             pid := pid(),
             from := gen_server:from(),
             started_at := integer()
-        }
+        },
+    %% `append`/`append_many` callers that wrote to the WAL and are
+    %% waiting for the applier to install the event(s) in the MST.
+    %% Keyed by the **last** event key in the originating batch; the
+    %% applier applies in order so the last key landing means every
+    %% prior key has already landed. Value is `{From, Reply}` where
+    %% `Reply` is the single key (for `append/2,3`) or the list of
+    %% keys (for `append_many/2`).
+    pending_applied ::
+        #{bondy_oplog_event:event_key() =>
+            {gen_server:from(),
+             bondy_oplog_event:event_key()
+             | [bondy_oplog_event:event_key()]}},
+    %% Cached per-instance WAL writer pid. Refreshed lazily from the
+    %% registry on the first append after a `'DOWN'` from the previous
+    %% writer (one_for_all restarts swap in a new pid).
+    wal_pid :: undefined | pid(),
+    %% Monitor reference for the cached `wal_pid`; cleared when the
+    %% monitored process dies.
+    wal_pid_monitor :: undefined | reference()
 }).
 
 -type backend() :: map | ets | module().
@@ -101,7 +120,15 @@ without protocol changes.
     crdt_module => module(),
     snapshot_store => module(),
     snapshot_store_opts => map(),
-    max_working_set => pos_integer() | infinity
+    max_working_set => pos_integer() | infinity,
+    %% Per-instance applier tuning. See `bondy_oplog_applier:opts/0`.
+    %% Recognised keys:
+    %%   commit_every     :: pos_integer()   (default 64)
+    %%   poll_interval_ms :: pos_integer()   (default 5)
+    applier => #{
+        commit_every => pos_integer(),
+        poll_interval_ms => pos_integer()
+    }
 }.
 
 -export_type([opts/0]).
@@ -117,6 +144,8 @@ without protocol changes.
 -export([append/3]).
 -export([append_many/2]).
 -export([append_remote/2]).
+-export([apply_event/2]).
+-export([apply_events/2]).
 -export([get/2]).
 -export([root_hash/1]).
 -export([fold_range/5]).
@@ -235,6 +264,39 @@ append_remote(Target, Event) ->
         _ ->
             gen_server:call(target(Target), {append_remote, Event}, infinity)
     end.
+
+?DOC("""
+Back-channel from the per-instance applier. Installs `Event` in the
+MST and replies `ok`. If a pending `append`/`append_many` caller was
+waiting for the event's key, replies to that caller as a side effect.
+
+This is the only path that mutates the MST for **local** events: the
+public `append/2,3` and `append_many/2` write to the WAL and stash
+the caller's `From`; the applier reads the WAL and calls this
+function to make the event observable.
+""").
+-spec apply_event(pid(), bondy_oplog_event:t()) -> ok | {error, term()}.
+
+apply_event(Pid, Event) when is_pid(Pid) ->
+    gen_server:call(Pid, {apply_event, Event}, infinity).
+
+?DOC("""
+Batched counterpart of `apply_event/2`. Applies a list of events in
+order inside a single gen_server round-trip and replies `ok` once they
+have all been installed. On the first event whose application is
+refused (signature failure or collision-with-quarantine), the fold
+stops and the error is returned — already-installed events stay; the
+remaining events are deferred to a future applier pass.
+
+The applier uses this entry point to keep replay throughput
+independent of per-event mailbox latency.
+""").
+-spec apply_events(pid(), [bondy_oplog_event:t()]) -> ok | {error, term()}.
+
+apply_events(_Pid, []) ->
+    ok;
+apply_events(Pid, [_ | _] = Events) when is_pid(Pid) ->
+    gen_server:call(Pid, {apply_events, Events}, infinity).
 
 -spec get(instance_id() | pid(), bondy_oplog_event:event_key()) ->
     {ok, bondy_oplog_event:t()} | not_found.
@@ -587,7 +649,7 @@ such instance is currently running.
 -spec whereis(instance_id()) -> pid() | undefined.
 
 whereis(InstanceId) when is_binary(InstanceId) ->
-    case bondy_oplog_registry:pid(InstanceId) of
+    case bondy_oplog_registry:instance_pid(InstanceId) of
         undefined ->
             undefined;
         Pid ->
@@ -711,49 +773,92 @@ init({InstanceId, Opts}) ->
         max_working_set = maps:get(max_working_set, Opts, infinity),
         live_size = LiveSize,
         last_event_key = LastMSTKey,
-        compaction = undefined
+        compaction = undefined,
+        pending_applied = #{},
+        wal_pid = undefined,
+        wal_pid_monitor = undefined
     },
     ok = publish(State),
     {ok, State}.
 
 handle_call(Req, From, State0) ->
-    case do_handle_call(Req, From, State0) of
-        {reply, _, State0} = Reply ->
-            %% No state change — no publish.
-            Reply;
-        {reply, _, State1} = Reply ->
-            ok = publish(State1),
-            Reply;
-        Other ->
-            Other
-    end.
+    Result = do_handle_call(Req, From, State0),
+    ok = maybe_publish(State0, Result),
+    Result.
 
 %% @private
-do_handle_call({append, Op, Meta}, _From, State0) ->
+%% Publishes the registry row when the handle_call clause produced a
+%% state different from the one we entered with. The explicit
+%% structural `=/=` is intentional: read-only clauses return the
+%% same state and skip the ETS write; idempotent mutations (e.g.,
+%% re-applying an event already in the MST) also fall through to a
+%% no-op because the resulting record is structurally identical.
+maybe_publish(State0, {reply, _, State1}) when State1 =/= State0 ->
+    publish(State1);
+maybe_publish(State0, {noreply, State1}) when State1 =/= State0 ->
+    publish(State1);
+maybe_publish(_State0, _Result) ->
+    ok.
+
+%% @private
+do_handle_call({append, Op, Meta}, From, State0) ->
     case backpressure_admit(State0, 1) of
         ok ->
-            {Key, State} = do_append_local(State0, Op, Meta),
-            {reply, Key, State};
+            case ensure_wal_pid(State0) of
+                {ok, WalPid, State1} ->
+                    case do_append_local(State1, WalPid, [{Op, Meta}]) of
+                        {ok, [Key], State2} ->
+                            State3 = stash_pending(State2, Key, From, Key),
+                            {noreply, State3};
+                        {error, wal_unavailable} ->
+                            {reply, {error, wal_unavailable},
+                             invalidate_wal_pid(State1)};
+                        {error, _} = Err ->
+                            {reply, Err, State1}
+                    end;
+                {error, _} = Err ->
+                    {reply, Err, State0}
+            end;
         {error, _} = Err ->
             {reply, Err, State0}
     end;
-do_handle_call({append_many, Items}, _From, State0) ->
-    %% Atomic admission: either all events fit under the working-set
-    %% cap or none are inserted.
+do_handle_call({append_many, Items}, From, State0) ->
     case backpressure_admit(State0, length(Items)) of
         ok ->
-            {Keys, State} = lists:foldl(
-                fun({Op, Meta}, {Acc, S0}) ->
-                    {Key, S1} = do_append_local(S0, Op, Meta),
-                    {[Key | Acc], S1}
-                end,
-                {[], State0},
-                Items
-            ),
-            {reply, lists:reverse(Keys), State};
+            case ensure_wal_pid(State0) of
+                {ok, WalPid, State1} ->
+                    case do_append_local(State1, WalPid, Items) of
+                        {ok, Keys, State2} ->
+                            LastKey = lists:last(Keys),
+                            State3 = stash_pending(
+                                State2, LastKey, From, Keys
+                            ),
+                            {noreply, State3};
+                        {error, wal_unavailable} ->
+                            {reply, {error, wal_unavailable},
+                             invalidate_wal_pid(State1)};
+                        {error, _} = Err ->
+                            {reply, Err, State1}
+                    end;
+                {error, _} = Err ->
+                    {reply, Err, State0}
+            end;
         {error, _} = Err ->
             {reply, Err, State0}
     end;
+do_handle_call({apply_event, Event}, _From, State0) ->
+    Key = bondy_oplog_event:key(Event),
+    case do_apply_local(State0, Event) of
+        {ok, State1} ->
+            State2 = release_pending(State1, Key),
+            {reply, ok, State2};
+        {error, _} = Err ->
+            State1 = release_pending_error(State0, Key, Err),
+            {reply, Err, State1}
+    end;
+do_handle_call({apply_events, Events}, _From, State0) ->
+    {Reply, State1} = do_apply_locals(State0, Events),
+    {reply, Reply, State1};
 do_handle_call({append_remote, Event}, _From, State0) ->
     Origin = bondy_oplog_event:key_origin(bondy_oplog_event:key(Event)),
     case bondy_oplog_origin_bans:is_banned(Origin) of
@@ -983,16 +1088,39 @@ handle_info(
             gen_server:reply(From, {error, {compaction_worker_died, Reason}}),
             {noreply, State#state{compaction = undefined}}
     end;
+handle_info(
+    {'DOWN', Ref, process, _Pid, _Reason},
+    #state{wal_pid_monitor = Ref} = State
+) ->
+    %% Cached WAL pid has gone down (one_for_all restart); drop the
+    %% cache so the next append re-resolves the new pid via the
+    %% registry.
+    {noreply, State#state{wal_pid = undefined, wal_pid_monitor = undefined}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, #state{
-    instance_id = Name,
     mst = MST,
     snapshot_store = SnapMod,
-    snapshot_state = SnapState
+    snapshot_state = SnapState,
+    pending_applied = Pending
 }) ->
-    _ = bondy_oplog_registry:unregister(Name),
+    %% Reply to every stashed `append` / `append_many` caller before
+    %% closing the MST. Without this they would sit on an `infinity`
+    %% `gen_server:call` until the gen_server's exit signal cascades
+    %% through `monitor`s — which is correct but ungraceful, and
+    %% obscures the real reason in tail traces.
+    maps:foreach(
+        fun(_Key, {From, _Reply}) ->
+            _ = gen_server:reply(From, {error, instance_terminating})
+        end,
+        Pending
+    ),
+    %% Leave the registry row in place so that on a one_for_all subtree
+    %% restart the dyn_sup mapping (`sup_pid`) survives. The row's
+    %% `instance_pid` field will be stale until the new instance
+    %% gen_server's init runs and republishes; lock-free read paths
+    %% use `is_process_alive/1` to detect that case.
     _ = catch SnapMod:close(SnapState),
     _ = catch bondy_mst:delete(MST),
     ok.
@@ -1002,28 +1130,180 @@ terminate(_Reason, #state{
 %% =============================================================================
 
 %% @private
-do_append_local(#state{mst = MST0} = State, Op, Meta) ->
-    HLC = bondy_oplog_hlc:now(State#state.hlc),
-    Seq = atomics:add_get(State#state.seq, 1, 1),
-    Key = bondy_oplog_event:key(HLC, State#state.origin, Seq),
-    Event0 = bondy_oplog_event:new(Key, Op, Meta),
-    {SignedEvent, ValidatorState} =
-        (State#state.validator_module):sign_event(
-            Event0, State#state.validator_state
-        ),
-    Value = value_from_event(SignedEvent),
-    MST1 = bondy_mst:put(MST0, Key, Value),
-    telemetry:execute(
-        [bondy_oplog, instance, append],
-        #{count => 1},
-        #{instance_id => State#state.instance_id}
+%% Builds a signed event for each `{Op, Meta}` item, hands the resulting
+%% list to the per-instance WAL as a single atomic batch frame, and
+%% returns the event keys in input order. The MST is **not** mutated
+%% here — the applier reads back the events from the WAL and calls
+%% `apply_event/2` to install them. Each caller is parked on
+%% `pending_applied` by the surrounding `do_handle_call` so it can be
+%% woken up when the corresponding event is applied.
+do_append_local(#state{} = State0, WalPid, Items) ->
+    {Events, Keys, State1} = build_events(State0, Items),
+    try bondy_oplog_wal:append_batch(WalPid, Events) of
+        {ok, _Entries} ->
+            telemetry:execute(
+                [bondy_oplog, instance, append],
+                #{count => length(Events)},
+                #{instance_id => State1#state.instance_id}
+            ),
+            {ok, Keys, State1};
+        {error, _} = E ->
+            E
+    catch
+        exit:{noproc, _} -> {error, wal_unavailable};
+        exit:noproc -> {error, wal_unavailable};
+        exit:{normal, _} -> {error, wal_unavailable};
+        exit:{shutdown, _} -> {error, wal_unavailable}
+    end.
+
+%% @private
+%% Allocates a fresh `{HLC, Origin, Seq}` for each item, signs the
+%% event via the configured validator, and threads the validator state
+%% forward. Returns `{Events, Keys, NewState}`.
+build_events(State0, Items) ->
+    {EventsRev, KeysRev, State1} = lists:foldl(
+        fun({Op, Meta}, {EvAcc, KAcc, S0}) ->
+            HLC = bondy_oplog_hlc:now(S0#state.hlc),
+            Seq = atomics:add_get(S0#state.seq, 1, 1),
+            Key = bondy_oplog_event:key(HLC, S0#state.origin, Seq),
+            Event0 = bondy_oplog_event:new(Key, Op, Meta),
+            {Signed, VS1} =
+                (S0#state.validator_module):sign_event(
+                    Event0, S0#state.validator_state
+                ),
+            {[Signed | EvAcc], [Key | KAcc],
+             S0#state{validator_state = VS1}}
+        end,
+        {[], [], State0},
+        Items
     ),
-    {Key, State#state{
-        mst = MST1,
-        validator_state = ValidatorState,
-        last_event_key = Key,
-        live_size = State#state.live_size + 1
-    }}.
+    {lists:reverse(EventsRev), lists:reverse(KeysRev), State1}.
+
+%% @private
+%% Installs a single local event in the MST. Called by the back-channel
+%% `apply_event/2` invoked by the applier.
+%%
+%% Re-verifies the stored signature as a defence-in-depth check against
+%% WAL tampering — for the trust validator this is a no-op; for the
+%% crypto validator it catches forged frames before they reach the MST.
+%%
+%% Idempotent on re-apply (same key + value → same MST root). On
+%% collision (same key, different value) the existing event is left
+%% in place and the incoming event is quarantined; the gen_server is
+%% NOT crashed because a one_for_all restart with always-from-beginning
+%% replay would just re-fire the same crash until the supervisor
+%% intensity is exhausted.
+-spec do_apply_local(#state{}, bondy_oplog_event:t()) ->
+    {ok, #state{}} | {error, term()}.
+
+do_apply_local(#state{mst = MST0} = State, Event) ->
+    Key = bondy_oplog_event:key(Event),
+    case verify(State, Event) of
+        ok ->
+            NewValue = value_from_event(Event),
+            case bondy_mst:get(MST0, Key) of
+                undefined ->
+                    {ok, install_event(State, Key, NewValue, apply_event, true)};
+                NewValue ->
+                    {ok, install_event(State, Key, NewValue, apply_event, false)};
+                ExistingValue ->
+                    record_equivocation(State, Key, ExistingValue, Event),
+                    {error, equivocation_detected}
+            end;
+        {error, _} = E ->
+            ?LOG_WARNING(#{
+                description =>
+                    "bondy_oplog_instance refused to apply a local event "
+                    "whose stored signature does not verify; the event "
+                    "has been skipped to keep the subtree alive",
+                instance_id => State#state.instance_id,
+                key => Key,
+                reason => E
+            }),
+            telemetry:execute(
+                [bondy_oplog, instance, apply_event, verify_failed],
+                #{count => 1},
+                #{instance_id => State#state.instance_id}
+            ),
+            E
+    end.
+
+%% @private
+%% Batched apply path. Folds `do_apply_local` over the list inside a
+%% single gen_server round-trip and replies once. On the first error
+%% the fold stops and the remaining events are left for a later applier
+%% pass (replay from beginning is idempotent, so this is safe).
+-spec do_apply_locals(#state{}, [bondy_oplog_event:t()]) ->
+    {ok | {error, term()}, #state{}}.
+
+do_apply_locals(State0, []) ->
+    {ok, State0};
+do_apply_locals(State0, [Event | Rest]) ->
+    Key = bondy_oplog_event:key(Event),
+    case do_apply_local(State0, Event) of
+        {ok, State1} ->
+            State2 = release_pending(State1, Key),
+            do_apply_locals(State2, Rest);
+        {error, _} = Err ->
+            State1 = release_pending_error(State0, Key, Err),
+            {Err, State1}
+    end.
+
+%% @private
+%% Returns `{ok, WalPid, State1}` with `State1` carrying a monitored
+%% cached pid so subsequent appends skip the registry lookup. If the
+%% registry does not yet have a `wal_pid` (subtree mid-restart), the
+%% cache is left empty and the caller surfaces `{error, wal_unavailable}`.
+ensure_wal_pid(#state{wal_pid = Pid} = State) when is_pid(Pid) ->
+    {ok, Pid, State};
+ensure_wal_pid(#state{instance_id = Id} = State) ->
+    case bondy_oplog_registry:wal_pid(Id) of
+        undefined ->
+            {error, wal_unavailable};
+        Pid when is_pid(Pid) ->
+            Ref = erlang:monitor(process, Pid),
+            {ok, Pid, State#state{wal_pid = Pid, wal_pid_monitor = Ref}}
+    end.
+
+%% @private
+%% Drops the cached WAL pid + its monitor. Used after a synchronous
+%% append surfaces `noproc` so the next append rolls forward to the
+%% new writer once the supervisor brings it up.
+invalidate_wal_pid(#state{wal_pid_monitor = undefined} = State) ->
+    State#state{wal_pid = undefined};
+invalidate_wal_pid(#state{wal_pid_monitor = Ref} = State) ->
+    _ = erlang:demonitor(Ref, [flush]),
+    State#state{wal_pid = undefined, wal_pid_monitor = undefined}.
+
+%% @private
+stash_pending(#state{pending_applied = P0} = State, Key, From, Reply) ->
+    State#state{pending_applied = P0#{Key => {From, Reply}}}.
+
+%% @private
+%% If `Key` had a pending caller, reply to it and remove the entry.
+%% A no-op for keys without a pending caller (e.g. replayed events on
+%% subtree restart, or batches whose last key has not yet landed).
+release_pending(#state{pending_applied = P0} = State, Key) ->
+    case maps:take(Key, P0) of
+        {{From, Reply}, P1} ->
+            gen_server:reply(From, Reply),
+            State#state{pending_applied = P1};
+        error ->
+            State
+    end.
+
+%% @private
+%% Wakes the pending caller for `Key` with `Err` so it doesn't sit on
+%% an `infinity` `gen_server:call` after the applier has decided to skip
+%% the event (quarantine / verify failure / collision).
+release_pending_error(#state{pending_applied = P0} = State, Key, Err) ->
+    case maps:take(Key, P0) of
+        {{From, _Reply}, P1} ->
+            gen_server:reply(From, Err),
+            State#state{pending_applied = P1};
+        error ->
+            State
+    end.
 
 %% @private
 %% Returns `{ok, NewState}` on accepted insert (or below-watermark filter,
@@ -1053,10 +1333,10 @@ do_append_remote(#state{mst = MST0} = State, Event) ->
             NewValue = value_from_event(Event),
             case bondy_mst:get(MST0, Key) of
                 undefined ->
-                    {ok, do_insert_remote(State, Key, NewValue, true)};
+                    {ok, install_event(State, Key, NewValue, append_remote, true)};
                 NewValue ->
                     %% Idempotent re-receive (bit-identical).
-                    {ok, do_insert_remote(State, Key, NewValue, false)};
+                    {ok, install_event(State, Key, NewValue, append_remote, false)};
                 ExistingValue ->
                     record_equivocation(State, Key, ExistingValue, Event),
                     {error, equivocation_detected}
@@ -1064,24 +1344,33 @@ do_append_remote(#state{mst = MST0} = State, Event) ->
     end.
 
 %% @private
-do_insert_remote(State, Key, Value, IsNew) ->
+%% Shared insert path for `do_apply_local` (local-origin events from
+%% the applier back-channel) and `do_append_remote` (peer-received
+%% events). Mutates the MST, refreshes `last_event_key` and
+%% `live_size`, advances the HLC, and emits a
+%% `[bondy_oplog, instance, Source, ok]` telemetry event so callers
+%% can tell the two paths apart in dashboards.
+install_event(#state{} = State, Key, Value, Source, IsNew) ->
     MST1 = bondy_mst:put(State#state.mst, Key, Value),
-    telemetry:execute(
-        [bondy_oplog, instance, append_remote, ok],
-        #{count => 1},
-        #{instance_id => State#state.instance_id, new => IsNew}
-    ),
     LastKey =
         case State#state.last_event_key of
             undefined -> Key;
             Prev when Key > Prev -> Key;
             Prev -> Prev
         end,
+    _ = bondy_oplog_hlc:update(
+        State#state.hlc, bondy_oplog_event:key_hlc(Key)
+    ),
     SizeDelta =
         case IsNew of
             true -> 1;
             false -> 0
         end,
+    telemetry:execute(
+        [bondy_oplog, instance, Source, ok],
+        #{count => 1},
+        #{instance_id => State#state.instance_id, new => IsNew}
+    ),
     State#state{
         mst = MST1,
         last_event_key = LastKey,
@@ -1531,7 +1820,7 @@ backend_opts(_, InstanceId, Opts) ->
 publish(#state{} = State) ->
     bondy_oplog_registry:publish(#{
         instance_id => State#state.instance_id,
-        pid => self(),
+        instance_pid => self(),
         origin => State#state.origin,
         mst => State#state.mst,
         watermark => State#state.watermark,
@@ -1542,7 +1831,7 @@ publish(#state{} = State) ->
 
 %% @private
 ets_member(InstanceId) ->
-    bondy_oplog_registry:pid(InstanceId) =/= undefined.
+    bondy_oplog_registry:instance_pid(InstanceId) =/= undefined.
 
 %% @private
 target(Pid) when is_pid(Pid) ->

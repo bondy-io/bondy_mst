@@ -13,16 +13,12 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-Node-shared peer-state registry (`_design/10_new_design.md` §11.6).
+Node-shared peer-state registry.
 
 A single ETS `set` table per node, keyed by `{peer_id, instance_id}`.
 Records the most recent root hash observed for each `(peer, instance)`
 pair, plus the wall-clock timestamps of the last successful sync and
 the last time we heard from the peer at all.
-
-This is the *only* library-level singleton consumers cannot easily
-replace: with many instances on a node, a per-instance peer table
-would be operationally untenable (millions of duplicates).
 
 ## Roles
 

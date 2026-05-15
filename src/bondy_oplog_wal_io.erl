@@ -19,6 +19,8 @@ manifest implementations.
 """).
 
 -export([fsync_dir/1]).
+-export([datasync/1]).
+-export([rename/2]).
 
 %% =============================================================================
 %% API
@@ -66,6 +68,41 @@ fsync_dir(Dir) ->
             warn_once(fsync_dir_unrecognised_error, Dir, Reason),
             E
     end.
+
+?DOC("""
+WAL datasync seam. Every disk-durability point in the WAL — the head
+segment, sealed segments, the sparse index, the manifest, the consumer
+offset, the snapshot watermark, and the recovery truncate — funnels
+through here so:
+
+1. Platform-specific tightening (macOS `F_FULLFSYNC` via a NIF, Linux
+   `io_uring`-based sync, etc.) lands in one place.
+2. The test suite has a single named callsite to `meck:expect/3` for
+   fault injection (P14 — `prop_failed_fsync/0`). Mocking `prim_file`
+   itself is unsafe because `file:write_file/2`, `file:open/2`, and the
+   emulator's own I/O flow through it.
+
+The wrapper is intentionally thin — production behaviour is
+byte-identical to `prim_file:datasync/1`. Test code that fault-injects
+this function must hold the `?MODULE` global lock (see
+`with_io_fault_lock/1` in the test suite) so concurrent test modules
+don't see another suite's mock.
+""").
+-spec datasync(file:fd()) -> ok | {error, term()}.
+
+datasync(Fd) ->
+    prim_file:datasync(Fd).
+
+?DOC("""
+WAL rename seam — same rationale as `datasync/1`. Every atomic
+rename-into-place in the WAL (manifest, sparse index, consumer offset,
+snapshot watermark) funnels through here.
+""").
+-spec rename(file:filename_all(), file:filename_all()) ->
+    ok | {error, term()}.
+
+rename(From, To) ->
+    prim_file:rename(From, To).
 
 %% =============================================================================
 %% PRIVATE

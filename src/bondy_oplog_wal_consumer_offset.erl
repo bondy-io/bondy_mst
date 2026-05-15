@@ -134,7 +134,7 @@ write(Dir, #?MODULE{} = CO) ->
     Bin = format(CO),
     case write_and_sync(TmpPath, Bin) of
         ok ->
-            case prim_file:rename(TmpPath, FinalPath) of
+            case bondy_oplog_wal_io:rename(TmpPath, FinalPath) of
                 ok ->
                     bondy_oplog_wal_io:fsync_dir(Dir);
                 {error, _} = E ->
@@ -274,7 +274,7 @@ write_and_sync(TmpPath, Bin) ->
             Res =
                 case prim_file:write(Fd, Bin) of
                     ok ->
-                        case prim_file:datasync(Fd) of
+                        case bondy_oplog_wal_io:datasync(Fd) of
                             ok -> ok;
                             {error, _} = E1 -> E1
                         end;

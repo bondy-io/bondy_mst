@@ -252,7 +252,11 @@ generate_keypair() ->
     crypto:generate_key(eddsa, ed25519).
 
 origin_from_pubkey(Pub) ->
-    crypto:hash(sha256, Pub).
+    %% The WAL's segment header stores a 16-byte origin; truncate the
+    %% sha256 hash so the test's derived origin satisfies that fixed
+    %% width. Collision probability across a single test run is
+    %% negligible.
+    binary:part(crypto:hash(sha256, Pub), 0, 16).
 
 init_state(Keypair, PeerPubkeys) ->
     bondy_oplog_validator_crypto:init(<<"test_inst">>, #{

@@ -106,4 +106,53 @@
 %% writer.
 -define(BONDY_OPLOG_WAL_BATCHED_FSYNC_BYTES_DEFAULT, (1 * 1024 * 1024)).
 
+%% -----------------------------------------------------------------------------
+%% Atomic batches (§3, §8.3 — Q9)
+%% -----------------------------------------------------------------------------
+
+%% Hard upper bound on the encoded body of a single atomic batch frame.
+%% 4 MiB is large enough to hold tens of thousands of small events in one
+%% atomic write, while keeping a single frame well below the default
+%% `max_segment_bytes` (64 MiB) so pre-rotation always has room.
+-define(BONDY_OPLOG_WAL_MAX_BATCH_BYTES_DEFAULT, (4 * 1024 * 1024)).
+
+%% -----------------------------------------------------------------------------
+%% Retention + snapshot watermark (§10)
+%% -----------------------------------------------------------------------------
+
+-define(BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_FILENAME, "snapshot.watermark").
+-define(BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_TMP_FILENAME,
+        "snapshot.watermark.tmp").
+-define(BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_VERSION, 1).
+
+%% Minimum number of live segments to keep after a retention sweep, even
+%% if all segments are otherwise eligible for deletion. Provides a
+%% recent-history safety net for ad-hoc inspection / replay.
+-define(BONDY_OPLOG_WAL_MIN_LIVE_SEGMENTS_DEFAULT, 2).
+
+%% Default cadence of the periodic retention sweep (ms). 5 minutes per
+%% WAL_DESIGN §10.4 — a safety net behind the event-driven triggers
+%% (applier commit advance, watermark advance).
+-define(BONDY_OPLOG_WAL_RETENTION_SWEEP_INTERVAL_DEFAULT_MS, (5 * 60 * 1000)).
+
+%% -----------------------------------------------------------------------------
+%% Backpressure (§14, §15)
+%% -----------------------------------------------------------------------------
+
+%% Hard cap on the sum of `.qdata` sizes across all live segments. Once
+%% crossed, `append`/`append_batch` return `{error, wal_full}` until
+%% retention frees space. 8 GiB matches the WAL_DESIGN §14 default.
+-define(BONDY_OPLOG_WAL_MAX_TOTAL_WAL_SIZE_DEFAULT, (8 * 1024 * 1024 * 1024)).
+
+%% Hard cap on `length(live_segments)`. Once reached, the writer refuses
+%% the rotation that would create segment N+1 — the in-flight append is
+%% rejected with `{error, wal_full}`. 256 matches WAL_DESIGN §14.
+-define(BONDY_OPLOG_WAL_MAX_LIVE_SEGMENTS_DEFAULT, 256).
+
+%% Minimum interval between `wal_full` telemetry events (ms). A backpressured
+%% client typically retries on a tight loop; without debouncing the WAL
+%% would emit one event per retry. 30 s matches the WAL_DESIGN §15
+%% recommendation.
+-define(BONDY_OPLOG_WAL_WAL_FULL_TELEMETRY_DEBOUNCE_MS, (30 * 1000)).
+
 -endif.

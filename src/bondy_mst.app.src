@@ -16,7 +16,8 @@
     resulto,
     memory,
     %% rocksdb,
-    bloomfi
+    bloomfi,
+    telemetry
    ]},
   {env,[]},
   {modules, []},

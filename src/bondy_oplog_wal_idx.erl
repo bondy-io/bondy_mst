@@ -491,7 +491,7 @@ decode_entries_loop(
 write_and_sync(Fd, Iolist) ->
     case prim_file:write(Fd, Iolist) of
         ok ->
-            case prim_file:datasync(Fd) of
+            case bondy_oplog_wal_io:datasync(Fd) of
                 ok -> ok;
                 {error, _} = E -> E
             end;
@@ -500,7 +500,7 @@ write_and_sync(Fd, Iolist) ->
 
 %% @private
 commit_or_cleanup(ok, TmpPath, Path) ->
-    case prim_file:rename(TmpPath, Path) of
+    case bondy_oplog_wal_io:rename(TmpPath, Path) of
         ok ->
             bondy_oplog_wal_io:fsync_dir(filename:dirname(Path));
         {error, _} = E ->

@@ -10,8 +10,7 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-Public façade for the operation-log replication framework
-(`_design/10_new_design.md` §11.4).
+Public façade for the operation-log replication framework.
 
 Each replicated value is an **instance**: an append-only operation log
 keyed by `{HLC, Origin, Seq}`, stored in a Merkle Search Tree. Stable
@@ -94,7 +93,7 @@ start_instance(InstanceId) when is_binary(InstanceId) ->
 ?DOC("""
 Starts an instance. Returns the pid of the per-instance supervisor.
 Idempotent: re-starting a running instance returns its existing
-sup pid.
+supervisor pid.
 """).
 -spec start_instance(
     instance_id(),
@@ -148,10 +147,12 @@ list_instances() ->
     ),
     [
         InstanceId
-     || {_Id, WorkerPid, worker, _} <- Children,
-        is_pid(WorkerPid),
+     || {_Id, SupPid, supervisor, _} <- Children,
+        is_pid(SupPid),
+        InstancePid <- [bondy_oplog_instance_sup:instance_pid(SupPid)],
+        is_pid(InstancePid),
         #{instance_id := InstanceId} <-
-            [bondy_oplog_instance:info(WorkerPid)]
+            [bondy_oplog_instance:info(InstancePid)]
     ].
 
 ?DOC("""
