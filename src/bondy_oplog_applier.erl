@@ -22,12 +22,20 @@ Sits between the per-instance WAL writer and the per-instance
 - On start, choose a resume position based on the live MST's
   high-watermark + the snapshot watermark (see `resume_position/2`)
   and open a non-following `bondy_oplog_wal_reader` there.
-- Drain the reader in batches, calling
-  `bondy_oplog_instance:apply_events/2` so the instance installs the
-  events in the MST and replies to the original `append` caller(s).
-- After applying each batch, persist `consumer.offset` (atomic write)
-  and notify the WAL writer of the new committed segment so retention
-  can sweep.
+- Drain the reader in batches. For each event in the batch the
+  applier re-verifies the stored signature (defence-in-depth against
+  WAL tampering) and then dispatches the surviving events to the
+  instance via a one-way `gen_server:cast` so the instance installs
+  them in the MST and evicts the matching overlay rows. The drain
+  loop does not block on the install — the cast lands in the
+  instance mailbox in FIFO order and is processed concurrently with
+  the next batch's read+verify.
+- At commit boundaries (every `commit_every` events or `end_of_log`)
+  the applier issues a synchronous `drain_install_queue` call to the
+  instance before persisting `consumer.offset` and advancing the
+  WAL's committed-segment marker. This call returns once every
+  in-flight install cast has been processed, so retention never
+  drops a segment whose events the instance has not yet installed.
 
 ## Resume position
 
@@ -62,7 +70,15 @@ resume frame is an idempotent no-op.
     %% Milliseconds between polling ticks when the reader returns
     %% `end_of_log`. Constant for now; the writer publishes an atomics
     %% durable position so a future revision could long-poll instead.
-    poll_interval_ms :: pos_integer()
+    poll_interval_ms :: pos_integer(),
+    %% Validator module + snapshot of validator state for signature
+    %% re-verification (S1) in the applier process. Fetched once from
+    %% the instance at `init/1`. `verify_event/2` is read-only on
+    %% state (the only state mutation happens in `sign_event/2` which
+    %% the instance owns), so the snapshot remains valid for the
+    %% lifetime of the applier.
+    validator_module :: module(),
+    validator_state :: term()
 }).
 
 -type opts() :: #{
@@ -143,6 +159,8 @@ init(#{instance_id := InstanceId, wal_dir := WalDir} = Opts) ->
                 WalP, StartPos, [{follow, false}]
             ) of
                 {ok, Iter} ->
+                    {ValidatorMod, ValidatorState} =
+                        bondy_oplog_instance:get_validator(InstP),
                     State = #state{
                         instance_id = InstanceId,
                         instance_pid = InstP,
@@ -152,7 +170,9 @@ init(#{instance_id := InstanceId, wal_dir := WalDir} = Opts) ->
                         consumer_offset = CO,
                         uncommitted = 0,
                         commit_every = CommitEvery,
-                        poll_interval_ms = PollMs
+                        poll_interval_ms = PollMs,
+                        validator_module = ValidatorMod,
+                        validator_state = ValidatorState
                     },
                     ok = bondy_oplog_registry:set_applier_pid(
                         InstanceId, self()
@@ -292,8 +312,7 @@ read_consumer_offset(WalDir) ->
 drain_loop(#state{iter = Iter} = State0) ->
     case bondy_oplog_wal_reader:next(Iter) of
         {ok, Batch, _Hlcs, {NextSeg, NextOff}, NewIter} ->
-            ApplyResult = apply_batch(State0, Batch),
-            ok = log_batch_outcome(State0, ApplyResult),
+            apply_batch(State0, Batch),
             {LastHlc, Count} = batch_summary(Batch),
             State1 = bump_offset(
                 State0#state{iter = NewIter},
@@ -316,29 +335,99 @@ drain_loop(#state{iter = Iter} = State0) ->
     end.
 
 %% @private
-%% The instance handles partial-batch refusal internally (signature
-%% failure, equivocation), so we always advance past the batch. A
-%% refusal is logged here; it has already been quarantined or logged
-%% at the instance side. Stopping on refusal would crash-loop the
-%% subtree under always-from-beginning replay.
-log_batch_outcome(_State, ok) ->
-    ok;
-log_batch_outcome(#state{instance_id = Id}, {error, Reason}) ->
-    ?LOG_WARNING(#{
-        description =>
-            "bondy_oplog_applier advancing past a batch that the "
-            "instance refused to apply; subsequent passes will not "
-            "retry these events",
-        instance_id => Id,
-        reason => Reason
-    }),
+%% Re-verify each event's stored signature (defence-in-depth against
+%% WAL tampering) and dispatch the survivors to the instance via a
+%% one-way `gen_server:cast`. The instance installs the events in
+%% the MST and evicts the matching overlay rows in FIFO order; the
+%% applier does not wait. Events that fail verification are dropped
+%% from the batch: their telemetry is emitted here and their overlay
+%% rows are evicted directly from the applier process so a reader
+%% does not perpetually observe a row whose event the system has
+%% rejected. Subsequent applier passes do not retry rejected events
+%% (replay-from-beginning would just re-fire the same failure).
+apply_batch(#state{instance_id = Id} = State, Batch) ->
+    {Verified, Rejected} = verify_batch(State, Batch, [], []),
+    case Rejected of
+        [] -> ok;
+        _ -> ok = evict_rejected_overlay(Id, Rejected)
+    end,
+    case Verified of
+        [] ->
+            ok;
+        _ ->
+            gen_server:cast(
+                State#state.instance_pid,
+                {install_local_batch, Verified}
+            )
+    end,
     ok.
 
 %% @private
-%% One gen_server round-trip per batch — the instance applies every
-%% event in order inside a single handle_call and replies once.
-apply_batch(#state{instance_pid = InstancePid}, Batch) ->
-    bondy_oplog_instance:apply_events(InstancePid, Batch).
+%% Folds the batch in order, partitioning into verified events and
+%% rejected ones. Verified order is preserved (the cast handler
+%% relies on HLC-monotonic order within a batch).
+verify_batch(_State, [], VAcc, RAcc) ->
+    {lists:reverse(VAcc), lists:reverse(RAcc)};
+verify_batch(#state{} = State, [Event | Rest], VAcc, RAcc) ->
+    case verify_event(State, Event) of
+        ok ->
+            verify_batch(State, Rest, [Event | VAcc], RAcc);
+        {error, Reason} ->
+            ok = log_verify_failure(State, Event, Reason),
+            verify_batch(State, Rest, VAcc, [Event | RAcc])
+    end.
+
+%% @private
+%% Removes overlay rows for events the applier refused to install.
+%% Uses the registry to find the overlay tid and an `ets:select_delete/2`
+%% with an HLC-conditional guard so a concurrent retry of the same key
+%% with a higher HLC is preserved.
+evict_rejected_overlay(InstanceId, Events) ->
+    case bondy_oplog_registry:overlay_tab(InstanceId) of
+        undefined ->
+            ok;
+        Tab ->
+            lists:foreach(
+                fun(Event) ->
+                    Key = bondy_oplog_event:key(Event),
+                    Hlc = bondy_oplog_event:key_hlc(Key),
+                    _ = try
+                        ets:select_delete(Tab, [{
+                            {Key, '_', '$1', '_'},
+                            [{'=<', '$1', Hlc}],
+                            [true]
+                        }])
+                    catch
+                        error:badarg -> 0
+                    end
+                end,
+                Events
+            ),
+            ok
+    end.
+
+%% @private
+verify_event(#state{validator_module = Mod, validator_state = VS}, Event) ->
+    Mod:verify_event(Event, VS).
+
+%% @private
+log_verify_failure(#state{instance_id = Id}, Event, Reason) ->
+    Key = bondy_oplog_event:key(Event),
+    ?LOG_WARNING(#{
+        description =>
+            "bondy_oplog_applier dropped an event whose stored "
+            "signature does not verify; the event has been skipped "
+            "to keep the subtree alive",
+        instance_id => Id,
+        key => Key,
+        reason => Reason
+    }),
+    telemetry:execute(
+        [bondy_oplog, applier, verify_failed],
+        #{count => 1},
+        #{instance_id => Id}
+    ),
+    ok.
 
 %% @private
 batch_summary(Batch) ->
@@ -369,10 +458,20 @@ commit_now(#state{uncommitted = 0} = State) ->
     State;
 commit_now(#state{
     instance_id = InstanceId,
+    instance_pid = InstancePid,
     wal_dir = Dir,
     wal_pid = WalPid,
     consumer_offset = CO
 } = State) ->
+    %% Drain barrier: block until the instance has processed every
+    %% `install_local_batch` cast we issued before this commit. The
+    %% FIFO mailbox ordering of casts and the synchronous call
+    %% together guarantee that, when the call returns, all events
+    %% whose keys we're about to commit have been installed in the
+    %% MST. Without this barrier, `notify_committed_segment` could
+    %% drop a WAL segment whose events the instance has not yet
+    %% applied — a hard durability hole on a co-crash.
+    ok = drain_install_queue(InstancePid),
     case bondy_oplog_wal_consumer_offset:write(Dir, CO) of
         ok ->
             Seg = bondy_oplog_wal_consumer_offset:committed_segment(CO),
@@ -388,6 +487,22 @@ commit_now(#state{
             }),
             %% Keep uncommitted > 0 so the next commit boundary retries.
             State
+    end.
+
+%% @private
+%% Synchronous barrier — `gen_server:call` jumps the instance mailbox
+%% to the back of the queue, so every prior cast (the `install_local_batch`
+%% messages from this drain pass) has been fully handled by the time
+%% this call returns. A `noproc` race during subtree shutdown is
+%% treated as a "no events to wait on" and tolerated.
+drain_install_queue(InstancePid) ->
+    try gen_server:call(InstancePid, drain_install_queue, infinity) of
+        ok -> ok
+    catch
+        exit:{noproc, _} -> ok;
+        exit:noproc -> ok;
+        exit:{normal, _} -> ok;
+        exit:{shutdown, _} -> ok
     end.
 
 %% @private

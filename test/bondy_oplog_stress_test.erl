@@ -99,6 +99,7 @@ convergence_with_file_snapshot_store() ->
     },
     {ok, _} = bondy_oplog:start_instance(Id, Opts),
     [bondy_oplog:append(Id, {inc, 1}) || _ <- lists:seq(1, 3)],
+    ok = bondy_oplog:await_apply(Id),
     %% Force a peer state for compaction (single-replica self-peer).
     LocalRoot = bondy_oplog:root_hash(Id),
     bondy_oplog_peer_state:record_sync_complete(

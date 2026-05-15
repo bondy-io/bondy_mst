@@ -52,6 +52,8 @@ Per-instance event operations pass through to
 -export([append/3]).
 -export([append_many/2]).
 -export([append_remote/2]).
+-export([await_apply/1]).
+-export([await_apply/2]).
 -export([get/2]).
 -export([root_hash/1]).
 -export([fold_range/5]).
@@ -205,6 +207,16 @@ append_many(InstanceId, Items) ->
 append_remote(InstanceId, Event) ->
     bondy_oplog_instance:append_remote(InstanceId, Event).
 
+-spec await_apply(instance_id()) -> ok | {error, timeout}.
+
+await_apply(InstanceId) ->
+    bondy_oplog_instance:await_apply(InstanceId).
+
+-spec await_apply(instance_id(), timeout()) -> ok | {error, timeout}.
+
+await_apply(InstanceId, Timeout) ->
+    bondy_oplog_instance:await_apply(InstanceId, Timeout).
+
 -spec get(instance_id(), bondy_oplog_event:event_key()) ->
     {ok, bondy_oplog_event:t()} | not_found.
 
@@ -214,6 +226,10 @@ get(InstanceId, Key) ->
 -spec root_hash(instance_id()) -> binary() | undefined.
 
 root_hash(InstanceId) ->
+    %% Drain the applier so the returned root reflects every event
+    %% the caller has already `append/2`-ed. Callers comparing roots
+    %% across nodes after a write expect read-your-writes semantics.
+    _ = bondy_oplog_instance:await_apply(InstanceId),
     bondy_oplog_instance:root_hash(InstanceId).
 
 -spec fold_range(
@@ -297,6 +313,11 @@ sync(InstanceId, Peer) ->
 ) -> {ok, bondy_mst:hash() | undefined} | {error, term()}.
 
 sync(InstanceId, Peer, Opts) ->
+    %% Drain the local applier so sync operates on the up-to-date MST
+    %% instead of stale state with overlay-pending events. Production
+    %% callers who do many appends followed by sync would otherwise
+    %% sync against an MST that doesn't yet contain those appends.
+    _ = bondy_oplog_instance:await_apply(InstanceId),
     bondy_oplog_sync_session:run(InstanceId, Peer, Opts).
 
 -spec sync_async(instance_id(), peer_id()) -> {ok, pid()}.
@@ -335,6 +356,9 @@ bootstrap(InstanceId, Peer) ->
 ) -> {ok, bondy_mst:hash() | undefined} | {error, term()}.
 
 bootstrap(InstanceId, Peer, Opts) ->
+    %% Drain the local applier so bootstrap operates on the
+    %% up-to-date MST (same rationale as `sync/3`).
+    _ = bondy_oplog_instance:await_apply(InstanceId),
     bondy_oplog_sync_session:bootstrap(InstanceId, Peer, Opts).
 
 %% =============================================================================
@@ -351,6 +375,11 @@ Runs one compaction cycle on `InstanceId`. See
     | {error, term()}.
 
 compact(InstanceId) ->
+    %% Drain the local applier so compaction operates on the
+    %% up-to-date MST. Without this, overlay-pending events would be
+    %% missed by the truncation pass and remain in the overlay after
+    %% compaction completes.
+    _ = bondy_oplog_instance:await_apply(InstanceId),
     bondy_oplog_compaction:compact(InstanceId).
 
 -spec current_watermark(instance_id()) ->
@@ -372,6 +401,9 @@ Hot query: snapshot + live events. See
 -spec query(instance_id(), Query :: term()) -> term().
 
 query(InstanceId, Query) ->
+    %% Hot query reads the MST (and snapshot). Drain so overlay-
+    %% pending events are included.
+    _ = bondy_oplog_instance:await_apply(InstanceId),
     bondy_oplog_query:query(InstanceId, Query).
 
 ?DOC("""
@@ -381,4 +413,10 @@ Stable query: snapshot only. See
 -spec query_stable(instance_id(), Query :: term()) -> term().
 
 query_stable(InstanceId, Query) ->
+    %% query_stable reads the snapshot store only (no live MST), but
+    %% the underlying compaction/load_snapshot operations must have
+    %% drained the applier first. We drain defensively here so a
+    %% stale read between an append and the next compaction doesn't
+    %% surprise callers.
+    _ = bondy_oplog_instance:await_apply(InstanceId),
     bondy_oplog_query:query_stable(InstanceId, Query).

@@ -112,6 +112,14 @@ dispatch(InstanceId, get_root) when is_binary(InstanceId) ->
         undefined ->
             {error, {instance_not_running, InstanceId}};
         _Pid ->
+            %% Await the local applier's drain before reading the
+            %% root. A peer that just appended events and then asked
+            %% us to sync against our root expects the root to reflect
+            %% the events durably visible on this side; without the
+            %% await, the applier's `install_local_batch` cast may
+            %% still be in the instance mailbox and the root would
+            %% lag behind the WAL.
+            _ = bondy_oplog_instance:await_apply(InstanceId),
             {ok, bondy_oplog_instance:root_hash(InstanceId)}
     end;
 dispatch(InstanceId, {get_pages, Hashes}) when is_binary(InstanceId) ->
@@ -119,6 +127,7 @@ dispatch(InstanceId, {get_pages, Hashes}) when is_binary(InstanceId) ->
         undefined ->
             {error, {instance_not_running, InstanceId}};
         _Pid ->
+            _ = bondy_oplog_instance:await_apply(InstanceId),
             HashList =
                 case is_list(Hashes) of
                     true -> Hashes;
@@ -131,6 +140,7 @@ dispatch(InstanceId, get_snapshot) when is_binary(InstanceId) ->
         undefined ->
             {error, {instance_not_running, InstanceId}};
         _Pid ->
+            _ = bondy_oplog_instance:await_apply(InstanceId),
             case bondy_oplog_instance:snapshot(InstanceId) of
                 not_found -> {ok, no_snapshot};
                 {ok, W, S} -> {ok, W, S}

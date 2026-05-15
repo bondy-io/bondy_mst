@@ -51,6 +51,12 @@ request(Peer, _InstanceId, _Request, _Opts) ->
 
 %% @private
 do_request(PeerInstance, get_root) ->
+    %% Drain the peer's applier so the returned root reflects every
+    %% WAL-fsynced event. Without this, a freshly-appended event that
+    %% is still in the peer's overlay would not be in the returned
+    %% root, and the local sync session would conclude
+    %% prematurely-equal or miss pages.
+    _ = bondy_oplog_instance:await_apply(PeerInstance),
     {ok, bondy_oplog_instance:root_hash(PeerInstance)};
 do_request(PeerInstance, {get_pages, Hashes}) ->
     HashList =

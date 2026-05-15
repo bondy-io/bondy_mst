@@ -82,25 +82,28 @@ without protocol changes.
             from := gen_server:from(),
             started_at := integer()
         },
-    %% `append`/`append_many` callers that wrote to the WAL and are
-    %% waiting for the applier to install the event(s) in the MST.
-    %% Keyed by the **last** event key in the originating batch; the
-    %% applier applies in order so the last key landing means every
-    %% prior key has already landed. Value is `{From, Reply}` where
-    %% `Reply` is the single key (for `append/2,3`) or the list of
-    %% keys (for `append_many/2`).
-    pending_applied ::
-        #{bondy_oplog_event:event_key() =>
-            {gen_server:from(),
-             bondy_oplog_event:event_key()
-             | [bondy_oplog_event:event_key()]}},
     %% Cached per-instance WAL writer pid. Refreshed lazily from the
     %% registry on the first append after a `'DOWN'` from the previous
     %% writer (one_for_all restarts swap in a new pid).
     wal_pid :: undefined | pid(),
     %% Monitor reference for the cached `wal_pid`; cleared when the
     %% monitored process dies.
-    wal_pid_monitor :: undefined | reference()
+    wal_pid_monitor :: undefined | reference(),
+    %% Per-instance overlay (`ordered_set`, public). Receives every
+    %% successfully WAL-appended local event so callers reading back
+    %% the key see the entry before the applier promotes it to the
+    %% MST. Rows are `{Key, Value, Hlc, Origin}`; entries are evicted
+    %% atomically with the MST insert via HLC-conditional
+    %% `ets:select_delete/2`. Created in `init/1`, deleted in
+    %% `terminate/2`; no heir.
+    overlay :: undefined | ets:tid(),
+    %% Overlay backpressure caps. `max_overlay_events` defaults to
+    %% 10_000; `max_overlay_bytes` to 5 MB; `throttle_strategy`
+    %% defaults to `drop` and is the only supported value
+    %% (`block` reserved).
+    max_overlay_events :: pos_integer(),
+    max_overlay_bytes :: pos_integer(),
+    overlay_throttle :: drop
 }).
 
 -type backend() :: map | ets | module().
@@ -121,6 +124,14 @@ without protocol changes.
     snapshot_store => module(),
     snapshot_store_opts => map(),
     max_working_set => pos_integer() | infinity,
+    %% Overlay backpressure caps. Either threshold triggers
+    %% `{error, backpressure}` from `append/2,3` and `append_many/2`.
+    max_overlay_events => pos_integer(),
+    max_overlay_bytes => pos_integer(),
+    %% Throttle strategy on overlay-cap breach. `drop` returns
+    %% `{error, backpressure}` immediately; `block` is reserved for a
+    %% follow-on PR and currently behaves like `drop`.
+    overlay_throttle => drop,
     %% Per-instance applier tuning. See `bondy_oplog_applier:opts/0`.
     %% Recognised keys:
     %%   commit_every     :: pos_integer()   (default 64)
@@ -144,8 +155,8 @@ without protocol changes.
 -export([append/3]).
 -export([append_many/2]).
 -export([append_remote/2]).
--export([apply_event/2]).
--export([apply_events/2]).
+-export([await_apply/1]).
+-export([await_apply/2]).
 -export([get/2]).
 -export([root_hash/1]).
 -export([fold_range/5]).
@@ -156,6 +167,11 @@ without protocol changes.
 -export([latest_key/1]).
 -export([origin/1]).
 -export([info/1]).
+
+%% Applier handshake — applier reads `{validator_module, validator_state}`
+%% once at its `init/1` so it can re-verify signatures (S1) in its own
+%% process before dispatching events to the instance.
+-export([get_validator/1]).
 
 %% Page-level API (sync protocol)
 -export([get_pages/2]).
@@ -266,51 +282,102 @@ append_remote(Target, Event) ->
     end.
 
 ?DOC("""
-Back-channel from the per-instance applier. Installs `Event` in the
-MST and replies `ok`. If a pending `append`/`append_many` caller was
-waiting for the event's key, replies to that caller as a side effect.
+Blocks until the per-instance applier has promoted every overlay row
+into the MST, or until `Timeout` ms have elapsed.
 
-This is the only path that mutates the MST for **local** events: the
-public `append/2,3` and `append_many/2` write to the WAL and stash
-the caller's `From`; the applier reads the WAL and calls this
-function to make the event observable.
+After the write path returns from `append/2`, the event is durable
+in the WAL and visible in the overlay but not yet in the MST. The
+per-instance applier drains the WAL and dispatches `install_local_batch`
+casts to the instance; each cast installs the events in the MST and
+evicts the matching overlay rows.
+
+Operations that read the MST directly (`root_hash/1`, `compact/2`,
+`sync/2`) see the post-applier state only — callers that need
+read-after-write consistency on the MST itself should call this
+function as a synchronisation point.
+
+Returns `ok` once the overlay is empty, or `{error, timeout}` on
+expiry. A missing overlay (subtree mid-restart) returns `ok`.
 """).
--spec apply_event(pid(), bondy_oplog_event:t()) -> ok | {error, term()}.
+-spec await_apply(instance_id() | pid()) -> ok | {error, timeout}.
 
-apply_event(Pid, Event) when is_pid(Pid) ->
-    gen_server:call(Pid, {apply_event, Event}, infinity).
+await_apply(Target) ->
+    await_apply(Target, 5000).
 
-?DOC("""
-Batched counterpart of `apply_event/2`. Applies a list of events in
-order inside a single gen_server round-trip and replies `ok` once they
-have all been installed. On the first event whose application is
-refused (signature failure or collision-with-quarantine), the fold
-stops and the error is returned — already-installed events stay; the
-remaining events are deferred to a future applier pass.
+-spec await_apply(instance_id() | pid(), timeout()) -> ok | {error, timeout}.
 
-The applier uses this entry point to keep replay throughput
-independent of per-event mailbox latency.
-""").
--spec apply_events(pid(), [bondy_oplog_event:t()]) -> ok | {error, term()}.
+await_apply(Target, Timeout) when
+    is_binary(Target) orelse is_pid(Target)
+->
+    Deadline = case Timeout of
+        infinity -> infinity;
+        Ms when is_integer(Ms), Ms >= 0 ->
+            erlang:monotonic_time(millisecond) + Ms
+    end,
+    do_await_apply(Target, Deadline).
 
-apply_events(_Pid, []) ->
-    ok;
-apply_events(Pid, [_ | _] = Events) when is_pid(Pid) ->
-    gen_server:call(Pid, {apply_events, Events}, infinity).
+%% @private
+do_await_apply(Target, Deadline) ->
+    case overlay_drained(Target) of
+        true -> ok;
+        false ->
+            case past_deadline(Deadline) of
+                true -> {error, timeout};
+                false ->
+                    timer:sleep(5),
+                    do_await_apply(Target, Deadline)
+            end
+    end.
+
+%% @private
+overlay_drained(Target) when is_binary(Target) ->
+    overlay_size(Target) =:= 0;
+overlay_drained(Target) when is_pid(Target) ->
+    case lookup_instance_id(Target) of
+        undefined -> true;
+        Id -> overlay_size(Id) =:= 0
+    end.
+
+%% @private
+past_deadline(infinity) -> false;
+past_deadline(Deadline) ->
+    erlang:monotonic_time(millisecond) >= Deadline.
+
+%% @private
+%% Best-effort reverse lookup from gen_server pid to instance_id.
+%% Returns `undefined` when the pid is not registered, in which case
+%% the overlay is treated as drained.
+lookup_instance_id(Pid) when is_pid(Pid) ->
+    try gen_server:call(Pid, instance_id, 1000) of
+        Id when is_binary(Id) -> Id;
+        _ -> undefined
+    catch
+        _:_ -> undefined
+    end.
 
 -spec get(instance_id() | pid(), bondy_oplog_event:event_key()) ->
     {ok, bondy_oplog_event:t()} | not_found.
 
 get(Target, Key) when is_binary(Target) ->
-    %% Lock-free read path: pull the published MST handle from the
-    %% registry and read directly. Bypasses the gen_server.
-    case bondy_oplog_registry:mst(Target) of
-        undefined ->
-            error({noproc, {?MODULE, Target}});
-        MST ->
-            case bondy_mst:get(MST, Key) of
-                undefined -> not_found;
-                Value -> {ok, event_from_value(Key, Value)}
+    %% Overlay-first, then registry MST. The overlay holds events
+    %% that landed in the WAL but have not yet been promoted by the
+    %% applier. Reading the overlay before the MST handle closes the
+    %% race where the applier publishes a new handle and then evicts
+    %% the overlay row: if we miss the overlay, the new handle is
+    %% already in the registry (MST publish strictly precedes overlay
+    %% evict).
+    case overlay_lookup(Target, Key) of
+        {ok, _} = Hit ->
+            Hit;
+        not_found ->
+            case bondy_oplog_registry:mst(Target) of
+                undefined ->
+                    error({noproc, {?MODULE, Target}});
+                MST ->
+                    case bondy_mst:get(MST, Key) of
+                        undefined -> not_found;
+                        Value -> {ok, event_from_value(Key, Value)}
+                    end
             end
     end;
 get(Target, Key) ->
@@ -341,16 +408,8 @@ fold_range(Target, From, To, Fun, Acc0) when
         undefined ->
             error({noproc, {?MODULE, Target}});
         MST ->
-            bondy_mst:fold(
-                MST,
-                fun
-                    ({K, V}, Acc) when K >= From, K =< To ->
-                        Fun(event_from_value(K, V), Acc);
-                    (_, Acc) ->
-                        Acc
-                end,
-                Acc0
-            )
+            OverlayQueue = overlay_range(Target, From, To),
+            fold_range_merged(MST, From, To, OverlayQueue, Fun, Acc0)
     end;
 fold_range(Target, From, To, Fun, Acc0) when is_function(Fun, 2) ->
     gen_server:call(target(Target), {fold_range, From, To, Fun, Acc0}).
@@ -375,9 +434,17 @@ truncate_prefix(Target, Watermark) ->
 -spec size(instance_id() | pid()) -> non_neg_integer().
 
 size(Target) when is_binary(Target) ->
+    %% Total events visible to the lock-free read path: events
+    %% already promoted to the MST + events still staged in the
+    %% overlay. The `install_local_batch` cast handler publishes the
+    %% new MST handle and evicts the matching overlay rows in the
+    %% same callback, so the two sets are disjoint at every observable
+    %% state — no double-count.
     case bondy_oplog_registry:live_size(Target) of
-        undefined -> error({noproc, {?MODULE, Target}});
-        N -> N
+        undefined ->
+            error({noproc, {?MODULE, Target}});
+        MstSize ->
+            MstSize + overlay_size(Target)
     end;
 size(Target) ->
     gen_server:call(target(Target), instance_size).
@@ -390,10 +457,7 @@ first_key(Target) when is_binary(Target) ->
         undefined ->
             error({noproc, {?MODULE, Target}});
         MST ->
-            case bondy_mst:first(MST) of
-                undefined -> empty;
-                {K, _V} -> {ok, K}
-            end
+            merge_first_key(Target, MST)
     end;
 first_key(Target) ->
     gen_server:call(target(Target), first_key).
@@ -406,10 +470,7 @@ latest_key(Target) when is_binary(Target) ->
         undefined ->
             error({noproc, {?MODULE, Target}});
         MST ->
-            case bondy_mst:last(MST) of
-                undefined -> empty;
-                {K, _V} -> {ok, K}
-            end
+            merge_latest_key(Target, MST)
     end;
 latest_key(Target) ->
     gen_server:call(target(Target), latest_key).
@@ -430,6 +491,19 @@ appropriate for status pages and operational tools.
 
 info(Target) ->
     gen_server:call(target(Target), info).
+
+?DOC("""
+Returns the validator module and a snapshot of the validator state
+for the per-instance applier. The applier uses this to re-verify
+event signatures (S1) in its own process before dispatching events
+to the instance for install. `verify_event/2` is read-only on the
+validator state, so the snapshot remains valid for the lifetime of
+the applier.
+""").
+-spec get_validator(pid()) -> {module(), term()}.
+
+get_validator(Pid) when is_pid(Pid) ->
+    gen_server:call(Pid, get_validator, infinity).
 
 %% =============================================================================
 %% PAGE-LEVEL API (sync protocol)
@@ -755,6 +829,22 @@ init({InstanceId, Opts}) ->
         undefined -> ok;
         MaxSeq -> ok = atomics:put(SeqRef, 1, MaxSeq)
     end,
+    %% Per-instance overlay (`ordered_set`, public, owned by this
+    %% gen_server). Rows are `{Key, Value, Hlc, Origin}`.
+    %% `ordered_set` so range reads (`fold_range/5`, `first_key/1`,
+    %% `latest_key/1`) can streaming-merge it with the MST in key
+    %% order. `public` so the applier-driven eviction can run via
+    %% `ets:select_delete/2` from any process. No heir — the table
+    %% dies with this process; a one_for_all subtree restart creates
+    %% a fresh one.
+    Overlay = ets:new(bondy_oplog_overlay, [
+        ordered_set,
+        public,
+        {keypos, ?OVERLAY_KEY_POS},
+        {read_concurrency, true},
+        {write_concurrency, true},
+        {decentralized_counters, true}
+    ]),
     State = #state{
         instance_id = InstanceId,
         origin = Origin,
@@ -774,11 +864,19 @@ init({InstanceId, Opts}) ->
         live_size = LiveSize,
         last_event_key = LastMSTKey,
         compaction = undefined,
-        pending_applied = #{},
         wal_pid = undefined,
-        wal_pid_monitor = undefined
+        wal_pid_monitor = undefined,
+        overlay = Overlay,
+        max_overlay_events = maps:get(max_overlay_events, Opts, 10_000),
+        max_overlay_bytes = maps:get(max_overlay_bytes, Opts, 5 * 1024 * 1024),
+        overlay_throttle = maps:get(overlay_throttle, Opts, drop)
     },
     ok = publish(State),
+    %% Publish the overlay tid via a dedicated setter so a stale tid
+    %% from a previous instance (left behind in a registry row that
+    %% outlived a one_for_all restart) is overwritten. Symmetric with
+    %% `set_wal_pid/2` / `set_applier_pid/2`.
+    ok = bondy_oplog_registry:set_overlay_tab(InstanceId, Overlay),
     {ok, State}.
 
 handle_call(Req, From, State0) ->
@@ -801,15 +899,19 @@ maybe_publish(_State0, _Result) ->
     ok.
 
 %% @private
-do_handle_call({append, Op, Meta}, From, State0) ->
-    case backpressure_admit(State0, 1) of
+do_handle_call({append, Op, Meta}, _From, State0) ->
+    %% Pressure check → WAL append (fsync) → overlay insert → reply.
+    %% The reply happens inline as soon as the WAL is durable and
+    %% the overlay row exists; the applier drains the WAL and casts
+    %% `install_local_batch` back to this gen_server, which promotes
+    %% the event to the MST and evicts the overlay row.
+    case admit(State0, 1) of
         ok ->
             case ensure_wal_pid(State0) of
                 {ok, WalPid, State1} ->
                     case do_append_local(State1, WalPid, [{Op, Meta}]) of
                         {ok, [Key], State2} ->
-                            State3 = stash_pending(State2, Key, From, Key),
-                            {noreply, State3};
+                            {reply, Key, State2};
                         {error, wal_unavailable} ->
                             {reply, {error, wal_unavailable},
                              invalidate_wal_pid(State1)};
@@ -822,18 +924,14 @@ do_handle_call({append, Op, Meta}, From, State0) ->
         {error, _} = Err ->
             {reply, Err, State0}
     end;
-do_handle_call({append_many, Items}, From, State0) ->
-    case backpressure_admit(State0, length(Items)) of
+do_handle_call({append_many, Items}, _From, State0) ->
+    case admit(State0, length(Items)) of
         ok ->
             case ensure_wal_pid(State0) of
                 {ok, WalPid, State1} ->
                     case do_append_local(State1, WalPid, Items) of
                         {ok, Keys, State2} ->
-                            LastKey = lists:last(Keys),
-                            State3 = stash_pending(
-                                State2, LastKey, From, Keys
-                            ),
-                            {noreply, State3};
+                            {reply, Keys, State2};
                         {error, wal_unavailable} ->
                             {reply, {error, wal_unavailable},
                              invalidate_wal_pid(State1)};
@@ -846,19 +944,14 @@ do_handle_call({append_many, Items}, From, State0) ->
         {error, _} = Err ->
             {reply, Err, State0}
     end;
-do_handle_call({apply_event, Event}, _From, State0) ->
-    Key = bondy_oplog_event:key(Event),
-    case do_apply_local(State0, Event) of
-        {ok, State1} ->
-            State2 = release_pending(State1, Key),
-            {reply, ok, State2};
-        {error, _} = Err ->
-            State1 = release_pending_error(State0, Key, Err),
-            {reply, Err, State1}
-    end;
-do_handle_call({apply_events, Events}, _From, State0) ->
-    {Reply, State1} = do_apply_locals(State0, Events),
-    {reply, Reply, State1};
+do_handle_call(get_validator, _From, State) ->
+    {reply, {State#state.validator_module, State#state.validator_state}, State};
+do_handle_call(drain_install_queue, _From, State) ->
+    %% Synchronisation barrier for the applier's commit boundary.
+    %% Calls jump past casts in the mailbox order, so by the time
+    %% this call is processed, every prior `install_local_batch`
+    %% cast has been handled. The reply itself carries no payload.
+    {reply, ok, State};
 do_handle_call({append_remote, Event}, _From, State0) ->
     Origin = bondy_oplog_event:key_origin(bondy_oplog_event:key(Event)),
     case bondy_oplog_origin_bans:is_banned(Origin) of
@@ -891,11 +984,18 @@ do_handle_call({append_remote, Event}, _From, State0) ->
                     end
             end
     end;
-do_handle_call({get, Key}, _From, #state{mst = MST} = State) ->
+do_handle_call({get, Key}, _From, #state{mst = MST, overlay = Overlay} = State) ->
+    %% pid-targeted path: same overlay-first → MST order as the
+    %% lock-free `get/2`.
     Reply =
-        case bondy_mst:get(MST, Key) of
-            undefined -> not_found;
-            Value -> {ok, event_from_value(Key, Value)}
+        case overlay_lookup_tab(Overlay, Key) of
+            {ok, _} = Hit ->
+                Hit;
+            not_found ->
+                case bondy_mst:get(MST, Key) of
+                    undefined -> not_found;
+                    Value -> {ok, event_from_value(Key, Value)}
+                end
         end,
     {reply, Reply, State};
 do_handle_call(root_hash, _From, #state{mst = MST} = State) ->
@@ -903,21 +1003,14 @@ do_handle_call(root_hash, _From, #state{mst = MST} = State) ->
 do_handle_call(
     {fold_range, From, To, Fun, Acc0},
     _From,
-    #state{mst = MST} = State
+    #state{mst = MST, overlay = Overlay} = State
 ) ->
-    %% NOTE: `bondy_mst:fold/4`'s declared `{first, _}` / `{stop, _}`
-    %% options are not yet honoured by `do_fold/5`. We filter inside
-    %% the user fun. Range-aware fold is a Stage 6 candidate.
-    Result = bondy_mst:fold(
-        MST,
-        fun({K, V}, Acc) ->
-            case K >= From andalso K =< To of
-                true -> Fun(event_from_value(K, V), Acc);
-                false -> Acc
-            end
-        end,
-        Acc0
-    ),
+    %% Streaming merge with strict ascending key order; overlay wins
+    %% on conflict. The overlay queue is materialised once
+    %% (`ets:select` on `ordered_set` yields key-ordered rows) and
+    %% drained as the MST fold walks.
+    OverlayQueue = overlay_range_tab(Overlay, From, To),
+    Result = fold_range_merged(MST, From, To, OverlayQueue, Fun, Acc0),
     {reply, Result, State};
 do_handle_call({truncate_prefix, Watermark}, _From, #state{mst = MST0} = State) ->
     %% Stage 2 simple truncation: collect keys ≤ Watermark and delete
@@ -943,26 +1036,21 @@ do_handle_call({truncate_prefix, Watermark}, _From, #state{mst = MST0} = State) 
         mst = MST1,
         live_size = max(0, State#state.live_size - Removed)
     }};
-do_handle_call(instance_size, _From, State) ->
-    %% Cached counter; matches a fold of the live MST as long as
-    %% all mutators keep it accurate.
-    {reply, State#state.live_size, State};
+do_handle_call(instance_size, _From, #state{overlay = Overlay} = State) ->
+    %% MST live_size + overlay rows = total events (disjoint sets;
+    %% see `size/1`).
+    Total = State#state.live_size + overlay_size_tab(Overlay),
+    {reply, Total, State};
 do_handle_call(origin, _From, State) ->
     {reply, State#state.origin, State};
-do_handle_call(first_key, _From, #state{mst = MST} = State) ->
-    Reply =
-        case bondy_mst:first(MST) of
-            undefined -> empty;
-            {K, _V} -> {ok, K}
-        end,
+do_handle_call(first_key, _From, #state{mst = MST, overlay = Overlay} = State) ->
+    Reply = merge_first_key_tab(Overlay, MST),
     {reply, Reply, State};
-do_handle_call(latest_key, _From, #state{mst = MST} = State) ->
-    Reply =
-        case bondy_mst:last(MST) of
-            undefined -> empty;
-            {K, _V} -> {ok, K}
-        end,
+do_handle_call(latest_key, _From, #state{mst = MST, overlay = Overlay} = State) ->
+    Reply = merge_latest_key_tab(Overlay, MST),
     {reply, Reply, State};
+do_handle_call(instance_id, _From, State) ->
+    {reply, State#state.instance_id, State};
 do_handle_call(info, _From, State) ->
     Info = #{
         instance_id => State#state.instance_id,
@@ -1056,6 +1144,18 @@ do_handle_call({load_snapshot, NewWatermark, Snapshot}, _From, State) ->
 do_handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
+handle_cast({install_local_batch, Events}, State0) ->
+    %% Sole dispatch path for local-event MST installs. The applier
+    %% verifies signatures in its own process and casts the surviving
+    %% events here. We fold `install_event` over them in WAL order,
+    %% publish once at the end (one ETS write per batch), then
+    %% HLC-conditionally evict the matching overlay rows. MST publish
+    %% strictly precedes overlay evict so a reader missing the
+    %% overlay row finds the entry in the MST instead.
+    State1 = install_local_batch(State0, Events),
+    ok = publish(State1),
+    ok = evict_overlay_batch(State1#state.overlay, Events),
+    {noreply, State1};
 handle_cast(
     {compaction_done, Pid, Result},
     #state{compaction = #{pid := Pid}} = State0
@@ -1103,19 +1203,8 @@ terminate(_Reason, #state{
     mst = MST,
     snapshot_store = SnapMod,
     snapshot_state = SnapState,
-    pending_applied = Pending
+    overlay = Overlay
 }) ->
-    %% Reply to every stashed `append` / `append_many` caller before
-    %% closing the MST. Without this they would sit on an `infinity`
-    %% `gen_server:call` until the gen_server's exit signal cascades
-    %% through `monitor`s — which is correct but ungraceful, and
-    %% obscures the real reason in tail traces.
-    maps:foreach(
-        fun(_Key, {From, _Reply}) ->
-            _ = gen_server:reply(From, {error, instance_terminating})
-        end,
-        Pending
-    ),
     %% Leave the registry row in place so that on a one_for_all subtree
     %% restart the dyn_sup mapping (`sup_pid`) survives. The row's
     %% `instance_pid` field will be stale until the new instance
@@ -1123,6 +1212,12 @@ terminate(_Reason, #state{
     %% use `is_process_alive/1` to detect that case.
     _ = catch SnapMod:close(SnapState),
     _ = catch bondy_mst:delete(MST),
+    %% Drop the overlay — it dies with the instance, no heir, no
+    %% survival across subtree restart. The applier reads the tid
+    %% from the registry, and the registry row's `overlay_tab`
+    %% becomes stale here until the next `init/1` republishes a
+    %% fresh one. Applier-side reads tolerate `undefined`.
+    _ = catch ets:delete(Overlay),
     ok.
 
 %% =============================================================================
@@ -1131,16 +1226,20 @@ terminate(_Reason, #state{
 
 %% @private
 %% Builds a signed event for each `{Op, Meta}` item, hands the resulting
-%% list to the per-instance WAL as a single atomic batch frame, and
-%% returns the event keys in input order. The MST is **not** mutated
-%% here — the applier reads back the events from the WAL and calls
-%% `apply_event/2` to install them. Each caller is parked on
-%% `pending_applied` by the surrounding `do_handle_call` so it can be
-%% woken up when the corresponding event is applied.
-do_append_local(#state{} = State0, WalPid, Items) ->
+%% list to the per-instance WAL as a single atomic batch frame, then
+%% inserts the events into the per-instance overlay so the caller's
+%% next read sees them. The MST is **not** mutated here — the per-
+%% instance applier drains the WAL, re-verifies each event's
+%% signature, and casts `install_local_batch` back to this gen_server
+%% which performs the actual MST install and overlay eviction. The
+%% overlay row closes the read-your-writes gap until the applier
+%% catches up; the row is evicted via HLC-conditional
+%% `ets:select_delete/2` once the install lands.
+do_append_local(#state{overlay = Overlay} = State0, WalPid, Items) ->
     {Events, Keys, State1} = build_events(State0, Items),
     try bondy_oplog_wal:append_batch(WalPid, Events) of
         {ok, _Entries} ->
+            ok = stage_to_overlay(Overlay, Events),
             telemetry:execute(
                 [bondy_oplog, instance, append],
                 #{count => length(Events)},
@@ -1155,6 +1254,27 @@ do_append_local(#state{} = State0, WalPid, Items) ->
         exit:{normal, _} -> {error, wal_unavailable};
         exit:{shutdown, _} -> {error, wal_unavailable}
     end.
+
+%% @private
+%% Inserts every event in the batch into the per-instance overlay as
+%% one atomic `ets:insert/2` call. Origin is `local` for events that
+%% went through the WAL; a future eager-push receiver will insert with
+%% `eager_pushed` so the applier's eviction protocol can distinguish
+%% the two (§10.3 of the applier design).
+stage_to_overlay(Overlay, Events) ->
+    Rows = [overlay_row(E, local) || E <- Events],
+    true = ets:insert(Overlay, Rows),
+    ok.
+
+%% @private
+overlay_row(Event, Origin) ->
+    Key = bondy_oplog_event:key(Event),
+    {
+        Key,
+        value_from_event(Event),
+        bondy_oplog_event:key_hlc(Key),
+        Origin
+    }.
 
 %% @private
 %% Allocates a fresh `{HLC, Origin, Seq}` for each item, signs the
@@ -1180,74 +1300,87 @@ build_events(State0, Items) ->
     {lists:reverse(EventsRev), lists:reverse(KeysRev), State1}.
 
 %% @private
-%% Installs a single local event in the MST. Called by the back-channel
-%% `apply_event/2` invoked by the applier.
+%% Sole MST-install path for local-origin events. Driven by the
+%% `install_local_batch` cast from the per-instance applier. The
+%% applier has already re-verified every event's signature in its
+%% own process before dispatching, so this fold trusts the input
+%% and runs:
 %%
-%% Re-verifies the stored signature as a defence-in-depth check against
-%% WAL tampering — for the trust validator this is a no-op; for the
-%% crypto validator it catches forged frames before they reach the MST.
+%% 1. `bondy_mst:get` to decide between fresh insert, idempotent
+%%    re-apply (same value), and collision-with-existing (different
+%%    value at the same key, recorded as equivocation, MST left
+%%    unchanged so the subtree survives bad input).
+%% 2. `install_event` to mutate the MST and refresh state.
 %%
-%% Idempotent on re-apply (same key + value → same MST root). On
-%% collision (same key, different value) the existing event is left
-%% in place and the incoming event is quarantined; the gen_server is
-%% NOT crashed because a one_for_all restart with always-from-beginning
-%% replay would just re-fire the same crash until the supervisor
-%% intensity is exhausted.
--spec do_apply_local(#state{}, bondy_oplog_event:t()) ->
-    {ok, #state{}} | {error, term()}.
+%% Folding the whole batch before publishing avoids N registry
+%% writes per batch.
+-spec install_local_batch(#state{}, [bondy_oplog_event:t()]) -> #state{}.
 
-do_apply_local(#state{mst = MST0} = State, Event) ->
+install_local_batch(State, []) ->
+    State;
+install_local_batch(#state{mst = MST0} = State0, [Event | Rest]) ->
     Key = bondy_oplog_event:key(Event),
-    case verify(State, Event) of
-        ok ->
-            NewValue = value_from_event(Event),
-            case bondy_mst:get(MST0, Key) of
-                undefined ->
-                    {ok, install_event(State, Key, NewValue, apply_event, true)};
-                NewValue ->
-                    {ok, install_event(State, Key, NewValue, apply_event, false)};
-                ExistingValue ->
-                    record_equivocation(State, Key, ExistingValue, Event),
-                    {error, equivocation_detected}
-            end;
-        {error, _} = E ->
-            ?LOG_WARNING(#{
-                description =>
-                    "bondy_oplog_instance refused to apply a local event "
-                    "whose stored signature does not verify; the event "
-                    "has been skipped to keep the subtree alive",
-                instance_id => State#state.instance_id,
-                key => Key,
-                reason => E
-            }),
-            telemetry:execute(
-                [bondy_oplog, instance, apply_event, verify_failed],
-                #{count => 1},
-                #{instance_id => State#state.instance_id}
-            ),
-            E
-    end.
+    NewValue = value_from_event(Event),
+    State1 =
+        case bondy_mst:get(MST0, Key) of
+            undefined ->
+                install_event(State0, Key, NewValue, apply_event, true);
+            NewValue ->
+                install_event(State0, Key, NewValue, apply_event, false);
+            ExistingValue ->
+                record_equivocation(State0, Key, ExistingValue, Event),
+                State0
+        end,
+    install_local_batch(State1, Rest).
 
 %% @private
-%% Batched apply path. Folds `do_apply_local` over the list inside a
-%% single gen_server round-trip and replies once. On the first error
-%% the fold stops and the remaining events are left for a later applier
-%% pass (replay from beginning is idempotent, so this is safe).
--spec do_apply_locals(#state{}, [bondy_oplog_event:t()]) ->
-    {ok | {error, term()}, #state{}}.
+%% Evicts every overlay row for a freshly-installed batch via a single
+%% `ets:select_delete/2`. The HLC-conditional guard preserves any
+%% newer row (Hlc > the maximum event HLC in the batch) that a
+%% concurrent `append` may have staged for an already-installed key.
+%% Such a "newer" row is by construction a *different* event with a
+%% later HLC, so leaving it in the overlay is exactly the
+%% read-your-writes contract.
+-spec evict_overlay_batch(undefined | ets:tid(),
+                          [bondy_oplog_event:t()]) -> ok.
 
-do_apply_locals(State0, []) ->
-    {ok, State0};
-do_apply_locals(State0, [Event | Rest]) ->
-    Key = bondy_oplog_event:key(Event),
-    case do_apply_local(State0, Event) of
-        {ok, State1} ->
-            State2 = release_pending(State1, Key),
-            do_apply_locals(State2, Rest);
-        {error, _} = Err ->
-            State1 = release_pending_error(State0, Key, Err),
-            {Err, State1}
-    end.
+evict_overlay_batch(undefined, _Events) ->
+    ok;
+evict_overlay_batch(_Tab, []) ->
+    ok;
+evict_overlay_batch(Tab, Events) ->
+    MaxHlc = lists:foldl(
+        fun(E, Acc) ->
+            H = bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)),
+            case H > Acc of true -> H; false -> Acc end
+        end,
+        0,
+        Events
+    ),
+    Keys = [bondy_oplog_event:key(E) || E <- Events],
+    KeyGuard = build_key_or_guard(Keys),
+    _ = try
+        ets:select_delete(Tab, [{
+            {'$1', '_', '$2', '_'},
+            [KeyGuard, {'=<', '$2', MaxHlc}],
+            [true]
+        }])
+    catch
+        error:badarg -> 0
+    end,
+    ok.
+
+%% @private
+%% Builds a `{'orelse', {'=:=', '$1', Key1}, {'=:=', '$1', Key2}, ...}`
+%% match-spec guard listing every batch key. ETS `select_delete` then
+%% deletes only rows whose key matches one of these AND whose Hlc is
+%% `=< MaxHlc`. We construct the guard explicitly (rather than per-
+%% event in a separate match-spec body) so the whole batch is
+%% deleted in one ETS call.
+build_key_or_guard([Key]) ->
+    {'=:=', '$1', {const, Key}};
+build_key_or_guard([Key | Rest]) ->
+    {'orelse', {'=:=', '$1', {const, Key}}, build_key_or_guard(Rest)}.
 
 %% @private
 %% Returns `{ok, WalPid, State1}` with `State1` carrying a monitored
@@ -1274,36 +1407,6 @@ invalidate_wal_pid(#state{wal_pid_monitor = undefined} = State) ->
 invalidate_wal_pid(#state{wal_pid_monitor = Ref} = State) ->
     _ = erlang:demonitor(Ref, [flush]),
     State#state{wal_pid = undefined, wal_pid_monitor = undefined}.
-
-%% @private
-stash_pending(#state{pending_applied = P0} = State, Key, From, Reply) ->
-    State#state{pending_applied = P0#{Key => {From, Reply}}}.
-
-%% @private
-%% If `Key` had a pending caller, reply to it and remove the entry.
-%% A no-op for keys without a pending caller (e.g. replayed events on
-%% subtree restart, or batches whose last key has not yet landed).
-release_pending(#state{pending_applied = P0} = State, Key) ->
-    case maps:take(Key, P0) of
-        {{From, Reply}, P1} ->
-            gen_server:reply(From, Reply),
-            State#state{pending_applied = P1};
-        error ->
-            State
-    end.
-
-%% @private
-%% Wakes the pending caller for `Key` with `Err` so it doesn't sit on
-%% an `infinity` `gen_server:call` after the applier has decided to skip
-%% the event (quarantine / verify failure / collision).
-release_pending_error(#state{pending_applied = P0} = State, Key, Err) ->
-    case maps:take(Key, P0) of
-        {{From, _Reply}, P1} ->
-            gen_server:reply(From, Err),
-            State#state{pending_applied = P1};
-        error ->
-            State
-    end.
 
 %% @private
 %% Returns `{ok, NewState}` on accepted insert (or below-watermark filter,
@@ -1344,10 +1447,10 @@ do_append_remote(#state{mst = MST0} = State, Event) ->
     end.
 
 %% @private
-%% Shared insert path for `do_apply_local` (local-origin events from
-%% the applier back-channel) and `do_append_remote` (peer-received
-%% events). Mutates the MST, refreshes `last_event_key` and
-%% `live_size`, advances the HLC, and emits a
+%% Shared insert path for `install_local_batch` (local-origin events
+%% dispatched by the applier after S1 re-verify) and `do_append_remote`
+%% (peer-received events). Mutates the MST, refreshes `last_event_key`
+%% and `live_size`, advances the HLC, and emits a
 %% `[bondy_oplog, instance, Source, ok]` telemetry event so callers
 %% can tell the two paths apart in dashboards.
 install_event(#state{} = State, Key, Value, Source, IsNew) ->
@@ -1450,35 +1553,104 @@ max_local_seq(MST, LocalOrigin) ->
     ).
 
 %% @private
+%% Combined admission test: overlay pressure first, then the MST
+%% working-set cap. Both checks are O(1) — overlay numbers come
+%% from `ets:info/2`, working-set from cached `live_size`. The order
+%% does not affect correctness because either failure is decisive;
+%% overlay-first surfaces the more specific `backpressure` error
+%% name when both would fire.
+admit(State, Delta) ->
+    case overlay_admit(State, Delta) of
+        ok -> backpressure_admit(State, Delta);
+        Err -> Err
+    end.
+
+%% @private
+%% Pressure-check before the WAL append. Returns
+%% `{error, backpressure}` when either cap is breached. `drop` is the
+%% only supported strategy; `block` is reserved.
+overlay_admit(
+    #state{
+        instance_id = Id,
+        overlay = Overlay,
+        max_overlay_events = MaxEvents,
+        max_overlay_bytes = MaxBytes
+    },
+    Delta
+) ->
+    Size = ets:info(Overlay, size),
+    case Size + Delta > MaxEvents of
+        true ->
+            emit_overlay_backpressure(Id, events, Size, MaxEvents, Delta),
+            {error, backpressure};
+        false ->
+            %% `memory` is in words; convert to bytes with the runtime's
+            %% word size. Approximate by design — sufficient for a
+            %% backpressure threshold.
+            MemBytes = ets:info(Overlay, memory) * erlang:system_info(wordsize),
+            case MemBytes >= MaxBytes of
+                true ->
+                    emit_overlay_backpressure(Id, bytes, MemBytes, MaxBytes, Delta),
+                    {error, backpressure};
+                false ->
+                    ok
+            end
+    end.
+
+%% @private
+emit_overlay_backpressure(Id, Dimension, Current, Cap, Delta) ->
+    telemetry:execute(
+        [bondy_oplog, instance, overlay, backpressure_drop],
+        #{count => 1},
+        #{
+            instance_id => Id,
+            dimension => Dimension,
+            current => Current,
+            cap => Cap,
+            requested => Delta
+        }
+    ).
+
+%% @private
 %% Backpressure admission test. Returns `ok` if the instance can
 %% absorb `Delta` more events under its `max_working_set` cap, or
 %% `{error, working_set_full}` otherwise. `infinity` disables the
 %% cap.
+%%
+%% The cap is on **total events visible to readers** = MST live_size
+%% + overlay rows (matching `size/1`), because events arriving via
+%% `append`/`append_many` enter the overlay before the applier
+%% promotes them to the MST. Counting only `live_size` would let the
+%% caller burst arbitrarily many writes into the overlay before the
+%% cap fires.
 backpressure_admit(#state{max_working_set = infinity}, _Delta) ->
-    ok;
-backpressure_admit(#state{max_working_set = Cap, live_size = Size}, Delta) when
-    Size + Delta =< Cap
-->
     ok;
 backpressure_admit(
     #state{
-        instance_id = Id,
         max_working_set = Cap,
-        live_size = Size
-    },
+        live_size = Size,
+        overlay = Overlay
+    } = State,
     Delta
 ) ->
-    telemetry:execute(
-        [bondy_oplog, instance, backpressure],
-        #{count => 1},
-        #{
-            instance_id => Id,
-            requested => Delta,
-            live_size => Size,
-            cap => Cap
-        }
-    ),
-    {error, working_set_full}.
+    Total = Size + overlay_size_tab(Overlay),
+    case Total + Delta =< Cap of
+        true ->
+            ok;
+        false ->
+            telemetry:execute(
+                [bondy_oplog, instance, backpressure],
+                #{count => 1},
+                #{
+                    instance_id => State#state.instance_id,
+                    requested => Delta,
+                    live_size => Size,
+                    overlay_size => Total - Size,
+                    cap => Cap
+                }
+            ),
+            {error, working_set_full}
+    end.
 
 %% @private
 %% Drops every key in MST that is `=< Watermark`. Used both by explicit
@@ -1832,6 +2004,200 @@ publish(#state{} = State) ->
 %% @private
 ets_member(InstanceId) ->
     bondy_oplog_registry:instance_pid(InstanceId) =/= undefined.
+
+%% @private
+%% Lock-free overlay lookup by InstanceId. Resolves the overlay tid
+%% from the registry then delegates to `overlay_lookup_tab/2`.
+%% Returns `not_found` if the registry has no overlay tid yet (subtree
+%% mid-restart) so the caller falls through to the MST.
+overlay_lookup(InstanceId, Key) when is_binary(InstanceId) ->
+    case bondy_oplog_registry:overlay_tab(InstanceId) of
+        undefined -> not_found;
+        Tab -> overlay_lookup_tab(Tab, Key)
+    end.
+
+%% @private
+%% Shape: `{Key, Value, Hlc, Origin}` per ?OVERLAY_KEY_POS macros.
+overlay_lookup_tab(Tab, Key) ->
+    try ets:lookup(Tab, Key) of
+        [{Key, Value, _Hlc, _Origin}] -> {ok, event_from_value(Key, Value)};
+        [] -> not_found
+    catch
+        %% Tolerates a torn-down table during one_for_all restart.
+        error:badarg -> not_found
+    end.
+
+%% @private
+%% Returns overlay rows in `[From, To]` as a sorted list of
+%% `{Key, Event}` tuples. `ets:select/2` on `ordered_set` yields rows
+%% in key order, so the result list is already sorted. Returns `[]`
+%% when the overlay tid is missing (subtree mid-restart).
+overlay_range(InstanceId, From, To) when is_binary(InstanceId) ->
+    case bondy_oplog_registry:overlay_tab(InstanceId) of
+        undefined -> [];
+        Tab -> overlay_range_tab(Tab, From, To)
+    end.
+
+%% @private
+overlay_range_tab(undefined, _From, _To) ->
+    [];
+overlay_range_tab(Tab, From, To) ->
+    MatchSpec = [{
+        {'$1', '$2', '_', '_'},
+        [
+            {'>=', '$1', {const, From}},
+            {'=<', '$1', {const, To}}
+        ],
+        [{{'$1', '$2'}}]
+    }],
+    try ets:select(Tab, MatchSpec) of
+        Rows -> [{K, event_from_value(K, V)} || {K, V} <- Rows]
+    catch
+        error:badarg -> []
+    end.
+
+%% @private
+%% Streaming merge of an MST fold with a pre-sorted overlay queue.
+%% Returns the user accumulator after every entry in `[From, To]`
+%% from both sources has been yielded in strict ascending key order.
+%% Overlay wins on tied keys.
+fold_range_merged(MST, From, To, OverlayQueue, Fun, Acc0) ->
+    {Leftover, Acc1} = bondy_mst:fold(
+        MST,
+        fun({K, V}, {Queue, A}) ->
+            case K >= From andalso K =< To of
+                false -> {Queue, A};
+                true -> merge_step(Queue, K, V, Fun, A)
+            end
+        end,
+        {OverlayQueue, Acc0}
+    ),
+    drain_overlay_queue(Leftover, Fun, Acc1).
+
+%% @private
+merge_step([{OK, OEvent} | Rest], MstK, _MstV, Fun, Acc) when OK < MstK ->
+    %% Overlay key strictly precedes MST key: yield overlay, recurse
+    %% so we keep emitting overlay rows below the current MST entry.
+    merge_step(Rest, MstK, _MstV, Fun, Fun(OEvent, Acc));
+merge_step([{MstK, OEvent} | Rest], MstK, _MstV, Fun, Acc) ->
+    %% Tied keys: overlay-wins; do not also emit the MST value.
+    {Rest, Fun(OEvent, Acc)};
+merge_step(Queue, MstK, MstV, Fun, Acc) ->
+    %% Overlay queue empty, or its head is greater than MstK: emit
+    %% MST entry.
+    {Queue, Fun(event_from_value(MstK, MstV), Acc)}.
+
+%% @private
+drain_overlay_queue([], _Fun, Acc) ->
+    Acc;
+drain_overlay_queue([{_K, Event} | Rest], Fun, Acc) ->
+    drain_overlay_queue(Rest, Fun, Fun(Event, Acc)).
+
+%% @private
+%% Min over (overlay.first, MST.first). Either can be empty.
+merge_first_key(InstanceId, MST) ->
+    OverlayFirst = overlay_first_key(InstanceId),
+    MstFirst = case bondy_mst:first(MST) of
+        undefined -> undefined;
+        {K, _V} -> K
+    end,
+    min_key(OverlayFirst, MstFirst).
+
+%% @private
+merge_first_key_tab(Tab, MST) ->
+    OverlayFirst = overlay_first_key_tab(Tab),
+    MstFirst = case bondy_mst:first(MST) of
+        undefined -> undefined;
+        {K, _V} -> K
+    end,
+    min_key(OverlayFirst, MstFirst).
+
+%% @private
+%% Max over (overlay.last, MST.last). Either can be empty.
+merge_latest_key(InstanceId, MST) ->
+    OverlayLast = overlay_last_key(InstanceId),
+    MstLast = case bondy_mst:last(MST) of
+        undefined -> undefined;
+        {K, _V} -> K
+    end,
+    max_key(OverlayLast, MstLast).
+
+%% @private
+merge_latest_key_tab(Tab, MST) ->
+    OverlayLast = overlay_last_key_tab(Tab),
+    MstLast = case bondy_mst:last(MST) of
+        undefined -> undefined;
+        {K, _V} -> K
+    end,
+    max_key(OverlayLast, MstLast).
+
+%% @private
+overlay_first_key(InstanceId) ->
+    case bondy_oplog_registry:overlay_tab(InstanceId) of
+        undefined -> undefined;
+        Tab -> overlay_first_key_tab(Tab)
+    end.
+
+%% @private
+overlay_first_key_tab(undefined) ->
+    undefined;
+overlay_first_key_tab(Tab) ->
+    try ets:first(Tab) of
+        '$end_of_table' -> undefined;
+        K -> K
+    catch
+        error:badarg -> undefined
+    end.
+
+%% @private
+overlay_last_key(InstanceId) ->
+    case bondy_oplog_registry:overlay_tab(InstanceId) of
+        undefined -> undefined;
+        Tab -> overlay_last_key_tab(Tab)
+    end.
+
+%% @private
+overlay_last_key_tab(undefined) ->
+    undefined;
+overlay_last_key_tab(Tab) ->
+    try ets:last(Tab) of
+        '$end_of_table' -> undefined;
+        K -> K
+    catch
+        error:badarg -> undefined
+    end.
+
+%% @private
+overlay_size(InstanceId) when is_binary(InstanceId) ->
+    case bondy_oplog_registry:overlay_tab(InstanceId) of
+        undefined -> 0;
+        Tab -> overlay_size_tab(Tab)
+    end.
+
+%% @private
+overlay_size_tab(undefined) ->
+    0;
+overlay_size_tab(Tab) ->
+    try ets:info(Tab, size) of
+        N when is_integer(N) -> N;
+        _ -> 0
+    catch
+        error:badarg -> 0
+    end.
+
+%% @private
+min_key(undefined, undefined) -> empty;
+min_key(undefined, K) -> {ok, K};
+min_key(K, undefined) -> {ok, K};
+min_key(A, B) when A =< B -> {ok, A};
+min_key(_, B) -> {ok, B}.
+
+%% @private
+max_key(undefined, undefined) -> empty;
+max_key(undefined, K) -> {ok, K};
+max_key(K, undefined) -> {ok, K};
+max_key(A, B) when A >= B -> {ok, A};
+max_key(_, B) -> {ok, B}.
 
 %% @private
 target(Pid) when is_pid(Pid) ->

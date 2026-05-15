@@ -132,6 +132,7 @@ run_bootstrap(NEvents) ->
         bondy_oplog:append(B, {inc, N})
      || N <- lists:seq(1, NEvents)
     ],
+    ok = bondy_oplog:await_apply(B),
     LocalRoot = bondy_oplog:root_hash(B),
     PeerKey = {peer, propbs, erlang:unique_integer([positive, monotonic])},
     bondy_oplog_peer_state:record_sync_complete(

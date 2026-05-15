@@ -69,4 +69,14 @@
     signature :: undefined | binary()
 }).
 
+%% Overlay row shape (`ordered_set`, public, per-instance). Keyed by
+%% the event key; carries the encoded value (so reads can return
+%% without going back to the WAL), the event's HLC for CAS-eviction,
+%% and an origin tag for future eager-push support. Tuple positions
+%% are stable; they appear in match-specs.
+-define(OVERLAY_KEY_POS, 1).
+-define(OVERLAY_VALUE_POS, 2).
+-define(OVERLAY_HLC_POS, 3).
+-define(OVERLAY_ORIGIN_POS, 4).
+
 -endif.

@@ -141,6 +141,7 @@ pull_when_peer_empty_is_noop() ->
     {ok, _} = bondy_oplog:start_instance(A, originated_opts()),
     {ok, _} = bondy_oplog:start_instance(B, originated_opts()),
     [bondy_oplog:append(A, X) || X <- [a, b, c]],
+    ok = bondy_oplog:await_apply(A),
     R0 = bondy_oplog:root_hash(A),
     {ok, R1} = bondy_oplog:sync(A, B),
     ?assertEqual(R0, R1),
@@ -167,6 +168,7 @@ missing_set_excludes_locally_present_pages() ->
     {ok, _} = bondy_oplog:start_instance(A, originated_opts()),
     {ok, _} = bondy_oplog:start_instance(B, originated_opts()),
     [bondy_oplog:append(B, X) || X <- lists:seq(1, 30)],
+    ok = bondy_oplog:await_apply(B),
     RootB = bondy_oplog:root_hash(B),
     %% Before sync, A is missing all of B's pages (root + descendants).
     BeforeMissing = bondy_oplog_instance:missing_set(A, RootB),

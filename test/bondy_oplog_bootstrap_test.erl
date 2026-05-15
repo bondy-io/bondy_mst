@@ -38,6 +38,10 @@ bootstrap_from_peer_with_snapshot() ->
     {A, B} = mk_pair(counter_opts()),
     %% Step 1: append a batch and compact on B.
     [bondy_oplog:append(B, {inc, 1}) || _ <- lists:seq(1, 10)],
+    %% Drain the applier so root_hash reflects every appended event;
+    %% the new write path returns after WAL fsync + overlay insert,
+    %% not after the applier has promoted the event to the MST.
+    ok = bondy_oplog:await_apply(B),
     LocalRoot = bondy_oplog:root_hash(B),
     bondy_oplog_peer_state:record_sync_complete(
         {peer, dummy_b}, B, LocalRoot
@@ -122,6 +126,7 @@ bootstrap_then_query_returns_snapshot_value() ->
     {A, B} = mk_pair(counter_opts()),
     [bondy_oplog:append(B, {inc, 7}) || _ <- lists:seq(1, 4)],
     %% 4 * 7 = 28
+    ok = bondy_oplog:await_apply(B),
     LocalRoot = bondy_oplog:root_hash(B),
     bondy_oplog_peer_state:record_sync_complete(
         {peer, dummy_b3}, B, LocalRoot

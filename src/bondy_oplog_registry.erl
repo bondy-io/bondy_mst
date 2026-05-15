@@ -30,6 +30,7 @@ the latest read-relevant state of every running instance:
 | `wal_pid`      | `bondy_oplog_wal:init/1` |
 | `applier_pid`  | `bondy_oplog_applier:init/1` |
 | `sup_pid`      | `bondy_oplog_instance_dyn_sup:start_instance/2` |
+| `overlay_tab`  | `init` of the instance gen_server (immutable thereafter) |
 
 ## Why ETS, not persistent_term
 
@@ -74,7 +75,14 @@ table's lifecycle tied to a supervisor child.
     %% after `supervisor:start_child/2` returns. Used by the dyn_sup
     %% to make `start_instance/2` idempotent and to stop the whole
     %% per-instance subtree on `stop_instance/1`.
-    sup_pid :: pid() | undefined
+    sup_pid :: pid() | undefined,
+    %% Per-instance overlay table. Created by the instance gen_server's
+    %% `init/1` and published once; not refreshed by `publish/1`. The
+    %% applier reads it at its own `init/1` and uses it for HLC-conditional
+    %% eviction after applying a batch. Dies with the instance gen_server
+    %% (no heir) — the row's `overlay_tab` field is then stale until the
+    %% next instance `init/1` republishes a fresh tid.
+    overlay_tab :: ets:tid() | undefined
 }).
 
 -record(state, {}).
@@ -90,7 +98,8 @@ table's lifecycle tied to a supervisor child.
     live_size := non_neg_integer(),
     wal_pid => pid() | undefined,
     applier_pid => pid() | undefined,
-    sup_pid => pid() | undefined
+    sup_pid => pid() | undefined,
+    overlay_tab => ets:tid() | undefined
 }.
 
 -export_type([entry/0]).
@@ -116,12 +125,14 @@ table's lifecycle tied to a supervisor child.
 -export([wal_pid/1]).
 -export([applier_pid/1]).
 -export([sup_pid/1]).
+-export([overlay_tab/1]).
 -export([instance_id_by_sup_pid/1]).
 
 %% Sibling pid management
 -export([set_wal_pid/2]).
 -export([set_applier_pid/2]).
 -export([set_sup_pid/2]).
+-export([set_overlay_tab/2]).
 
 %% gen_server callbacks
 -export([init/1]).
@@ -276,6 +287,11 @@ applier_pid(InstanceId) ->
 sup_pid(InstanceId) ->
     field(InstanceId, #entry.sup_pid).
 
+-spec overlay_tab(instance_id()) -> ets:tid() | undefined.
+
+overlay_tab(InstanceId) ->
+    field(InstanceId, #entry.overlay_tab).
+
 ?DOC("""
 Reverse lookup: returns the `instance_id()` whose registry row has
 the given `sup_pid`, or `undefined`. Used by the dyn supervisor's
@@ -328,6 +344,20 @@ benign no-op.
 
 set_sup_pid(InstanceId, Pid) when is_binary(InstanceId), is_pid(Pid) ->
     _ = update_field(InstanceId, #entry.sup_pid, Pid),
+    ok.
+
+?DOC("""
+Records the per-instance overlay ETS table id. Called by the instance
+gen_server's `init/1` once, immediately after the table is created and
+before the registry row is published, so the applier (which starts
+later in the one_for_all subtree) finds the tid already in place.
+Same tolerance as the sibling setters — a missing row is a benign
+no-op so a one_for_all restart race does not crash either process.
+""").
+-spec set_overlay_tab(instance_id(), ets:tid()) -> ok.
+
+set_overlay_tab(InstanceId, Tab) when is_binary(InstanceId) ->
+    _ = update_field(InstanceId, #entry.overlay_tab, Tab),
     ok.
 
 %% =============================================================================
@@ -401,7 +431,8 @@ to_record(#{instance_id := Id} = M) ->
         live_size = maps:get(live_size, M),
         wal_pid = maps:get(wal_pid, M, undefined),
         applier_pid = maps:get(applier_pid, M, undefined),
-        sup_pid = maps:get(sup_pid, M, undefined)
+        sup_pid = maps:get(sup_pid, M, undefined),
+        overlay_tab = maps:get(overlay_tab, M, undefined)
     }.
 
 %% @private
@@ -416,7 +447,8 @@ to_map(#entry{
     live_size = L,
     wal_pid = WalPid,
     applier_pid = ApplierPid,
-    sup_pid = SupPid
+    sup_pid = SupPid,
+    overlay_tab = OverlayTab
 }) ->
     #{
         instance_id => Id,
@@ -429,5 +461,6 @@ to_map(#entry{
         live_size => L,
         wal_pid => WalPid,
         applier_pid => ApplierPid,
-        sup_pid => SupPid
+        sup_pid => SupPid,
+        overlay_tab => OverlayTab
     }.
