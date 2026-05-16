@@ -36,6 +36,21 @@ Sits between the per-instance WAL writer and the per-instance
   WAL's committed-segment marker. This call returns once every
   in-flight install cast has been processed, so retention never
   drops a segment whose events the instance has not yet installed.
+- Acts as the verify gateway for peer-received events.
+  `bondy_oplog_instance:append_remote/2` forwards each remote event
+  here via `enqueue_remote/2`. The applier captures a read-only
+  snapshot of the validator state at `init/1` and, on every
+  `enqueue_remote` call, spawns a short-lived worker that re-verifies
+  the signature, forwards verified events to the instance for
+  origin-ban / backpressure / watermark filtering and the MST
+  install, and replies to the caller. The applier's mailbox is
+  freed immediately so WAL drain and concurrent remote events can
+  interleave. This keeps the applier as the sole verify+dispatch
+  origin for both local and remote events. Tree-level operations
+  (`merge_pages`, `integrate_peer_root`, `truncate_prefix`, `compact`,
+  `load_snapshot`) are not event-stream operations and remain in the
+  instance; the public façade drains the applier before invoking
+  them.
 
 ## Resume position
 
@@ -93,6 +108,7 @@ resume frame is an idempotent no-op.
 -export([start_link/1]).
 -export([child_spec/1]).
 -export([stop/1]).
+-export([enqueue_remote/2]).
 
 -export([init/1]).
 -export([handle_call/3]).
@@ -143,6 +159,19 @@ stop(Pid) when is_pid(Pid) ->
         exit:{noproc, _} -> ok
     end.
 
+-spec enqueue_remote(pid(), bondy_oplog_event:t()) ->
+    ok | {error, term()}.
+
+%% Verify gateway for peer-received events. The call returns once a
+%% per-event worker has finished verifying the signature, forwarded
+%% the event to the instance, and received its accept/reject reply —
+%% so callers continue to see `equivocation_detected`, `banned_origin`,
+%% and other accept/reject modes synchronously. While the worker runs,
+%% the applier's own mailbox is free, so WAL drain and other remote
+%% events interleave without head-of-line blocking.
+enqueue_remote(ApplierPid, Event) when is_pid(ApplierPid) ->
+    gen_server:call(ApplierPid, {enqueue_remote, Event}, infinity).
+
 %% =============================================================================
 %% gen_server CALLBACKS
 %% =============================================================================
@@ -186,6 +215,51 @@ init(#{instance_id := InstanceId, wal_dir := WalDir} = Opts) ->
             {stop, Err}
     end.
 
+handle_call({enqueue_remote, Event}, From,
+            #state{validator_module = Mod, validator_state = VS,
+                   instance_pid = InstP, instance_id = Id} = State) ->
+    %% Spawn-and-reply: free the applier mailbox immediately so the WAL
+    %% drain (`handle_info(drain, _)`) and other `enqueue_remote` calls
+    %% can interleave. The worker captures the read-only validator
+    %% snapshot + the instance pid + the caller's `From` tag, performs
+    %% the verify, forwards verified events to the instance for
+    %% origin-ban / backpressure / watermark / install, and replies on
+    %% behalf of the applier. The outer try/catch wraps the entire
+    %% worker body — including `gen_server:reply/2` — so the caller
+    %% can never hang on its `infinity` call: any exception (verify
+    %% raised, forward raised, even reply raised) is logged and a
+    %% best-effort fallback reply is attempted via `catch`.
+    _ = spawn(fun() ->
+        try
+            Reply =
+                case Mod:verify_event(Event, VS) of
+                    ok ->
+                        forward_remote(InstP, Event);
+                    {error, Reason} = VerifyErr ->
+                        ok = log_verify_failure(Id, Event, Reason),
+                        VerifyErr
+                end,
+            gen_server:reply(From, Reply)
+        catch
+            C:R:S ->
+                ?LOG_WARNING(#{
+                    description =>
+                        "bondy_oplog_applier verify worker raised before "
+                        "delivering a reply; the remote event has been "
+                        "rejected",
+                    instance_id => Id,
+                    class => C,
+                    reason => R,
+                    stacktrace => S
+                }),
+                %% Best-effort fallback. `gen_server:reply/2` is
+                %% documented as never failing on a dead caller, but
+                %% the wrapping `catch` swallows any pathological
+                %% exception so the worker always exits cleanly.
+                catch gen_server:reply(From, {error, {verify_crashed, R}})
+        end
+    end),
+    {noreply, State};
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
@@ -373,7 +447,7 @@ verify_batch(#state{} = State, [Event | Rest], VAcc, RAcc) ->
         ok ->
             verify_batch(State, Rest, [Event | VAcc], RAcc);
         {error, Reason} ->
-            ok = log_verify_failure(State, Event, Reason),
+            ok = log_verify_failure(State#state.instance_id, Event, Reason),
             verify_batch(State, Rest, VAcc, [Event | RAcc])
     end.
 
@@ -411,7 +485,24 @@ verify_event(#state{validator_module = Mod, validator_state = VS}, Event) ->
     Mod:verify_event(Event, VS).
 
 %% @private
-log_verify_failure(#state{instance_id = Id}, Event, Reason) ->
+%% Forwards a verified remote event to the instance for install. The
+%% instance still owns origin-ban / backpressure / watermark filtering
+%% and the equivocation check, so its reply is what the caller sees.
+%% A `noproc` race during subtree restart is surfaced as
+%% `{error, instance_unavailable}` so the caller (a sync session) can
+%% retry instead of treating the event as accepted.
+forward_remote(InstancePid, Event) ->
+    try gen_server:call(InstancePid, {install_remote, Event}, infinity) of
+        Reply -> Reply
+    catch
+        exit:{noproc, _} -> {error, instance_unavailable};
+        exit:noproc -> {error, instance_unavailable};
+        exit:{normal, _} -> {error, instance_unavailable};
+        exit:{shutdown, _} -> {error, instance_unavailable}
+    end.
+
+%% @private
+log_verify_failure(Id, Event, Reason) when is_binary(Id) ->
     Key = bondy_oplog_event:key(Event),
     ?LOG_WARNING(#{
         description =>

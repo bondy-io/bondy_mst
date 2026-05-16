@@ -252,10 +252,37 @@ fold_range(InstanceId, From, To, Fun, Acc0) ->
 range(InstanceId, From, To) ->
     bondy_oplog_instance:range(InstanceId, From, To).
 
+?DOC("""
+Operator-driven removal of every event with key `=< Watermark` from
+the live MST.
+
+Advances `current_watermark/1` to `Watermark` (monotonically — a value
+lower than the current watermark is ignored), so peer events arriving
+later with HLC `=< Watermark` are rejected by the receive-side filter
+instead of being re-installed. Without this, a peer that has not yet
+seen the truncate would keep re-shipping the events we just dropped.
+
+**No snapshot is written.** Events between the previous snapshot's
+watermark and the new truncate watermark are *unrecoverable* by a
+bootstrapping peer — that peer would receive the older snapshot and
+then be rejected for every event in the gap. Use this only when the
+operator has out-of-band evidence that the dropped events are safe to
+lose cluster-wide. For coordinated retention with a snapshot, use
+`compact/1` instead.
+
+Returns the number of MST rows removed.
+""").
 -spec truncate_prefix(instance_id(), bondy_oplog_event:event_key()) ->
     non_neg_integer().
 
 truncate_prefix(InstanceId, Watermark) ->
+    %% Drain the local applier so truncation operates on the up-to-date
+    %% MST. Without this, overlay-pending events whose keys are
+    %% `=< Watermark` are invisible to the MST-level fold and survive
+    %% the truncate — they are then installed by the applier *after*
+    %% truncate_prefix has returned, leaving the caller with rows the
+    %% truncate was meant to drop.
+    _ = bondy_oplog_instance:await_apply(InstanceId),
     bondy_oplog_instance:truncate_prefix(InstanceId, Watermark).
 
 -spec size(instance_id()) -> non_neg_integer().

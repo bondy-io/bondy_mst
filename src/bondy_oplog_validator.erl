@@ -28,6 +28,29 @@ with an already-known event under the same `{HLC, Origin, Seq}`. The
 trust implementation returns `ok`; the crypto implementation returns
 `{equivocation, Proof}` when the two events constitute proof that the
 Origin signed contradictory statements.
+
+## Verifier state lifetime
+
+The per-instance applier process captures a read-only snapshot of the
+validator state at its `init/1` (`bondy_oplog_applier:init/1`) and
+reuses that snapshot for the lifetime of the process to verify every
+peer-received event. `verify_event/2` is therefore called *off* the
+instance gen_server, with a state value that may be older than the
+state currently held by any other consumer.
+
+**Contract for implementations:** `verify_event/2` MUST be safe to run
+with a snapshot of `State` that is stale relative to wall-clock — i.e.
+all data that affects the accept/reject decision must be derived from
+the event itself plus values present in `State` at applier-start time.
+There is no mechanism for the applier to observe later state
+mutations.
+
+If a future implementation needs runtime rotation/revocation (e.g.
+adding a peer's public key without restarting the subtree), the
+behaviour will need to grow a `refresh/1` callback and the applier a
+matching `gen_server:cast` to swap its snapshot. Until then, treat
+the validator state as configuration: changes require a subtree
+restart.
 """).
 
 -callback init(InstanceId :: binary(), Opts :: map()) ->

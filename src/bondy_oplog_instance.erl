@@ -24,12 +24,19 @@ storage backend handle per instance.
 - Own the MST handle (which itself owns the storage backend).
 - Generate fresh `{HLC, Origin, Seq}` event keys on local appends.
 - Sign local events through the configured validator.
-- Verify peer events through the configured validator and append them
-  via the merge strategy.
+- Install verified peer events into the MST. Signature verification
+  for both locally appended events (WAL drain path) and peer-received
+  events (`append_remote/2`) runs in the per-instance applier
+  process; this gen_server is the install point but not the verify
+  point.
 - Expose the MST root hash, key-range reads, and prefix truncation
   hooks for compaction.
 - Run compaction cycles: stability frontier → `interpret_cog` →
   snapshot → MST truncate → watermark advance.
+- Own the page-level anti-entropy primitives (`merge_pages`,
+  `integrate_peer_root`) and snapshot-load operations. These are not
+  event-stream operations; the public façade drains the applier
+  before invoking them so installs already in flight are visible.
 
 ## What this module is *not*
 
@@ -265,8 +272,11 @@ append_many(Target, OpsAndMetas) when is_list(OpsAndMetas) ->
 Inserts an event received from a peer. Idempotent. Validation runs in
 the caller's process: an Origin matching the instance's local Origin
 raises `error/1` without disturbing the instance gen_server. The
-configured validator's `verify_event/2` runs on the gen_server side
-before the MST insert.
+configured validator's `verify_event/2` runs in the per-instance
+applier process, which then forwards the verified event to the
+instance for origin-ban / backpressure / watermark filtering and the
+MST install. The applier is therefore the sole verify+dispatch origin
+for both locally appended and peer-received events.
 """).
 -spec append_remote(instance_id() | pid(), bondy_oplog_event:t()) ->
     ok | {error, term()}.
@@ -278,7 +288,29 @@ append_remote(Target, Event) ->
         {ok, PeerOrigin} ->
             error({remote_event_with_local_origin, PeerOrigin});
         _ ->
-            gen_server:call(target(Target), {append_remote, Event}, infinity)
+            case applier_pid_for(Target) of
+                {ok, ApplierPid} ->
+                    bondy_oplog_applier:enqueue_remote(ApplierPid, Event);
+                {error, _} = Err ->
+                    Err
+            end
+    end.
+
+%% @private
+%% Resolves the applier pid for a `Target` (instance id or instance
+%% pid). The applier is published in the registry by its own
+%% `init/1`; during a subtree mid-restart it can briefly be absent,
+%% in which case callers see `{error, applier_unavailable}` and can
+%% retry.
+applier_pid_for(InstanceId) when is_binary(InstanceId) ->
+    case bondy_oplog_registry:applier_pid(InstanceId) of
+        undefined -> {error, applier_unavailable};
+        Pid when is_pid(Pid) -> {ok, Pid}
+    end;
+applier_pid_for(Pid) when is_pid(Pid) ->
+    case lookup_instance_id(Pid) of
+        undefined -> {error, applier_unavailable};
+        Id -> applier_pid_for(Id)
     end.
 
 ?DOC("""
@@ -952,7 +984,13 @@ do_handle_call(drain_install_queue, _From, State) ->
     %% this call is processed, every prior `install_local_batch`
     %% cast has been handled. The reply itself carries no payload.
     {reply, ok, State};
-do_handle_call({append_remote, Event}, _From, State0) ->
+do_handle_call({install_remote, Event}, _From, State0) ->
+    %% Sole install path for peer-received events. Signature
+    %% verification ran in the applier process (see
+    %% `bondy_oplog_applier:enqueue_remote/2`) before this call, so
+    %% we trust the event and run the remaining accept/reject checks:
+    %% origin-ban, backpressure, watermark filter, and the
+    %% `bondy_mst:get` three-way (undefined/match/equivocation).
     Origin = bondy_oplog_event:key_origin(bondy_oplog_event:key(Event)),
     case bondy_oplog_origin_bans:is_banned(Origin) of
         true ->
@@ -971,14 +1009,9 @@ do_handle_call({append_remote, Event}, _From, State0) ->
                 {error, _} = BPErr ->
                     {reply, BPErr, State0};
                 ok ->
-                    case verify(State0, Event) of
-                        ok ->
-                            case do_append_remote(State0, Event) of
-                                {ok, State} ->
-                                    {reply, ok, State};
-                                {error, _} = Error ->
-                                    {reply, Error, State0}
-                            end;
+                    case do_append_remote(State0, Event) of
+                        {ok, State} ->
+                            {reply, ok, State};
                         {error, _} = Error ->
                             {reply, Error, State0}
                     end
@@ -1013,11 +1046,22 @@ do_handle_call(
     Result = fold_range_merged(MST, From, To, OverlayQueue, Fun, Acc0),
     {reply, Result, State};
 do_handle_call({truncate_prefix, Watermark}, _From, #state{mst = MST0} = State) ->
-    %% Stage 2 simple truncation: collect keys ≤ Watermark and delete
-    %% one by one. Descending delete order — see comment on
+    %% Operator-driven prefix removal: collect keys ≤ Watermark and
+    %% delete one by one (descending order — see the comment on
     %% truncate_below_or_equal/2 for the underlying `bondy_mst:delete/2`
-    %% bug. Structural prefix-truncate (touching only the leftmost
-    %% path) is a future optimisation in `bondy_mst` itself.
+    %% bug). Structural prefix-truncate touching only the leftmost path
+    %% is a future optimisation in `bondy_mst` itself.
+    %%
+    %% Also advances `state.watermark` so the receive-side filter in
+    %% `do_append_remote/2` rejects peer events with HLC ≤ Watermark.
+    %% Without this, peers that have not yet seen the truncate would
+    %% keep re-shipping the events we just dropped, defeating the
+    %% purpose of the call. No snapshot is written at the new
+    %% watermark — operator-driven truncate is documented as lossy for
+    %% bootstrap consumers (see `bondy_oplog:truncate_prefix/2`). The
+    %% watermark advance is monotone: a Watermark lower than the
+    %% current `state.watermark` is ignored so compaction-set values
+    %% are never regressed.
     Keys = bondy_mst:fold(
         MST0,
         fun
@@ -1032,9 +1076,14 @@ do_handle_call({truncate_prefix, Watermark}, _From, #state{mst = MST0} = State) 
         Keys
     ),
     Removed = length(Keys),
+    NewWatermark = advance_watermark(State#state.watermark, Watermark),
+    _ = bondy_oplog_hlc:update(
+        State#state.hlc, bondy_oplog_event:key_hlc(Watermark)
+    ),
     {reply, Removed, State#state{
         mst = MST1,
-        live_size = max(0, State#state.live_size - Removed)
+        live_size = max(0, State#state.live_size - Removed),
+        watermark = NewWatermark
     }};
 do_handle_call(instance_size, _From, #state{overlay = Overlay} = State) ->
     %% MST live_size + overlay rows = total events (disjoint sets;
@@ -1409,13 +1458,20 @@ invalidate_wal_pid(#state{wal_pid_monitor = Ref} = State) ->
     State#state{wal_pid = undefined, wal_pid_monitor = undefined}.
 
 %% @private
-%% Returns `{ok, NewState}` on accepted insert (or below-watermark filter,
-%% or idempotent re-receive); `{error, equivocation_detected}` when the
-%% incoming event collides with a different existing value at the same
-%% key. The collision is recorded in the quarantine table; the MST is
-%% left unchanged. This keeps the gen_server alive — the alternative
-%% (letting the strict merger crash on `bondy_mst:put`) would crash-loop
-%% the instance on poisoned input.
+%% Install path for peer-received events. The applier has already
+%% re-verified the signature in its own process before forwarding
+%% here, so this function trusts the input and runs the remaining
+%% accept/reject logic:
+%%
+%% - Idempotent below-watermark filter (compaction may have advanced
+%%   past this key already).
+%% - `bondy_mst:get` three-way:
+%%   - `undefined`: fresh insert.
+%%   - bit-identical existing value: idempotent re-receive, no-op.
+%%   - different existing value: equivocation; record proof in the
+%%     quarantine table, leave the MST unchanged, return
+%%     `{error, equivocation_detected}`. Keeping the gen_server alive
+%%     on bad input avoids a crash-loop on poisoned peer traffic.
 do_append_remote(#state{mst = MST0} = State, Event) ->
     Key = bondy_oplog_event:key(Event),
     _ = bondy_oplog_hlc:update(
@@ -1663,6 +1719,18 @@ backpressure_admit(
 %% observed to leave a page in an invalid state when keys are deleted
 %% in ascending order — manifesting as a `case_clause` in
 %% `bondy_mst:first/2`. Descending order avoids the pathological path.
+%% @private
+%% Monotone watermark advance: returns whichever of the two values is
+%% higher, treating `undefined` as the bottom. Used by both compaction
+%% (via direct assignment, which is safe by construction — the worker
+%% rejects frontiers ≤ current watermark) and operator-driven
+%% `truncate_prefix`, where the caller's value could in principle be
+%% lower than a previously installed compaction watermark.
+advance_watermark(undefined, New) -> New;
+advance_watermark(Cur, New) when New > Cur -> New;
+advance_watermark(Cur, _New) -> Cur.
+
+%% @private
 truncate_below_or_equal(MST, Watermark) ->
     %% Collect keys ≤ Watermark *in descending order* (the fold cons-es
     %% in ascending order; we keep them ascending and reverse only when
@@ -1945,10 +2013,6 @@ longest_common_prefix([K | Rest], PeerSets, Acc) ->
         true -> longest_common_prefix(Rest, PeerSets, K);
         false -> Acc
     end.
-
-%% @private
-verify(#state{validator_module = Mod, validator_state = VS}, Event) ->
-    Mod:verify_event(Event, VS).
 
 %% @private
 %% Builds the underlying MST struct.

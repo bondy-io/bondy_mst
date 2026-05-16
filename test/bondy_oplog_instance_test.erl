@@ -30,6 +30,7 @@ instance_test_() ->
         fun fold_range_inclusive/0,
         fun range_returns_events_in_key_order/0,
         fun truncate_prefix/0,
+        fun truncate_prefix_advances_watermark/0,
         fun size_tracks_inserts_and_truncations/0,
         fun concurrent_appends_unique_and_ordered/0,
         fun append_many_atomic/0,
@@ -181,6 +182,53 @@ truncate_prefix() ->
     ?assertEqual(10, bondy_oplog:size(Id)),
     {ok, First} = bondy_oplog:first_key(Id),
     ?assert(First > Watermark),
+    ok = bondy_oplog:stop_instance(Id).
+
+%% After truncate_prefix, peer events with HLC =< Watermark must be
+%% rejected by the receive-side filter — otherwise a peer that has not
+%% yet seen the truncate would keep re-shipping the events we just
+%% dropped.
+truncate_prefix_advances_watermark() ->
+    Id = mk_id(),
+    {ok, _} = bondy_oplog:start_instance(Id),
+    Base = erlang:system_time(millisecond) + 1_000_000,
+    MkEvent = fun(N) ->
+        Key = bondy_oplog_event:key(
+            bondy_oplog_hlc:encode(Base + N, 0),
+            <<"peer-twwm-aaaa">>,
+            N
+        ),
+        bondy_oplog_event:new(Key, {n, N}, undefined)
+    end,
+    Events = [MkEvent(N) || N <- lists:seq(1, 5)],
+    [ok = bondy_oplog:append_remote(Id, E) || E <- Events],
+    ok = bondy_oplog:await_apply(Id),
+    ?assertEqual(5, bondy_oplog:size(Id)),
+    ?assertEqual(undefined, bondy_oplog:current_watermark(Id)),
+    K3 = bondy_oplog_event:key(lists:nth(3, Events)),
+    Removed = bondy_oplog:truncate_prefix(Id, K3),
+    ?assertEqual(3, Removed),
+    ?assertEqual(2, bondy_oplog:size(Id)),
+    ?assertEqual(K3, bondy_oplog:current_watermark(Id)),
+    %% Re-shipped peer event with HLC =< Watermark: filtered, no install.
+    ok = bondy_oplog:append_remote(Id, MkEvent(2)),
+    ok = bondy_oplog:await_apply(Id),
+    ?assertEqual(2, bondy_oplog:size(Id)),
+    %% Fresh peer event past the watermark: installs normally.
+    FreshKey = bondy_oplog_event:key(
+        bondy_oplog_hlc:encode(Base + 100, 0),
+        <<"peer-twwm-aaaa">>,
+        100
+    ),
+    ok = bondy_oplog:append_remote(
+        Id, bondy_oplog_event:new(FreshKey, {n, 100}, undefined)
+    ),
+    ok = bondy_oplog:await_apply(Id),
+    ?assertEqual(3, bondy_oplog:size(Id)),
+    %% Calling truncate_prefix with a lower watermark must NOT regress.
+    K1 = bondy_oplog_event:key(lists:nth(1, Events)),
+    _ = bondy_oplog:truncate_prefix(Id, K1),
+    ?assertEqual(K3, bondy_oplog:current_watermark(Id)),
     ok = bondy_oplog:stop_instance(Id).
 
 size_tracks_inserts_and_truncations() ->
