@@ -101,7 +101,20 @@ resume frame is an idempotent no-op.
     %% the instance owns), so the snapshot remains valid for the
     %% lifetime of the applier.
     validator_module :: module(),
-    validator_state :: term()
+    validator_state :: term(),
+    %% Per-instance fold projection (FOLD_STRATEGY_DESIGN §3 +
+    %% §6/§7). Read once from the registry at `init/1`; `undefined`
+    %% when no fold is configured for the instance, in which case the
+    %% fold path is a strict no-op.
+    %%
+    %% Scope: single-cell-per-instance. The fold's event vocabulary is
+    %% the `op` field of each WAL event (see `bondy_oplog_event:op/1`)
+    %% by convention. Per-cell projections are deferred to MST_DB_DESIGN.
+    %% Remote events bypass the WAL drain path and are NOT folded yet —
+    %% F8 documents this as a known gap; F9's cross-PR QA will track
+    %% resolution.
+    fold_module :: bondy_oplog_fold:strategy() | undefined,
+    fold_state :: term()
 }).
 
 -type opts() :: #{
@@ -118,6 +131,7 @@ resume frame is an idempotent no-op.
 -export([stop/1]).
 -export([enqueue_remote/2]).
 -export([refresh_validator/2]).
+-export([projection/1]).
 
 -export([init/1]).
 -export([handle_call/3]).
@@ -194,6 +208,24 @@ enqueue_remote(ApplierPid, Event) when is_pid(ApplierPid) ->
 refresh_validator(ApplierPid, Reason) when is_pid(ApplierPid) ->
     gen_server:cast(ApplierPid, {refresh_validator, Reason}).
 
+-spec projection(pid()) ->
+    {ok, term()} | {error, no_fold_configured}.
+
+-doc """
+Returns the current fold projection for the applier's instance.
+
+`{error, no_fold_configured}` when the instance was started without a
+`fold_module` opt (the legacy event-storage path is in effect).
+
+The reply observes the freshest fold state visible to the applier
+*after* the call is processed — synchronous `gen_server:call/2`
+contract. Events appended after the call returns are not reflected.
+Callers that need read-your-writes semantics across a recent append
+should call `bondy_oplog:await_apply/1` first.
+""".
+projection(ApplierPid) when is_pid(ApplierPid) ->
+    gen_server:call(ApplierPid, get_projection, infinity).
+
 %% =============================================================================
 %% gen_server CALLBACKS
 %% =============================================================================
@@ -212,6 +244,7 @@ init(#{instance_id := InstanceId, wal_dir := WalDir} = Opts) ->
                 {ok, Iter} ->
                     {ValidatorMod, ValidatorState} =
                         bondy_oplog_instance:get_validator(InstP),
+                    {FoldMod, FoldState0} = init_fold(InstanceId),
                     State = #state{
                         instance_id = InstanceId,
                         instance_pid = InstP,
@@ -223,7 +256,9 @@ init(#{instance_id := InstanceId, wal_dir := WalDir} = Opts) ->
                         commit_every = CommitEvery,
                         poll_interval_ms = PollMs,
                         validator_module = ValidatorMod,
-                        validator_state = ValidatorState
+                        validator_state = ValidatorState,
+                        fold_module = FoldMod,
+                        fold_state = FoldState0
                     },
                     ok = bondy_oplog_registry:set_applier_pid(
                         InstanceId, self()
@@ -282,6 +317,12 @@ handle_call({enqueue_remote, Event}, From,
         end
     end),
     {noreply, State};
+handle_call(get_projection, _From,
+            #state{fold_module = undefined} = State) ->
+    {reply, {error, no_fold_configured}, State};
+handle_call(get_projection, _From,
+            #state{fold_state = FS} = State) ->
+    {reply, {ok, FS}, State};
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
@@ -348,6 +389,20 @@ missing_sibling(_, _, undefined) -> mst;
 missing_sibling(_, _, _) -> none.
 
 %% @private
+%% Resolves the per-instance fold strategy (FOLD_STRATEGY_DESIGN
+%% §6/§7) from the registry and seeds the initial projection state.
+%% Returns `{undefined, undefined}` when no fold is configured —
+%% callers check `fold_module` and skip the fold path.
+init_fold(InstanceId) ->
+    case bondy_oplog_registry:fold_module(InstanceId) of
+        undefined ->
+            {undefined, undefined};
+        Strategy ->
+            Initial = bondy_oplog_fold:initial_value(Strategy),
+            {Strategy, Initial}
+    end.
+
+%% @private
 %% Resume from `max(last_MST_key.hlc, watermark.hlc)`. The reader's
 %% `{hlc, T}` start finds the first frame whose first event HLC is
 %% `>= T`, so the frame that contained our resume HLC is re-read and
@@ -410,10 +465,10 @@ read_consumer_offset(WalDir) ->
 drain_loop(#state{iter = Iter} = State0) ->
     case bondy_oplog_wal_reader:next(Iter) of
         {ok, Batch, _Hlcs, {NextSeg, NextOff}, NewIter} ->
-            apply_batch(State0, Batch),
+            StateA = apply_batch(State0, Batch),
             {LastHlc, Count} = batch_summary(Batch),
             State1 = bump_offset(
-                State0#state{iter = NewIter},
+                StateA#state{iter = NewIter},
                 NextSeg, NextOff, LastHlc, Count
             ),
             State2 = maybe_commit(State1),
@@ -451,14 +506,53 @@ apply_batch(#state{instance_id = Id} = State, Batch) ->
     end,
     case Verified of
         [] ->
-            ok;
+            State;
         _ ->
             gen_server:cast(
                 State#state.instance_pid,
                 {install_local_batch, Verified}
-            )
-    end,
-    ok.
+            ),
+            apply_fold_batch(State, Verified)
+    end.
+
+%% @private
+%% Folds the verified events into the per-instance projection state.
+%% No-op when no fold module is configured. Wraps the fold in a
+%% try/catch so a misbehaving fold module cannot wedge the applier —
+%% an exception is logged and the state is preserved unchanged
+%% (the applier continues to drain the WAL but the projection
+%% deviates from the WAL; F9 will track recovery semantics).
+apply_fold_batch(#state{fold_module = undefined} = State, _Verified) ->
+    State;
+apply_fold_batch(#state{fold_module = Mod,
+                        fold_state = FS0,
+                        instance_id = Id} = State, Verified) ->
+    try
+        FS1 = lists:foldl(
+            fun(Event, Acc) ->
+                bondy_oplog_fold:apply_event(
+                    Mod, Acc, bondy_oplog_event:op(Event)
+                )
+            end,
+            FS0,
+            Verified
+        ),
+        State#state{fold_state = FS1}
+    catch
+        C:R:S ->
+            ?LOG_ERROR(#{
+                description =>
+                    "bondy_oplog_applier fold raised; the projection "
+                    "is now inconsistent with the WAL until the next "
+                    "successful batch. Subtree continues to drain.",
+                instance_id => Id,
+                fold_module => Mod,
+                class => C,
+                reason => R,
+                stacktrace => S
+            }),
+            State
+    end.
 
 %% @private
 %% Folds the batch in order, partitioning into verified events and

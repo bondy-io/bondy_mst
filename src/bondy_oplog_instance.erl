@@ -67,6 +67,22 @@ without protocol changes.
     validator_module :: module(),
     validator_state :: term(),
     merge_strategy :: module(),
+    %% Per-namespace fold strategy (FOLD_STRATEGY_DESIGN §6/§7). The
+    %% applier consumes WAL events and folds them into per-cell
+    %% projection state via this module's callbacks. `undefined`
+    %% means no fold is configured for the instance and the applier
+    %% takes the legacy event-storage path. Stored as a resolved
+    %% module name (shorthand atoms are validated and recorded
+    %% verbatim — `mod_of/1` resolves at call time, so a config
+    %% migration that changes a shorthand → module mapping is
+    %% transparent on restart).
+    fold_module :: module() | atom() | undefined,
+    %% Opaque, fold-module-specific options. Passed to the fold
+    %% module at applier-side initialisation (the behaviour callback
+    %% `initial_value/0` is parameterless, so opts are consumed by
+    %% the consumer wrapping the fold — see F8). Empty map by
+    %% default.
+    fold_opts :: map(),
     crdt_module :: module() | undefined,
     snapshot_store :: module(),
     snapshot_state :: term(),
@@ -126,7 +142,23 @@ without protocol changes.
     seq_seed => non_neg_integer(),
     validator => module(),
     validator_opts => map(),
+    %% Legacy MST page-merge collision resolver. Deprecated in
+    %% favour of `fold_module` (FOLD_STRATEGY_DESIGN §6/§7) — still
+    %% honoured for backward compatibility. Defaults to
+    %% `bondy_oplog_merge_strict_uniqueness`, which crashes on
+    %% divergent values for the same event key. Configuring this
+    %% emits a one-shot deprecation warning at instance start.
     merge_strategy => module(),
+    %% Per-namespace fold strategy. Either a shorthand atom
+    %% (`presence_basic`, `lww_register`, `strict_register`, `orset`,
+    %% `ttl_presence`, `map_of_fields`) or an application-defined
+    %% module that implements the `bondy_oplog_fold` behaviour. The
+    %% module must export every mandatory callback (validated at
+    %% instance start; a misconfigured value crashes init).
+    fold_module => bondy_oplog_fold:strategy(),
+    %% Opaque options passed through to the fold consumer. Shape is
+    %% fold-module-specific; defaults to `#{}`.
+    fold_opts => map(),
     crdt_module => module(),
     snapshot_store => module(),
     snapshot_store_opts => map(),
@@ -865,6 +897,21 @@ init({InstanceId, Opts}) ->
         Opts,
         bondy_oplog_merge_strict_uniqueness
     ),
+    case maps:is_key(merge_strategy, Opts) of
+        true ->
+            ?LOG_WARNING(#{
+                description =>
+                    "`merge_strategy` opt is deprecated; configure "
+                    "`fold_module` per FOLD_STRATEGY_DESIGN §6/§7 "
+                    "instead. The legacy value is still honoured for "
+                    "MST page-merge collisions",
+                instance_id => InstanceId,
+                merge_strategy => MergeMod
+            });
+        false ->
+            ok
+    end,
+    {FoldMod, FoldOpts} = resolve_fold_config(InstanceId, Opts),
     Backend = maps:get(backend, Opts, ets),
     CrdtModForWarn = maps:get(crdt_module, Opts, undefined),
     case Backend =:= map andalso CrdtModForWarn =/= undefined of
@@ -952,6 +999,8 @@ init({InstanceId, Opts}) ->
         validator_module = ValidatorMod,
         validator_state = ValidatorState,
         merge_strategy = MergeMod,
+        fold_module = FoldMod,
+        fold_opts = FoldOpts,
         crdt_module = CrdtMod,
         snapshot_store = SnapshotMod,
         snapshot_state = SnapshotState,
@@ -1172,6 +1221,8 @@ do_handle_call(info, _From, State) ->
         backend => State#state.backend,
         validator => State#state.validator_module,
         merge_strategy => State#state.merge_strategy,
+        fold_module => State#state.fold_module,
+        fold_opts => State#state.fold_opts,
         last_event_key => State#state.last_event_key
     },
     {reply, Info, State};
@@ -2127,6 +2178,8 @@ publish(#state{} = State) ->
         watermark => State#state.watermark,
         snapshot => State#state.cached_snapshot,
         crdt_module => State#state.crdt_module,
+        fold_module => State#state.fold_module,
+        fold_opts => State#state.fold_opts,
         live_size => State#state.live_size
     }).
 
@@ -2338,3 +2391,29 @@ target(InstanceId) when is_binary(InstanceId) ->
     end;
 target(Other) ->
     error({invalid_target, Other}).
+
+%% @private
+%% Resolves and validates the `fold_module` / `fold_opts` instance
+%% opts. `undefined` means "no fold configured" — the legacy event-
+%% storage path remains in effect. Invalid configurations crash
+%% init/1 with a structured error.
+resolve_fold_config(InstanceId, Opts) ->
+    case maps:get(fold_module, Opts, undefined) of
+        undefined ->
+            FoldOpts0 = maps:get(fold_opts, Opts, #{}),
+            ok = assert_fold_opts(FoldOpts0),
+            {undefined, FoldOpts0};
+        Strategy ->
+            case bondy_oplog_fold:validate(Strategy) of
+                ok ->
+                    FoldOpts = maps:get(fold_opts, Opts, #{}),
+                    ok = assert_fold_opts(FoldOpts),
+                    {Strategy, FoldOpts};
+                {error, Reason} ->
+                    erlang:error({invalid_fold_module, InstanceId, Reason})
+            end
+    end.
+
+%% @private
+assert_fold_opts(M) when is_map(M) -> ok;
+assert_fold_opts(Other) -> erlang:error({invalid_fold_opts, Other}).

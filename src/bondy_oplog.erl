@@ -64,6 +64,7 @@ Per-instance event operations pass through to
 -export([latest_key/1]).
 -export([origin/1]).
 -export([info/1]).
+-export([projection/1]).
 
 %% Sync
 -export([sync/2]).
@@ -348,6 +349,48 @@ origin(InstanceId) ->
 
 info(InstanceId) ->
     bondy_oplog_instance:info(InstanceId).
+
+?DOC("""
+Returns the current per-instance fold projection
+(`FOLD_STRATEGY_DESIGN.md` §3).
+
+Drains the applier first so the returned projection reflects every
+event the caller has already `append/2`-ed (read-your-writes).
+
+Returns:
+- `{ok, State}` — the current fold projection.
+- `{error, no_fold_configured}` — the instance was started without
+  `fold_module` set.
+- `{error, instance_unavailable}` — applier pid not yet published
+  (subtree restart in progress) or already gone.
+
+**Scope (F8):** single-cell-per-instance. Per-cell projections and
+remote-event folding land later (see `MST_DB_DESIGN.md`).
+""").
+-spec projection(instance_id()) ->
+    {ok, term()}
+    | {error, no_fold_configured}
+    | {error, instance_unavailable}.
+
+projection(InstanceId) when is_binary(InstanceId) ->
+    case bondy_oplog_instance:await_apply(InstanceId) of
+        ok ->
+            case bondy_oplog_registry:applier_pid(InstanceId) of
+                undefined ->
+                    {error, instance_unavailable};
+                Pid when is_pid(Pid) ->
+                    try
+                        bondy_oplog_applier:projection(Pid)
+                    catch
+                        exit:{noproc, _}  -> {error, instance_unavailable};
+                        exit:noproc       -> {error, instance_unavailable};
+                        exit:{normal, _}  -> {error, instance_unavailable};
+                        exit:{shutdown, _}-> {error, instance_unavailable}
+                    end
+            end;
+        {error, _} ->
+            {error, instance_unavailable}
+    end.
 
 %% =============================================================================
 %% SYNC

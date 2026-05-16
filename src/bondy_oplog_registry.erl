@@ -26,6 +26,8 @@ the latest read-relevant state of every running instance:
 | `watermark`    | compact / load_snapshot |
 | `snapshot`     | compact / load_snapshot |
 | `crdt_module`  | `init` (immutable thereafter) |
+| `fold_module`  | `init` (immutable thereafter) |
+| `fold_opts`    | `init` (immutable thereafter) |
 | `live_size`    | every state-mutating handle_call |
 | `wal_pid`      | `bondy_oplog_wal:init/1` |
 | `applier_pid`  | `bondy_oplog_applier:init/1` |
@@ -62,6 +64,15 @@ table's lifecycle tied to a supervisor child.
     watermark :: undefined | bondy_oplog_event:event_key(),
     snapshot :: undefined | {bondy_oplog_event:event_key(), term()},
     crdt_module :: module() | undefined,
+    %% Per-namespace fold strategy. `undefined` means no fold is
+    %% configured for the instance (legacy event-storage path).
+    %% Published once by the instance gen_server's `init/1` (and
+    %% kept fresh by `publish/1`, though in practice it is
+    %% immutable for the instance's lifetime).
+    fold_module :: module() | atom() | undefined,
+    %% Opaque fold-module-specific options. `#{}` when no fold is
+    %% configured.
+    fold_opts :: map(),
     live_size :: non_neg_integer(),
     %% Filled in by `bondy_oplog_wal:init/1` after the row exists.
     %% Stays `undefined` between an instance gen_server start and the
@@ -95,6 +106,8 @@ table's lifecycle tied to a supervisor child.
     watermark := undefined | bondy_oplog_event:event_key(),
     snapshot := undefined | {bondy_oplog_event:event_key(), term()},
     crdt_module := module() | undefined,
+    fold_module := module() | atom() | undefined,
+    fold_opts := map(),
     live_size := non_neg_integer(),
     wal_pid => pid() | undefined,
     applier_pid => pid() | undefined,
@@ -121,6 +134,8 @@ table's lifecycle tied to a supervisor child.
 -export([watermark/1]).
 -export([snapshot/1]).
 -export([crdt_module/1]).
+-export([fold_module/1]).
+-export([fold_opts/1]).
 -export([live_size/1]).
 -export([wal_pid/1]).
 -export([applier_pid/1]).
@@ -212,6 +227,8 @@ publish(#{instance_id := Id} = Entry) ->
         {#entry.watermark, maps:get(watermark, Entry)},
         {#entry.snapshot, maps:get(snapshot, Entry)},
         {#entry.crdt_module, maps:get(crdt_module, Entry)},
+        {#entry.fold_module, maps:get(fold_module, Entry, undefined)},
+        {#entry.fold_opts, maps:get(fold_opts, Entry, #{})},
         {#entry.live_size, maps:get(live_size, Entry)}
     ],
     case update_element_safe(Id, Updates) of
@@ -266,6 +283,16 @@ snapshot(InstanceId) ->
 
 crdt_module(InstanceId) ->
     field(InstanceId, #entry.crdt_module).
+
+-spec fold_module(instance_id()) -> module() | atom() | undefined.
+
+fold_module(InstanceId) ->
+    field(InstanceId, #entry.fold_module).
+
+-spec fold_opts(instance_id()) -> map() | undefined.
+
+fold_opts(InstanceId) ->
+    field(InstanceId, #entry.fold_opts).
 
 -spec live_size(instance_id()) -> non_neg_integer() | undefined.
 
@@ -428,6 +455,8 @@ to_record(#{instance_id := Id} = M) ->
         watermark = maps:get(watermark, M),
         snapshot = maps:get(snapshot, M),
         crdt_module = maps:get(crdt_module, M),
+        fold_module = maps:get(fold_module, M, undefined),
+        fold_opts = maps:get(fold_opts, M, #{}),
         live_size = maps:get(live_size, M),
         wal_pid = maps:get(wal_pid, M, undefined),
         applier_pid = maps:get(applier_pid, M, undefined),
@@ -444,6 +473,8 @@ to_map(#entry{
     watermark = W,
     snapshot = S,
     crdt_module = C,
+    fold_module = FM,
+    fold_opts = FO,
     live_size = L,
     wal_pid = WalPid,
     applier_pid = ApplierPid,
@@ -458,6 +489,8 @@ to_map(#entry{
         watermark => W,
         snapshot => S,
         crdt_module => C,
+        fold_module => FM,
+        fold_opts => FO,
         live_size => L,
         wal_pid => WalPid,
         applier_pid => ApplierPid,

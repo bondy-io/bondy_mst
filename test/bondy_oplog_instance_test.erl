@@ -324,6 +324,8 @@ info_returns_diagnostic() ->
         #{merge_strategy := bondy_oplog_merge_strict_uniqueness},
         Info
     ),
+    %% F7: fold_module defaults to undefined; fold_opts to #{}.
+    ?assertMatch(#{fold_module := undefined, fold_opts := #{}}, Info),
     ok = bondy_oplog:stop_instance(Id).
 
 %% Two remote events with the same `{HLC, Origin, Seq}` but different
@@ -619,3 +621,173 @@ append_many_atomic_under_cap() ->
     %% Atomic — no partial insert.
     ?assertEqual(3, bondy_oplog:size(Id)),
     ok = bondy_oplog:stop_instance(Id).
+
+%% =============================================================================
+%% F7: Fold strategy config wiring (FOLD_STRATEGY_DESIGN §6/§7)
+%% =============================================================================
+
+fold_config_test_() ->
+    {setup, fun setup/0, fun cleanup/1, [
+        fun fold_module_defaults_to_undefined/0,
+        fun fold_module_shorthand_accepted/0,
+        fun fold_module_map_of_fields_accepted/0,
+        fun fold_module_custom_module_accepted/0,
+        fun fold_module_unknown_atom_crashes_init/0,
+        fun fold_module_non_atom_crashes_init/0,
+        fun fold_opts_non_map_crashes_init/0,
+        fun fold_opts_passed_through_verbatim/0,
+        fun registry_exposes_fold_fields/0,
+        fun legacy_merge_strategy_still_works/0
+    ]}.
+
+fold_module_defaults_to_undefined() ->
+    Id = mk_id(),
+    {ok, _} = bondy_oplog:start_instance(Id),
+    Info = bondy_oplog:info(Id),
+    ?assertEqual(undefined, maps:get(fold_module, Info)),
+    ?assertEqual(#{}, maps:get(fold_opts, Info)),
+    ok = bondy_oplog:stop_instance(Id).
+
+fold_module_shorthand_accepted() ->
+    Id = mk_id(),
+    {ok, _} = bondy_oplog:start_instance(Id, #{
+        fold_module => lww_register
+    }),
+    Info = bondy_oplog:info(Id),
+    %% Shorthand atom recorded verbatim; resolution happens at call time.
+    ?assertEqual(lww_register, maps:get(fold_module, Info)),
+    ?assertEqual(#{}, maps:get(fold_opts, Info)),
+    ok = bondy_oplog:stop_instance(Id).
+
+fold_module_map_of_fields_accepted() ->
+    Id = mk_id(),
+    Opts = #{<<"f_lww">> => lww_register},
+    {ok, _} = bondy_oplog:start_instance(Id, #{
+        fold_module => map_of_fields,
+        fold_opts => #{fields => Opts}
+    }),
+    Info = bondy_oplog:info(Id),
+    ?assertEqual(map_of_fields, maps:get(fold_module, Info)),
+    ?assertEqual(#{fields => Opts}, maps:get(fold_opts, Info)),
+    ok = bondy_oplog:stop_instance(Id).
+
+fold_module_custom_module_accepted() ->
+    %% A loaded module that happens to export all mandatory fold
+    %% callbacks is acceptable — `validate/1` doesn't require the
+    %% module to declare `-behaviour(bondy_oplog_fold)` explicitly.
+    Id = mk_id(),
+    {ok, _} = bondy_oplog:start_instance(Id, #{
+        fold_module => bondy_oplog_fold_lww_register
+    }),
+    Info = bondy_oplog:info(Id),
+    ?assertEqual(bondy_oplog_fold_lww_register, maps:get(fold_module, Info)),
+    ok = bondy_oplog:stop_instance(Id).
+
+fold_module_unknown_atom_crashes_init() ->
+    Id = mk_id(),
+    Result = bondy_oplog:start_instance(Id, #{
+        fold_module => not_a_real_fold_module_xyz
+    }),
+    %% init/1 raises; the supervisor surfaces the wrapped reason.
+    %% We assert on the unwrapped structured reason and skip
+    %% stop_instance — the instance never started.
+    ?assertMatch(
+        {error, {invalid_fold_module, Id, {module_not_loadable, _, _}}},
+        normalize_start_error(Result)
+    ).
+
+fold_module_non_atom_crashes_init() ->
+    Id = mk_id(),
+    Result = bondy_oplog:start_instance(Id, #{fold_module => 42}),
+    ?assertMatch(
+        {error, {invalid_fold_module, Id, {unknown_strategy, 42}}},
+        normalize_start_error(Result)
+    ).
+
+fold_opts_non_map_crashes_init() ->
+    Id = mk_id(),
+    Result = bondy_oplog:start_instance(Id, #{
+        fold_module => lww_register,
+        fold_opts => [{not_a_map, 1}]
+    }),
+    ?assertMatch(
+        {error, {invalid_fold_opts, _}},
+        normalize_start_error(Result)
+    ).
+
+fold_opts_passed_through_verbatim() ->
+    Id = mk_id(),
+    Opts = #{custom_key => some_value, nested => #{deep => true}},
+    {ok, _} = bondy_oplog:start_instance(Id, #{
+        fold_module => lww_register,
+        fold_opts => Opts
+    }),
+    ?assertEqual(Opts, maps:get(fold_opts, bondy_oplog:info(Id))),
+    ok = bondy_oplog:stop_instance(Id).
+
+registry_exposes_fold_fields() ->
+    Id = mk_id(),
+    {ok, _} = bondy_oplog:start_instance(Id, #{
+        fold_module => strict_register,
+        fold_opts => #{tag => abc}
+    }),
+    ?assertEqual(strict_register, bondy_oplog_registry:fold_module(Id)),
+    ?assertEqual(#{tag => abc}, bondy_oplog_registry:fold_opts(Id)),
+    %% Also verify presence in the full lookup map.
+    {ok, Entry} = bondy_oplog_registry:lookup(Id),
+    ?assertMatch(#{fold_module := strict_register}, Entry),
+    ?assertMatch(#{fold_opts := #{tag := abc}}, Entry),
+    ok = bondy_oplog:stop_instance(Id).
+
+legacy_merge_strategy_still_works() ->
+    %% Configuring the deprecated merge_strategy emits a warning at
+    %% init but the instance still starts and the value is recorded.
+    %% (We don't assert on the log line — the warning is best-effort
+    %% and capturing logger output across test runs is brittle.)
+    Id = mk_id(),
+    {ok, _} = bondy_oplog:start_instance(Id, #{
+        merge_strategy => bondy_oplog_merge_strict_uniqueness
+    }),
+    Info = bondy_oplog:info(Id),
+    ?assertEqual(
+        bondy_oplog_merge_strict_uniqueness,
+        maps:get(merge_strategy, Info)
+    ),
+    %% fold_module stays at its default.
+    ?assertEqual(undefined, maps:get(fold_module, Info)),
+    ok = bondy_oplog:stop_instance(Id).
+
+%% Supervisor start_instance wraps init/1 errors. The actual nesting
+%% observed in practice is
+%%   {error, {shutdown, {failed_to_start_child, Mod, {{Reason, Stack}, _}}}}
+%% which we unwrap to surface `{error, Reason}` for the test assertions.
+%% Various intermediate forms are tolerated so the helper stays useful
+%% if the supervisor changes its wrapping later.
+normalize_start_error({ok, _Pid}) ->
+    %% Failure was expected — surfacing ok lets the assertMatch fail
+    %% with a descriptive expected/got pair.
+    ok;
+normalize_start_error({error, Term}) ->
+    {error, unwrap_supervisor_error(Term)};
+normalize_start_error(Other) ->
+    {error, Other}.
+
+unwrap_supervisor_error({shutdown, Inner}) ->
+    unwrap_supervisor_error(Inner);
+unwrap_supervisor_error({failed_to_start_child, _Mod, Inner}) ->
+    unwrap_supervisor_error(Inner);
+unwrap_supervisor_error({Reason, Stack}) when is_list(Stack) ->
+    %% gen_server crash form: `{Reason, Stacktrace}`. Distinguish
+    %% from a "Reason that happens to be a 2-tuple with list payload"
+    %% by checking that Stack is a list of 4-element stack frames.
+    case is_stacktrace(Stack) of
+        true  -> Reason;
+        false -> {Reason, Stack}
+    end;
+unwrap_supervisor_error(Reason) ->
+    Reason.
+
+is_stacktrace([Top | _]) when is_tuple(Top), tuple_size(Top) =:= 4 ->
+    is_atom(element(1, Top)) andalso is_atom(element(2, Top));
+is_stacktrace(_) ->
+    false.
