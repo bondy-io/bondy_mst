@@ -189,7 +189,23 @@ stateful-PropEr fault-injection harness are still to land.
     %% Monotonic-millisecond timestamp of the most recent successful
     %% append (single or batch). Drives the `head_lag_ms` gauge in
     %% `info/1`. `undefined` until the first append lands.
-    last_append_at_ms  :: integer() | undefined
+    last_append_at_ms  :: integer() | undefined,
+    %% --- Body codec -----------------------------------------------------------
+    %% Compression algorithm applied to each frame's body before
+    %% `bondy_oplog_wal_frame:encode/2`. `none` is the v1-compatible
+    %% default; `zlib` compresses bodies whose size meets the threshold.
+    %% Flag bit 0 on the frame advertises that a body has been
+    %% compressed; the algorithm id lives in the first byte of the
+    %% compressed body envelope.
+    body_compression          :: bondy_oplog_wal_codec:algorithm(),
+    body_compression_min_bytes :: pos_integer(),
+    %% Body encryption. `disabled` is the default and means the writer
+    %% emits cleartext bodies; `{enabled, Module}` makes every body go
+    %% through `bondy_oplog_wal_codec:encrypt_now/3` against the
+    %% writer's current key (resolved on each write via
+    %% `Module:current_key/0`). Readers consult the same module via
+    %% `Module:lookup_key/1` to resolve historic frames.
+    body_encryption           :: bondy_oplog_wal_codec:encryption()
 }).
 
 -type opts() :: #{
@@ -205,7 +221,11 @@ stateful-PropEr fault-injection harness are still to land.
     min_live_segments => pos_integer(),
     retention_sweep_interval => pos_integer(),
     max_total_wal_size => pos_integer(),
-    max_live_segments => pos_integer()
+    max_live_segments => pos_integer(),
+    recovery_mode => strict | rescan,
+    body_compression => bondy_oplog_wal_codec:algorithm(),
+    body_compression_min_bytes => pos_integer(),
+    body_encryption => bondy_oplog_wal_codec:encryption()
 }.
 
 -type wal() :: pid().
@@ -233,6 +253,8 @@ stateful-PropEr fault-injection harness are still to land.
 -export([advance_snapshot_watermark/2]).
 -export([retention_sweep/1]).
 -export([set_committed_segment/2]).
+-export([mark_segment_alert/3]).
+-export([clear_segment_alert/2]).
 
 -export([init/1]).
 -export([handle_call/3]).
@@ -276,9 +298,8 @@ start(InstanceId, Opts) when
 
 ?DOC("""
 Returns a `supervisor:child_spec/0` for hosting a WAL writer under a
-supervisor. Used by `bondy_oplog_wal_sup` and by the future
-per-instance supervisor that will host the writer, applier, and
-instance API as a one_for_all subtree.
+supervisor. Used by `bondy_oplog_instance_sup`, the per-instance
+one_for_all subtree that owns the writer, applier, and instance API.
 """).
 -spec child_spec(instance_id(), opts()) -> supervisor:child_spec().
 
@@ -579,7 +600,7 @@ itself against this writer:
     live_segments    => [{segment_id(), hlc() | undefined}],
     deleted_through  => segment_id(),
     head_first_hlc   => hlc() | undefined,
-    head_idx_entries => [{hlc(), non_neg_integer()}]
+    head_idx_entries => [{hlc(), hlc(), non_neg_integer()}]
 }
 ```
 
@@ -680,6 +701,42 @@ set_committed_segment(Pid, NewSegId) when
 ->
     gen_server:call(Pid, {set_committed_segment, NewSegId}).
 
+?DOC("""
+Records an integrity-scrubber alert against `SegmentId`.
+
+Called by the per-instance `bondy_oplog_wal_scrubber` when it detects
+a bad frame in a sealed segment. The segment id is recorded in the
+manifest under `scrubber_alerts` and persisted atomically so the alert
+survives restart. The segment file itself is left untouched — the
+scrubber does not auto-repair; an operator triggers re-derivation
+from a peer or a snapshot.
+
+`Reason` is one of the loose atoms reported by the segment walk
+(`bad_crc`, `bad_magic`, `truncated`, `sealed_body_decode`).
+Subsequent calls for the same segment replace the prior reason
+(last-writer-wins — multiple bad frames in one segment still produce
+one alert).
+""").
+-spec mark_segment_alert(wal(), segment_id(), atom()) -> ok | {error, term()}.
+
+mark_segment_alert(Pid, SegmentId, Reason) when
+    is_pid(Pid), is_integer(SegmentId), SegmentId >= 0, is_atom(Reason)
+->
+    gen_server:call(Pid, {mark_segment_alert, SegmentId, Reason}).
+
+?DOC("""
+Clears any integrity-scrubber alert for `SegmentId`.
+
+Intended for operator use after a re-derivation has replaced the
+quarantined bytes. Returns `ok` whether or not an alert was present.
+""").
+-spec clear_segment_alert(wal(), segment_id()) -> ok | {error, term()}.
+
+clear_segment_alert(Pid, SegmentId) when
+    is_pid(Pid), is_integer(SegmentId), SegmentId >= 0
+->
+    gen_server:call(Pid, {clear_segment_alert, SegmentId}).
+
 %% =============================================================================
 %% gen_server CALLBACKS
 %% =============================================================================
@@ -765,6 +822,16 @@ handle_call({set_committed_segment, NewSegId}, _From, State0) ->
             {reply, ok, State2};
         {error, _} = E ->
             {reply, E, State0}
+    end;
+handle_call({mark_segment_alert, SegId, Reason}, _From, State0) ->
+    case do_mark_segment_alert(State0, SegId, Reason) of
+        {ok, State1} -> {reply, ok, State1};
+        {error, _} = E -> {reply, E, State0}
+    end;
+handle_call({clear_segment_alert, SegId}, _From, State0) ->
+    case do_clear_segment_alert(State0, SegId) of
+        {ok, State1} -> {reply, ok, State1};
+        {error, _} = E -> {reply, E, State0}
     end;
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
@@ -933,10 +1000,67 @@ validate_backpressure_opts(Opts) ->
 %% @private
 validate_max_live_segments(Opts) ->
     case maps:find(max_live_segments, Opts) of
-        {ok, M} when is_integer(M), M >= 1 -> ok;
-        {ok, M} -> {error, {invalid_opt, max_live_segments, M}};
-        error -> ok
+        {ok, M} when is_integer(M), M >= 1 ->
+            validate_recovery_mode(Opts);
+        {ok, M} ->
+            {error, {invalid_opt, max_live_segments, M}};
+        error ->
+            validate_recovery_mode(Opts)
     end.
+
+%% @private
+%% Validate `recovery_mode`: must be `strict` (default) or `rescan`.
+%% In `rescan`, head-segment recovery skips corrupt frames and emits a
+%% telemetry event with the skipped byte range; opt-in per instance.
+validate_recovery_mode(Opts) ->
+    case maps:find(recovery_mode, Opts) of
+        {ok, M} when M =:= strict; M =:= rescan ->
+            validate_body_compression(Opts);
+        {ok, M} ->
+            {error, {invalid_opt, recovery_mode, M}};
+        error ->
+            validate_body_compression(Opts)
+    end.
+
+%% @private
+%% Validate `body_compression`: `none` (default), `zlib`, or `lz4`.
+%% `lz4` is reserved (needs a NIF that isn't built in today) and is
+%% rejected as `unsupported_codec` so an operator who flips it on by
+%% mistake gets a loud failure at startup instead of silent fall-back.
+%% On success, also validate the optional `body_compression_min_bytes`
+%% threshold.
+validate_body_compression(Opts) ->
+    Algo = maps:get(body_compression, Opts, none),
+    case bondy_oplog_wal_codec:validate_algorithm(Algo) of
+        ok ->
+            validate_body_compression_min_bytes(Opts);
+        {error, _} = E ->
+            E
+    end.
+
+%% @private
+validate_body_compression_min_bytes(Opts) ->
+    case maps:find(body_compression_min_bytes, Opts) of
+        {ok, N} when is_integer(N), N >= 1 ->
+            validate_body_encryption(Opts);
+        {ok, N} ->
+            {error, {invalid_opt, body_compression_min_bytes, N}};
+        error ->
+            validate_body_encryption(Opts)
+    end.
+
+%% @private
+%% Validate `body_encryption`: `disabled` (default) or `{enabled,
+%% Module}` where `Module` implements the
+%% `bondy_oplog_wal_key_registry` behaviour. The startup check loads
+%% the module, verifies the two callbacks are exported, and calls
+%% `current_key/0` to ensure the writer can resolve a key before it
+%% accepts any append. Failure modes surface as typed errors so
+%% misconfiguration is visible to the operator at boot, not at the
+%% first encrypted write.
+validate_body_encryption(Opts) ->
+    Cfg = maps:get(body_encryption, Opts, disabled),
+    bondy_oplog_wal_codec:validate_encryption(Cfg).
 
 %% @private
 %% Reject malformed `fsync_mode` / interval / size / batch opts at init
@@ -1034,6 +1158,13 @@ open_after_opts_validated(InstanceId, Origin, Opts) ->
                 max_live_segments, Opts,
                 ?BONDY_OPLOG_WAL_MAX_LIVE_SEGMENTS_DEFAULT
             ),
+            RecoveryMode = maps:get(recovery_mode, Opts, strict),
+            BodyCompression = maps:get(body_compression, Opts, none),
+            BodyCompressionMin = maps:get(
+                body_compression_min_bytes, Opts,
+                ?BONDY_OPLOG_WAL_BODY_COMPRESSION_MIN_BYTES_DEFAULT
+            ),
+            BodyEncryption = maps:get(body_encryption, Opts, disabled),
             State0 = #state{
                 instance_id = InstanceId,
                 dir = Dir,
@@ -1065,9 +1196,15 @@ open_after_opts_validated(InstanceId, Origin, Opts) ->
                 max_total_wal_size = MaxTotal,
                 max_live_segments = MaxLive,
                 wal_full_last_emit_ms = undefined,
-                last_append_at_ms = undefined
+                last_append_at_ms = undefined,
+                body_compression = BodyCompression,
+                body_compression_min_bytes = BodyCompressionMin,
+                body_encryption = BodyEncryption
             },
-            open_or_recover(Dir, InstanceId, Origin, IdxInterval, State0);
+            open_or_recover(
+                Dir, InstanceId, Origin, IdxInterval, RecoveryMode,
+                BodyEncryption, State0
+            );
         error ->
             {error, {missing_opt, dir}}
     end.
@@ -1082,7 +1219,8 @@ open_after_opts_validated(InstanceId, Origin, Opts) ->
 %%   clean orphans, scan and truncate the head segment, rebuild missing
 %%   `.qidx` files, and clamp the consumer offset to a real frame
 %%   boundary.
-open_or_recover(Dir, InstanceId, Origin, IdxInterval, State0) ->
+open_or_recover(Dir, InstanceId, Origin, IdxInterval, RecoveryMode,
+                BodyEncryption, State0) ->
     case filelib:ensure_path(Dir) of
         ok ->
             ManifestPath = filename:join(
@@ -1096,7 +1234,10 @@ open_or_recover(Dir, InstanceId, Origin, IdxInterval, State0) ->
                     end;
                 true ->
                     case bondy_oplog_wal_recovery:recover(
-                        Dir, InstanceId, Origin, IdxInterval
+                        Dir, InstanceId, Origin,
+                        #{idx_interval_bytes => IdxInterval,
+                          recovery_mode => RecoveryMode,
+                          body_encryption => BodyEncryption}
                     ) of
                         {ok, Result} ->
                             case install_recovery(State0, Result) of
@@ -1192,7 +1333,7 @@ segment_size_or_zero(Dir, SegId) ->
 %% atomically. Failing to open the WAL over a corrupt hint would be
 %% disproportionate.
 read_snapshot_watermark_lenient(Dir) ->
-    case bondy_oplog_wal_snapshot_watermark:read(Dir) of
+    case bondy_oplog_wal_state:read_snapshot_watermark(Dir) of
         {ok, Watermark} ->
             Watermark;
         {error, Reason} ->
@@ -1276,21 +1417,35 @@ do_append_batch(#state{max_batch_bytes = MaxBatch} = State0, Events) ->
         false ->
             {error, {invalid_batch, hlc_not_monotonic}};
         true ->
-            Body = term_to_binary(
+            RawBody = term_to_binary(
                 Events, [{minor_version, 2}, deterministic]
             ),
-            BodySize = byte_size(Body),
-            case BodySize > MaxBatch of
+            RawSize = byte_size(RawBody),
+            case RawSize > MaxBatch of
                 true ->
                     {error, batch_too_large};
                 false ->
-                    FrameLen = ?FRAME_HEADER_BYTES + BodySize,
+                    %% Compress *after* the `max_batch_bytes` check —
+                    %% the cap bounds the writer's in-memory footprint
+                    %% for the encoded batch, which is the raw body
+                    %% regardless of whether it ends up compressed.
+                    %% FrameLen, rotation, and backpressure all run on
+                    %% the post-codec size: a compressed body shrinks
+                    %% the frame, so segment budget computations must
+                    %% reflect what actually goes to disk.
+                    {Flags, EncodedBody} =
+                        bondy_oplog_wal_codec:encode_body(
+                            RawBody, codec_opts(State0)
+                        ),
+                    EncodedSize = iolist_size(EncodedBody),
+                    FrameLen = ?FRAME_HEADER_BYTES + EncodedSize,
                     case check_backpressure(State0, FrameLen) of
                         ok ->
                             case maybe_rotate(State0, FrameLen) of
                                 {ok, State1} ->
                                     write_batch_frame(
-                                        State1, Body, FrameLen, Hlcs
+                                        State1, EncodedBody, Flags,
+                                        FrameLen, Hlcs
                                     );
                                 {fatal, _, _} = Fatal ->
                                     Fatal;
@@ -1302,6 +1457,21 @@ do_append_batch(#state{max_batch_bytes = MaxBatch} = State0, Events) ->
                     end
             end
     end.
+
+%% @private
+%% Builds the codec opts map from the writer's state. The codec is
+%% pure — it takes config + body in, returns flag + bytes out — so
+%% rebuilding this map per append is a few-key copy with no
+%% allocations beyond the map itself.
+codec_opts(#state{instance_id = Id, body_compression = Algo,
+                  body_compression_min_bytes = Min,
+                  body_encryption = Enc}) ->
+    #{
+        instance_id => Id,
+        body_compression => Algo,
+        body_compression_min_bytes => Min,
+        body_encryption => Enc
+    }.
 
 %% @private
 %% Hard backpressure check (§14, §15). Refuses the append iff EITHER
@@ -1526,9 +1696,9 @@ commit_rotation(
 write_batch_frame(
     #state{head_fd = Fd, current_offset = Off, segment_id = Seg,
            head_pos_ref = HeadRef, idx_acc = Acc0} = State0,
-    Body, FrameLen, Hlcs
+    Body, Flags, FrameLen, Hlcs
 ) ->
-    Frame = bondy_oplog_wal_frame:encode(Body),
+    Frame = bondy_oplog_wal_frame:encode(Body, [{flags, Flags}]),
     case prim_file:write(Fd, Frame) of
         ok ->
             NewOff = Off + FrameLen,
@@ -1539,7 +1709,7 @@ write_batch_frame(
             %% regardless of batch size — the reader's HLC seek finds
             %% the frame, then decodes its events as a unit.
             Acc1 = bondy_oplog_wal_idx:note_frame(
-                Acc0, FirstHlc, Off, FrameLen
+                Acc0, FirstHlc, LastHlc, Off, FrameLen
             ),
             State1 = State0#state{
                 current_offset = NewOff,
@@ -1614,7 +1784,7 @@ do_advance_snapshot_watermark(
 ) when Old =/= undefined, NewHlc < Old ->
     {error, {watermark_regression, Old, NewHlc}};
 do_advance_snapshot_watermark(#state{dir = Dir} = State, NewHlc) ->
-    case bondy_oplog_wal_snapshot_watermark:write(Dir, NewHlc) of
+    case bondy_oplog_wal_state:write_snapshot_watermark(Dir, NewHlc) of
         ok ->
             {ok, State#state{snapshot_watermark = NewHlc}};
         {error, _} = E ->
@@ -1630,6 +1800,31 @@ do_set_committed_segment(
     {error, {committed_segment_regression, Cur, NewSeg}};
 do_set_committed_segment(State, NewSeg) ->
     {ok, State#state{committed_segment = NewSeg}}.
+
+%% @private
+%% Add or update a scrubber alert for `SegId` and persist the manifest
+%% via the same tmp+rename path retention uses. The alert survives
+%% restart and is surfaced through `info/1`. Telemetry is emitted by
+%% the caller (`bondy_oplog_wal_scrubber`) so the alert event keeps the
+%% segment walk's offset/duration context that the WAL writer doesn't
+%% have.
+do_mark_segment_alert(#state{manifest = M, dir = Dir} = State, SegId, Reason) ->
+    M1 = bondy_oplog_wal_manifest:with_scrubber_alert(M, SegId, Reason),
+    case bondy_oplog_wal_manifest:write(Dir, M1) of
+        ok -> {ok, State#state{manifest = M1}};
+        {error, _} = E -> E
+    end.
+
+%% @private
+%% Drop the alert for `SegId` and persist. Persisting on a no-op clear
+%% is harmless (single tmp+rename) and keeps the call shape uniform
+%% with `do_mark_segment_alert/3`.
+do_clear_segment_alert(#state{manifest = M, dir = Dir} = State, SegId) ->
+    M1 = bondy_oplog_wal_manifest:without_scrubber_alert(M, SegId),
+    case bondy_oplog_wal_manifest:write(Dir, M1) of
+        ok -> {ok, State#state{manifest = M1}};
+        {error, _} = E -> E
+    end.
 
 %% @private
 %% Run a retention sweep and swallow any error after logging — used by
@@ -2065,6 +2260,8 @@ build_info(#state{} = State) ->
         live_segments_count => State#state.live_segments_count,
         deleted_through =>
             bondy_oplog_wal_manifest:deleted_through(State#state.manifest),
+        scrubber_alerts =>
+            bondy_oplog_wal_manifest:scrubber_alerts(State#state.manifest),
         snapshot_watermark => State#state.snapshot_watermark,
         committed_segment => State#state.committed_segment,
         min_live_segments => State#state.min_live_segments,
@@ -2141,7 +2338,12 @@ build_reader_view(#state{manifest = Manifest} = State) ->
         %% into the head segment wrap these via
         %% `bondy_oplog_wal_idx:from_entries/1` to avoid a redundant
         %% file read of data the writer already has in RAM.
-        head_idx_entries => head_idx_entries(State)
+        head_idx_entries => head_idx_entries(State),
+        %% Body-encryption config so the reader can resolve `KeyId`s
+        %% via the same registry the writer used. `disabled` when
+        %% encryption is off — the reader's codec path skips the
+        %% decrypt branch on frames whose Flags bit 1 is clear.
+        body_encryption => State#state.body_encryption
     }.
 
 %% @private
@@ -2379,24 +2581,49 @@ emit_retention_sweep_telemetry(
 %% `outcome` is `ok` here; failed recoveries short-circuit before this
 %% call.
 %%
-%% `scanned_bytes` is a proxy: the recovery procedure doesn't yet
-%% surface the total bytes it walked through (it returns only
-%% `truncated_bytes`, the bytes discarded after a torn-write boundary).
-%% We report `bytes_total` (post-recovery on-disk size) as a stand-in,
-%% which is what an operator actually needs to gauge the WAL footprint
-%% at boot. A future recovery-API revision will thread the precise
-%% scanned-byte count if needed.
+%% `scanned_bytes` is the head-segment work the scanner actually
+%% walked: `last_valid_offset - SEG_HEADER` (the run of accepted
+%% frames) plus any bytes the rescan path skipped past. Sealed
+%% segments are not included — they are validated by header check
+%% only, not by walking their frames. `truncated_bytes` (bytes
+%% discarded after a torn-write boundary) is reported separately on
+%% the same event.
 emit_recovery_telemetry(#state{} = State, DurationUs, Result) ->
     Manifest = maps:get(manifest, Result),
+    FramesSkipped = maps:get(frames_skipped, Result, 0),
+    BytesSkipped = maps:get(bytes_skipped, Result, 0),
     Measurements = #{
         duration_us => DurationUs,
-        scanned_bytes => State#state.bytes_total,
+        scanned_bytes => maps:get(scanned_bytes, Result, 0),
         truncated_bytes => maps:get(truncated_bytes, Result, 0),
+        frames_skipped => FramesSkipped,
+        bytes_skipped => BytesSkipped,
         segments_scanned =>
             length(bondy_oplog_wal_manifest:live_segments(Manifest))
     },
     Metadata = base_metadata(State, #{outcome => ok}),
-    emit([bondy_oplog, wal, recovery], Measurements, Metadata).
+    emit([bondy_oplog, wal, recovery], Measurements, Metadata),
+    maybe_emit_rescan_telemetry(
+        State, DurationUs, FramesSkipped, BytesSkipped
+    ).
+
+%% @private
+%% `[bondy_oplog, wal, recovery, rescan]` (`WAL_DESIGN_V2.md §3 PR2`).
+%% Emitted only when rescan-mode recovery actually skipped one or
+%% more frames. Operators alert on `frames_skipped > 0` and use the
+%% structured log records (one per skipped range) for forensics.
+maybe_emit_rescan_telemetry(_State, _DurationUs, 0, _BytesSkipped) ->
+    ok;
+maybe_emit_rescan_telemetry(State, DurationUs, FramesSkipped, BytesSkipped) ->
+    Measurements = #{
+        duration_us => DurationUs,
+        frames_skipped => FramesSkipped,
+        bytes_skipped => BytesSkipped
+    },
+    Metadata = base_metadata(State, #{}),
+    emit(
+        [bondy_oplog, wal, recovery, rescan], Measurements, Metadata
+    ).
 
 %% @private
 %% `[bondy_oplog, wal, wal_full]` (§15). Emitted on every hard-limit

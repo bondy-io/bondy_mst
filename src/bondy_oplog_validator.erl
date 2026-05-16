@@ -33,24 +33,49 @@ Origin signed contradictory statements.
 
 The per-instance applier process captures a read-only snapshot of the
 validator state at its `init/1` (`bondy_oplog_applier:init/1`) and
-reuses that snapshot for the lifetime of the process to verify every
-peer-received event. `verify_event/2` is therefore called *off* the
-instance gen_server, with a state value that may be older than the
-state currently held by any other consumer.
+reuses that snapshot to verify every peer-received event. `verify_event/2`
+is therefore called *off* the instance gen_server, with a state value
+that may be older than the state currently held by any other consumer.
 
 **Contract for implementations:** `verify_event/2` MUST be safe to run
 with a snapshot of `State` that is stale relative to wall-clock — i.e.
 all data that affects the accept/reject decision must be derived from
-the event itself plus values present in `State` at applier-start time.
-There is no mechanism for the applier to observe later state
-mutations.
+the event itself plus values present in `State` at applier-snapshot
+time. There is no mechanism for the applier to observe later state
+mutations *implicitly*.
 
-If a future implementation needs runtime rotation/revocation (e.g.
-adding a peer's public key without restarting the subtree), the
-behaviour will need to grow a `refresh/1` callback and the applier a
-matching `gen_server:cast` to swap its snapshot. Until then, treat
-the validator state as configuration: changes require a subtree
-restart.
+## Snapshot refresh
+
+Implementations that need runtime rotation/revocation (e.g. adding a
+peer's public key without restarting the subtree) MAY export the
+optional `refresh/1` callback. Operators trigger the refresh via
+`bondy_oplog_instance:refresh_validator/1`, which asks the applier to
+call `Mod:refresh(OldState)` and, on `{ok, NewState}`, atomically swap
+its in-process snapshot.
+
+- Implementations that do *not* export `refresh/1` are treated as
+  "snapshot never refreshes" — `refresh_validator/1` is a no-op for
+  those instances (a debug log is emitted).
+- Refresh is **never automatic**: the only way to rotate a snapshot
+  is the operator-facing API (or a validator implementation that
+  wraps a config-server and casts the refresh on config-change).
+- In-flight remote-event verifications that captured the *old*
+  snapshot before the cast was processed continue to verify against
+  that old snapshot — there is no mid-flight swap.
+
+**Implementation contract for `refresh/1`:**
+
+The applier handles the refresh cast on its main gen_server loop, so
+`refresh/1` MUST be fast and synchronous — typical bound is a few
+milliseconds. While it runs, the applier is not draining the WAL and
+is not dispatching remote-event verifies, so a slow callback directly
+adds drain latency.
+
+If the refresh needs to pull from a remote source (config-server,
+KMS, etc.), do the fetch outside `refresh/1` and have `refresh/1`
+read from a cached snapshot maintained by a separate process —
+typically the same process that fires the
+`bondy_oplog_instance:refresh_validator/1` cast on config-change.
 """).
 
 -callback init(InstanceId :: binary(), Opts :: map()) ->
@@ -67,4 +92,7 @@ restart.
     E2 :: bondy_oplog_event:t()
 ) -> ok | {equivocation, Proof :: term()}.
 
--optional_callbacks([detect_equivocation/2]).
+-callback refresh(State :: term()) ->
+    {ok, NewState :: term()} | {error, Reason :: term()}.
+
+-optional_callbacks([detect_equivocation/2, refresh/1]).

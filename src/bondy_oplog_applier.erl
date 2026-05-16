@@ -51,6 +51,14 @@ Sits between the per-instance WAL writer and the per-instance
   `load_snapshot`) are not event-stream operations and remain in the
   instance; the public façade drains the applier before invoking
   them.
+- Owns the validator snapshot used for re-verification. Operators
+  can rotate the snapshot at runtime via the
+  `{refresh_validator, Reason}` cast (entry point is
+  `bondy_oplog_instance:refresh_validator/1`); the cast calls
+  `Mod:refresh/1` on the current snapshot and, on `{ok, NewState}`,
+  installs `NewState` in the applier state. Workers spawned *before*
+  the cast was processed continue to verify against the snapshot
+  they captured — there is no mid-flight swap.
 
 ## Resume position
 
@@ -76,7 +84,7 @@ resume frame is an idempotent no-op.
     wal_pid :: pid(),
     wal_dir :: file:filename_all(),
     iter :: bondy_oplog_wal_reader:t() | undefined,
-    consumer_offset :: bondy_oplog_wal_consumer_offset:t(),
+    consumer_offset :: bondy_oplog_wal_state:consumer_offset(),
     %% Number of events applied since the last `commit/1`. Used to
     %% batch consumer.offset writes — flushed at `commit_every` or
     %% when the reader returns `end_of_log`.
@@ -109,6 +117,7 @@ resume frame is an idempotent no-op.
 -export([child_spec/1]).
 -export([stop/1]).
 -export([enqueue_remote/2]).
+-export([refresh_validator/2]).
 
 -export([init/1]).
 -export([handle_call/3]).
@@ -171,6 +180,19 @@ stop(Pid) when is_pid(Pid) ->
 %% events interleave without head-of-line blocking.
 enqueue_remote(ApplierPid, Event) when is_pid(ApplierPid) ->
     gen_server:call(ApplierPid, {enqueue_remote, Event}, infinity).
+
+-spec refresh_validator(pid(), term()) -> ok.
+
+%% Asks the applier to refresh its in-process validator snapshot by
+%% calling `Mod:refresh/1` on the current snapshot. The cast is
+%% fire-and-forget; the applier logs success/failure and emits
+%% telemetry. Validators that do not export `refresh/1` are a no-op
+%% (debug log).
+%%
+%% Operators normally call `bondy_oplog_instance:refresh_validator/1`,
+%% which resolves the applier pid for them.
+refresh_validator(ApplierPid, Reason) when is_pid(ApplierPid) ->
+    gen_server:cast(ApplierPid, {refresh_validator, Reason}).
 
 %% =============================================================================
 %% gen_server CALLBACKS
@@ -263,6 +285,8 @@ handle_call({enqueue_remote, Event}, From,
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
+handle_cast({refresh_validator, Reason}, State) ->
+    {noreply, do_refresh_validator(Reason, State)};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -281,7 +305,7 @@ handle_info(_Info, State) ->
 terminate(_Reason, #state{iter = Iter, consumer_offset = CO,
                           wal_dir = Dir, uncommitted = N}) ->
     case N > 0 of
-        true -> _ = bondy_oplog_wal_consumer_offset:write(Dir, CO);
+        true -> _ = bondy_oplog_wal_state:write_consumer_offset(Dir, CO);
         false -> ok
     end,
     case Iter of
@@ -373,9 +397,9 @@ watermark_hlc(Key) ->
 %% itself comes from `resume_position/2` (MST + watermark), not from
 %% this file, so a missing or stale offset is safe.
 read_consumer_offset(WalDir) ->
-    case bondy_oplog_wal_consumer_offset:read(WalDir) of
+    case bondy_oplog_wal_state:read_consumer_offset(WalDir) of
         {ok, CO} -> CO;
-        {error, _} -> bondy_oplog_wal_consumer_offset:new()
+        {error, _} -> bondy_oplog_wal_state:new_consumer_offset()
     end.
 
 %% @private
@@ -485,6 +509,97 @@ verify_event(#state{validator_module = Mod, validator_state = VS}, Event) ->
     Mod:verify_event(Event, VS).
 
 %% @private
+%% Refreshes the applier's snapshot of the validator state by calling
+%% the optional `Mod:refresh/1` callback. The new snapshot is only
+%% installed on `{ok, NewState}`; on any other return value (or on a
+%% raise) the old snapshot is preserved so a misbehaving validator
+%% cannot wedge the applier. In-flight `enqueue_remote` workers
+%% captured the old snapshot before this cast was processed and
+%% continue to use it — there is no mid-flight swap.
+do_refresh_validator(Reason,
+                     #state{instance_id = Id,
+                            validator_module = Mod,
+                            validator_state = VS} = State) ->
+    case erlang:function_exported(Mod, refresh, 1) of
+        false ->
+            ?LOG_DEBUG(#{
+                description =>
+                    "bondy_oplog_applier ignored a refresh_validator "
+                    "request because the validator module does not "
+                    "export refresh/1",
+                instance_id => Id,
+                validator => Mod,
+                refresh_reason => Reason
+            }),
+            telemetry:execute(
+                [bondy_oplog, applier, validator_refresh],
+                #{count => 1},
+                #{instance_id => Id, validator => Mod,
+                  outcome => unsupported, refresh_reason => Reason}
+            ),
+            State;
+        true ->
+            try Mod:refresh(VS) of
+                {ok, NewVS} ->
+                    ?LOG_INFO(#{
+                        description =>
+                            "bondy_oplog_applier refreshed validator "
+                            "snapshot",
+                        instance_id => Id,
+                        validator => Mod,
+                        refresh_reason => Reason
+                    }),
+                    telemetry:execute(
+                        [bondy_oplog, applier, validator_refresh],
+                        #{count => 1},
+                        #{instance_id => Id, validator => Mod,
+                          outcome => ok, refresh_reason => Reason}
+                    ),
+                    State#state{validator_state = NewVS};
+                {error, RefreshReason} ->
+                    ?LOG_WARNING(#{
+                        description =>
+                            "bondy_oplog_applier validator refresh "
+                            "returned an error; keeping the previous "
+                            "snapshot",
+                        instance_id => Id,
+                        validator => Mod,
+                        refresh_reason => Reason,
+                        reason => RefreshReason
+                    }),
+                    telemetry:execute(
+                        [bondy_oplog, applier, validator_refresh],
+                        #{count => 1},
+                        #{instance_id => Id, validator => Mod,
+                          outcome => error, refresh_reason => Reason,
+                          error => RefreshReason}
+                    ),
+                    State
+            catch
+                C:R:S ->
+                    ?LOG_ERROR(#{
+                        description =>
+                            "bondy_oplog_applier validator refresh "
+                            "raised; keeping the previous snapshot",
+                        instance_id => Id,
+                        validator => Mod,
+                        refresh_reason => Reason,
+                        class => C,
+                        reason => R,
+                        stacktrace => S
+                    }),
+                    telemetry:execute(
+                        [bondy_oplog, applier, validator_refresh],
+                        #{count => 1},
+                        #{instance_id => Id, validator => Mod,
+                          outcome => crashed, refresh_reason => Reason,
+                          class => C, error => R}
+                    ),
+                    State
+            end
+    end.
+
+%% @private
 %% Forwards a verified remote event to the instance for install. The
 %% instance still owns origin-ban / backpressure / watermark filtering
 %% and the equivocation check, so its reply is what the caller sees.
@@ -531,10 +646,10 @@ batch_summary(Batch) ->
 %% @private
 bump_offset(#state{consumer_offset = CO0, uncommitted = U} = State,
             Seg, Off, LastHlc, Count) ->
-    CO1 = bondy_oplog_wal_consumer_offset:with_position(CO0, Seg, Off),
-    CO2 = bondy_oplog_wal_consumer_offset:with_hlc(CO1, LastHlc),
-    Old = bondy_oplog_wal_consumer_offset:commit_count(CO2),
-    CO3 = bondy_oplog_wal_consumer_offset:with_commit_count(CO2, Old + 1),
+    CO1 = bondy_oplog_wal_state:with_position(CO0, Seg, Off),
+    CO2 = bondy_oplog_wal_state:with_hlc(CO1, LastHlc),
+    Old = bondy_oplog_wal_state:commit_count(CO2),
+    CO3 = bondy_oplog_wal_state:with_commit_count(CO2, Old + 1),
     State#state{consumer_offset = CO3, uncommitted = U + Count}.
 
 %% @private
@@ -563,9 +678,9 @@ commit_now(#state{
     %% drop a WAL segment whose events the instance has not yet
     %% applied — a hard durability hole on a co-crash.
     ok = drain_install_queue(InstancePid),
-    case bondy_oplog_wal_consumer_offset:write(Dir, CO) of
+    case bondy_oplog_wal_state:write_consumer_offset(Dir, CO) of
         ok ->
-            Seg = bondy_oplog_wal_consumer_offset:committed_segment(CO),
+            Seg = bondy_oplog_wal_state:committed_segment(CO),
             ok = notify_committed_segment(InstanceId, WalPid, Seg),
             State#state{uncommitted = 0};
         {error, Reason} ->

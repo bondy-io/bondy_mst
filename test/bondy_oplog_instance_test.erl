@@ -39,6 +39,10 @@ instance_test_() ->
         fun info_returns_diagnostic/0,
         fun divergent_remote_events_are_quarantined/0,
         fun custom_validator_can_reject_remote/0,
+        fun refresh_validator_rotates_applier_snapshot/0,
+        fun refresh_validator_noop_when_callback_not_exported/0,
+        fun refresh_validator_returns_error_when_no_applier/0,
+        fun refresh_validator_in_flight_keeps_old_snapshot/0,
         fun list_instances_reports_running/0,
         fun start_instance_idempotent/0
     ]}.
@@ -375,6 +379,131 @@ custom_validator_can_reject_remote() ->
     ?assertEqual(0, bondy_oplog:size(Id)),
     ok = bondy_oplog:stop_instance(Id).
 
+%% An operator rotates the validator snapshot at runtime via
+%% `bondy_oplog_instance:refresh_validator/1`. Before the refresh the
+%% validator accepts only `op_a` events; after the refresh it accepts
+%% only `op_b` events. No subtree restart.
+refresh_validator_rotates_applier_snapshot() ->
+    Id = mk_id(),
+    Tab = ets:new(refresh_rule, [public, set]),
+    true = ets:insert(Tab, {allow_op, op_a}),
+    {ok, _} = bondy_oplog:start_instance(Id, #{
+        validator => bondy_oplog_test_refreshable_validator,
+        validator_opts => #{rule_table => Tab}
+    }),
+    %% Pre-refresh: only op_a is accepted.
+    ?assertEqual(ok, append_peer_event(Id, op_a, 1)),
+    ?assertEqual({error, refused}, append_peer_event(Id, op_b, 2)),
+    %% Rotate the rule and trigger refresh.
+    true = ets:insert(Tab, {allow_op, op_b}),
+    ok = bondy_oplog_instance:refresh_validator(Id, test_rotation),
+    %% Drain the cast so the applier's snapshot is swapped before we
+    %% observe behaviour. `sys:get_state/1` is processed in mailbox
+    %% order, so any prior cast has been handled by the time it
+    %% returns.
+    ApplierPid = bondy_oplog_registry:applier_pid(Id),
+    ?assert(is_pid(ApplierPid)),
+    _ = sys:get_state(ApplierPid),
+    %% Post-refresh: only op_b is accepted; the old rule is gone.
+    ?assertEqual(ok, append_peer_event(Id, op_b, 3)),
+    ?assertEqual({error, refused}, append_peer_event(Id, op_a, 4)),
+    ok = bondy_oplog:stop_instance(Id),
+    true = ets:delete(Tab).
+
+%% A validator without `refresh/1` is treated as "snapshot never
+%% refreshes". The cast is silently ignored — no crash, no swap —
+%% and subsequent verifications still use the original snapshot.
+refresh_validator_noop_when_callback_not_exported() ->
+    Id = mk_id(),
+    {ok, _} = bondy_oplog:start_instance(Id, #{
+        validator => bondy_oplog_test_reject_validator
+    }),
+    ?assertEqual(ok,
+        bondy_oplog_instance:refresh_validator(Id, no_op_check)),
+    %% Validator is still alive and still rejecting.
+    ?assertEqual({error, refused}, append_peer_event(Id, anything, 1)),
+    ok = bondy_oplog:stop_instance(Id).
+
+%% The applier-unavailable error surfaces when the subtree is not
+%% running. Operators / tests can retry.
+refresh_validator_returns_error_when_no_applier() ->
+    Id = mk_id(),
+    ?assertEqual(
+        {error, applier_unavailable},
+        bondy_oplog_instance:refresh_validator(Id)
+    ).
+
+%% An `enqueue_remote` worker that captured the OLD snapshot before
+%% the refresh cast was processed continues to verify against that
+%% old snapshot. We force the interleaving by
+%% having `verify_event/2` block until the test releases each
+%% worker; the test releases worker A (started under snapshot-1)
+%% only after refreshing the applier to snapshot-2 and starting
+%% worker B (which captures snapshot-2). If the implementation
+%% were to read `state.validator_state` at verify-time rather than
+%% at call-arrival, worker A would have returned snapshot-2's
+%% verdict — the assertions below prove it does not.
+refresh_validator_in_flight_keeps_old_snapshot() ->
+    Id = mk_id(),
+    Self = self(),
+    %% Public ETS table for the blocking validator's `refresh/1` to
+    %% read its next-state from. We seed `snapshot-2` here so the
+    %% applier's eventual refresh swaps verdict ok -> refused.
+    Tab = ets:new(bondy_oplog_test_blocking_validator, [public, named_table]),
+    true = ets:insert(Tab, {Self, #{verdict => refused}}),
+    {ok, _} = bondy_oplog:start_instance(Id, #{
+        validator => bondy_oplog_test_blocking_validator,
+        validator_opts => #{coordinator => Self, verdict => ok}
+    }),
+    %% Spawn a helper that issues append_remote for event A. The
+    %% helper will block until the test releases worker A.
+    ResultA = make_ref(),
+    HelperA = spawn_link(fun() ->
+        Reply = append_peer_event(Id, op_alpha, 1),
+        Self ! {ResultA, Reply}
+    end),
+    %% Wait for worker A's `verifying` notification — proves A is
+    %% parked on its captured snapshot.
+    WorkerA = receive
+        {verifying, ok, WA} -> WA
+    after 2000 ->
+        ets:delete(Tab),
+        exit(HelperA, kill),
+        bondy_oplog:stop_instance(Id),
+        error({timeout_waiting_for_worker_a})
+    end,
+    %% Refresh the applier's snapshot. Worker A is still parked
+    %% inside `verify_event/2` and must remain unaffected.
+    ok = bondy_oplog_instance:refresh_validator(Id, in_flight_test),
+    ApplierPid = bondy_oplog_registry:applier_pid(Id),
+    _ = sys:get_state(ApplierPid),
+    %% Spawn helper for event B. Worker B captures the refreshed
+    %% snapshot (verdict=refused).
+    ResultB = make_ref(),
+    HelperB = spawn_link(fun() ->
+        Reply = append_peer_event(Id, op_beta, 2),
+        Self ! {ResultB, Reply}
+    end),
+    WorkerB = receive
+        {verifying, refused, WB} -> WB
+    after 2000 ->
+        ets:delete(Tab),
+        exit(HelperA, kill),
+        exit(HelperB, kill),
+        bondy_oplog:stop_instance(Id),
+        error({timeout_waiting_for_worker_b})
+    end,
+    %% Release worker A first; it must return ok (snapshot-1 verdict),
+    %% proving in-flight events stick with their captured snapshot.
+    WorkerA ! {release, WorkerA},
+    WorkerB ! {release, WorkerB},
+    ReplyA = receive {ResultA, RA} -> RA after 2000 -> error(timeout_a) end,
+    ReplyB = receive {ResultB, RB} -> RB after 2000 -> error(timeout_b) end,
+    ?assertEqual(ok, ReplyA),
+    ?assertEqual({error, refused}, ReplyB),
+    ets:delete(Tab),
+    ok = bondy_oplog:stop_instance(Id).
+
 list_instances_reports_running() ->
     A = mk_id(),
     B = mk_id(),
@@ -399,6 +528,19 @@ mk_id() ->
     list_to_binary(
         "inst_" ++ integer_to_list(erlang:unique_integer([positive, monotonic]))
     ).
+
+%% Builds a synthetic peer-originated event with the given op and HLC
+%% and forwards it through `append_remote/2`. The origin binary is
+%% fixed across calls so the per-origin equivocation / ban logic is
+%% never triggered; tests that need distinct origins should construct
+%% events themselves.
+append_peer_event(Id, Op, Hlc) ->
+    Event = bondy_oplog_event:new(
+        bondy_oplog_event:key(Hlc, <<"peer-origin-rfrsh">>, Hlc),
+        Op,
+        undefined
+    ),
+    bondy_oplog:append_remote(Id, Event).
 
 pick_nth_key(Id, N) ->
     Es = bondy_oplog:range(

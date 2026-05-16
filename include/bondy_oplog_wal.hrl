@@ -21,16 +21,69 @@
 %% FrameVersion(1) + Flags(3) = 16.
 -define(BONDY_OPLOG_WAL_FRAME_HEADER_BYTES, 16).
 
--define(BONDY_OPLOG_WAL_FRAME_VERSION, 1).
+%% Frame schema versions. v2 differs from v1 only in the on-wire
+%% `FrameVersion` byte and the set of flag bits its reader accepts:
+%% bits 0 (compressed_body) and 1 (encrypted_body) are active in v2;
+%% bit 2 (CRC32C) is reserved on-disk but unused (the upgrade was
+%% evaluated and deferred — see `WAL_DESIGN_V2.md` §PR6).
+-define(BONDY_OPLOG_WAL_FRAME_VERSION_V1, 1).
+-define(BONDY_OPLOG_WAL_FRAME_VERSION_V2, 2).
+
+%% Current writer version — what `encode/1,2` produces by default.
+-define(BONDY_OPLOG_WAL_FRAME_VERSION,
+        ?BONDY_OPLOG_WAL_FRAME_VERSION_V2).
 
 -define(BONDY_OPLOG_WAL_FRAME_FLAG_COMPRESSED, 16#000001).
 -define(BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED, 16#000002).
+-define(BONDY_OPLOG_WAL_FRAME_FLAG_CRC32C, 16#000004).
 
-%% Bitmask of flag bits the v1 reader understands. Bits outside this
-%% mask are rejected (encode-side `badarg`, decode-side `unknown_flag`).
-%% v1 implements neither compression nor encryption, so the mask is
-%% zero; future versions widen it as they land support.
+%% Codec algorithm ids used as the first byte of a compressed body
+%% envelope. The Flags bit advertises "body is compressed"; the
+%% envelope byte selects how to decompress. This decoupling lets a
+%% writer swap algorithms (zlib → lz4 → …) without a wire-format break:
+%% old segments stay readable as long as their algorithm id is still
+%% understood. Reserved ids never write but may appear in fixtures.
+-define(BONDY_OPLOG_WAL_CODEC_ALGO_ZLIB, 1).
+-define(BONDY_OPLOG_WAL_CODEC_ALGO_LZ4,  2).
+
+%% Encryption envelope (when Flags bit 1 is set):
+%%
+%%   Offset  Size  Field
+%%      0     1    AlgorithmId   (1 = AES-256-GCM)
+%%      1     2    KeyId         (operator-managed registry index)
+%%      3    12    IV            (96-bit per AES-GCM)
+%%     15    16    Tag           (GCM authentication tag)
+%%     31   var    Ciphertext    (encrypted body bytes)
+%%
+%% AES-256-GCM is the only algorithm supported today; the id widens
+%% the same way the compression-algorithm id does.
+-define(BONDY_OPLOG_WAL_CODEC_CIPHER_AES_256_GCM, 1).
+-define(BONDY_OPLOG_WAL_CODEC_IV_BYTES,           12).
+-define(BONDY_OPLOG_WAL_CODEC_TAG_BYTES,          16).
+-define(BONDY_OPLOG_WAL_CODEC_KEY_ID_BYTES,       2).
+-define(BONDY_OPLOG_WAL_CODEC_KEY_BYTES,          32).
+%% AlgorithmId(1) + KeyId(2) + IV(12) + Tag(16) = 31 bytes.
+-define(BONDY_OPLOG_WAL_CODEC_ENCRYPT_HEADER_BYTES, 31).
+
+%% Default `body_compression_min_bytes` — bodies below this threshold
+%% are written uncompressed even when compression is enabled. Tunable
+%% per-instance; trades a small CPU win on small bodies for the codec
+%% cycles + envelope-byte overhead. 256 matches the design default.
+-define(BONDY_OPLOG_WAL_BODY_COMPRESSION_MIN_BYTES_DEFAULT, 256).
+
+%% Bitmask of flag bits each frame version's reader understands. Bits
+%% outside the mask are rejected (encode-side `badarg`, decode-side
+%% `unknown_flag`). v1 implemented neither codec nor algorithm choice
+%% so the mask is zero; v2's mask covers bits 0 (compressed_body) and
+%% 1 (encrypted_body). Bit 2 (CRC32C) is reserved on-disk via
+%% `FLAG_CRC32C` but excluded from this mask — the upgrade was
+%% evaluated and deferred (`WAL_DESIGN_V2.md` §PR6); a future activation
+%% widens this mask and adds a `compute_crc(crc32c, _)` clause without
+%% a wire-format change.
 -define(BONDY_OPLOG_WAL_FRAME_KNOWN_FLAGS_V1, 16#000000).
+-define(BONDY_OPLOG_WAL_FRAME_KNOWN_FLAGS_V2,
+        (?BONDY_OPLOG_WAL_FRAME_FLAG_COMPRESSED
+         bor ?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED)).
 
 %% -----------------------------------------------------------------------------
 %% Segment format (§4)
@@ -74,10 +127,24 @@
 %% Reserved(4) = 16.
 -define(BONDY_OPLOG_WAL_IDX_HEADER_BYTES, 16).
 
-%% Each entry: HLC(8) + ByteOffset(8) = 16.
--define(BONDY_OPLOG_WAL_IDX_ENTRY_BYTES, 16).
+%% v1 entry: HLC(8) + ByteOffset(8) = 16.
+%% v2 entry: HLC_first(8) + HLC_last(8) + ByteOffset(8) = 24. v2 carries
+%% each indexed frame's *batch-HLC range* so the reader-side seek picks
+%% the offset of the batch that contains a target HLC in O(log N)
+%% without a forward scan into the un-indexed gap. See
+%% `WAL_DESIGN_V2.md` §PR7.
+-define(BONDY_OPLOG_WAL_IDX_ENTRY_BYTES_V1, 16).
+-define(BONDY_OPLOG_WAL_IDX_ENTRY_BYTES_V2, 24).
 
--define(BONDY_OPLOG_WAL_IDX_VERSION, 1).
+-define(BONDY_OPLOG_WAL_IDX_VERSION_V1, 1).
+-define(BONDY_OPLOG_WAL_IDX_VERSION_V2, 2).
+
+%% Current writer version — what `write_file/2` produces by default.
+%% v1 files remain readable (entries are lifted to the v2 shape at read
+%% time); a rebuild during recovery upgrades them to v2.
+-define(BONDY_OPLOG_WAL_IDX_VERSION, ?BONDY_OPLOG_WAL_IDX_VERSION_V2).
+-define(BONDY_OPLOG_WAL_IDX_ENTRY_BYTES,
+        ?BONDY_OPLOG_WAL_IDX_ENTRY_BYTES_V2).
 
 %% Default index interval in bytes — the writer emits one index entry per
 %% ~64 KB of frames written. See `_design/WAL_DESIGN.md` §7.

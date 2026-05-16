@@ -14,25 +14,30 @@
 ?MODULEDOC("""
 Per-instance one_for_all supervisor.
 
-Holds the three processes that together implement one running
-instance:
+Holds the processes that together implement one running instance:
 
 | Order | Child | Role |
 |---|---|---|
-| 1 | `bondy_oplog_instance` | MST owner, validator, public API entry point |
-| 2 | `bondy_oplog_wal`      | Per-instance write-ahead log writer |
-| 3 | `bondy_oplog_applier`  | Reads the WAL and feeds the instance |
+| 1 | `bondy_oplog_instance`     | MST owner, validator, public API entry point |
+| 2 | `bondy_oplog_wal`          | Per-instance write-ahead log writer |
+| 3 | `bondy_oplog_applier`      | Reads the WAL and feeds the instance |
+| 4 | `bondy_oplog_wal_scrubber` | Periodic CRC integrity check on sealed segments |
 
-`one_for_all` because the three are interdependent: an instance with
-a dead WAL cannot serve writes, and a WAL with no applier accumulates
-unconsumed events the retention sweep cannot clear. A crash anywhere
-in the subtree restarts the whole subtree, and recovery on reopen
-reconciles the on-disk state.
+`one_for_all` because the first three are interdependent: an instance
+with a dead WAL cannot serve writes, and a WAL with no applier
+accumulates unconsumed events the retention sweep cannot clear. A
+crash anywhere in the subtree restarts the whole subtree, and recovery
+on reopen reconciles the on-disk state. The scrubber is a passive
+read-only observer; it accepts being restarted along with its peers
+in exchange for the simplicity of a single strategy.
 
 Start order matters: the instance creates its registry row before the
 WAL writes `wal_pid` and before the applier writes `applier_pid`. The
 WAL is up before the applier opens its reader; the applier resolves
-the WAL pid and instance pid from the registry at init time.
+the WAL pid and instance pid from the registry at init time. The
+scrubber is started last and resolves the WAL pid from the registry
+lazily on each scrub run, so it has no init-time dependency on its
+peers.
 """).
 
 -export([start_link/2]).
@@ -41,6 +46,7 @@ the WAL pid and instance pid from the registry at init time.
 -export([wal_pid/1]).
 -export([instance_pid/1]).
 -export([applier_pid/1]).
+-export([scrubber_pid/1]).
 
 %% =============================================================================
 %% API
@@ -79,6 +85,14 @@ Returns the pid of the per-instance `bondy_oplog_applier` child.
 applier_pid(SupPid) when is_pid(SupPid) ->
     find_child(SupPid, bondy_oplog_applier).
 
+?DOC("""
+Returns the pid of the per-instance `bondy_oplog_wal_scrubber` child.
+""").
+-spec scrubber_pid(pid()) -> pid() | undefined.
+
+scrubber_pid(SupPid) when is_pid(SupPid) ->
+    find_child(SupPid, bondy_oplog_wal_scrubber).
+
 %% =============================================================================
 %% supervisor CALLBACKS
 %% =============================================================================
@@ -115,7 +129,16 @@ init({InstanceId, Opts}) ->
         type => worker,
         modules => [bondy_oplog_applier]
     },
-    {ok, {SupFlags, [InstanceSpec, WalSpec, ApplierSpec]}}.
+    ScrubberOpts = scrubber_opts(InstanceId, Opts),
+    ScrubberSpec = #{
+        id => bondy_oplog_wal_scrubber,
+        start => {bondy_oplog_wal_scrubber, start_link, [ScrubberOpts]},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [bondy_oplog_wal_scrubber]
+    },
+    {ok, {SupFlags, [InstanceSpec, WalSpec, ApplierSpec, ScrubberSpec]}}.
 
 %% =============================================================================
 %% PRIVATE
@@ -212,3 +235,11 @@ applier_opts(InstanceId, Opts) ->
         instance_id => InstanceId,
         wal_dir => WalDir
     }.
+
+%% @private
+%% Extract the scrubber-relevant options. `scrubber` is an optional map
+%% under the instance opts that can carry `interval_ms`. Default is
+%% disabled (`interval_ms = 0`) so untouched configurations do no I/O.
+scrubber_opts(InstanceId, Opts) ->
+    Scrubber0 = maps:get(scrubber, Opts, #{}),
+    Scrubber0#{instance_id => InstanceId}.

@@ -91,9 +91,56 @@ the offending Origin's public key.
 
 These costs are appropriate for cluster-coordination workloads;
 high-throughput per-message signing should batch at a higher layer.
+
+## Snapshot refresh
+
+The validator implements the optional `bondy_oplog_validator:refresh/1`
+callback so operators can add or remove peer public keys (and flip
+the `accept_unknown_origin` toggle) at runtime, without restarting
+the subtree.
+
+**What is refreshable**
+
+| Field | Refreshable | Why |
+|---|---|---|
+| `peer_pubkeys` | yes | Used by `verify_event/2` on the applier; rotating the map adds/removes trusted peers. |
+| `accept_unknown_origin` | yes | Verify-side toggle; safe to flip at runtime. |
+| `keypair` | **no** | `sign_event/2` runs on the instance gen_server, not the applier. The applier's snapshot is verify-only; rotating its `keypair` would have no effect. Signing-key rotation requires a subtree restart. |
+| `last_hash` | **no** | Signing-side per-Origin chain tail; mutates on every local append. Rotating it would corrupt the chain. |
+
+**Operator flow**
+
+```erlang
+%% 1. Publish the new config under the per-instance key.
+application:set_env(
+    bondy_mst,
+    {validator_crypto, InstanceId},
+    #{peer_pubkeys => NewPubkeys}  %% or accept_unknown_origin, or both
+),
+
+%% 2. Trigger the refresh. The applier reads the env, swaps the
+%%    snapshot, and emits the
+%%    `[bondy_oplog, applier, validator_refresh]` telemetry event.
+ok = bondy_oplog_instance:refresh_validator(InstanceId, key_rotation).
+```
+
+**Semantics:**
+
+- Refresh **merges** the pushed map into the current state: keys
+  present in the pushed map replace their counterparts; keys absent
+  are preserved. Operators rotating only `peer_pubkeys` need not
+  re-push `accept_unknown_origin`.
+- `refresh/1` returns `{error, no_refreshed_config}` if no env key
+  is set, or `{error, invalid_refreshed_config}` if the value is
+  not a map. The applier logs and keeps the previous snapshot.
+- In-flight `verify_event/2` calls that captured the old snapshot
+  continue to use it (see `bondy_oplog_applier` moduledoc).
 """).
 
 -record(state, {
+    %% Captured at `init/2` and reused by `refresh/1` to look up
+    %% the operator-pushed rotation payload in the application env.
+    instance_id :: binary(),
     keypair :: undefined | {binary(), binary()},
     peer_pubkeys :: #{binary() => binary()},
     accept_unknown_origin :: boolean(),
@@ -110,13 +157,15 @@ high-throughput per-message signing should batch at a higher layer.
 -export([sign_event/2]).
 -export([verify_event/2]).
 -export([detect_equivocation/2]).
+-export([refresh/1]).
 
 %% =============================================================================
 %% bondy_oplog_validator CALLBACKS
 %% =============================================================================
 
-init(_InstanceId, Opts) when is_map(Opts) ->
+init(InstanceId, Opts) when is_binary(InstanceId), is_map(Opts) ->
     {ok, #state{
+        instance_id = InstanceId,
         keypair = maps:get(keypair, Opts, undefined),
         peer_pubkeys = maps:get(peer_pubkeys, Opts, #{}),
         accept_unknown_origin = maps:get(accept_unknown_origin, Opts, false),
@@ -177,6 +226,33 @@ detect_equivocation(E1, E2) ->
                         event_two => E2
                     }}
             end
+    end.
+
+%% Refreshes the verification-side fields of the state from the
+%% operator-pushed application env key
+%% `{validator_crypto, InstanceId}` under the `bondy_mst`
+%% application. Fields present in the pushed map replace their
+%% counterparts in the current state; fields absent are kept.
+%%
+%% Only `peer_pubkeys` and `accept_unknown_origin` are refreshable
+%% — see the "Snapshot refresh" section of the moduledoc for why
+%% `keypair` and `last_hash` cannot be rotated through this path.
+refresh(#state{instance_id = InstanceId} = State) ->
+    case application:get_env(bondy_mst, {validator_crypto, InstanceId}) of
+        undefined ->
+            {error, no_refreshed_config};
+        {ok, NewOpts} when is_map(NewOpts) ->
+            {ok, State#state{
+                peer_pubkeys = maps:get(
+                    peer_pubkeys, NewOpts, State#state.peer_pubkeys
+                ),
+                accept_unknown_origin = maps:get(
+                    accept_unknown_origin, NewOpts,
+                    State#state.accept_unknown_origin
+                )
+            }};
+        {ok, _Bad} ->
+            {error, invalid_refreshed_config}
     end.
 
 %% =============================================================================

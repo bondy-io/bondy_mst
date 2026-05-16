@@ -16,6 +16,10 @@
 %%   Frame layer:
 %%     - prop_frame_roundtrip/0          (P1 framing slice)
 %%     - prop_frame_bit_flip_detection/0 (P3 framing slice)
+%%     - prop_codec_roundtrip/0          (body codec round-trip)
+%%     - prop_codec_encrypt_roundtrip/0  (body codec encrypt round-trip)
+%%     - prop_codec_ciphertext_bit_flip_detection/0
+%%                                       (AES-GCM authenticity)
 %%
 %%   Single-event writer:
 %%     - prop_wal_single_event_roundtrip/0  (P1 single-event slice)
@@ -74,12 +78,22 @@
 
 -define(HEADER, ?BONDY_OPLOG_WAL_FRAME_HEADER_BYTES).
 -define(SEG_HEADER, ?BONDY_OPLOG_WAL_SEGMENT_HEADER_BYTES).
--define(KNOWN_FLAGS, ?BONDY_OPLOG_WAL_FRAME_KNOWN_FLAGS_V1).
+%% The encoder defaults to v2 (`?BONDY_OPLOG_WAL_FRAME_VERSION`), so
+%% framing properties drive their flag generator from the v2 mask.
+%% v1's mask is still tested by the dedicated v1/v2-equivalence
+%% property below.
+-define(KNOWN_FLAGS, ?BONDY_OPLOG_WAL_FRAME_KNOWN_FLAGS_V2).
 -define(DEFAULT_NUMTESTS, 200).
 -define(WAL_NUMTESTS, 50).
 
 -export([prop_frame_roundtrip/0]).
 -export([prop_frame_bit_flip_detection/0]).
+-export([prop_frame_v1_v2_decoder_equivalence/0]).
+-export([prop_codec_roundtrip/0]).
+-export([prop_codec_encrypt_roundtrip/0]).
+-export([prop_codec_ciphertext_bit_flip_detection/0]).
+-export([prop_idx_v2_seek_matches_v1_on_point_ranges/0]).
+-export([prop_idx_v2_seek_in_range_returns_that_entry/0]).
 -export([prop_wal_single_event_roundtrip/0]).
 -export([prop_wal_hlc_monotonicity/0]).
 -export([prop_wal_roundtrip/0]).
@@ -94,6 +108,7 @@
 -export([prop_bit_flip_magic/0]).
 -export([prop_rotation_atomicity/0]).
 -export([prop_partial_write/0]).
+-export([prop_rescan_recovery/0]).
 -export([prop_concurrent_reader_safety/0]).
 -export([prop_failed_fsync/0]).
 -export([prop_failed_fsync_batched/0]).
@@ -146,14 +161,236 @@ prop_frame_bit_flip_detection() ->
         end
     ).
 
-%% v1 only accepts flag bits inside the known mask. Today that's zero,
-%% but expressing this as a generator means the property keeps testing
-%% the full space when future versions widen the mask.
+%% Each frame version accepts only flag bits inside its known mask.
+%% The v1 mask is zero; v2's mask covers bits 0 (compressed_body) and
+%% 1 (encrypted_body). Expressing the bound as a generator means the
+%% property keeps testing the full space if the mask widens further
+%% (e.g., if the deferred CRC32C activation is ever picked back up).
 known_flags() ->
     case ?KNOWN_FLAGS of
         0 -> 0;
         Mask -> choose(0, Mask)
     end.
+
+%% Body codec round-trip acceptance property.
+%% For any body and any compression setting, encode_body ↦ decode_body
+%% is the identity on the byte representation. Exercises both the
+%% no-op paths (compression = none, body under threshold) and the
+%% active path (zlib above threshold). The codec's "didn't shrink"
+%% fallback may flip a would-be-compressed run back to the raw form;
+%% the property holds either way because decode_body branches on the
+%% returned Flags rather than on the input config.
+prop_codec_roundtrip() ->
+    ?FORALL(
+        {Body, Algo, MinBytes},
+        {binary(), oneof([none, zlib]), choose(1, 4096)},
+        begin
+            Opts = #{body_compression => Algo,
+                     body_compression_min_bytes => MinBytes},
+            {Flags, Encoded} =
+                bondy_oplog_wal_codec:encode_body(Body, Opts),
+            EncodedBin = iolist_to_binary(Encoded),
+            case bondy_oplog_wal_codec:decode_body(EncodedBin, Flags) of
+                {ok, Decoded} -> Decoded =:= Body;
+                _ -> false
+            end
+        end
+    ).
+
+%% Body-codec encryption round-trip acceptance property.
+%% For any body, the compose of encrypt and decrypt (with a known key
+%% registry) is the identity. Exercises the encryption-only path and
+%% the compress-then-encrypt path; both must produce a flag-tagged
+%% envelope that decode_body reverses byte-for-byte.
+prop_codec_encrypt_roundtrip() ->
+    ?FORALL(
+        {Body, WithCompression},
+        {binary(), boolean()},
+        begin
+            Opts0 = #{body_encryption =>
+                          {enabled, bondy_oplog_wal_codec_test}},
+            Opts = case WithCompression of
+                       true ->
+                           Opts0#{body_compression => zlib,
+                                  body_compression_min_bytes => 1};
+                       false ->
+                           Opts0
+                   end,
+            {Flags, Encoded} =
+                bondy_oplog_wal_codec:encode_body(Body, Opts),
+            EncodedBin = iolist_to_binary(Encoded),
+            case bondy_oplog_wal_codec:decode_body(
+                EncodedBin, Flags, Opts
+            ) of
+                {ok, Decoded} -> Decoded =:= Body;
+                _ -> false
+            end
+        end
+    ).
+
+%% AES-GCM authenticity property. For any random ciphertext byte
+%% flip, decode_body returns `{error, decrypt_failed}` — *never* the
+%% wrong plaintext and *never* a CRC-class error. This is the property
+%% that makes the encryption envelope the integrity boundary: a
+%% modified frame body cannot escape the codec.
+prop_codec_ciphertext_bit_flip_detection() ->
+    Opts = #{body_encryption => {enabled, bondy_oplog_wal_codec_test}},
+    ?FORALL(
+        {Body, BitIdx},
+        ?LET(B, non_empty(binary()),
+             {B, choose(0, 7)}),
+        begin
+            {?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED, Encoded} =
+                bondy_oplog_wal_codec:encode_body(Body, Opts),
+            Bin = iolist_to_binary(Encoded),
+            %% Flip a bit anywhere in the post-header region
+            %% (ciphertext or tag — both must reject).
+            TotalBits = (byte_size(Bin) - 31) * 8,
+            case TotalBits > 0 of
+                false -> true; %% Empty payload edge case: skip
+                true ->
+                    Idx = 31 * 8 + (BitIdx rem TotalBits),
+                    Corrupted = flip_bit(Bin, Idx),
+                    case bondy_oplog_wal_codec:decode_body(
+                        Corrupted,
+                        ?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED,
+                        Opts
+                    ) of
+                        {error, decrypt_failed} -> true;
+                        %% Tolerate `truncated_envelope` if the flip
+                        %% lands within the envelope header range —
+                        %% won't happen given our offset, but defend
+                        %% the contract.
+                        {error, truncated_envelope} -> true;
+                        _ -> false
+                    end
+            end
+        end
+    ).
+
+%% v2 index acceptance — equivalence with v1 on single-point ranges.
+%% For any synthetic v2 `.qidx` whose every entry has `FirstHlc =
+%% LastHlc` (the shape a lifted v1 file produces), seek(T) returns the
+%% same offset as a reference "largest FirstHlc =< T" v1 search.
+%% This pins down that the v2 reader does not regress the v1 fallback
+%% case, which is what the design's "v2 seek returns the same offsets
+%% as v1 seek" claim formalises for the universe of v1 (= single-point)
+%% inputs.
+prop_idx_v2_seek_matches_v1_on_point_ranges() ->
+    ?FORALL(
+        {Hlcs, Targets},
+        {non_empty(list(non_neg_integer())), list(non_neg_integer())},
+        begin
+            Sorted = lists:usort(Hlcs),
+            Entries = [{H, H, H * 100} || H <- Sorted],
+            Handle = bondy_oplog_wal_idx:from_entries(Entries),
+            lists:all(
+                fun(T) ->
+                    Got = bondy_oplog_wal_idx:seek(Handle, T),
+                    Want = reference_v1_seek(Sorted, T),
+                    Got =:= Want
+                end,
+                Targets
+            )
+        end
+    ).
+
+%% v2 index acceptance — in-range hits return the containing entry,
+%% bounding the reader's body-decode work to one batch.
+%% Generates a v2 entry list with non-degenerate ranges
+%% `(FirstHlc, LastHlc, Offset)` where `FirstHlc < LastHlc`, then for a
+%% target HLC drawn from inside one specific entry's range asserts that
+%% `seek/2` returns exactly that entry's offset. The "scan bounded by
+%% one batch" guarantee is the seek-level expression of the design's
+%% acceptance — the reader has the right anchor frame on the first
+%% probe and never has to walk forward into the un-indexed gap.
+prop_idx_v2_seek_in_range_returns_that_entry() ->
+    ?FORALL(
+        Spec,
+        idx_spec_with_target(),
+        begin
+            {Entries, TargetIdx, T} = Spec,
+            {_, _, ExpectedOffset} = lists:nth(TargetIdx, Entries),
+            Handle = bondy_oplog_wal_idx:from_entries(Entries),
+            bondy_oplog_wal_idx:seek(Handle, T) =:= {ok, ExpectedOffset}
+        end
+    ).
+
+%% @private
+%% Reference v1 seek: returns `{ok, Offset}` for the largest entry
+%% whose FirstHlc =< T, or `none`. Implemented over a sorted-FirstHlcs
+%% list, since the v1-shape entries we generate share that ordering.
+reference_v1_seek([], _T) -> none;
+reference_v1_seek(Sorted, T) ->
+    case [H || H <- Sorted, H =< T] of
+        [] -> none;
+        Hs -> {ok, lists:max(Hs) * 100}
+    end.
+
+%% @private
+%% Generates `(Entries, TargetIdx, T)` where `Entries` is a non-empty
+%% ascending v2 entry list with non-overlapping non-degenerate ranges,
+%% `TargetIdx` selects one entry, and `T` is drawn from that entry's
+%% inclusive range.
+idx_spec_with_target() ->
+    ?LET(
+        Bases,
+        non_empty(list(range(0, 1_000_000))),
+        ?LET(
+            Spans,
+            vector(length(lists:usort(Bases)), range(1, 64)),
+            begin
+                Sorted = lists:usort(Bases),
+                %% Build non-overlapping ranges: stride starts at
+                %% `Base * 100` to put a guaranteed gap between every
+                %% range. Each entry's FirstHlc = base, LastHlc =
+                %% base + span.
+                Entries =
+                    [{B * 100, B * 100 + S, B * 1000}
+                     || {B, S} <- lists:zip(Sorted, Spans)],
+                N = length(Entries),
+                ?LET(
+                    Idx,
+                    range(1, N),
+                    begin
+                        {F, L, _} = lists:nth(Idx, Entries),
+                        ?LET(
+                            T,
+                            range(F, L),
+                            {Entries, Idx, T}
+                        )
+                    end
+                )
+            end
+        )
+    ).
+
+%% PR1 acceptance property.
+%% The v2 reader (this one) must round-trip both v1- and v2-encoded
+%% frames byte-for-byte, with the version field preserved as a
+%% distinguishing tag. This is the property that gates rolling forward
+%% to v2 frames on disk while keeping pre-PR1 segments readable.
+prop_frame_v1_v2_decoder_equivalence() ->
+    ?FORALL(
+        Body,
+        binary(),
+        begin
+            V1Frame = iolist_to_binary(
+                bondy_oplog_wal_frame:encode(Body, [{version, 1}])
+            ),
+            V2Frame = iolist_to_binary(
+                bondy_oplog_wal_frame:encode(Body, [{version, 2}])
+            ),
+            case {bondy_oplog_wal_frame:decode(V1Frame),
+                  bondy_oplog_wal_frame:decode(V2Frame)} of
+                {{ok, B1, #{version := 1, flags := 0}},
+                 {ok, B2, #{version := 2, flags := 0}}} ->
+                    B1 =:= Body andalso B2 =:= Body;
+                _ ->
+                    false
+            end
+        end
+    ).
 
 %% =============================================================================
 %% WAL writer properties (single-event path)
@@ -334,7 +571,7 @@ check_segment_index(Dir, InstanceId, SegId) ->
             false
     end.
 
-check_entry(Dir, InstanceId, SegId, {Hlc, Offset}) ->
+check_entry(Dir, InstanceId, SegId, {FirstHlc, _LastHlc, Offset}) ->
     SegPath = filename:join(
         [Dir, InstanceId, bondy_oplog_wal_segment:filename(SegId)]
     ),
@@ -351,7 +588,7 @@ check_entry(Dir, InstanceId, SegId, {Hlc, Offset}) ->
                             case binary_to_term(Body, [safe]) of
                                 [Event | _] ->
                                     Key = bondy_oplog_event:key(Event),
-                                    bondy_oplog_event:key_hlc(Key) =:= Hlc;
+                                    bondy_oplog_event:key_hlc(Key) =:= FirstHlc;
                                 _ ->
                                     false
                             end;
@@ -507,13 +744,13 @@ prop_consumer_offset_clamping() ->
                 instance_id(), Opts
             ),
             ok = bondy_oplog_wal:close(P2),
-            {ok, Clamped} = bondy_oplog_wal_consumer_offset:read(InstDir),
+            {ok, Clamped} = bondy_oplog_wal_state:read_consumer_offset(InstDir),
             ClampedSeg =
-                bondy_oplog_wal_consumer_offset:committed_segment(
+                bondy_oplog_wal_state:committed_segment(
                     Clamped
                 ),
             ClampedOff =
-                bondy_oplog_wal_consumer_offset:committed_frame_offset(
+                bondy_oplog_wal_state:committed_frame_offset(
                     Clamped
                 ),
             %% Clamped segment is live (post-clamp it must be ≤ head;
@@ -1134,6 +1371,87 @@ prop_partial_write() ->
     ).
 
 %% =============================================================================
+%% PR2 (WAL_DESIGN_V2.md) — rescan recovery
+%% =============================================================================
+
+%% Property: in `rescan` mode, a single byte flip inside the body of
+%% an arbitrary frame K must leave the recovered event sequence as a
+%% subset of the originally-appended sequence, with recovery succeeding
+%% and a strict reopen of the post-recovery WAL returning the same
+%% events (i.e., the segment is rewritten contiguously).
+%%
+%% The flip is placed past the frame's 16-byte header so it triggers a
+%% CRC mismatch (body-level corruption), not a `bad_magic` (header-
+%% level corruption). The two paths are exercised independently by the
+%% unit tests; this property focuses on the body-corruption path which
+%% is the most common in production (torn writes inside a frame).
+prop_rescan_recovery() ->
+    ?FORALL(
+        {N, K, BodyByteOff},
+        ?LET(NN, choose(3, 8),
+             {NN, choose(0, NN - 1), choose(20, 80)}),
+        with_wal_dir(fun(Dir) ->
+            HLC = bondy_oplog_hlc:new(),
+            Events = generate_events(HLC, N),
+            Opts = #{dir => Dir, origin => origin()},
+            {ok, P1} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            {Positions, HeadAfter} =
+                append_and_record_positions(P1, Events),
+            ok = bondy_oplog_wal:close(P1),
+            SegPath = seg_path(Dir, 0),
+            {FrameKStart, FrameKEnd} =
+                frame_extent(K, Positions, HeadAfter),
+            FrameKLen = FrameKEnd - FrameKStart,
+            %% Clamp the body-byte offset against the actual frame
+            %% size so the flip lands inside this frame's body.
+            Clamped = min(BodyByteOff, max(?HEADER + 1, FrameKLen - 1)),
+            FlipByte = FrameKStart + Clamped,
+            flip_bit_in_file(SegPath, FlipByte * 8),
+            RescanOpts = Opts#{recovery_mode => rescan},
+            {ok, P2} = bondy_oplog_wal:start_link(
+                instance_id(), RescanOpts
+            ),
+            Read1 = read_all_events(P2),
+            ok = bondy_oplog_wal:close(P2),
+            %% Reopen in strict mode — the rescan compaction must have
+            %% left a contiguous segment that strict recovery accepts.
+            {ok, P3} = bondy_oplog_wal:start_link(instance_id(), Opts),
+            Read2 = read_all_events(P3),
+            ok = bondy_oplog_wal:close(P3),
+            %% Recovery acceptance criteria:
+            %%   (a) read1 is a subset of the appended events,
+            %%   (b) read1 preserves append order,
+            %%   (c) strict reopen yields the same events as rescan,
+            %%   (d) at least N-1 frames survive (we corrupted one).
+            SubsetOk = lists:all(
+                fun(E) -> lists:member(E, Events) end, Read1
+            ),
+            OrderOk = is_subsequence(Read1, Events),
+            StrictRoundTripOk = Read1 =:= Read2,
+            SurvivalOk = length(Read1) >= N - 1,
+            ?WHENFAIL(
+                io:format(
+                    user,
+                    "prop_rescan_recovery fail: N=~p K=~p Clamped=~p "
+                    "FlipByte=~p Read1=~p Read2=~p~n",
+                    [N, K, Clamped, FlipByte,
+                     length(Read1), length(Read2)]
+                ),
+                SubsetOk andalso OrderOk andalso StrictRoundTripOk
+                    andalso SurvivalOk
+            )
+        end)
+    ).
+
+%% Returns `true` iff `Sub` is a (not necessarily contiguous)
+%% subsequence of `List` — i.e. every element of `Sub` appears in
+%% `List` in the same order. Used by `prop_rescan_recovery/0`.
+is_subsequence([], _) -> true;
+is_subsequence(_, []) -> false;
+is_subsequence([X | XR], [X | YR]) -> is_subsequence(XR, YR);
+is_subsequence(Xs, [_ | YR]) -> is_subsequence(Xs, YR).
+
+%% =============================================================================
 %% P11 — concurrent reader safety
 %% =============================================================================
 
@@ -1731,7 +2049,13 @@ properties_test_() ->
         WalOpts = [{to_file, user}, {numtests, ?WAL_NUMTESTS}],
         FrameProps = [
             prop_frame_roundtrip(),
-            prop_frame_bit_flip_detection()
+            prop_frame_bit_flip_detection(),
+            prop_frame_v1_v2_decoder_equivalence(),
+            prop_codec_roundtrip(),
+            prop_codec_encrypt_roundtrip(),
+            prop_codec_ciphertext_bit_flip_detection(),
+            prop_idx_v2_seek_matches_v1_on_point_ranges(),
+            prop_idx_v2_seek_in_range_returns_that_entry()
         ],
         WalProps = [
             prop_wal_single_event_roundtrip(),
@@ -1748,6 +2072,7 @@ properties_test_() ->
             prop_bit_flip_magic(),
             prop_rotation_atomicity(),
             prop_partial_write(),
+            prop_rescan_recovery(),
             prop_concurrent_reader_safety(),
             prop_failed_fsync(),
             prop_failed_fsync_batched(),

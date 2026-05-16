@@ -102,7 +102,13 @@ rely on `committed_frame_offset` being a real frame start.
     %% Upper bound for `{hlc_upper_bound, T}` opt. If set, frames whose
     %% first HLC is `> hlc_upper_bound` terminate the reader as if it
     %% had hit end_of_log. `undefined` means no upper bound.
-    hlc_upper_bound  :: bondy_oplog_hlc:hlc() | undefined
+    hlc_upper_bound  :: bondy_oplog_hlc:hlc() | undefined,
+    %% Body-encryption config inherited from the writer's
+    %% `reader_view/1` map. `disabled` skips the decrypt branch;
+    %% `{enabled, Module}` lets the codec resolve frame `KeyId`s via
+    %% `Module:lookup_key/1`. The reader does not call `current_key/0`
+    %% — historic frames carry the id they were written with.
+    body_encryption  :: bondy_oplog_wal_codec:encryption()
 }).
 
 -type t() :: #iter{}.
@@ -280,7 +286,9 @@ do_open(Writer, Start, Opts) ->
                         offset = Off,
                         sealed_size = undefined,
                         seek_target = SeekTarget,
-                        hlc_upper_bound = UpperBound
+                        hlc_upper_bound = UpperBound,
+                        body_encryption =
+                            maps:get(body_encryption, View, disabled)
                     }};
                 {error, _} = E ->
                     E
@@ -606,11 +614,14 @@ advance_segment(
 %% - `head` — `Bound` is the writer's published head offset. The
 %%   publish protocol guarantees that any frame whose header is visible
 %%   below `Bound` is fully written below `Bound` (the writer publishes
-%%   only after `prim_file:write/2` returns). A `FrameEnd > Bound`
-%%   case is therefore unreachable for the current head, but treated
-%%   defensively as "no frame yet" so a future batched-fsync mode
-%%   that publishes ahead of the write cannot tip us into corruption
-%%   handling.
+%%   only after `prim_file:write/2` returns). Both `fsync_mode = sync`
+%%   and `fsync_mode = batched` follow this contract — `batched` only
+%%   defers the `datasync` past publish, it does not publish ahead of
+%%   the write. The `FrameEnd > Bound` branch is therefore unreachable
+%%   under any shipped fsync mode; it is retained as a defensive guard
+%%   so a hypothetical future publish-ahead mode (e.g. a "publish on
+%%   intent" or pre-write reservation scheme) cannot tip a reader into
+%%   the corruption-handling path against the head.
 %% - `sealed` — `Bound` is the file's exact byte size, frozen by the
 %%   writer's `datasync` + `close` before bumping the head atomic.
 %%   `FrameEnd > Bound` here means the segment is corrupt; surface as
@@ -682,22 +693,37 @@ read_frame_body(#iter{fd = Fd, offset = Off, segment_id = Seg} = Iter, FrameLen)
 %% @private
 decode_and_advance(#iter{} = Iter, FrameBin, FrameLen, Seg, Off) ->
     case bondy_oplog_wal_frame:decode(FrameBin) of
-        {ok, Body, _Meta} ->
-            case decode_batch_body(Body) of
-                {ok, Batch} ->
-                    Hlcs = [
-                        bondy_oplog_event:key_hlc(bondy_oplog_event:key(E))
-                        || E <- Batch
-                    ],
-                    NextOff = Off + FrameLen,
-                    NewIter = Iter#iter{offset = NextOff},
-                    deliver_or_filter(NewIter, Batch, Hlcs, Seg, NextOff);
+        {ok, RawBody, #{flags := Flags}} ->
+            case bondy_oplog_wal_codec:decode_body(
+                RawBody, Flags, codec_opts(Iter)
+            ) of
+                {ok, Body} ->
+                    case decode_batch_body(Body) of
+                        {ok, Batch} ->
+                            Hlcs = [
+                                bondy_oplog_event:key_hlc(
+                                    bondy_oplog_event:key(E)
+                                )
+                                || E <- Batch
+                            ],
+                            NextOff = Off + FrameLen,
+                            NewIter = Iter#iter{offset = NextOff},
+                            deliver_or_filter(
+                                NewIter, Batch, Hlcs, Seg, NextOff
+                            );
+                        {error, _} = E ->
+                            E
+                    end;
                 {error, _} = E ->
                     E
             end;
         {error, _} = E ->
             E
     end.
+
+%% @private
+codec_opts(#iter{instance_id = Id, body_encryption = Enc}) ->
+    #{instance_id => Id, body_encryption => Enc}.
 
 %% @private
 %% Applies the HLC seek-target lower bound and `hlc_upper_bound` opt to a

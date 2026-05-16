@@ -6,13 +6,13 @@
 %% 1. Accumulator semantics — first frame always indexed, subsequent
 %%    frames indexed only when bytes-since-last crosses the interval,
 %%    interval reset on emit, entries returned in HLC-ascending order.
+%%    Entries are `{FirstHlc, LastHlc, Offset}` triples.
 %% 2. File I/O — header/entry codec round-trip via write_file/read_file;
-%%    empty index is valid; tmp+rename atomicity (a partial tmp does not
-%%    overwrite the live file); error paths for truncated and bad-magic
-%%    files.
-%% 3. Seek — binary search returns the largest entry with HLC <= T;
-%%    none for T below first entry; correct on edge cases (single entry,
-%%    exact-match HLC, T at first/last entry's HLC).
+%%    v2-format writes, v1-format reads (legacy `.qidx` files lifted to
+%%    the v2 shape at read time); empty index is valid; atomic rename;
+%%    error paths for truncated and bad-magic files.
+%% 3. Seek — range-aware binary search returns the entry whose range
+%%    contains T (or the largest entry with LastHlc <= T as fallback).
 %% =============================================================================
 
 -module(bondy_oplog_wal_idx_test).
@@ -22,7 +22,10 @@
 
 -define(MAGIC, ?BONDY_OPLOG_WAL_IDX_MAGIC).
 -define(HEADER, ?BONDY_OPLOG_WAL_IDX_HEADER_BYTES).
--define(ENTRY, ?BONDY_OPLOG_WAL_IDX_ENTRY_BYTES).
+-define(ENTRY_V1, ?BONDY_OPLOG_WAL_IDX_ENTRY_BYTES_V1).
+-define(ENTRY_V2, ?BONDY_OPLOG_WAL_IDX_ENTRY_BYTES_V2).
+-define(VERSION_V1, ?BONDY_OPLOG_WAL_IDX_VERSION_V1).
+-define(VERSION_V2, ?BONDY_OPLOG_WAL_IDX_VERSION_V2).
 
 %% =============================================================================
 %% Fixture helpers
@@ -61,9 +64,11 @@ header_bytes_is_16_test() ->
     ?assertEqual(16, bondy_oplog_wal_idx:header_bytes()),
     ?assertEqual(16, ?HEADER).
 
-entry_bytes_is_16_test() ->
-    ?assertEqual(16, bondy_oplog_wal_idx:entry_bytes()),
-    ?assertEqual(16, ?ENTRY).
+entry_bytes_is_24_for_v2_test() ->
+    ?assertEqual(24, bondy_oplog_wal_idx:entry_bytes()),
+    ?assertEqual(24, ?ENTRY_V2),
+    %% v1 fallback shape remains 16 bytes on-disk.
+    ?assertEqual(16, ?ENTRY_V1).
 
 %% =============================================================================
 %% Accumulator
@@ -87,61 +92,60 @@ first_frame_is_always_indexed_test() ->
     %% segment must produce an entry so seek always finds at least one
     %% anchor point.
     Acc0 = bondy_oplog_wal_idx:new(1_000_000),
-    Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 100, 48, 80),
-    ?assertEqual([{100, 48}], bondy_oplog_wal_idx:entries(Acc1)),
+    Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 100, 105, 48, 80),
+    ?assertEqual(
+        [{100, 105, 48}],
+        bondy_oplog_wal_idx:entries(Acc1)
+    ),
     ?assertEqual(1, bondy_oplog_wal_idx:entry_count(Acc1)).
 
 subsequent_frames_indexed_only_after_interval_test() ->
-    %% Interval = 1000 bytes; frames are 100 bytes each. Frame 0 indexed
-    %% (always); frames 1..9 accumulate without emitting; frame 10
-    %% crosses interval and emits.
+    %% Interval = 1000 bytes; frames are 100 bytes each.
     Acc0 = bondy_oplog_wal_idx:new(1000),
-    %% First frame at offset 48.
-    Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 100, 48, 100),
-    %% 9 more frames at offsets 148, 248, ..., 948. None should emit
-    %% because the bytes_since_last counter resets to 0 after the first
-    %% emit, then accumulates 100 per frame: after frame 9 it's 900.
+    Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 100, 100, 48, 100),
     Acc10 = lists:foldl(
         fun(I, A) ->
             Off = 48 + I * 100,
             Hlc = 100 + I,
-            bondy_oplog_wal_idx:note_frame(A, Hlc, Off, 100)
+            bondy_oplog_wal_idx:note_frame(A, Hlc, Hlc, Off, 100)
         end,
         Acc1,
         lists:seq(1, 9)
     ),
     ?assertEqual(1, bondy_oplog_wal_idx:entry_count(Acc10)),
-    %% Frame 10 at offset 1048; bytes_since_last + 100 = 900 + 100 = 1000
-    %% which crosses the threshold → emit.
-    Acc11 = bondy_oplog_wal_idx:note_frame(Acc10, 110, 1048, 100),
+    %% Frame 10 crosses interval → emit.
+    Acc11 = bondy_oplog_wal_idx:note_frame(Acc10, 110, 110, 1048, 100),
     ?assertEqual(2, bondy_oplog_wal_idx:entry_count(Acc11)),
-    ?assertEqual([{100, 48}, {110, 1048}], bondy_oplog_wal_idx:entries(Acc11)).
+    ?assertEqual(
+        [{100, 100, 48}, {110, 110, 1048}],
+        bondy_oplog_wal_idx:entries(Acc11)
+    ).
 
 entries_are_hlc_ascending_test() ->
     Acc0 = bondy_oplog_wal_idx:new(100),
     %% Three entries: small interval forces emit on every frame.
-    Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 100, 48, 200),
-    Acc2 = bondy_oplog_wal_idx:note_frame(Acc1, 110, 248, 200),
-    Acc3 = bondy_oplog_wal_idx:note_frame(Acc2, 120, 448, 200),
+    Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 100, 105, 48, 200),
+    Acc2 = bondy_oplog_wal_idx:note_frame(Acc1, 110, 115, 248, 200),
+    Acc3 = bondy_oplog_wal_idx:note_frame(Acc2, 120, 125, 448, 200),
     ?assertEqual(
-        [{100, 48}, {110, 248}, {120, 448}],
+        [{100, 105, 48}, {110, 115, 248}, {120, 125, 448}],
         bondy_oplog_wal_idx:entries(Acc3)
     ).
 
+note_indexed_frame_rejects_last_below_first_test() ->
+    %% Guard on `note_indexed_frame/4`: LastHlc must be >= FirstHlc.
+    Acc = bondy_oplog_wal_idx:new(1000),
+    ?assertError(function_clause,
+        bondy_oplog_wal_idx:note_indexed_frame(Acc, 200, 100, 48)).
+
 interval_resets_on_emit_test() ->
     Acc0 = bondy_oplog_wal_idx:new(500),
-    %% Frame 0 (300 bytes) indexed (first). bytes_since_last = 0.
-    Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 1, 48, 300),
-    %% Frame 1 (300 bytes). bytes_since_last + 300 = 0 + 300 = 300, < 500
-    %% → no emit, bytes_since_last = 300.
-    Acc2 = bondy_oplog_wal_idx:note_frame(Acc1, 2, 348, 300),
+    Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 1, 1, 48, 300),
+    Acc2 = bondy_oplog_wal_idx:note_frame(Acc1, 2, 2, 348, 300),
     ?assertEqual(1, bondy_oplog_wal_idx:entry_count(Acc2)),
-    %% Frame 2 (300 bytes). 300 + 300 = 600, >= 500 → emit. Reset.
-    Acc3 = bondy_oplog_wal_idx:note_frame(Acc2, 3, 648, 300),
+    Acc3 = bondy_oplog_wal_idx:note_frame(Acc2, 3, 3, 648, 300),
     ?assertEqual(2, bondy_oplog_wal_idx:entry_count(Acc3)),
-    %% Frame 3 (300 bytes). After reset bytes_since_last = 0; this
-    %% becomes 300 < 500 → no emit.
-    Acc4 = bondy_oplog_wal_idx:note_frame(Acc3, 4, 948, 300),
+    Acc4 = bondy_oplog_wal_idx:note_frame(Acc3, 4, 4, 948, 300),
     ?assertEqual(2, bondy_oplog_wal_idx:entry_count(Acc4)).
 
 %% =============================================================================
@@ -151,7 +155,7 @@ interval_resets_on_emit_test() ->
 write_then_read_roundtrip_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        Entries = [{100, 48}, {200, 1024}, {300, 2048}],
+        Entries = [{100, 105, 48}, {200, 210, 1024}, {300, 320, 2048}],
         ok = bondy_oplog_wal_idx:write_file(Path, Entries),
         ?assertEqual({ok, Entries}, bondy_oplog_wal_idx:read_file(Path))
     end).
@@ -166,6 +170,58 @@ write_empty_index_is_valid_test() ->
         ?assertEqual(16, element(2, FileInfo))
     end).
 
+write_produces_v2_header_test() ->
+    with_tmp_dir(fun(Dir) ->
+        Path = filename:join(Dir, "000000000.qidx"),
+        ok = bondy_oplog_wal_idx:write_file(Path, [{100, 105, 48}]),
+        {ok, Bin} = file:read_file(Path),
+        <<_Magic:32/big, Version:8, _:24, EntryCount:32/big, _:32,
+          Body/binary>> = Bin,
+        ?assertEqual(?VERSION_V2, Version),
+        ?assertEqual(1, EntryCount),
+        ?assertEqual(?ENTRY_V2, byte_size(Body))
+    end).
+
+read_v1_lifts_entries_to_v2_shape_test() ->
+    with_tmp_dir(fun(Dir) ->
+        Path = filename:join(Dir, "000000000.qidx"),
+        %% Hand-craft a v1 file: header version = 1, 16-byte entries
+        %% (HLC + Offset). Mixes a single-HLC range and a "v1 batch"
+        %% (which v2 readers see as a single-point range).
+        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V1:8/unsigned,
+                   0:24/big-unsigned, 2:32/big-unsigned, 0:32/big-unsigned>>,
+        V1Entries = <<100:64/big-unsigned, 48:64/big-unsigned,
+                      200:64/big-unsigned, 1024:64/big-unsigned>>,
+        ok = file:write_file(Path, [Header, V1Entries]),
+        %% Reader lifts each `(H, Off)` to `(H, H, Off)`.
+        ?assertEqual(
+            {ok, [{100, 100, 48}, {200, 200, 1024}]},
+            bondy_oplog_wal_idx:read_file(Path)
+        )
+    end).
+
+read_v1_via_open_seeks_correctly_test() ->
+    %% A v1 file lifted to v2 shape behaves identically to v1's
+    %% "largest HLC <= T" semantics for any T (since every range is a
+    %% single point).
+    with_tmp_dir(fun(Dir) ->
+        Path = filename:join(Dir, "000000000.qidx"),
+        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V1:8/unsigned,
+                   0:24/big-unsigned, 3:32/big-unsigned, 0:32/big-unsigned>>,
+        V1Entries = <<100:64/big-unsigned,  48:64/big-unsigned,
+                      200:64/big-unsigned, 1024:64/big-unsigned,
+                      300:64/big-unsigned, 2048:64/big-unsigned>>,
+        ok = file:write_file(Path, [Header, V1Entries]),
+        {ok, Handle} = bondy_oplog_wal_idx:open(Path),
+        ?assertEqual(none,        bondy_oplog_wal_idx:seek(Handle, 50)),
+        ?assertEqual({ok, 48},    bondy_oplog_wal_idx:seek(Handle, 100)),
+        ?assertEqual({ok, 48},    bondy_oplog_wal_idx:seek(Handle, 150)),
+        ?assertEqual({ok, 1024},  bondy_oplog_wal_idx:seek(Handle, 200)),
+        ?assertEqual({ok, 1024},  bondy_oplog_wal_idx:seek(Handle, 299)),
+        ?assertEqual({ok, 2048},  bondy_oplog_wal_idx:seek(Handle, 300)),
+        ?assertEqual({ok, 2048},  bondy_oplog_wal_idx:seek(Handle, 99999))
+    end).
+
 read_nonexistent_file_returns_enoent_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "does_not_exist.qidx"),
@@ -175,7 +231,6 @@ read_nonexistent_file_returns_enoent_test() ->
 read_truncated_header_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        %% Write only 8 bytes — less than the 16-byte header.
         ok = file:write_file(Path, <<1, 2, 3, 4, 5, 6, 7, 8>>),
         ?assertEqual(
             {error, truncated_header},
@@ -186,7 +241,6 @@ read_truncated_header_test() ->
 read_bad_magic_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        %% 16 bytes but not the magic.
         ok = file:write_file(Path, <<0, 0, 0, 0,  0, 0, 0, 0,
                                      0, 0, 0, 0,  0, 0, 0, 0>>),
         ?assertEqual({error, bad_magic}, bondy_oplog_wal_idx:read_file(Path))
@@ -204,13 +258,27 @@ read_unsupported_version_test() ->
         )
     end).
 
-read_truncated_entries_test() ->
+read_truncated_entries_v2_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
         %% Header claims 2 entries but only 1 entry's worth of bytes
         %% follows.
-        Header = <<?MAGIC:32/big-unsigned, 1:8, 0:24, 2:32, 0:32>>,
-        Entry = <<100:64, 48:64>>,
+        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V2:8/unsigned, 0:24,
+                   2:32/big-unsigned, 0:32/big-unsigned>>,
+        Entry = <<100:64/big-unsigned, 105:64/big-unsigned, 48:64/big-unsigned>>,
+        ok = file:write_file(Path, [Header, Entry]),
+        ?assertEqual(
+            {error, truncated_entries},
+            bondy_oplog_wal_idx:read_file(Path)
+        )
+    end).
+
+read_truncated_entries_v1_test() ->
+    with_tmp_dir(fun(Dir) ->
+        Path = filename:join(Dir, "000000000.qidx"),
+        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V1:8/unsigned, 0:24,
+                   2:32/big-unsigned, 0:32/big-unsigned>>,
+        Entry = <<100:64/big-unsigned, 48:64/big-unsigned>>,
         ok = file:write_file(Path, [Header, Entry]),
         ?assertEqual(
             {error, truncated_entries},
@@ -221,8 +289,8 @@ read_truncated_entries_test() ->
 read_trailing_bytes_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        %% Header claims 0 entries but bytes follow.
-        Header = <<?MAGIC:32/big-unsigned, 1:8, 0:24, 0:32, 0:32>>,
+        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V2:8/unsigned, 0:24,
+                   0:32/big-unsigned, 0:32/big-unsigned>>,
         ok = file:write_file(Path, [Header, <<"garbage">>]),
         ?assertEqual(
             {error, trailing_bytes},
@@ -231,14 +299,10 @@ read_trailing_bytes_test() ->
     end).
 
 write_is_atomic_rename_test() ->
-    %% After a successful write, the tmp file is gone (rename consumed
-    %% it) and the final file exists with the new content. We can't
-    %% easily kill the writer mid-operation in unit tests, so we just
-    %% verify the post-state.
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
         TmpPath = iolist_to_binary([Path, ".tmp"]),
-        ok = bondy_oplog_wal_idx:write_file(Path, [{100, 48}]),
+        ok = bondy_oplog_wal_idx:write_file(Path, [{100, 105, 48}]),
         ?assert(filelib:is_regular(Path)),
         ?assertNot(filelib:is_regular(TmpPath))
     end).
@@ -246,12 +310,12 @@ write_is_atomic_rename_test() ->
 write_overwrites_existing_file_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        ok = bondy_oplog_wal_idx:write_file(Path, [{100, 48}]),
+        ok = bondy_oplog_wal_idx:write_file(Path, [{100, 105, 48}]),
         ok = bondy_oplog_wal_idx:write_file(
-            Path, [{100, 48}, {200, 1024}]
+            Path, [{100, 105, 48}, {200, 210, 1024}]
         ),
         ?assertEqual(
-            {ok, [{100, 48}, {200, 1024}]},
+            {ok, [{100, 105, 48}, {200, 210, 1024}]},
             bondy_oplog_wal_idx:read_file(Path)
         )
     end).
@@ -259,9 +323,9 @@ write_overwrites_existing_file_test() ->
 write_accumulator_entries_round_trip_test() ->
     with_tmp_dir(fun(Dir) ->
         Acc0 = bondy_oplog_wal_idx:new(100),
-        Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 1, 48, 100),
-        Acc2 = bondy_oplog_wal_idx:note_frame(Acc1, 2, 148, 100),
-        Acc3 = bondy_oplog_wal_idx:note_frame(Acc2, 3, 248, 100),
+        Acc1 = bondy_oplog_wal_idx:note_frame(Acc0, 1, 5, 48, 100),
+        Acc2 = bondy_oplog_wal_idx:note_frame(Acc1, 10, 15, 148, 100),
+        Acc3 = bondy_oplog_wal_idx:note_frame(Acc2, 20, 25, 248, 100),
         Entries = bondy_oplog_wal_idx:entries(Acc3),
         Path = filename:join(Dir, "000000000.qidx"),
         ok = bondy_oplog_wal_idx:write_file(Path, Entries),
@@ -269,7 +333,7 @@ write_accumulator_entries_round_trip_test() ->
     end).
 
 %% =============================================================================
-%% Reader handle / seek
+%% Reader handle / seek (v2 range semantics)
 %% =============================================================================
 
 from_entries_empty_returns_handle_test() ->
@@ -277,75 +341,97 @@ from_entries_empty_returns_handle_test() ->
     ?assertEqual([], bondy_oplog_wal_idx:handle_entries(Handle)),
     ?assertEqual(none, bondy_oplog_wal_idx:seek(Handle, 100)).
 
-seek_finds_exact_match_test() ->
+seek_finds_exact_match_at_first_hlc_test() ->
     Handle = bondy_oplog_wal_idx:from_entries(
-        [{100, 48}, {200, 1024}, {300, 2048}]
+        [{100, 110, 48}, {200, 210, 1024}, {300, 320, 2048}]
     ),
     ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 200)).
 
-seek_finds_largest_le_target_test() ->
-    %% T = 150 → largest entry with HLC <= 150 is {100, 48}.
+seek_target_inside_range_returns_that_entry_test() ->
+    %% T = 205 is inside {200, 210, 1024}'s range.
     Handle = bondy_oplog_wal_idx:from_entries(
-        [{100, 48}, {200, 1024}, {300, 2048}]
+        [{100, 110, 48}, {200, 210, 1024}, {300, 320, 2048}]
+    ),
+    ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 205)),
+    %% T = 210 is at the upper bound of that range — still inside.
+    ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 210)),
+    %% T = 320 is the upper bound of the last range — still inside.
+    ?assertEqual({ok, 2048}, bondy_oplog_wal_idx:seek(Handle, 320)).
+
+seek_target_between_ranges_returns_fallback_test() ->
+    %% T = 150 falls between {100, 110} and {200, 210}; v1-style
+    %% fallback returns the previous entry's offset.
+    Handle = bondy_oplog_wal_idx:from_entries(
+        [{100, 110, 48}, {200, 210, 1024}, {300, 320, 2048}]
     ),
     ?assertEqual({ok, 48}, bondy_oplog_wal_idx:seek(Handle, 150)),
-    %% T = 250 → {200, 1024}.
-    ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 250)).
+    %% T = 250 between {200, 210} and {300, 320}.
+    ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 250)),
+    %% T = 211 just past {200, 210}.
+    ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 211)).
 
-seek_returns_last_entry_for_t_above_all_test() ->
+seek_target_above_all_ranges_returns_last_test() ->
     Handle = bondy_oplog_wal_idx:from_entries(
-        [{100, 48}, {200, 1024}, {300, 2048}]
+        [{100, 110, 48}, {200, 210, 1024}, {300, 320, 2048}]
     ),
     ?assertEqual({ok, 2048}, bondy_oplog_wal_idx:seek(Handle, 1000)).
 
-seek_returns_none_for_t_below_first_test() ->
+seek_returns_none_for_t_below_first_first_hlc_test() ->
     Handle = bondy_oplog_wal_idx:from_entries(
-        [{100, 48}, {200, 1024}, {300, 2048}]
+        [{100, 110, 48}, {200, 210, 1024}, {300, 320, 2048}]
     ),
-    ?assertEqual(none, bondy_oplog_wal_idx:seek(Handle, 50)).
+    ?assertEqual(none, bondy_oplog_wal_idx:seek(Handle, 50)),
+    %% T = 99 is one below the first FirstHlc — none.
+    ?assertEqual(none, bondy_oplog_wal_idx:seek(Handle, 99)).
 
 seek_single_entry_test() ->
-    Handle = bondy_oplog_wal_idx:from_entries([{100, 48}]),
+    Handle = bondy_oplog_wal_idx:from_entries([{100, 110, 48}]),
     ?assertEqual({ok, 48}, bondy_oplog_wal_idx:seek(Handle, 100)),
+    ?assertEqual({ok, 48}, bondy_oplog_wal_idx:seek(Handle, 105)),
+    ?assertEqual({ok, 48}, bondy_oplog_wal_idx:seek(Handle, 110)),
+    %% Above range — fallback to this entry.
     ?assertEqual({ok, 48}, bondy_oplog_wal_idx:seek(Handle, 1000)),
     ?assertEqual(none, bondy_oplog_wal_idx:seek(Handle, 99)).
 
-seek_at_t_equals_first_hlc_test() ->
+seek_at_t_equals_first_hlc_returns_first_test() ->
     Handle = bondy_oplog_wal_idx:from_entries(
-        [{100, 48}, {200, 1024}]
+        [{100, 110, 48}, {200, 210, 1024}]
     ),
     ?assertEqual({ok, 48}, bondy_oplog_wal_idx:seek(Handle, 100)).
 
-seek_large_random_index_test() ->
-    %% Build an index with 1000 entries with HLCs at strides of 10:
-    %%   {10, _}, {20, _}, ..., {10000, _}
-    %% Then seek for a handful of T values and verify the result is the
-    %% largest entry HLC <= T.
-    Entries = [{H, H * 1000} || H <- lists:seq(10, 10000, 10)],
+seek_large_index_test() ->
+    %% Build an index with 1000 entries, each indexing a batch of 5
+    %% HLCs. Entries are {H, H+4, Off}; HLCs start at 10 and stride by 10.
+    Entries = [{H, H + 4, H * 1000} || H <- lists:seq(10, 10000, 10)],
     Handle = bondy_oplog_wal_idx:from_entries(Entries),
-    %% T = 9 → none (below first).
+    %% T = 9 → below first FirstHlc → none.
     ?assertEqual(none, bondy_oplog_wal_idx:seek(Handle, 9)),
-    %% T = 10 → {10, 10000}.
+    %% T = 10 → inside {10, 14, 10000}.
     ?assertEqual({ok, 10000}, bondy_oplog_wal_idx:seek(Handle, 10)),
-    %% T = 15 → {10, 10000} (largest HLC <= 15).
+    %% T = 14 → still inside that range (upper bound).
+    ?assertEqual({ok, 10000}, bondy_oplog_wal_idx:seek(Handle, 14)),
+    %% T = 15 → in gap → fallback to {10, 14, 10000}.
     ?assertEqual({ok, 10000}, bondy_oplog_wal_idx:seek(Handle, 15)),
-    %% T = 1234 → largest HLC <= 1234 is 1230 → {1230, 1230000}.
+    %% T = 1234 → in gap between {1230, 1234, ...} and {1240, 1244, ...}.
+    %% {1230, 1234, 1230000} contains 1234 (upper bound) → in-range hit.
     ?assertEqual({ok, 1230000}, bondy_oplog_wal_idx:seek(Handle, 1234)),
-    %% T = 5000 → exact match {5000, 5000000}.
+    %% T = 1235 → gap → fallback to {1230, 1234, 1230000}.
+    ?assertEqual({ok, 1230000}, bondy_oplog_wal_idx:seek(Handle, 1235)),
+    %% T = 5000 → inside {5000, 5004, 5000000}.
     ?assertEqual({ok, 5000000}, bondy_oplog_wal_idx:seek(Handle, 5000)),
-    %% T = 10001 → largest HLC <= 10001 is 10000 → {10000, 10000000}.
-    ?assertEqual({ok, 10000000}, bondy_oplog_wal_idx:seek(Handle, 10001)),
-    %% T = 10000000 → same.
+    %% T = 10005 → above last range → fallback to last.
+    ?assertEqual({ok, 10000000}, bondy_oplog_wal_idx:seek(Handle, 10005)),
+    %% T = 10_000_000 → far above → still fallback to last.
     ?assertEqual({ok, 10000000}, bondy_oplog_wal_idx:seek(Handle, 10000000)).
 
 open_round_trips_via_file_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        Entries = [{100, 48}, {200, 1024}, {300, 2048}],
+        Entries = [{100, 110, 48}, {200, 210, 1024}, {300, 320, 2048}],
         ok = bondy_oplog_wal_idx:write_file(Path, Entries),
         {ok, Handle} = bondy_oplog_wal_idx:open(Path),
         ?assertEqual(Entries, bondy_oplog_wal_idx:handle_entries(Handle)),
-        ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 250))
+        ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 205))
     end).
 
 open_propagates_file_errors_test() ->

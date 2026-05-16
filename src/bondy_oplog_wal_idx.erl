@@ -13,91 +13,115 @@
 ?MODULEDOC("""
 Sparse HLC index (`.qidx`).
 
-See `_design/WAL_DESIGN.md` §7. One `.qidx` per `.qdata` segment maps
-`HLC → ByteOffset` at sparse intervals (default 64 KB). The index lets
-`open_reader(_, {hlc, T}, _)` jump directly to the byte range of a
-target HLC instead of linearly scanning a segment from offset 48.
+See `_design/WAL_DESIGN.md` §7 and `_design/WAL_DESIGN_V2.md` §PR7.
+One `.qidx` per `.qdata` segment maps each indexed batch frame's
+**HLC range** to its byte offset, at sparse intervals (default 64 KB).
+The index lets `open_reader(_, {hlc, T}, _)` jump directly to the
+batch that contains a target HLC in O(log N), instead of linearly
+scanning a segment from offset 48.
 
 The index is a **best-effort accelerator**, not load-bearing for
-correctness. A missing or stale `.qidx` only makes HLC-seek slower: the
-reader falls back to scanning from the start of the candidate segment.
-Recovery rebuilds the file from a segment scan if it's missing or
-shorter than expected.
+correctness. A missing or stale `.qidx` only makes HLC-seek slower:
+the reader falls back to scanning from the start of the candidate
+segment. Recovery rebuilds the file from a segment scan if it's
+missing or shorter than expected.
 
 This module has three concerns:
 
-1. **Accumulator** (writer-side, in-memory): `new/1`, `note_frame/4`,
-   `entries/1` build up the list of `{HLC, ByteOffset}` entries to
-   persist for a segment. The writer holds one accumulator at a time,
-   for the current head segment.
+1. **Accumulator** (writer-side, in-memory): `new/1`, `note_frame/5`,
+   `entries/1` build up the list of `{FirstHlc, LastHlc, ByteOffset}`
+   entries to persist for a segment. The writer holds one accumulator
+   at a time, for the current head segment.
 
-2. **File I/O** (writer flush, reader load): `write_file/2` persists an
-   entry list via tmp+datasync+rename+dir-fsync; `read_file/1` parses
-   it back. Both validate magic / version / entry count.
+2. **File I/O** (writer flush, reader load): `write_file/2` persists
+   an entry list as a v2 file via tmp+datasync+rename+dir-fsync;
+   `read_file/1` parses it back. The reader accepts both v1 and v2
+   files: v1 entries `(Hlc, Off)` are lifted to v2 shape
+   `(Hlc, Hlc, Off)` (degenerate single-HLC range). The next rebuild
+   produces a v2 file.
 
-3. **Seek** (reader-side): `open/1` loads a file and returns an opaque
-   handle; `seek/2` does an O(log N) binary search for the largest
-   entry with `HLC ≤ T` and returns the byte offset of that frame's
-   start. `from_entries/1` builds the same handle from in-memory
-   entries (used for the head segment, whose `.qidx` is not yet on
-   disk while the writer is alive).
+3. **Seek** (reader-side): `open/1` loads a file and returns an
+   opaque handle; `seek/2` does an O(log N) binary search for the
+   entry whose range contains the target HLC, falling back to the
+   largest entry whose range ends ≤ the target (mirrors v1's
+   semantics for any T that misses every range). `from_entries/1`
+   builds the same handle from in-memory entries (used for the head
+   segment, whose `.qidx` is not yet on disk while the writer is
+   alive).
 
-### File format (§7.1)
+### File format (§7.1, v2)
 
-Header (16 bytes):
+Header (16 bytes) — unchanged from v1; the `Version` byte selects
+the entry layout below:
 
 ```
 Offset  Size  Field
    0     4    Magic           0x42444958  ("BDIX")
-   4     1    Version
+   4     1    Version         1 or 2
    5     3    Flags
    8     4    EntryCount
   12     4    Reserved
 ```
 
-Each entry (16 bytes):
+v2 entry (24 bytes):
 
 ```
 Offset  Size  Field
-   0     8    HLC              first HLC of the indexed batch frame
+   0     8    FirstHlc         first event's HLC in the indexed batch
+   8     8    LastHlc          last event's HLC in the indexed batch
+  16     8    ByteOffset       offset of the frame start within .qdata
+```
+
+v1 entry (16 bytes, read-only fallback):
+
+```
+Offset  Size  Field
+   0     8    Hlc              first HLC of the indexed batch frame
    8     8    ByteOffset       offset of the frame start within .qdata
 ```
 
-For a 64 MB segment with 64 KB entry spacing: 1024 entries × 16 B =
-16 KB. ~0.025 % storage overhead.
+For a 64 MB segment with 64 KB entry spacing: 1024 entries × 24 B =
+24 KB. ~0.04 % storage overhead.
 
 ### Accumulator semantics
 
 The accumulator gates on `bytes_since_last_emit + frame_len >=
 interval_bytes`. The **first frame of a segment is always indexed**
 (invariant: every non-empty segment has at least one entry whose
-HLC ≤ every HLC in the segment). After each emit, `bytes_since_last`
-resets to zero.
+range bounds every HLC in the segment). After each emit,
+`bytes_since_last` resets to zero. Indexed entries always satisfy
+`FirstHlc =< LastHlc`; a single-event batch produces an entry where
+`FirstHlc == LastHlc`.
 """).
 
 -define(MAGIC, ?BONDY_OPLOG_WAL_IDX_MAGIC).
 -define(HEADER_BYTES, ?BONDY_OPLOG_WAL_IDX_HEADER_BYTES).
--define(ENTRY_BYTES, ?BONDY_OPLOG_WAL_IDX_ENTRY_BYTES).
--define(VERSION, ?BONDY_OPLOG_WAL_IDX_VERSION).
+-define(ENTRY_BYTES_V1, ?BONDY_OPLOG_WAL_IDX_ENTRY_BYTES_V1).
+-define(ENTRY_BYTES_V2, ?BONDY_OPLOG_WAL_IDX_ENTRY_BYTES_V2).
+-define(VERSION_V1, ?BONDY_OPLOG_WAL_IDX_VERSION_V1).
+-define(VERSION_V2, ?BONDY_OPLOG_WAL_IDX_VERSION_V2).
+-define(VERSION_CURRENT, ?BONDY_OPLOG_WAL_IDX_VERSION).
 
 -type hlc() :: bondy_oplog_hlc:hlc().
 -type offset() :: non_neg_integer().
--type entry() :: {hlc(), offset()}.
+-type entry() :: {hlc(), hlc(), offset()}.
 
 %% Writer-side accumulator: a running list of entries plus the bookkeeping
 %% needed to decide when to emit the next one.
 -record(acc, {
     interval_bytes    :: pos_integer(),
     bytes_since_last  :: non_neg_integer(),
-    %% Entries are stored newest-first while building so `note_frame/4`
+    %% Entries are stored newest-first while building so `note_frame/5`
     %% is O(1); `entries/1` reverses to ascending HLC order on emission.
     entries_rev       :: [entry()],
     entry_count       :: non_neg_integer()
 }).
 
-%% Reader-side index handle: a 1-based tuple of `{HLC, Offset}` entries
-%% sorted by HLC ascending. Tuple-backed so `seek/2` is O(log N) via
-%% `element/2` (constant-time random access).
+%% Reader-side index handle: a 1-based tuple of
+%% `{FirstHlc, LastHlc, Offset}` entries sorted by `FirstHlc` ascending
+%% (equivalently by `Offset` ascending, since the writer emits in HLC
+%% order). Tuple-backed so `seek/2` is O(log N) via `element/2`
+%% (constant-time random access).
 -record(idx, {
     entries :: tuple()
 }).
@@ -119,9 +143,9 @@ resets to zero.
 %% Accumulator
 -export([new/0]).
 -export([new/1]).
--export([note_frame/4]).
+-export([note_frame/5]).
 -export([would_index/2]).
--export([note_indexed_frame/3]).
+-export([note_indexed_frame/4]).
 -export([note_skipped_frame/2]).
 -export([entries/1]).
 -export([entry_count/1]).
@@ -159,11 +183,15 @@ filename(Id) when is_integer(Id), Id >= 0 ->
 header_bytes() ->
     ?HEADER_BYTES.
 
-?DOC("Returns the `.qidx` entry size in bytes (16).").
+?DOC("""
+Returns the `.qidx` entry size in bytes for the **current** writer
+version (v2 = 24). v1 files use 16-byte entries; the read path
+handles both.
+""").
 -spec entry_bytes() -> pos_integer().
 
 entry_bytes() ->
-    ?ENTRY_BYTES.
+    ?ENTRY_BYTES_V2.
 
 %% =============================================================================
 %% ACCUMULATOR
@@ -198,9 +226,10 @@ new(IntervalBytes) when is_integer(IntervalBytes), IntervalBytes > 0 ->
 ?DOC("""
 Records a freshly-written frame.
 
-`Hlc` is the HLC of the first event in the frame's batch. `Offset` is
-the byte offset of the frame's start within the segment. `FrameLen` is
-the total frame length on disk (header + body).
+`FirstHlc` and `LastHlc` are the HLCs of the first and last events in
+the frame's batch (`FirstHlc =< LastHlc`; equal for a single-event
+batch). `Offset` is the byte offset of the frame's start within the
+segment. `FrameLen` is the total frame length on disk (header + body).
 
 The accumulator emits a new entry when:
 
@@ -209,17 +238,18 @@ The accumulator emits a new entry when:
    segment has at least one entry usable for seek.
 2. The accumulator has emitted at least one entry **and** the running
    `bytes_since_last_emit + FrameLen >= interval_bytes`. The new entry
-   is `(Hlc, Offset)` and `bytes_since_last` resets to zero.
+   is `(FirstHlc, LastHlc, Offset)` and `bytes_since_last` resets to
+   zero.
 
 Otherwise `bytes_since_last` is incremented by `FrameLen` and the
 entry list is unchanged.
 """).
--spec note_frame(accumulator(), hlc(), offset(), pos_integer()) ->
+-spec note_frame(accumulator(), hlc(), hlc(), offset(), pos_integer()) ->
     accumulator().
 
-note_frame(Acc, Hlc, Offset, FrameLen) ->
+note_frame(Acc, FirstHlc, LastHlc, Offset, FrameLen) ->
     case would_index(Acc, FrameLen) of
-        true -> note_indexed_frame(Acc, Hlc, Offset);
+        true -> note_indexed_frame(Acc, FirstHlc, LastHlc, Offset);
         false -> note_skipped_frame(Acc, FrameLen)
     end.
 
@@ -240,23 +270,27 @@ would_index(#acc{bytes_since_last = B, interval_bytes = I}, FrameLen) when
     B + FrameLen >= I.
 
 ?DOC("""
-Records a frame that the caller has decided to index. Appends an entry,
-bumps `entry_count`, and resets `bytes_since_last` to zero.
+Records a frame that the caller has decided to index. Appends an
+entry, bumps `entry_count`, and resets `bytes_since_last` to zero.
 
-This is the lower-level companion of `note_frame/4`. Use this when the
-caller has already determined the frame should be indexed (e.g., via
-`would_index/2` followed by a body decode to extract the first HLC).
+This is the lower-level companion of `note_frame/5`. Use this when
+the caller has already determined the frame should be indexed (e.g.,
+via `would_index/2` followed by a body decode to extract the first
+and last HLCs).
 """).
--spec note_indexed_frame(accumulator(), hlc(), offset()) -> accumulator().
+-spec note_indexed_frame(accumulator(), hlc(), hlc(), offset()) ->
+    accumulator().
 
 note_indexed_frame(
-    #acc{entries_rev = Rev, entry_count = N} = Acc, Hlc, Offset
+    #acc{entries_rev = Rev, entry_count = N} = Acc,
+    FirstHlc, LastHlc, Offset
 ) when
-    is_integer(Hlc), Hlc >= 0,
+    is_integer(FirstHlc), FirstHlc >= 0,
+    is_integer(LastHlc), LastHlc >= FirstHlc,
     is_integer(Offset), Offset >= 0
 ->
     Acc#acc{
-        entries_rev = [{Hlc, Offset} | Rev],
+        entries_rev = [{FirstHlc, LastHlc, Offset} | Rev],
         entry_count = N + 1,
         bytes_since_last = 0
     }.
@@ -334,18 +368,23 @@ write_file(Path, Entries) when is_list(Entries) ->
 ?DOC("""
 Reads and parses a `.qidx` file at `Path`.
 
-Returns `{ok, Entries}` where `Entries` is in HLC-ascending order, or
-`{error, Reason}` for:
+Returns `{ok, Entries}` where `Entries` is in HLC-ascending order
+(each `{FirstHlc, LastHlc, Offset}`), or `{error, Reason}` for:
 
 - `enoent` — file missing.
 - `truncated_header` — file shorter than 16 bytes.
 - `bad_magic` — header magic is not `BDIX`.
-- `unsupported_version` — header version is not v1.
+- `unsupported_version` — header version is neither v1 nor v2.
 - `truncated_entries` — `EntryCount` declares more bytes than the file
   contains.
 - `trailing_bytes` — file contains bytes past the declared entry count.
 
 A file with `EntryCount = 0` is valid and returns `{ok, []}`.
+
+v1 files are read transparently: each 16-byte v1 entry `(Hlc, Offset)`
+is lifted to the v2 shape `(Hlc, Hlc, Offset)` so callers always see a
+single representation. The seek semantics on a lifted v1 file reduce
+to the original v1 behaviour (single-point ranges).
 """).
 -spec read_file(file:filename_all()) ->
     {ok, entries()} | {error, term()}.
@@ -400,25 +439,38 @@ from_entries(Entries) when is_list(Entries) ->
     #idx{entries = list_to_tuple(Entries)}.
 
 ?DOC("""
-Returns the largest indexed byte offset whose HLC is `≤ TargetHlc`, or
-`none` if every entry has `HLC > TargetHlc` (or the handle is empty).
+Returns the byte offset of the indexed batch frame the reader should
+start at to find `TargetHlc`. `none` if every entry's range is strictly
+> `TargetHlc` (or the handle is empty).
+
+Search rules (mirrors `WAL_DESIGN_V2.md` §PR7):
+
+1. If some entry's range contains `TargetHlc`
+   (`FirstHlc =< TargetHlc =< LastHlc`), return that entry's offset —
+   the target is inside the indexed batch.
+2. Otherwise, return the offset of the largest entry whose `LastHlc`
+   is `=< TargetHlc` — the v1-style fallback. The reader scans
+   forward from there into the un-indexed gap.
 
 Binary search over the entry tuple; O(log N) time, no allocations.
+Entries are sorted ascending by `FirstHlc`, which (together with the
+writer's monotonic HLC sequence) means the entries are also sorted by
+`LastHlc` — a single bsearch tracks both range-hit and fallback.
 
-The returned offset is **a frame boundary** — the first byte of a frame
-header inside the indexed segment. The reader uses it as the start of a
-forward scan; the body decode at each step extracts the first event's
-HLC to find the precise first frame with `HLC ≥ TargetHlc`.
+The returned offset is **a frame boundary** — the first byte of a
+frame header inside the indexed segment.
 """).
 -spec seek(t(), hlc()) -> {ok, offset()} | none.
 
-seek(#idx{entries = E}, TargetHlc) when is_integer(TargetHlc), TargetHlc >= 0 ->
+seek(#idx{entries = E}, TargetHlc) when
+    is_integer(TargetHlc), TargetHlc >= 0
+->
     N = tuple_size(E),
     case N of
         0 -> none;
         _ ->
-            {FirstHlc, _} = element(1, E),
-            case FirstHlc > TargetHlc of
+            {FirstHlc1, _, _} = element(1, E),
+            case FirstHlc1 > TargetHlc of
                 true -> none;
                 false -> bsearch(E, TargetHlc, 1, N, undefined)
             end
@@ -439,14 +491,18 @@ encode_header(EntryCount) when
     is_integer(EntryCount), EntryCount >= 0, EntryCount =< 16#FFFFFFFF
 ->
     <<?MAGIC:32/big-unsigned,
-      ?VERSION:8/unsigned,
+      ?VERSION_CURRENT:8/unsigned,
       0:24/big-unsigned,
       EntryCount:32/big-unsigned,
       0:32/big-unsigned>>.
 
 %% @private
+%% v2-only encode. v1 files exist on-disk from prior writers; the
+%% reader handles them via the decode path, but writers never produce
+%% v1 again.
 encode_entries(Entries) ->
-    [<<H:64/big-unsigned, O:64/big-unsigned>> || {H, O} <- Entries].
+    [<<F:64/big-unsigned, L:64/big-unsigned, O:64/big-unsigned>>
+     || {F, L, O} <- Entries].
 
 %% @private
 decode_file(Bin) when is_binary(Bin), byte_size(Bin) < ?HEADER_BYTES ->
@@ -458,8 +514,10 @@ decode_file(<<?MAGIC:32/big-unsigned,
               _Reserved:32/big-unsigned,
               EntriesBin/binary>>) ->
     case Version of
-        ?VERSION ->
-            decode_entries_bin(EntriesBin, EntryCount);
+        ?VERSION_V1 ->
+            decode_entries_bin(?ENTRY_BYTES_V1, EntriesBin, EntryCount);
+        ?VERSION_V2 ->
+            decode_entries_bin(?ENTRY_BYTES_V2, EntriesBin, EntryCount);
         _ ->
             {error, unsupported_version}
     end;
@@ -467,22 +525,27 @@ decode_file(<<Magic:32/big-unsigned, _/binary>>) when Magic =/= ?MAGIC ->
     {error, bad_magic}.
 
 %% @private
-decode_entries_bin(Bin, EntryCount) ->
-    Expected = EntryCount * ?ENTRY_BYTES,
+decode_entries_bin(EntryBytes, Bin, EntryCount) ->
+    Expected = EntryCount * EntryBytes,
     Have = byte_size(Bin),
     if
         Have < Expected -> {error, truncated_entries};
         Have > Expected -> {error, trailing_bytes};
-        true -> {ok, decode_entries_loop(Bin, [])}
+        true -> {ok, decode_entries_loop(EntryBytes, Bin, [])}
     end.
 
 %% @private
-decode_entries_loop(<<>>, Acc) ->
+decode_entries_loop(_EntryBytes, <<>>, Acc) ->
     lists:reverse(Acc);
-decode_entries_loop(
-    <<H:64/big-unsigned, O:64/big-unsigned, Rest/binary>>, Acc
-) ->
-    decode_entries_loop(Rest, [{H, O} | Acc]).
+decode_entries_loop(?ENTRY_BYTES_V1,
+    <<H:64/big-unsigned, O:64/big-unsigned, Rest/binary>>, Acc) ->
+    %% v1 fallback: lift the single HLC to a degenerate single-point
+    %% range so callers see a uniform 3-tuple shape.
+    decode_entries_loop(?ENTRY_BYTES_V1, Rest, [{H, H, O} | Acc]);
+decode_entries_loop(?ENTRY_BYTES_V2,
+    <<F:64/big-unsigned, L:64/big-unsigned, O:64/big-unsigned, Rest/binary>>,
+    Acc) ->
+    decode_entries_loop(?ENTRY_BYTES_V2, Rest, [{F, L, O} | Acc]).
 
 %% @private
 %% Writes the header+body to the open tmp fd then datasyncs. The close
@@ -516,9 +579,12 @@ tmp_path(Path) ->
     iolist_to_binary([Path, ".tmp"]).
 
 %% @private
-%% Returns the offset of the largest entry whose HLC ≤ T. Invariant:
-%% entries are sorted ascending by HLC, so a standard binary search
-%% with a running "best so far" tracks the answer correctly.
+%% Binary search for the entry whose range contains `T`, falling back
+%% to the largest entry whose `LastHlc =< T`. Invariant: entries are
+%% sorted ascending by `FirstHlc` (and, by writer monotonicity, by
+%% `LastHlc` too). Walking towards higher indices while
+%% `LastHlc =< T` tracks the fallback "best so far"; a hit on an
+%% entry's range short-circuits with that entry's offset.
 bsearch(_E, _T, Lo, Hi, Best) when Lo > Hi ->
     case Best of
         undefined -> none;
@@ -526,8 +592,18 @@ bsearch(_E, _T, Lo, Hi, Best) when Lo > Hi ->
     end;
 bsearch(E, T, Lo, Hi, Best) ->
     Mid = (Lo + Hi) div 2,
-    {H, O} = element(Mid, E),
+    {F, L, O} = element(Mid, E),
     if
-        H =< T -> bsearch(E, T, Mid + 1, Hi, O);
-        true -> bsearch(E, T, Lo, Mid - 1, Best)
+        T < F ->
+            %% Target is before this entry's range — fallback (if any)
+            %% lives to the left.
+            bsearch(E, T, Lo, Mid - 1, Best);
+        T =< L ->
+            %% In-range hit — return immediately, this is the best
+            %% possible answer.
+            {ok, O};
+        true ->
+            %% Past this entry's range — update fallback and look right
+            %% in case a later entry's range still contains T.
+            bsearch(E, T, Mid + 1, Hi, O)
     end.

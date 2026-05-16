@@ -79,6 +79,43 @@ Per-instance event operations pass through to
 -export([snapshot/1]).
 -export([query/2]).
 -export([query_stable/2]).
+-export([retention_advice/1, retention_advice/2]).
+-export([retention_decision/1]).
+
+%% =============================================================================
+%% TYPES
+%% =============================================================================
+
+-type retention_pressure() :: #{
+    bytes_total := non_neg_integer(),
+    max_total_wal_size := pos_integer(),
+    bytes_ratio := float(),
+    live_segments_count := non_neg_integer(),
+    max_live_segments := pos_integer(),
+    segments_ratio := float(),
+    backpressure := term()
+}.
+
+-type retention_inputs() :: #{
+    pressure := retention_pressure(),
+    has_snapshot := boolean(),
+    snapshot_watermark := bondy_oplog_event:event_key() | undefined,
+    scrubber_alerts := [{non_neg_integer(), atom()}],
+    bootstrap_consumers := non_neg_integer()
+}.
+
+-type retention_advice_action() :: compact | truncate_prefix | none.
+
+-type retention_advice() :: #{
+    recommended_action := retention_advice_action(),
+    rationale := binary(),
+    inputs := retention_inputs()
+}.
+
+-export_type([retention_pressure/0]).
+-export_type([retention_inputs/0]).
+-export_type([retention_advice/0]).
+-export_type([retention_advice_action/0]).
 
 %% =============================================================================
 %% LIFECYCLE
@@ -447,3 +484,174 @@ query_stable(InstanceId, Query) ->
     %% surprise callers.
     _ = bondy_oplog_instance:await_apply(InstanceId),
     bondy_oplog_query:query_stable(InstanceId, Query).
+
+%% =============================================================================
+%% RETENTION ADVICE
+%% =============================================================================
+
+%% Threshold under which both pressure ratios must fall to be considered
+%% "low" (no retention action recommended). Chosen so that an instance
+%% with comfortable headroom on either dimension is left alone.
+-define(LOW_PRESSURE_THRESHOLD, 0.5).
+
+?DOC("""
+Surfaces a recommended retention action for `InstanceId` based on
+current state: write/segment pressure ratios, snapshot existence,
+outstanding scrubber alerts, and the number of in-flight bootstrap
+consumers the caller is aware of.
+
+The advice is **advisory only** — no state is changed. Returns
+`{ok, retention_advice()}` with the recommended action
+(`compact | truncate_prefix | none`), a human-readable rationale, and
+the full set of inputs the decision was made from, so an operator can
+audit the call.
+
+Returns `{error, instance_not_running}` if `InstanceId` has no
+running WAL.
+
+The `bootstrap_consumers` count is operator-supplied: the library
+does not track active bootstrap sessions as durable state, so the
+caller is expected to plumb in any cluster-level information about
+peers that are currently mid-bootstrap and would be orphaned by a
+`truncate_prefix/2`.
+
+Decision tree:
+
+1. Scrubber alert outstanding ⇒ `none` (investigate the alert before
+   changing retention).
+2. Both pressure ratios under 50 % ⇒ `none` (ample headroom).
+3. Otherwise:
+   - bootstrap consumers > 0:
+     - snapshot exists ⇒ `compact` (non-lossy; bootstrap consumers
+       are unaffected because compaction preserves the snapshot
+       watermark in the manifest).
+     - no snapshot ⇒ `none` (truncate would orphan bootstrap; no
+       snapshot to compact against — wait or take a snapshot first).
+   - no bootstrap consumers:
+     - snapshot exists ⇒ `compact` (non-lossy; preserves history up
+       to the watermark).
+     - no snapshot ⇒ `truncate_prefix` (no compaction lever
+       available; operator picks a watermark).
+""").
+-spec retention_advice(instance_id()) ->
+    {ok, retention_advice()} | {error, instance_not_running}.
+
+retention_advice(InstanceId) ->
+    retention_advice(InstanceId, #{}).
+
+?DOC("""
+As `retention_advice/1` but accepts a map of caller-supplied inputs:
+
+- `bootstrap_consumers :: non_neg_integer()` (default `0`) — number
+  of peers currently mid-bootstrap from this instance. Drives the
+  bootstrap-aware branch of the decision tree.
+""").
+-spec retention_advice(instance_id(), map()) ->
+    {ok, retention_advice()} | {error, instance_not_running}.
+
+retention_advice(InstanceId, Opts) when
+    is_binary(InstanceId), is_map(Opts)
+->
+    BootstrapConsumers = maps:get(bootstrap_consumers, Opts, 0),
+    case bondy_oplog_registry:wal_pid(InstanceId) of
+        undefined ->
+            {error, instance_not_running};
+        WalPid when is_pid(WalPid) ->
+            WalInfo = bondy_oplog_wal:info(WalPid),
+            Snapshot = ?MODULE:snapshot(InstanceId),
+            Inputs = build_inputs(WalInfo, Snapshot, BootstrapConsumers),
+            {ok, retention_decision(Inputs)}
+    end.
+
+?DOC("""
+Pure decision function — given a fully-populated `retention_inputs()`
+map, returns the recommended action and rationale. Exposed primarily
+for unit testing and for callers that have already gathered the
+inputs by other means.
+""").
+-spec retention_decision(retention_inputs()) -> retention_advice().
+
+retention_decision(#{scrubber_alerts := [_ | _] = Alerts} = Inputs) ->
+    Rationale = list_to_binary(io_lib:format(
+        "scrubber alert outstanding on ~p segment(s); resolve via "
+        "re-derivation or magic-rescan before changing retention",
+        [length(Alerts)]
+    )),
+    advice(none, Rationale, Inputs);
+retention_decision(#{pressure := P} = Inputs) ->
+    BytesR = maps:get(bytes_ratio, P),
+    SegsR = maps:get(segments_ratio, P),
+    case max(BytesR, SegsR) < ?LOW_PRESSURE_THRESHOLD of
+        true ->
+            advice(none,
+                <<"retention pressure is low; no action recommended">>,
+                Inputs);
+        false ->
+            HasSnapshot = maps:get(has_snapshot, Inputs),
+            Bootstrap = maps:get(bootstrap_consumers, Inputs),
+            non_low_pressure_decision(HasSnapshot, Bootstrap, Inputs)
+    end.
+
+%% @private
+non_low_pressure_decision(true, Bootstrap, Inputs) when Bootstrap > 0 ->
+    advice(compact,
+        <<"bootstrap consumers active; compact preserves the snapshot "
+          "watermark and will not orphan them">>,
+        Inputs);
+non_low_pressure_decision(false, Bootstrap, Inputs) when Bootstrap > 0 ->
+    advice(none,
+        <<"bootstrap consumers active but no snapshot exists; "
+          "truncate_prefix would orphan them and compact has nothing "
+          "to fold — wait for bootstrap to finish or take a snapshot "
+          "first">>,
+        Inputs);
+non_low_pressure_decision(true, _Bootstrap, Inputs) ->
+    advice(compact,
+        <<"snapshot exists; compact reclaims space without loss of "
+          "history visible to peers">>,
+        Inputs);
+non_low_pressure_decision(false, _Bootstrap, Inputs) ->
+    advice(truncate_prefix,
+        <<"no snapshot available; truncate_prefix at an "
+          "operator-chosen watermark is the only retention lever">>,
+        Inputs).
+
+%% @private
+advice(Action, Rationale, Inputs) ->
+    #{recommended_action => Action,
+      rationale => Rationale,
+      inputs => Inputs}.
+
+%% @private
+build_inputs(WalInfo, Snapshot, BootstrapConsumers) ->
+    BytesTotal = maps:get(bytes_total, WalInfo),
+    MaxTotal = maps:get(max_total_wal_size, WalInfo),
+    LiveSegs = maps:get(live_segments_count, WalInfo),
+    MaxSegs = maps:get(max_live_segments, WalInfo),
+    Backpressure = maps:get(backpressure, WalInfo, ok),
+    ScrubberAlerts = maps:get(scrubber_alerts, WalInfo, []),
+    Pressure = #{
+        bytes_total => BytesTotal,
+        max_total_wal_size => MaxTotal,
+        bytes_ratio => safe_ratio(BytesTotal, MaxTotal),
+        live_segments_count => LiveSegs,
+        max_live_segments => MaxSegs,
+        segments_ratio => safe_ratio(LiveSegs, MaxSegs),
+        backpressure => Backpressure
+    },
+    {HasSnapshot, Watermark} = snapshot_summary(Snapshot),
+    #{pressure => Pressure,
+      has_snapshot => HasSnapshot,
+      snapshot_watermark => Watermark,
+      scrubber_alerts => ScrubberAlerts,
+      bootstrap_consumers => BootstrapConsumers}.
+
+%% @private
+safe_ratio(_, Max) when Max =< 0 -> 0.0;
+safe_ratio(N, Max) -> N / Max.
+
+%% @private
+snapshot_summary(not_found) ->
+    {false, undefined};
+snapshot_summary({ok, Key, _Value}) ->
+    {true, Key}.

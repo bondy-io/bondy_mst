@@ -173,7 +173,9 @@ integration_cleanup(_) ->
 integration_test_() ->
     {setup, fun integration_setup/0, fun integration_cleanup/1, [
         fun instance_with_crypto_validator_signs_events/0,
-        fun instance_rejects_tampered_remote_event/0
+        fun instance_rejects_tampered_remote_event/0,
+        fun crypto_validator_refresh_adds_peer_pubkey/0,
+        fun crypto_validator_refresh_returns_error_without_env/0
     ]}.
 
 %% Bring up an instance configured with the crypto validator. Verify
@@ -242,6 +244,107 @@ instance_rejects_tampered_remote_event() ->
     ),
     %% A's MST is unchanged.
     ?assertEqual(0, bondy_oplog:size(IdA)),
+    ok.
+
+%% An operator can add a peer's public key at runtime by publishing
+%% the new `peer_pubkeys` under the per-instance app env key and
+%% calling `refresh_validator/1`. A's snapshot is rotated without a
+%% subtree restart and the previously-rejected B event is accepted on
+%% retry.
+crypto_validator_refresh_adds_peer_pubkey() ->
+    {PubA, PrivA} = generate_keypair(),
+    {PubB, PrivB} = generate_keypair(),
+    OriginA = origin_from_pubkey(PubA),
+    OriginB = origin_from_pubkey(PubB),
+    IdA = mk_id(),
+    IdB = mk_id(),
+    %% A starts knowing only itself. B has both keys so it can sign.
+    {ok, _} = bondy_oplog:start_instance(IdA, #{
+        origin => OriginA,
+        validator => bondy_oplog_validator_crypto,
+        validator_opts => #{
+            keypair => {PubA, PrivA},
+            peer_pubkeys => #{OriginA => PubA}
+        }
+    }),
+    {ok, _} = bondy_oplog:start_instance(IdB, #{
+        origin => OriginB,
+        validator => bondy_oplog_validator_crypto,
+        validator_opts => #{
+            keypair => {PubB, PrivB},
+            peer_pubkeys => #{OriginA => PubA, OriginB => PubB}
+        }
+    }),
+    %% B signs a local event then forwards it to A — must be rejected
+    %% because A doesn't know B's pubkey yet.
+    Key1 = bondy_oplog:append(IdB, {inc, 1}),
+    {ok, Signed1} = bondy_oplog:get(IdB, Key1),
+    ?assertMatch(
+        {error, {unknown_origin, _}},
+        bondy_oplog:append_remote(IdA, Signed1)
+    ),
+    %% Operator pushes B's pubkey into A's rotation config and
+    %% triggers refresh.
+    application:set_env(
+        bondy_mst,
+        {validator_crypto, IdA},
+        #{peer_pubkeys => #{OriginA => PubA, OriginB => PubB}}
+    ),
+    ok = bondy_oplog_instance:refresh_validator(IdA, add_peer_b),
+    %% Synchronise on the applier so the cast is processed before
+    %% the retry.
+    ApplierPid = bondy_oplog_registry:applier_pid(IdA),
+    ?assert(is_pid(ApplierPid)),
+    _ = sys:get_state(ApplierPid),
+    %% B signs a second event (the first was per-Origin chain head;
+    %% reusing it would equivocate on prev_hash). A accepts it.
+    Key2 = bondy_oplog:append(IdB, {inc, 2}),
+    {ok, Signed2} = bondy_oplog:get(IdB, Key2),
+    ?assertEqual(ok, bondy_oplog:append_remote(IdA, Signed2)),
+    application:unset_env(bondy_mst, {validator_crypto, IdA}),
+    ok.
+
+%% Without a published env key, `refresh/1` returns
+%% `{error, no_refreshed_config}` and the applier keeps its old
+%% snapshot. We observe the no-op behaviourally: the previously-
+%% rejecting validator continues to reject.
+crypto_validator_refresh_returns_error_without_env() ->
+    {PubA, PrivA} = generate_keypair(),
+    {PubB, PrivB} = generate_keypair(),
+    OriginA = origin_from_pubkey(PubA),
+    OriginB = origin_from_pubkey(PubB),
+    IdA = mk_id(),
+    IdB = mk_id(),
+    {ok, _} = bondy_oplog:start_instance(IdA, #{
+        origin => OriginA,
+        validator => bondy_oplog_validator_crypto,
+        validator_opts => #{
+            keypair => {PubA, PrivA},
+            peer_pubkeys => #{OriginA => PubA}
+        }
+    }),
+    {ok, _} = bondy_oplog:start_instance(IdB, #{
+        origin => OriginB,
+        validator => bondy_oplog_validator_crypto,
+        validator_opts => #{
+            keypair => {PubB, PrivB},
+            peer_pubkeys => #{OriginA => PubA, OriginB => PubB}
+        }
+    }),
+    %% Ensure no env key is set.
+    application:unset_env(bondy_mst, {validator_crypto, IdA}),
+    %% Refresh cast is delivered, applier logs the error, keeps old
+    %% snapshot. Verify behaviourally: B's event is still rejected.
+    ok = bondy_oplog_instance:refresh_validator(IdA, no_env_check),
+    ApplierPid = bondy_oplog_registry:applier_pid(IdA),
+    ?assert(is_pid(ApplierPid)),
+    _ = sys:get_state(ApplierPid),
+    Key = bondy_oplog:append(IdB, {inc, 1}),
+    {ok, Signed} = bondy_oplog:get(IdB, Key),
+    ?assertMatch(
+        {error, {unknown_origin, _}},
+        bondy_oplog:append_remote(IdA, Signed)
+    ),
     ok.
 
 %% =============================================================================

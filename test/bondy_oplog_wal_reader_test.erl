@@ -595,7 +595,7 @@ qidx_is_flushed_to_disk_on_rotation_test() ->
         {ok, Entries} = bondy_oplog_wal_idx:read_file(Seg0Idx),
         %% Segment 0 had exactly one frame so its index has exactly one
         %% entry (the first-frame-is-always-indexed invariant).
-        ?assertMatch([{_, ?SEG_HEADER}], Entries)
+        ?assertMatch([{_, _, ?SEG_HEADER}], Entries)
     end).
 
 %% On normal `terminate/2`, the head segment's `.qidx` should also land

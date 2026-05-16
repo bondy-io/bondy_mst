@@ -27,10 +27,17 @@ per line, for human debuggability:
 {live_segments, [{40, 1715520000123}, {41, 1715520600456}, {42, undefined}]}.
 {deleted_through, 39}.
 {retention, [...]}.
+{scrubber_alerts, [{40, bad_crc}]}.
 {schema_version, 1}.
 {created_at, 1715520000000}.
 {last_rotated_at, 1715522400000}.
 ```
+
+`scrubber_alerts` is a proplist of `{SegmentId, Reason}` raised by
+the integrity scrubber. Defaults to `[]`. Entries are added by
+`bondy_oplog_wal:mark_segment_alert/3` and cleared by
+`bondy_oplog_wal:clear_segment_alert/2`. The list is read as
+`[]` if the term is absent from the manifest (forward-compat).
 
 Writes follow the tmp-then-rename pattern:
 
@@ -51,6 +58,7 @@ a partial mix.
     live_segments :: [{non_neg_integer(), hlc_or_undefined()}],
     deleted_through :: non_neg_integer(),
     retention = [] :: [{atom(), term()}],
+    scrubber_alerts = [] :: [scrubber_alert()],
     schema_version = 1 :: pos_integer(),
     created_at :: non_neg_integer(),
     last_rotated_at :: non_neg_integer()
@@ -59,9 +67,12 @@ a partial mix.
 -type hlc_or_undefined() :: bondy_oplog_hlc:hlc() | undefined.
 -type t() :: #?MODULE{}.
 -type live_segment() :: {non_neg_integer(), hlc_or_undefined()}.
+-type scrubber_alert() :: {SegmentId :: non_neg_integer(),
+                           Reason :: atom()}.
 
 -export_type([t/0]).
 -export_type([live_segment/0]).
+-export_type([scrubber_alert/0]).
 
 -export([new/3]).
 -export([read/1]).
@@ -71,12 +82,15 @@ a partial mix.
 -export([live_segments/1]).
 -export([deleted_through/1]).
 -export([retention/1]).
+-export([scrubber_alerts/1]).
 -export([created_at/1]).
 -export([last_rotated_at/1]).
 -export([with_current_segment/3]).
 -export([with_live_segments/2]).
 -export([with_deleted_through/2]).
 -export([with_retention/2]).
+-export([with_scrubber_alert/3]).
+-export([without_scrubber_alert/2]).
 
 %% =============================================================================
 %% API
@@ -188,6 +202,13 @@ deleted_through(#?MODULE{deleted_through = D}) -> D.
 -spec retention(t()) -> [{atom(), term()}].
 retention(#?MODULE{retention = R}) -> R.
 
+?DOC("""
+Returns the list of integrity-scrubber alerts as `{SegmentId, Reason}`
+pairs. Empty list when no segment is quarantined.
+""").
+-spec scrubber_alerts(t()) -> [scrubber_alert()].
+scrubber_alerts(#?MODULE{scrubber_alerts = A}) -> A.
+
 ?DOC("Returns the manifest creation timestamp (ms since epoch).").
 -spec created_at(t()) -> non_neg_integer().
 created_at(#?MODULE{created_at = T}) -> T.
@@ -243,6 +264,27 @@ with_deleted_through(#?MODULE{deleted_through = Old} = M, New) when
 with_retention(#?MODULE{} = M, Retention) when is_list(Retention) ->
     M#?MODULE{retention = Retention}.
 
+?DOC("""
+Records a scrubber alert for `SegmentId` with `Reason`. If an alert
+already exists for the segment, its reason is replaced (last writer
+wins — multiple bad frames in the same segment still produce one
+alert).
+""").
+-spec with_scrubber_alert(t(), non_neg_integer(), atom()) -> t().
+with_scrubber_alert(#?MODULE{scrubber_alerts = A} = M, SegmentId, Reason)
+  when is_integer(SegmentId), SegmentId >= 0, is_atom(Reason) ->
+    A1 = lists:keystore(SegmentId, 1, A, {SegmentId, Reason}),
+    M#?MODULE{scrubber_alerts = A1}.
+
+?DOC("""
+Clears any scrubber alert for `SegmentId`. Returns the manifest
+unchanged if no alert was present.
+""").
+-spec without_scrubber_alert(t(), non_neg_integer()) -> t().
+without_scrubber_alert(#?MODULE{scrubber_alerts = A} = M, SegmentId)
+  when is_integer(SegmentId), SegmentId >= 0 ->
+    M#?MODULE{scrubber_alerts = lists:keydelete(SegmentId, 1, A)}.
+
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
@@ -269,6 +311,8 @@ parse_terms(Terms) ->
         validate_live_segments(LiveSegments),
         DeletedThrough = maps:get(deleted_through, Map, 0),
         Retention = maps:get(retention, Map, []),
+        ScrubberAlerts = maps:get(scrubber_alerts, Map, []),
+        validate_scrubber_alerts(ScrubberAlerts),
         SchemaVersion = maps:get(schema_version, Map, 1),
         CreatedAt = maps:get(created_at, Map, 0),
         LastRotatedAt = maps:get(last_rotated_at, Map, CreatedAt),
@@ -279,6 +323,7 @@ parse_terms(Terms) ->
             live_segments = LiveSegments,
             deleted_through = DeletedThrough,
             retention = Retention,
+            scrubber_alerts = ScrubberAlerts,
             schema_version = SchemaVersion,
             created_at = CreatedAt,
             last_rotated_at = LastRotatedAt
@@ -321,6 +366,18 @@ validate_live_segments(L) when is_list(L) ->
     ).
 
 %% @private
+validate_scrubber_alerts(L) when is_list(L) ->
+    lists:foreach(
+        fun
+            ({Id, R}) when is_integer(Id), Id >= 0, is_atom(R) -> ok;
+            (Other) -> throw({invalid, {invalid_scrubber_alert, Other}})
+        end,
+        L
+    );
+validate_scrubber_alerts(V) ->
+    throw({invalid, {invalid_scrubber_alerts, V}}).
+
+%% @private
 update_first_hlc(Live, SegmentId, FirstHlc) ->
     [
         case S of
@@ -344,6 +401,7 @@ format(#?MODULE{
     live_segments = LiveSegments,
     deleted_through = DeletedThrough,
     retention = Retention,
+    scrubber_alerts = ScrubberAlerts,
     schema_version = SchemaVersion,
     created_at = CreatedAt,
     last_rotated_at = LastRotatedAt
@@ -355,6 +413,7 @@ format(#?MODULE{
         format_term({live_segments, LiveSegments}),
         format_term({deleted_through, DeletedThrough}),
         format_term({retention, Retention}),
+        format_term({scrubber_alerts, ScrubberAlerts}),
         format_term({schema_version, SchemaVersion}),
         format_term({created_at, CreatedAt}),
         format_term({last_rotated_at, LastRotatedAt})

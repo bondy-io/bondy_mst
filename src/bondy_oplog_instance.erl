@@ -180,6 +180,11 @@ without protocol changes.
 %% process before dispatching events to the instance.
 -export([get_validator/1]).
 
+%% Operator-facing trigger that asks the applier to refresh its
+%% validator snapshot by calling the optional
+%% `bondy_oplog_validator:refresh/1` callback.
+-export([refresh_validator/1, refresh_validator/2]).
+
 %% Page-level API (sync protocol)
 -export([get_pages/2]).
 -export([merge_pages/2]).
@@ -277,6 +282,13 @@ applier process, which then forwards the verified event to the
 instance for origin-ban / backpressure / watermark filtering and the
 MST install. The applier is therefore the sole verify+dispatch origin
 for both locally appended and peer-received events.
+
+**Pass an `instance_id()` (binary)** for hot-path callers. The binary
+form resolves origin and applier pid via lock-free registry reads
+before issuing the verify call. The `pid()` form is supported for
+test/internal convenience only: it pays two extra `gen_server:call`
+round trips (origin lookup, then instance-id reverse lookup) before
+the verify call begins.
 """).
 -spec append_remote(instance_id() | pid(), bondy_oplog_event:t()) ->
     ok | {error, term()}.
@@ -507,6 +519,14 @@ latest_key(Target) when is_binary(Target) ->
 latest_key(Target) ->
     gen_server:call(target(Target), latest_key).
 
+?DOC("""
+Returns the configured Origin for `Target`.
+
+**Pass an `instance_id()` (binary)** for hot-path callers — this form
+reads the value directly from the registry without messaging. The
+`pid()` form is a test/internal convenience that issues a synchronous
+`gen_server:call` to the instance.
+""").
 -spec origin(instance_id() | pid()) -> bondy_oplog_origin:t().
 
 origin(Target) ->
@@ -536,6 +556,46 @@ the applier.
 
 get_validator(Pid) when is_pid(Pid) ->
     gen_server:call(Pid, get_validator, infinity).
+
+?DOC("""
+Asks the per-instance applier to refresh its validator snapshot by
+calling `bondy_oplog_validator:refresh/1` on the current snapshot.
+
+Returns `ok` once the refresh request has been *delivered* to the
+applier (fire-and-forget cast). The actual outcome — snapshot
+swapped, validator returned `{error, _}`, validator raised, or
+`refresh/1` not exported — is logged by the applier and surfaced
+via the `[bondy_oplog, applier, validator_refresh]` telemetry event.
+
+Returns `{error, applier_unavailable}` if the subtree is mid-restart
+and the applier hasn't published its pid yet — operators / tests
+should retry.
+
+Equivalent to `refresh_validator(Target, validator_refresh)`.
+""").
+-spec refresh_validator(instance_id() | pid()) ->
+    ok | {error, applier_unavailable}.
+
+refresh_validator(Target) ->
+    refresh_validator(Target, validator_refresh).
+
+?DOC("""
+As `refresh_validator/1` but tags the refresh request with an
+operator-supplied `Reason` term. The reason is logged by the applier
+and emitted on the `[bondy_oplog, applier, validator_refresh]`
+telemetry event so operators can correlate the refresh with whatever
+upstream change triggered it (config push, key rotation, etc.).
+""").
+-spec refresh_validator(instance_id() | pid(), term()) ->
+    ok | {error, applier_unavailable}.
+
+refresh_validator(Target, Reason) ->
+    case applier_pid_for(Target) of
+        {ok, ApplierPid} ->
+            bondy_oplog_applier:refresh_validator(ApplierPid, Reason);
+        {error, _} = Err ->
+            Err
+    end.
 
 %% =============================================================================
 %% PAGE-LEVEL API (sync protocol)
@@ -765,6 +825,11 @@ whereis(InstanceId) when is_binary(InstanceId) ->
             end
     end.
 
+%% Binary-id callers go through the lock-free registry path; pid
+%% callers pay a `gen_server:call` because the registry is keyed by
+%% instance_id and a pid→id reverse lookup would cost an ETS
+%% `select`. Pid callers are tests/internals only — see
+%% `append_remote/2` and `origin/1` docstrings.
 -spec lookup_origin(instance_id() | pid()) ->
     {ok, bondy_oplog_origin:t()} | not_found.
 

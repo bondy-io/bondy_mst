@@ -57,6 +57,8 @@ the Quick Start. The rest of this README assumes those concepts.
 - [Reading and querying](#reading-and-querying)
 - [Replication](#replication)
 - [Compaction and snapshots](#compaction-and-snapshots)
+  - [Manual prefix truncation (advanced — lossy)](#manual-prefix-truncation-advanced--lossy)
+  - [Retention advice](#retention-advice)
 - [Persistence](#persistence)
 - [Validators and Byzantine tolerance](#validators-and-byzantine-tolerance)
 - [Operations](#operations)
@@ -578,6 +580,26 @@ case bondy_oplog:compact(Id) of
 end.
 ```
 
+### Manual prefix truncation (advanced — lossy)
+
+`bondy_oplog:truncate_prefix(Id, Watermark)` removes every event with
+key `=< Watermark` from the live MST and advances
+`current_watermark/1` to `Watermark` (monotonically). Subsequent peer
+events with HLC `=< Watermark` are rejected by the receive-side
+filter.
+
+```erlang
+Removed = bondy_oplog:truncate_prefix(Id, Watermark).
+```
+
+**This call is lossy.** Unlike `compact/1`, it does **not** write a
+snapshot at the new watermark. Events between the previous snapshot's
+watermark and `Watermark` are unrecoverable by a bootstrapping peer —
+that peer would receive the older snapshot and then be rejected for
+every event in the gap. Use this only when out-of-band coordination
+has confirmed cluster-wide that the dropped events are safe to lose.
+For coordinated retention with a recoverable snapshot, use `compact/1`.
+
 ### Default GC scheduler
 
 ```erlang
@@ -601,6 +623,57 @@ Watermark               = bondy_oplog:current_watermark(Id).
 %%   or
 not_found               = bondy_oplog:snapshot(Id).
 ```
+
+### Retention advice
+
+`bondy_oplog:retention_advice(InstanceId)` returns a recommended
+retention action for an instance based on its current write/segment
+pressure, snapshot existence, outstanding scrubber alerts, and any
+in-flight bootstrap consumers the caller knows about. The call is
+advisory; it does not change state.
+
+```erlang
+{ok, #{recommended_action := Action,    %% compact | truncate_prefix | none
+       rationale          := Rationale, %% binary; human-readable
+       inputs             := Inputs}}
+    = bondy_oplog:retention_advice(Id).
+
+%% Cluster-supplied bootstrap-consumer count (the library does not
+%% track active bootstrap sessions as durable state):
+{ok, _Advice} = bondy_oplog:retention_advice(
+    Id, #{bootstrap_consumers => 2}
+).
+```
+
+Decision table:
+
+| Scrubber alerts | Pressure  | Snapshot | Bootstrap consumers | Recommendation     |
+|-----------------|-----------|----------|---------------------|--------------------|
+| Outstanding     | any       | any      | any                 | `none`             |
+| Clean           | low       | any      | any                 | `none`             |
+| Clean           | non-low   | yes      | any                 | `compact`          |
+| Clean           | non-low   | no       | > 0                 | `none`             |
+| Clean           | non-low   | no       | 0                   | `truncate_prefix`  |
+
+"Pressure" is the maximum of `bytes_total / max_total_wal_size` and
+`live_segments_count / max_live_segments`; "low" is < 50 %.
+
+Rationale by recommendation:
+
+- **`none` (alerts outstanding)** — re-derive the affected segments
+  (operator action: `bondy_oplog_wal:clear_segment_alert/2` once the
+  segment has been replaced) or boot the instance with
+  `recovery_mode => rescan` before reasoning about retention.
+- **`none` (low pressure)** — nothing to do.
+- **`none` (bootstrap, no snapshot)** — `truncate_prefix` would
+  orphan the bootstrapping peers, and `compact` has nothing to fold.
+  Wait for bootstrap to finish or take a snapshot first.
+- **`compact`** — non-lossy; folds the prefix up to the snapshot
+  watermark into the snapshot store, freeing WAL segments below it.
+  Bootstrap consumers receive the snapshot and the events above it.
+- **`truncate_prefix`** — lossy; drops events `=< Watermark`
+  without a snapshot. Use only when out-of-band coordination has
+  confirmed cluster-wide that the dropped events are safe to lose.
 
 ---
 

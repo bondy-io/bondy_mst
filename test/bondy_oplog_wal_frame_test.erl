@@ -28,7 +28,8 @@ encode(Body, Opts) ->
 empty_body_roundtrip_test() ->
     Frame = encode(<<>>),
     ?assertEqual(?HEADER, byte_size(Frame)),
-    ?assertMatch({ok, <<>>, #{version := 1, flags := 0}},
+    ?assertMatch({ok, <<>>,
+                  #{version := ?BONDY_OPLOG_WAL_FRAME_VERSION, flags := 0}},
                  bondy_oplog_wal_frame:decode(Frame)).
 
 small_body_roundtrip_test() ->
@@ -133,17 +134,17 @@ unsupported_version_test() ->
     ?assertEqual({error, unsupported_version},
                  bondy_oplog_wal_frame:decode(Frame)).
 
-unknown_flag_test() ->
-    %% v1 known-flags mask is 0; any set flag bit is unknown_flag at decode.
-    Body = <<"body">>,
-    FrameLen = ?HEADER + byte_size(Body),
-    Version = 1,
-    Flags = 16#000004,
-    CrcInput = <<FrameLen:32, Version:8, Flags:24, Body/binary>>,
-    Crc = erlang:crc32(CrcInput),
-    Frame = <<?MAGIC:32, FrameLen:32, Crc:32, Version:8, Flags:24, Body/binary>>,
+unknown_flag_v1_test() ->
+    %% v1's known-flags mask is 0; every set bit is unknown_flag.
     ?assertEqual({error, unknown_flag},
-                 bondy_oplog_wal_frame:decode(Frame)).
+                 decode(handcraft_frame(1, 16#000004, <<"body">>))).
+
+unknown_flag_v2_test() ->
+    %% v2's mask now includes bit 0 (compressed_body); bit 2 is still
+    %% outside the mask, so a v2 frame setting it must be rejected
+    %% rather than silently accepted.
+    ?assertEqual({error, unknown_flag},
+                 decode(handcraft_frame(2, 16#000004, <<"body">>))).
 
 %% =============================================================================
 %% decode_header/1
@@ -153,7 +154,8 @@ decode_header_ok_test() ->
     Frame = encode(<<"abc">>),
     {ok, Header} = bondy_oplog_wal_frame:decode_header(Frame),
     ?assertEqual(?HEADER + 3, maps:get(frame_len, Header)),
-    ?assertEqual(1, maps:get(version, Header)),
+    ?assertEqual(?BONDY_OPLOG_WAL_FRAME_VERSION,
+                 maps:get(version, Header)),
     ?assertEqual(0, maps:get(flags, Header)).
 
 decode_header_only_header_bytes_test() ->
@@ -190,8 +192,66 @@ invalid_version_rejected_test() ->
                  bondy_oplog_wal_frame:encode(<<>>, [{version, 99}])).
 
 invalid_flag_bit_rejected_at_encode_test() ->
-    %% v1 known-flags mask is zero; any non-zero flag is `badarg` on encode.
+    %% v2 accepts bits 0 (compressed_body) and 1 (encrypted_body);
+    %% bit 2 and beyond are still outside the v2 known-flags mask.
     ?assertError({badarg, _},
-                 bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#1}])),
+                 bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#4}])),
     ?assertError({badarg, _},
-                 bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#FFFFFFFF}])).
+                 bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#8}])),
+    ?assertError({badarg, _},
+                 bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#FFFFFFFF}])),
+    %% Explicitly producing a v1 frame: mask is zero, every bit is bad.
+    ?assertError({badarg, _},
+                 bondy_oplog_wal_frame:encode(
+                     <<>>, [{version, 1}, {flags, 16#1}])).
+
+%% =============================================================================
+%% v2 envelope + v1 backward compatibility
+%% =============================================================================
+
+%% Default-encoded frames advertise the current writer version.
+default_encoded_frame_is_v2_test() ->
+    Frame = encode(<<"x">>),
+    ?assertMatch({ok, <<"x">>,
+                  #{version := ?BONDY_OPLOG_WAL_FRAME_VERSION_V2,
+                    flags := 0}},
+                 bondy_oplog_wal_frame:decode(Frame)).
+
+%% A v2 reader (this one) must continue to round-trip v1-encoded
+%% frames byte-for-byte. Production has v1-frame segments on disk from
+%% before PR1; recovery must keep reading them.
+v1_frame_decoded_by_v2_reader_test() ->
+    Body = <<"legacy body">>,
+    Frame = encode(Body, [{version, 1}]),
+    ?assertMatch({ok, Body, #{version := 1, flags := 0}},
+                 bondy_oplog_wal_frame:decode(Frame)).
+
+%% Same body encoded as v1 and as v2 differs only in the version byte
+%% (the CRC differs as a consequence). Bodies decode identically.
+v1_and_v2_frames_yield_same_body_test() ->
+    Body = <<"abcdefghij">>,
+    V1Frame = encode(Body, [{version, 1}]),
+    V2Frame = encode(Body, [{version, 2}]),
+    {ok, B1, M1} = bondy_oplog_wal_frame:decode(V1Frame),
+    {ok, B2, M2} = bondy_oplog_wal_frame:decode(V2Frame),
+    ?assertEqual(Body, B1),
+    ?assertEqual(Body, B2),
+    ?assertEqual(1, maps:get(version, M1)),
+    ?assertEqual(2, maps:get(version, M2)),
+    %% Frames differ in exactly the version byte at offset 12, hence
+    %% also in the CRC32 over the modified region.
+    ?assertNotEqual(V1Frame, V2Frame).
+
+%% =============================================================================
+%% Helpers
+%% =============================================================================
+
+decode(Frame) ->
+    bondy_oplog_wal_frame:decode(Frame).
+
+handcraft_frame(Version, Flags, Body) when is_binary(Body) ->
+    FrameLen = ?HEADER + byte_size(Body),
+    CrcInput = <<FrameLen:32, Version:8, Flags:24, Body/binary>>,
+    Crc = erlang:crc32(CrcInput),
+    <<?MAGIC:32, FrameLen:32, Crc:32,
+      Version:8, Flags:24, Body/binary>>.

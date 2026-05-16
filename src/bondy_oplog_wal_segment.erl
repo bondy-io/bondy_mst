@@ -67,6 +67,7 @@ origin (rejecting orphan tarballs / wrong-instance files).
 -export([segment_id/1]).
 -export([origin/1]).
 -export([created_at/1]).
+-export([encode_header/1]).
 
 %% =============================================================================
 %% API
@@ -281,7 +282,17 @@ created_at(#?MODULE{created_at = C}) -> C.
 %% PRIVATE
 %% =============================================================================
 
-%% @private
+?DOC("""
+Encodes a segment header record back into its 48-byte on-disk form.
+
+Used by `bondy_oplog_wal_recovery` to rewrite a head segment during
+`rescan` recovery: the new (compacted) segment carries the original
+header unchanged so the file's identity (`segment_id`,
+`instance_id_hash`, `origin`, `created_at`) is preserved across the
+rewrite.
+""").
+-spec encode_header(t()) -> binary().
+
 encode_header(#?MODULE{
     segment_id = SegmentId,
     version = Version,
