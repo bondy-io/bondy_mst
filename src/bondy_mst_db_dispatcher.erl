@@ -1,0 +1,246 @@
+%% =============================================================================
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
+%% =============================================================================
+
+-module(bondy_mst_db_dispatcher).
+
+-behaviour(gen_server).
+
+-include_lib("kernel/include/logger.hrl").
+-include("bondy_mst.hrl").
+
+-moduledoc #{format => "text/markdown"}.
+?MODULEDOC("""
+Reference subscription dispatcher for `bondy_mst_db:subscribe/2`
+(`MST_DB_DESIGN.md` §12).
+
+Subscriptions are local-only (do not cross nodes). The dispatcher owns
+a `public set` ETS table of `(SubRef, Namespace, Pid, MonitorRef,
+Pattern)` rows. The gen_server only handles subscription churn and
+`DOWN` cleanup; the publish hot path is a pure `ets:select/2` walk
+followed by `erlang:send/2` to matching subscribers — no round-trip,
+no contention with subscribers.
+
+## Table
+
+```erlang
+ets:new(bondy_mst_db_dispatcher_tab, [
+    set,
+    public,
+    named_table,
+    {keypos, #sub.ref},
+    {read_concurrency, true}
+])
+```
+
+## Patterns
+
+| Pattern                 | Matches                                                     |
+|-------------------------|-------------------------------------------------------------|
+| `all`                   | every event                                                 |
+| `{prefix, P}` (binary)  | binary keys with `P` as a prefix                            |
+| `{prefix, P}` (list)    | list keys with `P` as a prefix                              |
+| `{match, F}`            | keys for which `F(Key)` returns `true`                      |
+| `{exact, T}`            | keys equal to `T`                                           |
+
+Exact-key subscriptions use `{exact, T}`. Bare terms are not accepted —
+the pattern type is closed so dialyzer can verify subscribers at
+compile time.
+
+## Message shape
+
+Subscribers receive
+
+```erlang
+{bondy_mst_db_event, Namespace, Key, Hlc, Operation}
+```
+
+Delivery uses the bare send operator (`Pid ! Msg`), which is local-only
+best-effort and never blocks the publisher.
+
+## Restart semantics
+
+The ETS table is owned by this gen_server; if the gen_server dies the
+table dies with it. On supervisor restart, `init/1` creates a fresh
+empty table — **all in-memory subscriptions are silently lost**.
+Subscribers receive no further events and have no way to detect the
+loss; their `SubRef` becomes a dead reference.
+
+There is no recovery protocol. Operators should either set the
+supervisor's `intensity` so the dispatcher effectively never restarts,
+or design subscribers to periodically validate liveness (e.g., a
+heartbeat publish that exercises the subscription). The substrate
+does not police this.
+""").
+
+-define(TABLE, bondy_mst_db_dispatcher_tab).
+
+-record(sub, {
+    ref     :: reference(),
+    ns      :: atom(),
+    pid     :: pid(),
+    monitor :: reference(),
+    pattern :: pattern()
+}).
+
+-record(state, {}).
+
+-type pattern() :: all
+                 | {prefix, binary() | list()}
+                 | {match, fun((term()) -> boolean())}
+                 | {exact, term()}.
+
+-export_type([pattern/0]).
+
+-export([child_spec/0]).
+-export([start_link/0]).
+
+-export([subscribe/2]).
+-export([unsubscribe/1]).
+-export([publish/4]).
+-export([subscription_count/0]).
+
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
+         code_change/3]).
+
+%% =============================================================================
+%% API
+%% =============================================================================
+
+child_spec() ->
+    #{
+        id => ?MODULE,
+        start => {?MODULE, start_link, []},
+        restart => permanent,
+        shutdown => 5000,
+        type => worker,
+        modules => [?MODULE]
+    }.
+
+
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+
+-spec subscribe(atom(), pattern()) -> {ok, reference()}.
+
+subscribe(NS, Pattern) when is_atom(NS) ->
+    gen_server:call(?MODULE, {subscribe, NS, self(), Pattern}).
+
+
+-spec unsubscribe(reference()) -> ok.
+
+unsubscribe(Ref) when is_reference(Ref) ->
+    gen_server:call(?MODULE, {unsubscribe, Ref}).
+
+
+-doc("""
+Publish an event to every matching subscriber. Walk runs in the caller
+process — no gen_server round-trip. Returns `ok` whether or not any
+subscriber was matched.
+""").
+-spec publish(atom(), term(), bondy_oplog_hlc:hlc(), term()) -> ok.
+
+publish(NS, Key, Hlc, Op) ->
+    Msg = {bondy_mst_db_event, NS, Key, Hlc, Op},
+    Subs = ets:select(?TABLE, [{#sub{ns = NS, _ = '_'}, [], ['$_']}]),
+    lists:foreach(
+        fun(#sub{pid = Pid, pattern = Pat}) ->
+            case matches(Pat, Key) of
+                true  -> Pid ! Msg;
+                false -> ok
+            end
+        end,
+        Subs
+    ),
+    ok.
+
+
+-spec subscription_count() -> non_neg_integer().
+
+subscription_count() ->
+    ets:info(?TABLE, size).
+
+
+%% =============================================================================
+%% Pattern matching
+%% =============================================================================
+
+matches(all, _Key) ->
+    true;
+matches({prefix, P}, Key) when is_binary(P), is_binary(Key) ->
+    Sz = byte_size(P),
+    byte_size(Key) >= Sz andalso binary:part(Key, 0, Sz) =:= P;
+matches({prefix, P}, Key) when is_list(P), is_list(Key) ->
+    lists:prefix(P, Key);
+matches({prefix, _}, _Key) ->
+    false;
+matches({match, F}, Key) when is_function(F, 1) ->
+    try F(Key) of
+        true  -> true;
+        _     -> false
+    catch
+        _:_ -> false
+    end;
+matches({exact, T}, Key) ->
+    Key =:= T;
+matches(_, _) ->
+    false.
+
+
+%% =============================================================================
+%% gen_server callbacks
+%% =============================================================================
+
+init([]) ->
+    _ = ets:new(?TABLE, [
+        set,
+        public,
+        named_table,
+        {keypos, #sub.ref},
+        {read_concurrency, true}
+    ]),
+    {ok, #state{}}.
+
+handle_call({subscribe, NS, Pid, Pattern}, _From, State) ->
+    Ref = erlang:make_ref(),
+    Mon = erlang:monitor(process, Pid),
+    Row = #sub{
+        ref = Ref,
+        ns = NS,
+        pid = Pid,
+        monitor = Mon,
+        pattern = Pattern
+    },
+    true = ets:insert(?TABLE, Row),
+    {reply, {ok, Ref}, State};
+
+handle_call({unsubscribe, Ref}, _From, State) ->
+    case ets:lookup(?TABLE, Ref) of
+        [#sub{monitor = Mon}] ->
+            true = erlang:demonitor(Mon, [flush]),
+            true = ets:delete(?TABLE, Ref);
+        [] ->
+            ok
+    end,
+    {reply, ok, State};
+
+handle_call(_Req, _From, State) ->
+    {reply, {error, unknown}, State}.
+
+handle_cast(_, State) ->
+    {noreply, State}.
+
+handle_info({'DOWN', Mon, process, _Pid, _Reason}, State) ->
+    MS = [{#sub{monitor = Mon, _ = '_'}, [], [true]}],
+    _ = ets:select_delete(?TABLE, MS),
+    {noreply, State};
+handle_info(_, State) ->
+    {noreply, State}.
+
+terminate(_, _) ->
+    ok.
+
+code_change(_, State, _) ->
+    {ok, State}.

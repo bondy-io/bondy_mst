@@ -232,6 +232,11 @@ projection(ApplierPid) when is_pid(ApplierPid) ->
 
 init(#{instance_id := InstanceId, wal_dir := WalDir} = Opts) ->
     process_flag(trap_exit, true),
+    %% Off-heap inbox — the applier consumes batches from the WAL on
+    %% one side and posts `install_local_batch` casts back to the
+    %% instance on the other; either side may bunch under load. Off-
+    %% heap messages keep the applier's own heap small.
+    process_flag(message_queue_data, off_heap),
     CommitEvery = maps:get(commit_every, Opts, ?DEFAULT_COMMIT_EVERY),
     PollMs = maps:get(poll_interval_ms, Opts, ?DEFAULT_POLL_INTERVAL_MS),
     case resolve_siblings(InstanceId) of

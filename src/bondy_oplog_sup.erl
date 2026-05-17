@@ -18,6 +18,8 @@ Children, in start order:
 | Child | Strategy |
 |---|---|
 | `bondy_oplog_registry`           | `gen_server`; node-shared per-instance read-snapshot ETS |
+| `bondy_mst_db_registry`          | `gen_server`; node-shared per-(NS,Index,Shard) read-handle ETS |
+| `bondy_mst_db_dispatcher`        | `gen_server`; local-only `subscribe/2` ref dispatcher |
 | `bondy_oplog_peer_state`         | `gen_server`; node-shared peer ETS |
 | `bondy_oplog_origin_bans`        | `gen_server`; node-shared origin ban ETS |
 | `bondy_oplog_quarantine`         | `gen_server`; node-shared equivocation quarantine ETS |
@@ -53,6 +55,8 @@ init([]) ->
     },
     ChildSpecs = [
         bondy_oplog_registry:child_spec(),
+        bondy_mst_db_registry:child_spec(),
+        bondy_mst_db_dispatcher:child_spec(),
         bondy_oplog_peer_state:child_spec(#{}),
         bondy_oplog_origin_bans:child_spec(),
         bondy_oplog_quarantine:child_spec(),

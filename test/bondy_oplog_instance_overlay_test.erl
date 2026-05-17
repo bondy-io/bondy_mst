@@ -136,46 +136,31 @@ await_apply_drains_overlay() ->
 overlay_events_cap_returns_backpressure() ->
     %% A tight overlay events cap surfaces `{error, backpressure}`
     %% when exceeded. We use a tiny cap and assert the threshold
-    %% fires deterministically.
+    %% fires deterministically by suspending the applier so the
+    %% overlay does not drain between appends.
     Id = mk_id(),
     {ok, _} = bondy_oplog:start_instance(Id, #{
         max_overlay_events => 3
     }),
-    %% Block the applier by capturing the gen_server so events sit in
-    %% the overlay. The applier still runs in the background, but
-    %% with a tiny `commit_every` default of 64 it does evict per
-    %% event via the in-handler path, so we have to be careful: the
-    %% test exercises pressure *as observed at append time*, before
-    %% the apply hop runs. To make the assertion deterministic we
-    %% suspend the instance gen_server so apply_events cannot drain
-    %% the overlay.
-    Pid = bondy_oplog_instance:whereis(Id),
-    true = is_pid(Pid),
-    sys:suspend(Pid),
+    %% Suspend the applier (not the instance) so events accumulate
+    %% in the overlay but the instance gen_server continues to serve
+    %% appends. The applier is the sole evictor.
+    ApplierPid = bondy_oplog_registry:applier_pid(Id),
+    true = is_pid(ApplierPid),
+    sys:suspend(ApplierPid),
     %% Three appends are accepted (size + delta =< cap).
-    %% But sys:suspend blocks all gen_server calls including append.
-    %% Use a side-process to do the appends asynchronously, then
-    %% resume and verify their results.
-    %%
-    %% Simpler approach: pre-populate overlay via direct ets:insert
-    %% (only valid in test code) to simulate "applier behind".
-    sys:resume(Pid),
-    OverlayTab = bondy_oplog_registry:overlay_tab(Id),
-    true = is_reference(OverlayTab) orelse is_atom(OverlayTab)
-        orelse is_integer(OverlayTab),
-    %% Insert 3 fake rows directly. The applier will not promote
-    %% them (no WAL entries to read for these keys), but they count
-    %% toward the cap.
-    Fake = [fake_overlay_row(N) || N <- lists:seq(1, 3)],
-    true = ets:insert(OverlayTab, Fake),
-    %% Cap reached.
+    _ = bondy_oplog:append(Id, e1),
+    _ = bondy_oplog:append(Id, e2),
+    _ = bondy_oplog:append(Id, e3),
+    %% The fourth tips the count past the cap and is rejected before
+    %% touching the WAL.
     ?assertEqual(
         {error, backpressure},
-        bondy_oplog:append(Id, x)
+        bondy_oplog:append(Id, e4)
     ),
-    %% Remove the fake rows so cleanup can stop the instance cleanly.
-    [true = ets:delete(OverlayTab,
-                       element(?OVERLAY_KEY_POS, R)) || R <- Fake],
+    %% Resume the applier so cleanup can stop the instance.
+    sys:resume(ApplierPid),
+    ok = bondy_oplog:await_apply(Id, 5000),
     ok = bondy_oplog:stop_instance(Id).
 
 overlay_value_round_trip() ->

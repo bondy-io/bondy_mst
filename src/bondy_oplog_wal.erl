@@ -50,6 +50,28 @@ See `_design/WAL_DESIGN.md` §8. Current behaviour:
   current state (including `head_offset`, `durable_offset`,
   `fsync_mode`, `last_fsync_at`).
 
+## Choosing an `fsync_mode`
+
+The library default is `per_write` because security-class namespaces
+(`grants`, `tickets`, `users`) rely on the strong "on disk before
+`append/2` returns" contract. The conservative default protects
+correctness for callers who do not opt in.
+
+`per_write` is bounded by the device fsync rate (a few thousand
+ops/s) and its tail latency grows linearly with the number of
+concurrent appenders — the writer replies serially, one per fsync.
+Concurrency benchmarks measure ~5,500 events/s on a single writer
+and degrade under contention.
+
+`batched` is the right choice for any high-churn workload that can
+accept a bounded durability window (the larger of
+`batched_fsync_interval` ms or `batched_fsync_bytes`). It reaches
+~200 k events/s under 16 concurrent appenders on commodity NVMe and
+keeps p99.9 latency bounded by the fsync interval. Pair it with
+`await_durable/3` when the caller needs to know a specific position
+is on disk. The reference high-churn namespace (`registry`)
+overrides to `batched` in its per-instance config.
+
 Retention, backpressure, the applier integration, and the full
 stateful-PropEr fault-injection harness are still to land.
 """).
@@ -345,6 +367,23 @@ Optional:
   every `append/2`; batched defers fsync to a size or time boundary
   (see `batched_fsync_*` below) and exposes durability via
   `durable_position/1` and `await_durable/3`.
+
+  **Throughput hazard.** `per_write` ties one fsync to every caller's
+  reply — the writer is bounded by the storage device's fsync rate
+  (~6 k/s on a typical NVMe). With multiple concurrent appenders the
+  reply queue stays full and throughput plateaus at the device fsync
+  rate regardless of how many writers are added. Latency p99.9
+  scales with concurrency (`N × fsync_us`). Concurrent-writer
+  benchmarks (`bench/benchmarks/concurrency_wal.exs`) measure this
+  directly.
+
+  Use `per_write` only when the caller needs the WAL replicated to
+  storage before its `append/2` returns. For any other shape —
+  including the standard `bondy_oplog_instance` write path — prefer
+  `batched` plus `await_durable/3` for explicit durability waits.
+  The batched mode reaches ~200 k events/s under 16 concurrent
+  appenders on the same device, two orders of magnitude better
+  than `per_write`, with bounded fsync-interval latency.
 - `batched_fsync_interval` — batched-mode time trigger in
   milliseconds; defaults to 50 ms. The writer fsyncs at most this
   long after the first un-fsynced append.
@@ -743,6 +782,11 @@ clear_segment_alert(Pid, SegmentId) when
 
 init({InstanceId, Opts}) ->
     process_flag(trap_exit, true),
+    %% Off-heap inbox — same rationale as `bondy_oplog_instance`. The
+    %% WAL writer's mailbox grows whenever fsync stalls or many
+    %% concurrent appenders pile up; keeping messages off the main
+    %% heap stops minor GC from scanning them on every collection.
+    process_flag(message_queue_data, off_heap),
     T0 = erlang:monotonic_time(microsecond),
     case do_open(InstanceId, Opts) of
         {ok, State, RecoveryResult} ->

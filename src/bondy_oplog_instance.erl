@@ -126,7 +126,17 @@ without protocol changes.
     %% (`block` reserved).
     max_overlay_events :: pos_integer(),
     max_overlay_bytes :: pos_integer(),
-    overlay_throttle :: drop
+    overlay_throttle :: drop,
+    %% In-state mirrors of `ets:info(overlay, size)` and
+    %% `ets:info(overlay, memory)` — read by `overlay_admit/2` on every
+    %% append. Maintained on insert (`stage_to_overlay/2`) and evict
+    %% (`evict_overlay_batch/2`). With `decentralized_counters: true`
+    %% on the overlay table, the equivalent `ets:info/2` calls
+    %% aggregate across all schedulers and grow expensive under
+    %% concurrent appenders — these mirrors keep the admit check
+    %% purely in-process and constant-time.
+    overlay_event_count :: non_neg_integer(),
+    overlay_byte_estimate :: non_neg_integer()
 }).
 
 -type backend() :: map | ets | module().
@@ -879,6 +889,14 @@ lookup_origin(InstanceId) when is_binary(InstanceId) ->
 
 init({InstanceId, Opts}) ->
     process_flag(trap_exit, true),
+    %% Off-heap inbox: incoming messages land in their own heap
+    %% fragments instead of the process heap, so minor GC does not
+    %% scan them and the process heap stays small even when many
+    %% callers pile up appends. Without this flag the writer cliff
+    %% at >=16 concurrent appenders shows up as throughput regression
+    %% — the gen_server's heap fragmenting under mailbox depth
+    %% triggers frequent full-sweep GCs that stall every caller.
+    process_flag(message_queue_data, off_heap),
     Origin = maps:get(origin, Opts, bondy_oplog_origin:default()),
     case bondy_oplog_origin:validate(Origin) of
         ok -> ok;
@@ -1015,7 +1033,9 @@ init({InstanceId, Opts}) ->
         overlay = Overlay,
         max_overlay_events = maps:get(max_overlay_events, Opts, 10_000),
         max_overlay_bytes = maps:get(max_overlay_bytes, Opts, 5 * 1024 * 1024),
-        overlay_throttle = maps:get(overlay_throttle, Opts, drop)
+        overlay_throttle = maps:get(overlay_throttle, Opts, drop),
+        overlay_event_count = 0,
+        overlay_byte_estimate = 0
     },
     ok = publish(State),
     %% Publish the overlay tid via a dedicated setter so a stale tid
@@ -1031,18 +1051,43 @@ handle_call(Req, From, State0) ->
     Result.
 
 %% @private
-%% Publishes the registry row when the handle_call clause produced a
-%% state different from the one we entered with. The explicit
-%% structural `=/=` is intentional: read-only clauses return the
-%% same state and skip the ETS write; idempotent mutations (e.g.,
-%% re-applying an event already in the MST) also fall through to a
-%% no-op because the resulting record is structurally identical.
-maybe_publish(State0, {reply, _, State1}) when State1 =/= State0 ->
-    publish(State1);
-maybe_publish(State0, {noreply, State1}) when State1 =/= State0 ->
-    publish(State1);
+%% Publishes the registry row when the handle_call clause changed any
+%% field exposed to lock-free readers. We compare only the
+%% *published* subset (see `published_fingerprint/1`) because state
+%% fields that no reader sees — e.g. the in-process overlay counters
+%% maintained by `stage_to_overlay/2` and `evict_overlay_batch/2` —
+%% would otherwise force a registry write on every append. Under
+%% mixed read/write load that turned a 4 k/s writer into a
+%% bottleneck on the registry row's per-key lock bucket and dragged
+%% writer throughput by ~7×.
+maybe_publish(State0, {reply, _, State1}) ->
+    maybe_publish_diff(State0, State1);
+maybe_publish(State0, {noreply, State1}) ->
+    maybe_publish_diff(State0, State1);
 maybe_publish(_State0, _Result) ->
     ok.
+
+maybe_publish_diff(State0, State1) ->
+    case published_fingerprint(State0) =:= published_fingerprint(State1) of
+        true -> ok;
+        false -> publish(State1)
+    end.
+
+%% @private
+%% Tuple of the fields that `publish/1` writes to the registry. Used
+%% by `maybe_publish/2` to skip the ETS write when nothing visible to
+%% lock-free readers has changed. `instance_id` and `origin` are
+%% immutable post-init so they are not included.
+published_fingerprint(#state{} = S) ->
+    {
+        S#state.mst,
+        S#state.watermark,
+        S#state.cached_snapshot,
+        S#state.crdt_module,
+        S#state.fold_module,
+        S#state.fold_opts,
+        S#state.live_size
+    }.
 
 %% @private
 do_handle_call({append, Op, Meta}, _From, State0) ->
@@ -1199,10 +1244,11 @@ do_handle_call({truncate_prefix, Watermark}, _From, #state{mst = MST0} = State) 
         live_size = max(0, State#state.live_size - Removed),
         watermark = NewWatermark
     }};
-do_handle_call(instance_size, _From, #state{overlay = Overlay} = State) ->
+do_handle_call(instance_size, _From, State) ->
     %% MST live_size + overlay rows = total events (disjoint sets;
-    %% see `size/1`).
-    Total = State#state.live_size + overlay_size_tab(Overlay),
+    %% see `size/1`). Overlay count is mirrored in state to keep this
+    %% call out of `ets:info/2`'s per-scheduler aggregation path.
+    Total = State#state.live_size + State#state.overlay_event_count,
     {reply, Total, State};
 do_handle_call(origin, _From, State) ->
     {reply, State#state.origin, State};
@@ -1319,8 +1365,8 @@ handle_cast({install_local_batch, Events}, State0) ->
     %% overlay row finds the entry in the MST instead.
     State1 = install_local_batch(State0, Events),
     ok = publish(State1),
-    ok = evict_overlay_batch(State1#state.overlay, Events),
-    {noreply, State1};
+    State2 = evict_overlay_batch(State1, Events),
+    {noreply, State2};
 handle_cast(
     {compaction_done, Pid, Result},
     #state{compaction = #{pid := Pid}} = State0
@@ -1400,17 +1446,17 @@ terminate(_Reason, #state{
 %% overlay row closes the read-your-writes gap until the applier
 %% catches up; the row is evicted via HLC-conditional
 %% `ets:select_delete/2` once the install lands.
-do_append_local(#state{overlay = Overlay} = State0, WalPid, Items) ->
+do_append_local(#state{} = State0, WalPid, Items) ->
     {Events, Keys, State1} = build_events(State0, Items),
     try bondy_oplog_wal:append_batch(WalPid, Events) of
         {ok, _Entries} ->
-            ok = stage_to_overlay(Overlay, Events),
+            State2 = stage_to_overlay(State1, Events),
             telemetry:execute(
                 [bondy_oplog, instance, append],
                 #{count => length(Events)},
-                #{instance_id => State1#state.instance_id}
+                #{instance_id => State2#state.instance_id}
             ),
-            {ok, Keys, State1};
+            {ok, Keys, State2};
         {error, _} = E ->
             E
     catch
@@ -1422,14 +1468,33 @@ do_append_local(#state{overlay = Overlay} = State0, WalPid, Items) ->
 
 %% @private
 %% Inserts every event in the batch into the per-instance overlay as
-%% one atomic `ets:insert/2` call. Origin is `local` for events that
-%% went through the WAL; a future eager-push receiver will insert with
-%% `eager_pushed` so the applier's eviction protocol can distinguish
-%% the two (§10.3 of the applier design).
-stage_to_overlay(Overlay, Events) ->
+%% one atomic `ets:insert/2` call and bumps the in-state size +
+%% byte-estimate counters used by `overlay_admit/2`. Origin is `local`
+%% for events that went through the WAL; a future eager-push receiver
+%% will insert with `eager_pushed` so the applier's eviction protocol
+%% can distinguish the two (§10.3 of the applier design).
+stage_to_overlay(#state{overlay = Overlay} = State, Events) ->
     Rows = [overlay_row(E, local) || E <- Events],
     true = ets:insert(Overlay, Rows),
-    ok.
+    {DeltaCount, DeltaBytes} = overlay_delta(Events),
+    State#state{
+        overlay_event_count = State#state.overlay_event_count + DeltaCount,
+        overlay_byte_estimate = State#state.overlay_byte_estimate + DeltaBytes
+    }.
+
+%% @private
+%% Counts events and sums their approximate on-heap size via
+%% `erlang:external_size/1` — faster than `term_to_binary` because it
+%% does not allocate. The result is used purely for backpressure
+%% accounting; exactness is not required.
+overlay_delta(Events) ->
+    lists:foldl(
+        fun(E, {Count, Bytes}) ->
+            {Count + 1, Bytes + erlang:external_size(E)}
+        end,
+        {0, 0},
+        Events
+    ).
 
 %% @private
 overlay_row(Event, Origin) ->
@@ -1506,14 +1571,13 @@ install_local_batch(#state{mst = MST0} = State0, [Event | Rest]) ->
 %% Such a "newer" row is by construction a *different* event with a
 %% later HLC, so leaving it in the overlay is exactly the
 %% read-your-writes contract.
--spec evict_overlay_batch(undefined | ets:tid(),
-                          [bondy_oplog_event:t()]) -> ok.
+-spec evict_overlay_batch(#state{}, [bondy_oplog_event:t()]) -> #state{}.
 
-evict_overlay_batch(undefined, _Events) ->
-    ok;
-evict_overlay_batch(_Tab, []) ->
-    ok;
-evict_overlay_batch(Tab, Events) ->
+evict_overlay_batch(#state{overlay = undefined} = State, _Events) ->
+    State;
+evict_overlay_batch(State, []) ->
+    State;
+evict_overlay_batch(#state{overlay = Tab} = State, Events) ->
     MaxHlc = lists:foldl(
         fun(E, Acc) ->
             H = bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)),
@@ -1524,7 +1588,7 @@ evict_overlay_batch(Tab, Events) ->
     ),
     Keys = [bondy_oplog_event:key(E) || E <- Events],
     KeyGuard = build_key_or_guard(Keys),
-    _ = try
+    Deleted = try
         ets:select_delete(Tab, [{
             {'$1', '_', '$2', '_'},
             [KeyGuard, {'=<', '$2', MaxHlc}],
@@ -1533,7 +1597,21 @@ evict_overlay_batch(Tab, Events) ->
     catch
         error:badarg -> 0
     end,
-    ok.
+    %% Approximate the byte delta: scale the running byte estimate by
+    %% the fraction of rows deleted. Self-corrects on the next batch
+    %% because both counters drift together.
+    OldCount = State#state.overlay_event_count,
+    OldBytes = State#state.overlay_byte_estimate,
+    NewCount = max(0, OldCount - Deleted),
+    NewBytes =
+        case OldCount of
+            0 -> 0;
+            _ -> OldBytes * NewCount div OldCount
+        end,
+    State#state{
+        overlay_event_count = NewCount,
+        overlay_byte_estimate = NewBytes
+    }.
 
 %% @private
 %% Builds a `{'orelse', {'=:=', '$1', Key1}, {'=:=', '$1', Key2}, ...}`
@@ -1741,28 +1819,31 @@ admit(State, Delta) ->
 %% Pressure-check before the WAL append. Returns
 %% `{error, backpressure}` when either cap is breached. `drop` is the
 %% only supported strategy; `block` is reserved.
+%%
+%% Reads `overlay_event_count` and `overlay_byte_estimate` straight
+%% from state — both are maintained by `stage_to_overlay/2` and
+%% `evict_overlay_batch/2`. Pre-history this read pair `ets:info/2` on
+%% the overlay table for size and memory; under heavy concurrent
+%% appends those calls aggregated decentralised counters across every
+%% scheduler and dominated the gen_server's per-call cost.
 overlay_admit(
     #state{
         instance_id = Id,
-        overlay = Overlay,
+        overlay_event_count = Size,
+        overlay_byte_estimate = Bytes,
         max_overlay_events = MaxEvents,
         max_overlay_bytes = MaxBytes
     },
     Delta
 ) ->
-    Size = ets:info(Overlay, size),
     case Size + Delta > MaxEvents of
         true ->
             emit_overlay_backpressure(Id, events, Size, MaxEvents, Delta),
             {error, backpressure};
         false ->
-            %% `memory` is in words; convert to bytes with the runtime's
-            %% word size. Approximate by design — sufficient for a
-            %% backpressure threshold.
-            MemBytes = ets:info(Overlay, memory) * erlang:system_info(wordsize),
-            case MemBytes >= MaxBytes of
+            case Bytes >= MaxBytes of
                 true ->
-                    emit_overlay_backpressure(Id, bytes, MemBytes, MaxBytes, Delta),
+                    emit_overlay_backpressure(Id, bytes, Bytes, MaxBytes, Delta),
                     {error, backpressure};
                 false ->
                     ok
@@ -1801,11 +1882,11 @@ backpressure_admit(
     #state{
         max_working_set = Cap,
         live_size = Size,
-        overlay = Overlay
+        overlay_event_count = OverlaySize
     } = State,
     Delta
 ) ->
-    Total = Size + overlay_size_tab(Overlay),
+    Total = Size + OverlaySize,
     case Total + Delta =< Cap of
         true ->
             ok;
@@ -1817,7 +1898,7 @@ backpressure_admit(
                     instance_id => State#state.instance_id,
                     requested => Delta,
                     live_size => Size,
-                    overlay_size => Total - Size,
+                    overlay_size => OverlaySize,
                     cap => Cap
                 }
             ),

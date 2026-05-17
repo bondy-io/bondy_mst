@@ -1,0 +1,138 @@
+defmodule Bench do
+  @moduledoc """
+  Bench harness for bondy_mst.
+
+  Wires the rebar3-built beams into the Elixir VM, starts the
+  `:bondy_mst` application, and exposes shared helpers used by
+  the benchmark scripts in `benchmarks/`.
+  """
+
+  # Erlang modules from rebar3-built deps are loaded at runtime via
+  # `Code.prepend_path/1`, so Mix's compiler can't see them.
+  @compile {:no_warn_undefined, [:bondy_mst, :bondy_mst_db, :bondy_mst_db_registry]}
+
+  @root_app :bondy_mst
+  # __DIR__ is bench/lib, so the bondy_mst project root is two up.
+  @project_root Path.expand("../..", __DIR__)
+  @rebar_lib Path.join([@project_root, "_build", "default", "lib"])
+  @output_dir Path.join([@project_root, "bench", "_output"])
+
+  @doc """
+  Ensures the rebar3 default profile is compiled, prepends every
+  beam directory to the code path, and starts `:bondy_mst`.
+
+  Safe to call multiple times in one VM.
+  """
+  def setup do
+    ensure_compiled!()
+    prepend_beam_paths!()
+    start_app!()
+    File.mkdir_p!(@output_dir)
+    :ok
+  end
+
+  @doc "Absolute path to the bench HTML/JSON output directory."
+  def output_dir, do: @output_dir
+
+  @doc """
+  Default Benchee options used across every script in this project.
+
+  Captures the percentiles requested for the HTML report and pins
+  the formatters to JSON + HTML side-by-side so the static report
+  links to its underlying data.
+  """
+  def benchee_opts(name, opts \\ []) do
+    sub_dir = Path.join(@output_dir, name)
+    File.mkdir_p!(sub_dir)
+
+    defaults = [
+      time: 5,
+      warmup: 2,
+      memory_time: 2,
+      reduction_time: 2,
+      percentiles: [50, 75, 90, 95, 99],
+      print: [benchmarking: true, configuration: false, fast_warning: false],
+      formatters: [
+        {Benchee.Formatters.HTML,
+         file: Path.join(sub_dir, "index.html"),
+         auto_open: false,
+         inline_assets: true},
+        {Benchee.Formatters.JSON, file: Path.join(sub_dir, "data.json")},
+        Benchee.Formatters.Console
+      ]
+    ]
+
+    Keyword.merge(defaults, opts)
+  end
+
+  @doc """
+  Generates `count` deterministic binary keys of the form
+  `"k:00000001"`. Stable across runs so different benchmarks measure
+  the same workload.
+  """
+  def gen_keys(count) when is_integer(count) and count > 0 do
+    width = max(8, byte_size(Integer.to_string(count)))
+
+    for i <- 1..count do
+      "k:" <> String.pad_leading(Integer.to_string(i), width, "0")
+    end
+  end
+
+  @doc """
+  Returns `count` deterministically-shuffled keys for read benchmarks.
+  Uses a fixed seed so each run hits the same access pattern.
+  """
+  def gen_keys_shuffled(count, seed \\ 42) do
+    keys = gen_keys(count)
+    _ = :rand.seed(:exsss, {seed, seed + 1, seed + 2})
+    Enum.shuffle(keys)
+  end
+
+  @doc """
+  Builds an MST containing `count` items using the supplied store
+  module and store options. Returns the populated tree.
+  """
+  def build_tree(count, store_mod \\ :bondy_mst_map_store, store_opts \\ %{}) do
+    tree =
+      :bondy_mst.new(%{
+        store_mod: store_mod,
+        store_opts: store_opts
+      })
+
+    keys = gen_keys(count)
+
+    Enum.reduce(keys, tree, fn k, acc ->
+      :bondy_mst.put(acc, k, k)
+    end)
+  end
+
+  defp ensure_compiled! do
+    case File.dir?(@rebar_lib) do
+      true ->
+        :ok
+
+      false ->
+        IO.puts("[bench] compiling bondy_mst with rebar3...")
+        {out, status} = System.cmd("rebar3", ["compile"], cd: @project_root)
+
+        if status != 0 do
+          IO.puts(out)
+          raise "rebar3 compile failed (status #{status})"
+        end
+    end
+  end
+
+  defp prepend_beam_paths! do
+    @rebar_lib
+    |> File.ls!()
+    |> Enum.each(fn dep ->
+      ebin = Path.join([@rebar_lib, dep, "ebin"])
+      if File.dir?(ebin), do: Code.prepend_path(ebin)
+    end)
+  end
+
+  defp start_app! do
+    {:ok, _} = Application.ensure_all_started(@root_app)
+    :ok
+  end
+end

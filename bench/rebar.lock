@@ -1,0 +1,27 @@
+{"1.2.0",
+[{<<"app_config">>,
+  {git,"https://github.com/leapsight/app_config.git",
+       {ref,"6c4aee8fc3d08b59e22183a530cb4ce29d4b348b"}},
+  0},
+ {<<"bloomfi">>,
+  {git,"https://github.com/Leapsight/bloomfi.git",
+       {ref,"d09a310876ea82e49aa984d8d385725918c8d7c1"}},
+  0},
+ {<<"key_value">>,
+  {git,"https://github.com/leapsight/key_value.git",
+       {ref,"cf0143bf3a91c1d41ace9ef938e314307c80bd1f"}},
+  0},
+ {<<"memory">>,
+  {git,"https://github.com/Leapsight/memory.git",
+       {ref,"09fac9e5aab8411380adc8b8c88a23bb5a7aef22"}},
+  0},
+ {<<"resulto">>,{pkg,<<"resulto">>,<<"0.2.5">>},0},
+ {<<"telemetry">>,{pkg,<<"telemetry">>,<<"1.4.1">>},0}]}.
+[
+{pkg_hash,[
+ {<<"resulto">>, <<"FE36BF7A4A0334C35256A0305CE8780BA0368337A99B3E750EA6FB632C5D5A31">>},
+ {<<"telemetry">>, <<"AB6DE178E2B29B58E8256B92B382EA3F590A47152CA3651EA857A6CAE05AC423">>}]},
+{pkg_hash_ext,[
+ {<<"resulto">>, <<"4A2168C35FFFC6257BD8D566BED26560D053506DF80196B643E2B10F01A88A76">>},
+ {<<"telemetry">>, <<"2172E05A27531D3D31DD9782841065C50DD5C3C7699D95266B2EDD54C2DAFA1C">>}]}
+].
