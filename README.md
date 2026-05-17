@@ -54,6 +54,7 @@ the Quick Start. The rest of this README assumes those concepts.
 - [Defining a CRDT](#defining-a-crdt)
 - [Lifecycle](#lifecycle)
 - [Writing events](#writing-events)
+  - [Concurrency and the lock-free fast path](#concurrency-and-the-lock-free-fast-path)
 - [Reading and querying](#reading-and-querying)
 - [Replication](#replication)
 - [Compaction and snapshots](#compaction-and-snapshots)
@@ -432,6 +433,44 @@ Optional working-set cap:
 `append/2` returns `{error, working_set_full}` when the cap is reached.
 `append_many/2` admits atomically — either all events fit, or none.
 
+### Concurrency and the lock-free fast path
+
+`bondy_oplog:append/2,3` is **lock-free** when the configured
+validator advertises `is_stateless/0 -> true` — the default
+`bondy_oplog_validator_trust` does. The caller process builds the
+event, signs it in-process, calls the WAL gen_server directly, and
+stages the overlay row inline. The instance gen_server is not on the
+hot write path.
+
+Concretely, what this means at runtime:
+
+| Path                      | Hops | Bottleneck                              |
+|---------------------------|------|-----------------------------------------|
+| `append/2,3` (stateless)  | 1    | WAL gen_server (file + fsync)           |
+| `append/2,3` (stateful)   | 2    | Instance gen_server, then the WAL       |
+| `append_many/2`           | 2    | Instance gen_server (atomic batch)      |
+| `append_remote/2`         | 1    | Applier (out-of-band)                   |
+
+The WAL gen_server is still a serialisation point — every appender
+queues for the WAL's frame-ordered write. In `batched` fsync mode
+that's well over a million events/s on commodity hardware; in
+`per_write` mode it's bounded by the device fsync rate (a few
+thousand/s).
+
+**Reads are also lock-free.** `get/2`, `fold_range/5`,
+`first_key/1`, `latest_key/1`, `size/1`, and `root_hash/1` go
+straight to the registry-published MST handle and the overlay ETS
+table — no gen_server hop, no waiting behind writes.
+
+**Stateful validators** (`bondy_oplog_validator_crypto` or any
+caller-supplied validator that doesn't export
+`is_stateless/0 -> true`) route through the instance gen_server so
+the validator's per-event state mutations are serialised correctly.
+This is automatic — same `append/2,3` API.
+
+**The `bench/README.md`** has measured numbers and a longer
+discussion of the concurrency model.
+
 ---
 
 ## Reading and querying
@@ -743,12 +782,18 @@ ships two:
 
 ### `bondy_oplog_validator_trust` (default)
 
-No-op. Suitable for closed trusted clusters where every Origin is friendly.
+No-op. Suitable for closed trusted clusters where every Origin is
+friendly. Exports `is_stateless/0 -> true`, so `append/2,3` takes
+the lock-free fast path
+([Concurrency and the lock-free fast path](#concurrency-and-the-lock-free-fast-path)).
 
 ### `bondy_oplog_validator_crypto`
 
 Ed25519 per-event signing with per-Origin hash chain. Suitable for
-Byzantine-tolerant deployments.
+Byzantine-tolerant deployments. The per-Origin chain tail
+(`last_hash`) mutates on every local sign, so the validator is
+**stateful** — `append/2,3` routes through the instance gen_server
+when this validator is configured.
 
 ```erlang
 {Pub, Priv} = crypto:generate_key(eddsa, ed25519),
@@ -767,6 +812,18 @@ Origin      = crypto:hash(sha256, Pub),
     crdt_module    => my_counter
 }).
 ```
+
+### Opting a custom validator into the fast path
+
+Consumer-supplied validators may export the optional
+`is_stateless/0 -> boolean()` callback. Return `true` only when
+`sign_event/2` is a pure function of its arguments — i.e. it
+returns the same `{SignedEvent, State}` for the same `{Event,
+State}` and never mutates any external state. Validators that
+advertise `is_stateless/0 -> true` are eligible for the lock-free
+`append/2,3` path which signs in the caller's process using a
+cached, immutable validator state. The default (callback absent)
+is `false` — signing is routed through the instance gen_server.
 
 ### Equivocation handling
 

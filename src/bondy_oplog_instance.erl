@@ -127,16 +127,17 @@ without protocol changes.
     max_overlay_events :: pos_integer(),
     max_overlay_bytes :: pos_integer(),
     overlay_throttle :: drop,
-    %% In-state mirrors of `ets:info(overlay, size)` and
-    %% `ets:info(overlay, memory)` — read by `overlay_admit/2` on every
-    %% append. Maintained on insert (`stage_to_overlay/2`) and evict
-    %% (`evict_overlay_batch/2`). With `decentralized_counters: true`
-    %% on the overlay table, the equivalent `ets:info/2` calls
-    %% aggregate across all schedulers and grow expensive under
-    %% concurrent appenders — these mirrors keep the admit check
-    %% purely in-process and constant-time.
-    overlay_event_count :: non_neg_integer(),
-    overlay_byte_estimate :: non_neg_integer()
+    %% Atomic mirrors of `ets:info(overlay, size)` and
+    %% `ets:info(overlay, memory)`. Held as `atomics:atomics_ref()` so
+    %% the lock-free `append_fast/2,3` path (caller-side) can update
+    %% them without going through this gen_server. Slot 1: event
+    %% count. Slot 2: byte estimate. Updated on insert
+    %% (`stage_to_overlay/2`) and evict (`evict_overlay_batch/2`).
+    %% With `decentralized_counters: true` on the overlay table, the
+    %% equivalent `ets:info/2` calls aggregate across all schedulers
+    %% and grow expensive under concurrent appenders — these atomic
+    %% mirrors keep the admit check purely lock-free and constant-time.
+    overlay_counters :: atomics:atomics_ref()
 }).
 
 -type backend() :: map | ets | module().
@@ -202,6 +203,7 @@ without protocol changes.
 %% Public API (typically called via `bondy_oplog`)
 -export([append/2]).
 -export([append/3]).
+-export([append_fast/3]).
 -export([append_many/2]).
 -export([append_remote/2]).
 -export([await_apply/1]).
@@ -300,6 +302,166 @@ append(Target, Op) ->
 
 append(Target, Op, Meta) ->
     gen_server:call(target(Target), {append, Op, Meta}, infinity).
+
+?DOC("""
+Lock-free single-event append for instances whose validator is
+stateless (advertises `bondy_oplog_validator:is_stateless/0 -> true`).
+Builds the event in the caller's process, calls the WAL gen_server
+directly, and stages the overlay row inline — skipping the instance
+gen_server hop entirely.
+
+Returns the assigned `event_key()` on success, `{error, backpressure}`
+or `{error, working_set_full}` if backpressure caps would be
+breached, and `{error, wal_unavailable}` if the WAL is mid-restart.
+
+Callers should not use this directly; route through
+`bondy_oplog:append/2,3`, which checks fast-path eligibility from
+the registry and falls back to the gen_server when ineligible.
+""").
+-spec append_fast(
+    instance_id(),
+    bondy_oplog_event:op(),
+    bondy_oplog_event:meta()
+) -> bondy_oplog_event:event_key() | {error, term()}.
+
+append_fast(InstanceId, Op, Meta) when is_binary(InstanceId) ->
+    case bondy_oplog_registry:fast_path(InstanceId) of
+        undefined ->
+            %% Fast path was disabled or torn down — fall back.
+            append(InstanceId, Op, Meta);
+        FastPath ->
+            do_append_fast(InstanceId, FastPath, Op, Meta)
+    end.
+
+%% @private
+do_append_fast(InstanceId, FastPath, Op, Meta) ->
+    #{
+        hlc := HLC,
+        seq := SeqRef,
+        overlay_counters := Ctrs,
+        origin := Origin,
+        validator_module := ValidatorMod,
+        validator_state := ValidatorState,
+        max_overlay_events := MaxEvents,
+        max_overlay_bytes := MaxBytes,
+        max_working_set := MaxWorkingSet
+    } = FastPath,
+    case fast_admit(InstanceId, Ctrs, MaxEvents, MaxBytes, MaxWorkingSet, 1) of
+        ok ->
+            %% Build the event in the caller's process. The HLC + seq
+            %% atomics give us a unique, monotonic key without holding
+            %% the instance gen_server.
+            Hlc = bondy_oplog_hlc:now(HLC),
+            Seq = atomics:add_get(SeqRef, 1, 1),
+            Key = bondy_oplog_event:key(Hlc, Origin, Seq),
+            Event0 = bondy_oplog_event:new(Key, Op, Meta),
+            %% Stateless validator: discard the returned state — by
+            %% contract it equals the cached one.
+            {Event, _} = ValidatorMod:sign_event(Event0, ValidatorState),
+            case fast_wal_append(InstanceId, Event) of
+                ok ->
+                    %% Resolve the overlay tid fresh each call: it can
+                    %% briefly be `undefined` after a one_for_all
+                    %% restart before the new instance's init/1
+                    %% republishes it. Fall back to the gen_server
+                    %% path in that window.
+                    case bondy_oplog_registry:overlay_tab(InstanceId) of
+                        undefined ->
+                            append(InstanceId, Op, Meta);
+                        Tab ->
+                            true = ets:insert(
+                                Tab, [overlay_row(Event, local)]
+                            ),
+                            overlay_counters_add(Ctrs, [Event]),
+                            telemetry:execute(
+                                [bondy_oplog, instance, append],
+                                #{count => 1},
+                                #{instance_id => InstanceId}
+                            ),
+                            Key
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @private
+%% Lock-free analogue of `admit/2` for the fast path. The atomics
+%% counters can be transiently over-read because reads and writes are
+%% not serialised across slot 1/slot 2 — backpressure is best-effort.
+fast_admit(InstanceId, Ctrs, MaxEvents, MaxBytes, MaxWorkingSet, Delta) ->
+    Size = atomics:get(Ctrs, 1),
+    Bytes = atomics:get(Ctrs, 2),
+    case Size + Delta > MaxEvents of
+        true ->
+            emit_overlay_backpressure(
+                InstanceId, events, Size, MaxEvents, Delta
+            ),
+            {error, backpressure};
+        false ->
+            case Bytes >= MaxBytes of
+                true ->
+                    emit_overlay_backpressure(
+                        InstanceId, bytes, Bytes, MaxBytes, Delta
+                    ),
+                    {error, backpressure};
+                false ->
+                    fast_working_set_admit(
+                        InstanceId, Size, MaxWorkingSet, Delta
+                    )
+            end
+    end.
+
+%% @private
+fast_working_set_admit(_InstanceId, _Size, infinity, _Delta) ->
+    ok;
+fast_working_set_admit(InstanceId, OverlaySize, Cap, Delta) ->
+    LiveSize = case bondy_oplog_registry:live_size(InstanceId) of
+        undefined -> 0;
+        N -> N
+    end,
+    Total = LiveSize + OverlaySize,
+    case Total + Delta =< Cap of
+        true ->
+            ok;
+        false ->
+            telemetry:execute(
+                [bondy_oplog, instance, backpressure],
+                #{count => 1},
+                #{
+                    instance_id => InstanceId,
+                    requested => Delta,
+                    live_size => LiveSize,
+                    overlay_size => OverlaySize,
+                    cap => Cap
+                }
+            ),
+            {error, working_set_full}
+    end.
+
+%% @private
+%% Resolves the per-instance WAL pid and calls `append_batch/2`. The
+%% pid can be `undefined` for a window during init or after a
+%% one_for_all subtree restart; in either case fall back to the
+%% instance gen_server, which has the existing `ensure_wal_pid/1`
+%% retry logic.
+fast_wal_append(InstanceId, Event) ->
+    case bondy_oplog_registry:wal_pid(InstanceId) of
+        undefined ->
+            {error, wal_unavailable};
+        WalPid ->
+            try bondy_oplog_wal:append_batch(WalPid, [Event]) of
+                {ok, _Entries} -> ok;
+                {error, _} = Err -> Err
+            catch
+                exit:{noproc, _} -> {error, wal_unavailable};
+                exit:noproc -> {error, wal_unavailable};
+                exit:{normal, _} -> {error, wal_unavailable};
+                exit:{shutdown, _} -> {error, wal_unavailable}
+            end
+    end.
 
 ?DOC("""
 Appends a batch of operations atomically (all-or-nothing within the
@@ -1034,8 +1196,7 @@ init({InstanceId, Opts}) ->
         max_overlay_events = maps:get(max_overlay_events, Opts, 10_000),
         max_overlay_bytes = maps:get(max_overlay_bytes, Opts, 5 * 1024 * 1024),
         overlay_throttle = maps:get(overlay_throttle, Opts, drop),
-        overlay_event_count = 0,
-        overlay_byte_estimate = 0
+        overlay_counters = atomics:new(2, [{signed, false}])
     },
     ok = publish(State),
     %% Publish the overlay tid via a dedicated setter so a stale tid
@@ -1043,7 +1204,43 @@ init({InstanceId, Opts}) ->
     %% outlived a one_for_all restart) is overwritten. Symmetric with
     %% `set_wal_pid/2` / `set_applier_pid/2`.
     ok = bondy_oplog_registry:set_overlay_tab(InstanceId, Overlay),
+    %% Publish the lock-free `append_fast` bundle iff the validator
+    %% advertises `is_stateless/0 -> true`. The bundle lets callers
+    %% build an event, hit the WAL gen_server directly, and stage
+    %% to the overlay without routing through this gen_server.
+    ok = bondy_oplog_registry:set_fast_path(
+        InstanceId, build_fast_path(State)
+    ),
     {ok, State}.
+
+%% @private
+%% Returns a fast-path bundle map when the configured validator is
+%% stateless (the `is_stateless/0` optional callback returns `true`),
+%% or `undefined` otherwise. The bundle is consumed by
+%% `bondy_oplog_instance:append_fast/2,3`.
+build_fast_path(#state{validator_module = ValidatorMod} = State) ->
+    case validator_is_stateless(ValidatorMod) of
+        true ->
+            #{
+                hlc => State#state.hlc,
+                seq => State#state.seq,
+                overlay_counters => State#state.overlay_counters,
+                origin => State#state.origin,
+                validator_module => ValidatorMod,
+                validator_state => State#state.validator_state,
+                max_overlay_events => State#state.max_overlay_events,
+                max_overlay_bytes => State#state.max_overlay_bytes,
+                max_working_set => State#state.max_working_set,
+                overlay_throttle => State#state.overlay_throttle
+            };
+        false ->
+            undefined
+    end.
+
+%% @private
+validator_is_stateless(Mod) ->
+    erlang:function_exported(Mod, is_stateless, 0) andalso
+        Mod:is_stateless().
 
 handle_call(Req, From, State0) ->
     Result = do_handle_call(Req, From, State0),
@@ -1246,9 +1443,10 @@ do_handle_call({truncate_prefix, Watermark}, _From, #state{mst = MST0} = State) 
     }};
 do_handle_call(instance_size, _From, State) ->
     %% MST live_size + overlay rows = total events (disjoint sets;
-    %% see `size/1`). Overlay count is mirrored in state to keep this
-    %% call out of `ets:info/2`'s per-scheduler aggregation path.
-    Total = State#state.live_size + State#state.overlay_event_count,
+    %% see `size/1`). Overlay count read from the shared atomic so
+    %% concurrent `append_fast/2,3` increments are reflected without
+    %% routing through this gen_server.
+    Total = State#state.live_size + atomics:get(State#state.overlay_counters, 1),
     {reply, Total, State};
 do_handle_call(origin, _From, State) ->
     {reply, State#state.origin, State};
@@ -1473,14 +1671,25 @@ do_append_local(#state{} = State0, WalPid, Items) ->
 %% for events that went through the WAL; a future eager-push receiver
 %% will insert with `eager_pushed` so the applier's eviction protocol
 %% can distinguish the two (§10.3 of the applier design).
-stage_to_overlay(#state{overlay = Overlay} = State, Events) ->
+stage_to_overlay(#state{overlay = Overlay, overlay_counters = Ctrs} = State, Events) ->
     Rows = [overlay_row(E, local) || E <- Events],
     true = ets:insert(Overlay, Rows),
+    overlay_counters_add(Ctrs, Events),
+    State.
+
+%% @private
+%% Adds the count + byte delta of `Events` into the shared
+%% `overlay_counters` atomics. Called from this gen_server and from
+%% the `append_fast/2,3` caller-side path.
+overlay_counters_add(Ctrs, Events) ->
     {DeltaCount, DeltaBytes} = overlay_delta(Events),
-    State#state{
-        overlay_event_count = State#state.overlay_event_count + DeltaCount,
-        overlay_byte_estimate = State#state.overlay_byte_estimate + DeltaBytes
-    }.
+    ok = atomics:add(Ctrs, 1, DeltaCount),
+    ok = atomics:add(Ctrs, 2, DeltaBytes),
+    ok.
+
+%% @private
+overlay_counters_get(Ctrs) ->
+    {atomics:get(Ctrs, 1), atomics:get(Ctrs, 2)}.
 
 %% @private
 %% Counts events and sums their approximate on-heap size via
@@ -1577,7 +1786,7 @@ evict_overlay_batch(#state{overlay = undefined} = State, _Events) ->
     State;
 evict_overlay_batch(State, []) ->
     State;
-evict_overlay_batch(#state{overlay = Tab} = State, Events) ->
+evict_overlay_batch(#state{overlay = Tab, overlay_counters = Ctrs} = State, Events) ->
     MaxHlc = lists:foldl(
         fun(E, Acc) ->
             H = bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)),
@@ -1599,19 +1808,35 @@ evict_overlay_batch(#state{overlay = Tab} = State, Events) ->
     end,
     %% Approximate the byte delta: scale the running byte estimate by
     %% the fraction of rows deleted. Self-corrects on the next batch
-    %% because both counters drift together.
-    OldCount = State#state.overlay_event_count,
-    OldBytes = State#state.overlay_byte_estimate,
+    %% because both counters drift together. CAS-style update so we
+    %% race-free reconcile with concurrent `append_fast/2,3` increments
+    %% on the same atomics.
+    overlay_counters_sub(Ctrs, Deleted),
+    State.
+
+%% @private
+%% Removes `Deleted` events from the overlay counters atomics. The
+%% byte delta is computed proportionally to the surviving fraction —
+%% same approximation the prior in-state version used. We snapshot
+%% both slots together, compute the new pair, and write each slot
+%% individually with `atomics:put/3`; a concurrent `append_fast/3`
+%% that races between the two writes can transiently underestimate
+%% byte usage by one increment, which is acceptable (backpressure
+%% accounting is best-effort, not exact).
+overlay_counters_sub(_Ctrs, 0) ->
+    ok;
+overlay_counters_sub(Ctrs, Deleted) ->
+    OldCount = atomics:get(Ctrs, 1),
+    OldBytes = atomics:get(Ctrs, 2),
     NewCount = max(0, OldCount - Deleted),
     NewBytes =
         case OldCount of
             0 -> 0;
             _ -> OldBytes * NewCount div OldCount
         end,
-    State#state{
-        overlay_event_count = NewCount,
-        overlay_byte_estimate = NewBytes
-    }.
+    ok = atomics:put(Ctrs, 1, NewCount),
+    ok = atomics:put(Ctrs, 2, NewBytes),
+    ok.
 
 %% @private
 %% Builds a `{'orelse', {'=:=', '$1', Key1}, {'=:=', '$1', Key2}, ...}`
@@ -1820,22 +2045,24 @@ admit(State, Delta) ->
 %% `{error, backpressure}` when either cap is breached. `drop` is the
 %% only supported strategy; `block` is reserved.
 %%
-%% Reads `overlay_event_count` and `overlay_byte_estimate` straight
-%% from state — both are maintained by `stage_to_overlay/2` and
-%% `evict_overlay_batch/2`. Pre-history this read pair `ets:info/2` on
-%% the overlay table for size and memory; under heavy concurrent
-%% appends those calls aggregated decentralised counters across every
-%% scheduler and dominated the gen_server's per-call cost.
+%% Reads both slots of the shared `overlay_counters` atomics — slot
+%% 1 the event count, slot 2 the byte estimate. Both are maintained
+%% by `stage_to_overlay/2` and `evict_overlay_batch/2`, and by
+%% lock-free `append_fast/2,3` callers. Pre-history this read pair
+%% `ets:info/2` on the overlay table for size and memory; under
+%% heavy concurrent appends those calls aggregated decentralised
+%% counters across every scheduler and dominated the gen_server's
+%% per-call cost.
 overlay_admit(
     #state{
         instance_id = Id,
-        overlay_event_count = Size,
-        overlay_byte_estimate = Bytes,
+        overlay_counters = Ctrs,
         max_overlay_events = MaxEvents,
         max_overlay_bytes = MaxBytes
     },
     Delta
 ) ->
+    {Size, Bytes} = overlay_counters_get(Ctrs),
     case Size + Delta > MaxEvents of
         true ->
             emit_overlay_backpressure(Id, events, Size, MaxEvents, Delta),
@@ -1882,10 +2109,11 @@ backpressure_admit(
     #state{
         max_working_set = Cap,
         live_size = Size,
-        overlay_event_count = OverlaySize
+        overlay_counters = Ctrs
     } = State,
     Delta
 ) ->
+    OverlaySize = atomics:get(Ctrs, 1),
     Total = Size + OverlaySize,
     case Total + Delta =< Cap of
         true ->

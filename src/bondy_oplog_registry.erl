@@ -93,10 +93,36 @@ table's lifecycle tied to a supervisor child.
     %% eviction after applying a batch. Dies with the instance gen_server
     %% (no heir) — the row's `overlay_tab` field is then stale until the
     %% next instance `init/1` republishes a fresh tid.
-    overlay_tab :: ets:tid() | undefined
+    overlay_tab :: ets:tid() | undefined,
+    %% Bundle of per-instance handles + immutable opts that the
+    %% `bondy_oplog_instance:append_fast/2,3` path needs to build
+    %% an event entirely in the caller's process. Set once, at
+    %% instance init, to either:
+    %% - `undefined` when the configured validator is *not* stateless
+    %%   (or the consumer disabled the fast path explicitly): all
+    %%   appends route through the instance gen_server.
+    %% - a map with `hlc`, `seq`, `overlay_counters`, `origin`,
+    %%   `validator_module`, `validator_state`, and the overlay /
+    %%   working-set caps: the caller signs in-process, calls the
+    %%   WAL directly, inserts the overlay row itself, and bumps the
+    %%   shared atomics.
+    fast_path :: undefined | fast_path()
 }).
 
 -record(state, {}).
+
+-type fast_path() :: #{
+    hlc := bondy_oplog_hlc:t(),
+    seq := atomics:atomics_ref(),
+    overlay_counters := atomics:atomics_ref(),
+    origin := bondy_oplog_origin:t(),
+    validator_module := module(),
+    validator_state := term(),
+    max_overlay_events := pos_integer(),
+    max_overlay_bytes := pos_integer(),
+    max_working_set := pos_integer() | infinity,
+    overlay_throttle := drop
+}.
 
 -type entry() :: #{
     instance_id := instance_id(),
@@ -112,10 +138,12 @@ table's lifecycle tied to a supervisor child.
     wal_pid => pid() | undefined,
     applier_pid => pid() | undefined,
     sup_pid => pid() | undefined,
-    overlay_tab => ets:tid() | undefined
+    overlay_tab => ets:tid() | undefined,
+    fast_path => undefined | fast_path()
 }.
 
 -export_type([entry/0]).
+-export_type([fast_path/0]).
 
 %% Lifecycle
 -export([start_link/0]).
@@ -141,6 +169,7 @@ table's lifecycle tied to a supervisor child.
 -export([applier_pid/1]).
 -export([sup_pid/1]).
 -export([overlay_tab/1]).
+-export([fast_path/1]).
 -export([instance_id_by_sup_pid/1]).
 
 %% Sibling pid management
@@ -148,6 +177,7 @@ table's lifecycle tied to a supervisor child.
 -export([set_applier_pid/2]).
 -export([set_sup_pid/2]).
 -export([set_overlay_tab/2]).
+-export([set_fast_path/2]).
 
 %% gen_server callbacks
 -export([init/1]).
@@ -320,6 +350,16 @@ overlay_tab(InstanceId) ->
     field(InstanceId, #entry.overlay_tab).
 
 ?DOC("""
+Returns the cached fast-path bundle for an instance, or `undefined`
+when none is published (callers must route through the instance
+gen_server).
+""").
+-spec fast_path(instance_id()) -> undefined | fast_path().
+
+fast_path(InstanceId) ->
+    field(InstanceId, #entry.fast_path).
+
+?DOC("""
 Reverse lookup: returns the `instance_id()` whose registry row has
 the given `sup_pid`, or `undefined`. Used by the dyn supervisor's
 `stop_instance(Pid)` path to drop the row alongside the supervisor
@@ -385,6 +425,18 @@ no-op so a one_for_all restart race does not crash either process.
 
 set_overlay_tab(InstanceId, Tab) when is_binary(InstanceId) ->
     _ = update_field(InstanceId, #entry.overlay_tab, Tab),
+    ok.
+
+?DOC("""
+Publishes the lock-free `append_fast` bundle for an instance, or
+clears it when the validator is not stateless. Set once by the
+instance gen_server's `init/1`. Same benign-race tolerance as
+`set_overlay_tab/2`.
+""").
+-spec set_fast_path(instance_id(), undefined | fast_path()) -> ok.
+
+set_fast_path(InstanceId, FastPath) when is_binary(InstanceId) ->
+    _ = update_field(InstanceId, #entry.fast_path, FastPath),
     ok.
 
 %% =============================================================================
@@ -461,7 +513,8 @@ to_record(#{instance_id := Id} = M) ->
         wal_pid = maps:get(wal_pid, M, undefined),
         applier_pid = maps:get(applier_pid, M, undefined),
         sup_pid = maps:get(sup_pid, M, undefined),
-        overlay_tab = maps:get(overlay_tab, M, undefined)
+        overlay_tab = maps:get(overlay_tab, M, undefined),
+        fast_path = maps:get(fast_path, M, undefined)
     }.
 
 %% @private
@@ -479,7 +532,8 @@ to_map(#entry{
     wal_pid = WalPid,
     applier_pid = ApplierPid,
     sup_pid = SupPid,
-    overlay_tab = OverlayTab
+    overlay_tab = OverlayTab,
+    fast_path = FastPath
 }) ->
     #{
         instance_id => Id,
@@ -495,5 +549,6 @@ to_map(#entry{
         wal_pid => WalPid,
         applier_pid => ApplierPid,
         sup_pid => SupPid,
-        overlay_tab => OverlayTab
+        overlay_tab => OverlayTab,
+        fast_path => FastPath
     }.

@@ -21,6 +21,7 @@ state, never alters events, and never rejects them.
 -export([sign_event/2]).
 -export([verify_event/2]).
 -export([detect_equivocation/2]).
+-export([is_stateless/0]).
 
 %% =============================================================================
 %% bondy_oplog_validator CALLBACKS
@@ -37,3 +38,10 @@ verify_event(_Event, _State) ->
 
 detect_equivocation(_E1, _E2) ->
     ok.
+
+%% `sign_event/2` is a no-op — same return for the same input, no
+%% external mutation. The `bondy_oplog_instance:append_fast/2,3`
+%% path uses this to decide whether it can sign in the caller
+%% process and bypass the gen_server hop.
+is_stateless() ->
+    true.

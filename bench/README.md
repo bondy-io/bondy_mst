@@ -122,53 +122,76 @@ load metric.
 
 ## Reading the concurrency results
 
-Two structural properties shape what these numbers can and can't tell
-you:
+Two structural properties shape what these numbers mean:
 
-1. **Writes serialise on the instance gen_server.** Every `append/2`
-   call on a given instance goes through one process: the WAL append
-   and the overlay insert happen inline before reply. Multi-writer
-   throughput on a single instance is therefore bounded by the slower
-   of (a) the fsync rate in `per_write` mode (~5 k events/s on
-   commodity NVMe) and (b) the gen_server's serial processing rate.
-2. **Reads are lock-free.** `get/2` and `fold_range/5` go straight to
+1. **Reads are lock-free.** `get/2` and `fold_range/5` go straight to
    the registry-published MST handle and the overlay ETS table — no
    gen_server hop. Per-process reads scale with cores.
+2. **Writes take the lock-free fast path when the validator is
+   stateless** (the default `bondy_oplog_validator_trust` advertises
+   `is_stateless/0 -> true`). The caller builds the event, calls the
+   WAL gen_server directly, and stages the overlay row inline; the
+   instance gen_server is no longer on the hot write path. Only
+   stateful validators (e.g. `bondy_oplog_validator_crypto`) route
+   through the instance gen_server. The WAL gen_server remains the
+   one serialisation point for the WAL file itself.
 
-This produces a real asymmetry under mixed load on a single hot
-instance:
+For the default validator, multi-writer throughput on a single
+instance is bounded by the slower of (a) the fsync rate in
+`per_write` mode (~5 k events/s on commodity NVMe) and (b) the WAL
+gen_server's serial processing rate (millions of events/s in
+`batched` mode).
 
-| Scenario                | Writer ips | Reader ips |
-|-------------------------|------------|------------|
-| `oplog_writers_8`       | ~4,100     | —          |
-| `oplog_readers_16`      | —          | ~2.9 M     |
-| `oplog_mixed_8w_8r`     | **~400**   | ~1.7 M     |
+### Reference numbers (8-writer, 14-scheduler M-series Mac, single
+instance)
 
-The mixed-load writer drop is **not** a bug: 8 CPU-bound readers
-soak up scheduler time that the instance gen_server (and the WAL it
-calls) would otherwise use to ack writers. Mitigations available
-to consumers:
+| Scenario                | `per_write` writer ips | `batched` writer ips |
+|-------------------------|------------------------|----------------------|
+| `oplog_writers_8`       | ~4,200                 | ~4.7 M               |
+| `oplog_mixed_8w_8r`     | ~500                   | ~4.4 M               |
 
-- **Use `batched` fsync** for high-churn namespaces — about 75 %
-  faster than `per_write` in mixed mode, with bounded durability
-  windows (see `bondy_oplog_wal` moduledoc).
-- **Shard hot instances**: the gen_server bottleneck is per-instance,
-  so separate `bondy_oplog` instances do not contend with each
-  other.
-- **Avoid hot single-instance reader floods** if writer latency
-  matters — the lock-free read path will happily absorb millions of
-  reads/sec, but those reductions come out of the same scheduler
-  budget the writer needs.
+In `per_write` mode the bottleneck is the device fsync rate — both
+the standalone and mixed cases are bounded by it (mixed is lower
+because readers compete for the same schedulers). In `batched`
+mode the fast path delivers near-linear scaling: with 8 readers
+running concurrently, writers stay above 4 M/s and readers above
+1 M/s.
 
-Inside the code, the writer-cliff investigation drove three changes
-worth knowing about:
+### When the mixed-load floor still bites
+
+- `per_write` instances cannot exceed the device fsync rate. Use
+  `per_write` only for namespaces that must be on disk before
+  `append/2` returns; everything else should use `batched` plus
+  `await_durable/3` for explicit durability checkpoints.
+- Stateful validators (`bondy_oplog_validator_crypto` and any
+  caller-supplied validator that doesn't export
+  `is_stateless/0 -> true`) bypass the fast path and still serialise
+  through the instance gen_server. Signing is also CPU-heavy
+  (~80 µs/append for Ed25519), so even with batched WAL the
+  per-instance write rate is bounded by signing throughput on a
+  single core.
+- Shard hot instances when a single causal log isn't required —
+  the WAL gen_server is per-instance, so separate `bondy_oplog`
+  instances do not contend with each other.
+
+### Code changes worth knowing about
 
 - `bondy_oplog_cache_ets` opens its table with
   `write_concurrency: true` + `decentralized_counters: true`.
 - `bondy_oplog_instance` / `_wal` / `_applier` set
-  `message_queue_data => off_heap` in `init/1` so mailbox depth does
-  not trigger GCs on the main heap.
+  `message_queue_data => off_heap` in `init/1` so mailbox depth
+  does not trigger GCs on the main heap.
 - `bondy_oplog_instance:maybe_publish/2` compares only the
   *published* fields (`published_fingerprint/1`) — appends mutate
-  per-process counters that no reader sees, so the registry write is
-  skipped.
+  per-process counters that no reader sees, so the registry write
+  is skipped.
+- `bondy_oplog_validator` has an optional `is_stateless/0`
+  callback. Returning `true` opts the validator into the
+  `append_fast/3` path.
+- `bondy_oplog_instance:append_fast/3` is the lock-free append.
+  `bondy_oplog:append/2,3` routes through it unconditionally;
+  the implementation falls back to the gen_server when the
+  registry's `fast_path` bundle is `undefined`.
+- The overlay-row count + byte estimate live in an `atomics`
+  array (`overlay_counters`) so the fast path's backpressure
+  check is a couple of atomic reads.

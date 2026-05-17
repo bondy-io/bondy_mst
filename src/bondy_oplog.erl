@@ -39,26 +39,28 @@ Per-instance event operations pass through to
 
 ## Concurrency model — what to expect
 
-- **Writes serialise per instance.** `append/2,3` and `append_many/2`
-  call into one gen_server (the instance writer). Multi-writer
-  throughput on a single instance is bounded by the slower of the
-  WAL `fsync_mode` rate and the gen_server's serial processing
-  rate. Shard hot work across separate instances if writers need
-  to scale linearly.
+- **Single-event `append/2,3` is lock-free for stateless
+  validators.** The default `bondy_oplog_validator_trust` advertises
+  `is_stateless/0 -> true`; the call builds the event, signs it, and
+  hits the WAL gen_server directly from the caller's process,
+  bypassing the instance gen_server. Stateful validators (e.g.
+  `bondy_oplog_validator_crypto`) fall back to the gen_server path.
 - **Reads are lock-free.** `get/2`, `fold_range/5`, `first_key/1`,
   `latest_key/1`, `size/1`, and `root_hash/1` go straight to the
   registry-published MST handle plus the overlay ETS table — no
   gen_server hop. Readers scale with cores.
-- **High concurrent reader load on a single hot instance will
-  slow that instance's writers**, even though the read path itself
-  is non-blocking: the readers consume scheduler time that the
-  instance gen_server would otherwise use to ack writes. The
-  trade-off is intentional (cheap reads) but worth knowing about
-  when sizing per-instance workloads. See
-  `bench/README.md` "Reading the concurrency results".
-- For high-churn write paths choose `fsync_mode => batched` plus
+- **The WAL gen_server is the sole write serialiser.** Multi-writer
+  throughput on a single instance is bounded by the slower of the
+  WAL `fsync_mode` rate and the WAL gen_server's serial processing
+  rate. In `batched` mode that gen_server processes millions of
+  events/s; in `per_write` mode it is bounded by the device fsync
+  rate (~5 k events/s on commodity NVMe).
+- For high-churn write paths prefer `fsync_mode => batched` plus
   `await_durable/3` over the default `per_write` (see
   `bondy_oplog_wal` moduledoc).
+- Multi-event `append_many/2` and remote-event delivery still
+  route through the instance gen_server; the fast path is
+  single-event-append only at the moment.
 """).
 
 %% Lifecycle
@@ -243,7 +245,7 @@ discover_instances(BaseDir, Strategy) when
     bondy_oplog_event:event_key().
 
 append(InstanceId, Op) ->
-    bondy_oplog_instance:append(InstanceId, Op).
+    bondy_oplog_instance:append_fast(InstanceId, Op, undefined).
 
 -spec append(
     instance_id(),
@@ -252,7 +254,7 @@ append(InstanceId, Op) ->
 ) -> bondy_oplog_event:event_key().
 
 append(InstanceId, Op, Meta) ->
-    bondy_oplog_instance:append(InstanceId, Op, Meta).
+    bondy_oplog_instance:append_fast(InstanceId, Op, Meta).
 
 -spec append_many(
     instance_id(),
