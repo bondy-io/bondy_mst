@@ -58,9 +58,12 @@ Per-instance event operations pass through to
 - For high-churn write paths prefer `fsync_mode => batched` plus
   `await_durable/3` over the default `per_write` (see
   `bondy_oplog_wal` moduledoc).
-- Multi-event `append_many/2` and remote-event delivery still
-  route through the instance gen_server; the fast path is
-  single-event-append only at the moment.
+- `append_many/2` also takes the lock-free fast path when the
+  validator is stateless — every event is signed in the caller
+  process, the WAL writes one atomic frame, and every overlay
+  row is staged in a single `ets:insert/2`. Remote-event delivery
+  (`append_remote/2`) still routes through the applier+instance
+  gen_server because the verify+conflict path is stateful.
 """).
 
 %% Lifecycle
@@ -262,7 +265,7 @@ append(InstanceId, Op, Meta) ->
 ) -> [bondy_oplog_event:event_key()].
 
 append_many(InstanceId, Items) ->
-    bondy_oplog_instance:append_many(InstanceId, Items).
+    bondy_oplog_instance:append_many_fast(InstanceId, Items).
 
 -spec append_remote(instance_id(), bondy_oplog_event:t()) ->
     ok | {error, term()}.

@@ -205,6 +205,7 @@ without protocol changes.
 -export([append/3]).
 -export([append_fast/3]).
 -export([append_many/2]).
+-export([append_many_fast/2]).
 -export([append_remote/2]).
 -export([await_apply/1]).
 -export([await_apply/2]).
@@ -358,7 +359,7 @@ do_append_fast(InstanceId, FastPath, Op, Meta) ->
             %% Stateless validator: discard the returned state — by
             %% contract it equals the cached one.
             {Event, _} = ValidatorMod:sign_event(Event0, ValidatorState),
-            case fast_wal_append(InstanceId, Event) of
+            case fast_wal_append_batch(InstanceId, [Event]) of
                 ok ->
                     %% Resolve the overlay tid fresh each call: it can
                     %% briefly be `undefined` after a one_for_all
@@ -386,6 +387,115 @@ do_append_fast(InstanceId, FastPath, Op, Meta) ->
         {error, _} = Err ->
             Err
     end.
+
+?DOC("""
+Lock-free batch append. Same eligibility as `append_fast/3`: the
+instance's validator must advertise `is_stateless/0 -> true`. The
+caller mints every event's `{HLC, Origin, Seq}` key, signs each
+event in-process, ships the whole batch through the WAL as one
+atomic frame, inserts every overlay row in a single `ets:insert/2`,
+and bumps the overlay-counters atomics once.
+
+The WAL's `append_batch/2` is all-or-nothing: either every event
+becomes durable or the entire batch is rejected. The fast path
+inherits that semantic — on `{error, _}` no overlay row is written
+and the caller can retry. HLCs and Seqs that were minted for a
+rejected batch are not recycled; gaps in those sequences are
+benign (the keys are global identifiers, not array indices).
+
+Returns the assigned `event_key()` list in input order, or
+`{error, backpressure | working_set_full | wal_unavailable | _}`.
+
+Routed through automatically by `bondy_oplog:append_many/2` when
+the registry exposes a fast-path bundle; the consumer-facing API
+stays unchanged.
+""").
+-spec append_many_fast(
+    instance_id(),
+    [{bondy_oplog_event:op(), bondy_oplog_event:meta()}]
+) -> [bondy_oplog_event:event_key()] | {error, term()}.
+
+append_many_fast(_InstanceId, []) ->
+    [];
+append_many_fast(InstanceId, Items)
+        when is_binary(InstanceId), is_list(Items) ->
+    case bondy_oplog_registry:fast_path(InstanceId) of
+        undefined ->
+            %% Stateful validator or fast-path torn down — defer to
+            %% the gen_server path which threads validator state
+            %% through the batch.
+            append_many(InstanceId, Items);
+        FastPath ->
+            do_append_many_fast(InstanceId, FastPath, Items)
+    end.
+
+%% @private
+do_append_many_fast(InstanceId, FastPath, Items) ->
+    #{
+        hlc := HLC,
+        seq := SeqRef,
+        overlay_counters := Ctrs,
+        origin := Origin,
+        validator_module := ValidatorMod,
+        validator_state := ValidatorState,
+        max_overlay_events := MaxEvents,
+        max_overlay_bytes := MaxBytes,
+        max_working_set := MaxWorkingSet
+    } = FastPath,
+    Delta = length(Items),
+    case fast_admit(InstanceId, Ctrs, MaxEvents, MaxBytes, MaxWorkingSet, Delta) of
+        ok ->
+            {Events, Keys} = build_events_fast(
+                HLC, SeqRef, Origin, ValidatorMod, ValidatorState, Items
+            ),
+            case fast_wal_append_batch(InstanceId, Events) of
+                ok ->
+                    case bondy_oplog_registry:overlay_tab(InstanceId) of
+                        undefined ->
+                            %% Subtree mid-restart between WAL ack
+                            %% and overlay republish. The events are
+                            %% already durable; fall back to the
+                            %% gen_server which will reconcile via
+                            %% the applier. The caller sees the same
+                            %% effect as if the fast path had been
+                            %% disabled to begin with.
+                            append_many(InstanceId, Items);
+                        Tab ->
+                            Rows = [overlay_row(E, local) || E <- Events],
+                            true = ets:insert(Tab, Rows),
+                            overlay_counters_add(Ctrs, Events),
+                            telemetry:execute(
+                                [bondy_oplog, instance, append],
+                                #{count => Delta},
+                                #{instance_id => InstanceId}
+                            ),
+                            Keys
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @private
+%% Mints `{Event, Key}` pairs for every item: one HLC tick + seq
+%% bump + sign per item, in input order. The validator state is
+%% immutable (stateless validators by contract), so we pass the
+%% same `ValState` for every call and discard the returned state.
+build_events_fast(HLC, SeqRef, Origin, Mod, ValState, Items) ->
+    Pairs = lists:map(
+        fun({Op, Meta}) ->
+            Hlc = bondy_oplog_hlc:now(HLC),
+            Seq = atomics:add_get(SeqRef, 1, 1),
+            Key = bondy_oplog_event:key(Hlc, Origin, Seq),
+            Event0 = bondy_oplog_event:new(Key, Op, Meta),
+            {Event, _} = Mod:sign_event(Event0, ValState),
+            {Event, Key}
+        end,
+        Items
+    ),
+    {[E || {E, _} <- Pairs], [K || {_, K} <- Pairs]}.
 
 %% @private
 %% Lock-free analogue of `admit/2` for the fast path. The atomics
@@ -444,15 +554,15 @@ fast_working_set_admit(InstanceId, OverlaySize, Cap, Delta) ->
 %% @private
 %% Resolves the per-instance WAL pid and calls `append_batch/2`. The
 %% pid can be `undefined` for a window during init or after a
-%% one_for_all subtree restart; in either case fall back to the
-%% instance gen_server, which has the existing `ensure_wal_pid/1`
-%% retry logic.
-fast_wal_append(InstanceId, Event) ->
+%% one_for_all subtree restart; in either case return
+%% `{error, wal_unavailable}` so the caller can fall back to the
+%% instance gen_server path (which has `ensure_wal_pid/1` retry).
+fast_wal_append_batch(InstanceId, Events) ->
     case bondy_oplog_registry:wal_pid(InstanceId) of
         undefined ->
             {error, wal_unavailable};
         WalPid ->
-            try bondy_oplog_wal:append_batch(WalPid, [Event]) of
+            try bondy_oplog_wal:append_batch(WalPid, Events) of
                 {ok, _Entries} -> ok;
                 {error, _} = Err -> Err
             catch

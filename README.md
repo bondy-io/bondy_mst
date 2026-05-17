@@ -435,21 +435,22 @@ Optional working-set cap:
 
 ### Concurrency and the lock-free fast path
 
-`bondy_oplog:append/2,3` is **lock-free** when the configured
-validator advertises `is_stateless/0 -> true` — the default
-`bondy_oplog_validator_trust` does. The caller process builds the
-event, signs it in-process, calls the WAL gen_server directly, and
-stages the overlay row inline. The instance gen_server is not on the
-hot write path.
+`bondy_oplog:append/2,3` and `append_many/2` are **lock-free** when
+the configured validator advertises `is_stateless/0 -> true` — the
+default `bondy_oplog_validator_trust` does. The caller process
+builds the event(s), signs them in-process, calls the WAL gen_server
+directly, and stages the overlay row(s) inline. The instance
+gen_server is not on the hot write path.
 
 Concretely, what this means at runtime:
 
-| Path                      | Hops | Bottleneck                              |
-|---------------------------|------|-----------------------------------------|
-| `append/2,3` (stateless)  | 1    | WAL gen_server (file + fsync)           |
-| `append/2,3` (stateful)   | 2    | Instance gen_server, then the WAL       |
-| `append_many/2`           | 2    | Instance gen_server (atomic batch)      |
-| `append_remote/2`         | 1    | Applier (out-of-band)                   |
+| Path                          | Hops | Bottleneck                          |
+|-------------------------------|------|-------------------------------------|
+| `append/2,3` (stateless)      | 1    | WAL gen_server (file + fsync)       |
+| `append/2,3` (stateful)       | 2    | Instance gen_server, then the WAL   |
+| `append_many/2` (stateless)   | 1    | WAL gen_server (one batch frame)    |
+| `append_many/2` (stateful)    | 2    | Instance gen_server, then the WAL   |
+| `append_remote/2`             | 1    | Applier (out-of-band)               |
 
 The WAL gen_server is still a serialisation point — every appender
 queues for the WAL's frame-ordered write. In `batched` fsync mode
@@ -466,7 +467,7 @@ table — no gen_server hop, no waiting behind writes.
 caller-supplied validator that doesn't export
 `is_stateless/0 -> true`) route through the instance gen_server so
 the validator's per-event state mutations are serialised correctly.
-This is automatic — same `append/2,3` API.
+This is automatic — same `append/2,3` and `append_many/2` API.
 
 **The `bench/README.md`** has measured numbers and a longer
 discussion of the concurrency model.
