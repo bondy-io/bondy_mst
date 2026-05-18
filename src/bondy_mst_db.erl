@@ -109,7 +109,12 @@ read(NS, Index, Key) ->
 read(NS, Index, Key, _Opts) ->
     case resolve_shard(NS, Index, Key) of
         {ok, Entry} ->
-            do_read(Entry, Key);
+            {_NS, _Idx, Shard} = bondy_mst_db_registry:entry_key(Entry),
+            T0 = erlang:monotonic_time(microsecond),
+            {Result, Source} = do_read_traced(Entry, Key),
+            DurUs = erlang:monotonic_time(microsecond) - T0,
+            emit_read_event(NS, Index, Shard, Source, DurUs, Result),
+            Result;
         {error, _} = Err ->
             Err
     end.
@@ -152,21 +157,34 @@ read_batch(Reads, Opts) when is_list(Reads), is_map(Opts) ->
     Consistency = maps:get(consistency, Opts, eventual),
     Fence = maps:get(fence, Opts, infinity),
     {EffectiveMaxLag, EffectiveSkew} = apply_consistency(Consistency, Opts),
-    %% Per-key freshness: only the shards the batch actually touches
-    %% participate in the staleness check. A cold shard elsewhere in
-    %% the namespace cannot fail a batch that does not read from it.
-    case ensure_fresh_predicate_for_keys(Reads, EffectiveMaxLag) of
-        {error, _} = Err ->
-            Err;
+    T0 = erlang:monotonic_time(microsecond),
+    %% Per-namespace policy (§15): `cp` namespaces refuse `eventual`
+    %% reads to prevent unfenced staleness. `causal` and `snapshot`
+    %% are allowed under either class.
+    Result = case check_consistency_class(Reads, Consistency) of
+        {error, _} = ClassErr ->
+            ClassErr;
         ok ->
-            Results = compute_batch(Reads, Fence),
-            case check_skew(Results, EffectiveSkew) of
-                ok ->
-                    {ok, Results, Fence};
+            %% Per-key freshness: only the shards the batch actually
+            %% touches participate in the staleness check. A cold
+            %% shard elsewhere in the namespace cannot fail a batch
+            %% that does not read from it.
+            case ensure_fresh_predicate_for_keys(Reads, EffectiveMaxLag) of
                 {error, _} = Err ->
-                    Err
+                    Err;
+                ok ->
+                    Results = compute_batch(Reads, Fence),
+                    case check_skew(Results, EffectiveSkew) of
+                        ok ->
+                            {ok, Results, Fence};
+                        {error, _} = SkewErr ->
+                            SkewErr
+                    end
             end
-    end.
+    end,
+    DurUs = erlang:monotonic_time(microsecond) - T0,
+    emit_read_batch_event(Reads, Fence, Result, DurUs),
+    Result.
 
 
 -doc("""
@@ -253,7 +271,12 @@ raise `limit` or scatter via `shard => N` and merge themselves.
 range(NS, Index, {Low, High}, Opts) when is_map(Opts) ->
     case resolve_shard_for_range(NS, Index, Low, Opts) of
         {ok, Entry} ->
-            do_range(Entry, Low, High, Opts);
+            {_NS, _Idx, Shard} = bondy_mst_db_registry:entry_key(Entry),
+            T0 = erlang:monotonic_time(microsecond),
+            Result = do_range(Entry, Low, High, Opts),
+            DurUs = erlang:monotonic_time(microsecond) - T0,
+            emit_range_event(NS, Index, Shard, Result, DurUs),
+            Result;
         {error, _} = Err ->
             Err
     end.
@@ -285,12 +308,16 @@ out of scope.
    | {error, term()}.
 
 read_at_hlc(NS, Key, T) when is_integer(T), T >= 0 ->
-    case resolve_shard(NS, primary, Key) of
+    T0 = erlang:monotonic_time(microsecond),
+    Result = case resolve_shard(NS, primary, Key) of
         {ok, Entry} ->
             do_read_at_hlc(Entry, Key, T);
         {error, _} = Err ->
             Err
-    end.
+    end,
+    DurUs = erlang:monotonic_time(microsecond) - T0,
+    emit_read_at_hlc_event(NS, Result, DurUs),
+    Result.
 
 
 -doc("""
@@ -317,6 +344,7 @@ ensure_fresh(_NSs, infinity) ->
     ok;
 ensure_fresh(NSs, MaxLag)
         when is_list(NSs), is_integer(MaxLag), MaxLag >= 0 ->
+    T0 = erlang:monotonic_time(microsecond),
     Now = erlang:monotonic_time(millisecond),
     Stale = lists:usort(
         [NS
@@ -324,6 +352,8 @@ ensure_fresh(NSs, MaxLag)
             Entry <- bondy_mst_db_registry:shards_for(NS),
             (Now - atomics:get(
                 bondy_mst_db_registry:entry_ae_atomics(Entry), 1)) > MaxLag]),
+    DurUs = erlang:monotonic_time(microsecond) - T0,
+    emit_ensure_fresh_event(length(NSs), length(Stale), DurUs),
     case Stale of
         [] -> ok;
         _  -> {stale, Stale}
@@ -346,12 +376,20 @@ ensure_fresh_for_keys(_Reads, infinity) ->
     ok;
 ensure_fresh_for_keys(Reads, MaxLag)
         when is_list(Reads), is_integer(MaxLag), MaxLag >= 0 ->
+    T0 = erlang:monotonic_time(microsecond),
     Now = erlang:monotonic_time(millisecond),
     Touched = touched_shards(Reads),
     Stale = lists:usort(
         [NS
          || {NS, Ae} <- Touched,
             (Now - atomics:get(Ae, 1)) > MaxLag]),
+    DurUs = erlang:monotonic_time(microsecond) - T0,
+    %% `namespaces_checked` here is the count of distinct shards we
+    %% actually inspected — not the namespace count — because
+    %% `ensure_fresh_for_keys/2` operates per-shard, not per-namespace.
+    %% A consumer comparing the two events should treat this number as
+    %% "shards inspected" semantically.
+    emit_ensure_fresh_event(length(Touched), length(Stale), DurUs),
     case Stale of
         [] -> ok;
         _  -> {stale, Stale}
@@ -446,31 +484,42 @@ resolve_shard(NS, Index, Key) ->
     end.
 
 
-do_read(Entry, Key) ->
+do_read_traced(Entry, Key) ->
     CA = bondy_mst_db_registry:entry_cache_adapter(Entry),
     CH = bondy_mst_db_registry:entry_cache_handle(Entry),
     case CA:get(CH, Key) of
         {ok, {Value, Hlc}} ->
-            {Value, Hlc};
+            {{Value, Hlc}, cache};
         not_found ->
-            slow_read(Entry, Key)
+            slow_read_traced(Entry, Key)
     end.
 
 
-slow_read(Entry, Key) ->
+slow_read_traced(Entry, Key) ->
     Strategy = bondy_mst_db_registry:entry_fold_module(Entry),
-    {ProjValue, ProjHlc} = read_projection(Entry, Key, Strategy),
+    {ProjValue, ProjHlc, ProjHadFrame} = read_projection(Entry, Key, Strategy),
     OverlayEvents = read_overlay(Entry, Key, ProjHlc),
+    OverlayApplied = OverlayEvents =/= [],
     {Value, Hlc} = fold_events(Strategy, ProjValue, ProjHlc, OverlayEvents),
+    Source = source_for(ProjHadFrame, OverlayApplied),
     case Value of
         undefined ->
-            undefined;
+            {undefined, Source};
         _ ->
             CA = bondy_mst_db_registry:entry_cache_adapter(Entry),
             CH = bondy_mst_db_registry:entry_cache_handle(Entry),
             ok = CA:put(CH, Key, {Value, Hlc}),
-            {Value, Hlc}
+            {{Value, Hlc}, Source}
     end.
+
+
+%% `projection` covers both "projection had a frame, no overlay" and the
+%% degenerate "neither projection nor overlay" case — the projection was
+%% the last source consulted in either path.
+source_for(true,  false) -> projection;
+source_for(true,  true)  -> projection_with_overlay;
+source_for(false, true)  -> overlay_only;
+source_for(false, false) -> projection.
 
 
 read_projection(Entry, Key, Strategy) ->
@@ -478,10 +527,10 @@ read_projection(Entry, Key, Strategy) ->
     PH = bondy_mst_db_registry:entry_projection_handle(Entry),
     case PA:get(PH, Key) of
         not_found ->
-            {bondy_oplog_fold:initial_value(Strategy), 0};
+            {bondy_oplog_fold:initial_value(Strategy), 0, false};
         {ok, Frame} ->
             {Hlc, Body} = bondy_oplog_cell_frame:decode(Frame),
-            {bondy_oplog_fold:decode_state(Strategy, Body), Hlc}
+            {bondy_oplog_fold:decode_state(Strategy, Body), Hlc, true}
     end.
 
 
@@ -594,7 +643,7 @@ fenced_read(Entry, Key, Fence) ->
     %% Fenced reads bypass the cache: the cache holds the "now" value,
     %% not the as-of-fence value. The slow path always runs.
     Strategy = bondy_mst_db_registry:entry_fold_module(Entry),
-    {ProjValue, ProjHlc} = read_projection(Entry, Key, Strategy),
+    {ProjValue, ProjHlc, _ProjHadFrame} = read_projection(Entry, Key, Strategy),
     OverlayEvents = fenced_overlay(Entry, Key, ProjHlc, Fence),
     {Value, Hlc} = fold_events(Strategy, ProjValue, ProjHlc, OverlayEvents),
     case Value of
@@ -755,7 +804,7 @@ emit_range_cell(Strategy, Frame, Events) ->
 
 do_read_at_hlc(Entry, Key, T) ->
     Strategy = bondy_mst_db_registry:entry_fold_module(Entry),
-    {ProjValue, ProjHlc} = read_projection(Entry, Key, Strategy),
+    {ProjValue, ProjHlc, _ProjHadFrame} = read_projection(Entry, Key, Strategy),
     case ProjHlc > T of
         true ->
             {error, {historical_read_unavailable, ProjHlc, T}};
@@ -774,6 +823,130 @@ do_read_at_hlc(Entry, Key, T) ->
 %% =============================================================================
 %% Write-through
 %% =============================================================================
+
+%% Walk distinct namespaces in the batch; the first one that declares
+%% `cp` and conflicts with an `eventual` request short-circuits with the
+%% violation. `causal` and `snapshot` always pass — they invoke the
+%% freshness predicate which is sufficient for `cp`'s guarantee.
+check_consistency_class(_Reads, Consistency)
+        when Consistency =/= eventual ->
+    ok;
+check_consistency_class(Reads, eventual) ->
+    NSs = lists:usort([NS || {NS, _Idx, _K} <- Reads]),
+    case lists:dropwhile(
+        fun(NS) -> bondy_mst_db_registry:consistency_class(NS) =/= cp end,
+        NSs
+    ) of
+        [] -> ok;
+        [CpNs | _] ->
+            {error, {consistency_class_violation, CpNs, cp, eventual}}
+    end.
+
+
+%% =============================================================================
+%% Telemetry (`MST_DB_DESIGN.md` §16)
+%% =============================================================================
+
+emit_read_event(NS, Index, Shard, Source, DurUs, Result) ->
+    {Hit, ValueBytes} = case Result of
+        {Value, _Hlc} when Value =/= undefined ->
+            {Source =:= cache, erlang:external_size(Value)};
+        _ ->
+            {false, 0}
+    end,
+    telemetry:execute(
+        [bondy_mst_db, read],
+        #{duration_us => DurUs, hit => Hit, value_bytes => ValueBytes},
+        #{namespace => NS, index => Index, shard => Shard, source => Source}
+    ).
+
+
+emit_read_batch_event(Reads, Fence, Result, DurUs) ->
+    NSs = lists:usort([NS || {NS, _Idx, _K} <- Reads]),
+    {ReadCount, TotalBytes, SkewMs} = batch_summary(Result),
+    telemetry:execute(
+        [bondy_mst_db, read_batch],
+        #{duration_us => DurUs,
+          read_count => ReadCount,
+          total_bytes => TotalBytes,
+          skew_ms => SkewMs},
+        #{namespaces => NSs, fence_hlc => Fence}
+    ).
+
+
+%% On error we report the request shape but cannot describe values: the
+%% batch was rejected before any cells were read. `read_count` falls back
+%% to the requested length so the event still reflects what was asked.
+batch_summary({ok, Results, _Fence}) ->
+    Values = maps:values(Results),
+    Bytes = lists:foldl(
+        fun
+            ({V, _H}, Acc) when V =/= undefined -> Acc + erlang:external_size(V);
+            (_, Acc) -> Acc
+        end,
+        0,
+        Values
+    ),
+    Hlcs = collect_hlcs(Values),
+    Skew = case Hlcs of
+        [] -> 0;
+        _ ->
+            Phys = [physical(H) || H <- Hlcs],
+            lists:max(Phys) - lists:min(Phys)
+    end,
+    {length(Values), Bytes, Skew};
+batch_summary(_Err) ->
+    {0, 0, 0}.
+
+
+emit_range_event(NS, Index, Shard, Result, DurUs) ->
+    {Entries, Bytes} = case Result of
+        {ok, Rows} ->
+            B = lists:foldl(
+                fun({_K, V, _H}, Acc) -> Acc + erlang:external_size(V) end,
+                0,
+                Rows
+            ),
+            {length(Rows), B};
+        _ ->
+            {0, 0}
+    end,
+    telemetry:execute(
+        [bondy_mst_db, range],
+        #{duration_us => DurUs,
+          entries_returned => Entries,
+          scanned_bytes => Bytes},
+        #{namespace => NS, index => Index, shard => Shard}
+    ).
+
+
+emit_read_at_hlc_event(NS, Result, DurUs) ->
+    {Refused, Reason} = case Result of
+        {ok, _, _}                                 -> {false, undefined};
+        {error, {historical_read_unavailable, _, _}} ->
+            {true, historical_read_unavailable};
+        {error, {Tag, _, _}}                       -> {true, Tag};
+        {error, {Tag, _}}                          -> {true, Tag};
+        {error, Tag} when is_atom(Tag)             -> {true, Tag};
+        {error, _}                                 -> {true, unknown};
+        _                                          -> {true, unknown}
+    end,
+    telemetry:execute(
+        [bondy_mst_db, read_at_hlc],
+        #{duration_us => DurUs, refused => Refused},
+        #{namespace => NS, refusal_reason => Reason}
+    ).
+
+
+emit_ensure_fresh_event(NSsChecked, StaleCount, DurUs) ->
+    telemetry:execute(
+        [bondy_mst_db, ensure_fresh],
+        #{duration_us => DurUs,
+          namespaces_checked => NSsChecked,
+          stale_count => StaleCount},
+        #{}
+    ).
+
 
 do_write_through(Entry, Key, Event) ->
     CA = bondy_mst_db_registry:entry_cache_adapter(Entry),

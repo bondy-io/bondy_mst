@@ -106,7 +106,15 @@ table's lifecycle tied to a supervisor child.
     %%   working-set caps: the caller signs in-process, calls the
     %%   WAL directly, inserts the overlay row itself, and bumps the
     %%   shared atomics.
-    fast_path :: undefined | fast_path()
+    fast_path :: undefined | fast_path(),
+    %% Substrate read-side freshness targets (MST_DB_DESIGN §11/§18
+    %% items 6 & 8). The list of `{Namespace, Index, Shard}` tuples
+    %% that the applier (on every successful commit) and AE rounds
+    %% (on every successful sync) bump via
+    %% `bondy_mst_db_registry:bump_ae_targets/1,2`. Published once at
+    %% instance init via `set_ae_targets/2`; unchanged for the
+    %% instance's lifetime. Empty list = wiring disabled.
+    ae_targets = [] :: [{atom(), atom(), non_neg_integer()}]
 }).
 
 -record(state, {}).
@@ -139,7 +147,8 @@ table's lifecycle tied to a supervisor child.
     applier_pid => pid() | undefined,
     sup_pid => pid() | undefined,
     overlay_tab => ets:tid() | undefined,
-    fast_path => undefined | fast_path()
+    fast_path => undefined | fast_path(),
+    ae_targets => [{atom(), atom(), non_neg_integer()}]
 }.
 
 -export_type([entry/0]).
@@ -170,6 +179,7 @@ table's lifecycle tied to a supervisor child.
 -export([sup_pid/1]).
 -export([overlay_tab/1]).
 -export([fast_path/1]).
+-export([ae_targets/1]).
 -export([instance_id_by_sup_pid/1]).
 %% Composite reads — pull several fields in one ETS lookup. Used by
 %% hot lock-free reader paths in `bondy_oplog_instance` that would
@@ -183,6 +193,7 @@ table's lifecycle tied to a supervisor child.
 -export([set_sup_pid/2]).
 -export([set_overlay_tab/2]).
 -export([set_fast_path/2]).
+-export([set_ae_targets/2]).
 
 %% gen_server callbacks
 -export([init/1]).
@@ -365,6 +376,20 @@ fast_path(InstanceId) ->
     field(InstanceId, #entry.fast_path).
 
 ?DOC("""
+Returns the AE-target list stored for `InstanceId`, or `[]` when the
+row exists but the consumer has not configured targets, or
+`undefined` when no row exists. Used by `bondy_oplog_applier` (commit
+boundary) and `bondy_oplog_sync_session` (round completion) to know
+which substrate shards to bump via
+`bondy_mst_db_registry:bump_ae_targets/2`.
+""").
+-spec ae_targets(instance_id()) ->
+    [{atom(), atom(), non_neg_integer()}] | undefined.
+
+ae_targets(InstanceId) ->
+    field(InstanceId, #entry.ae_targets).
+
+?DOC("""
 Returns `{OverlayTab, MST}` for an instance in **one** ETS lookup,
 or `undefined` when the row is absent. Used by the hot lock-free
 read paths (`get/2`, `fold_range/5`, `first_key/1`,
@@ -478,6 +503,20 @@ set_fast_path(InstanceId, FastPath) when is_binary(InstanceId) ->
     _ = update_field(InstanceId, #entry.fast_path, FastPath),
     ok.
 
+?DOC("""
+Stores the substrate read-side AE targets for `InstanceId` (`MST_DB_DESIGN.md`
+§18 items 6 & 8). Symmetric with `set_overlay_tab/2`; published once
+at instance init and never updated for the instance's lifetime.
+""").
+-spec set_ae_targets(
+    instance_id(), [{atom(), atom(), non_neg_integer()}]
+) -> ok.
+
+set_ae_targets(InstanceId, Targets) when is_binary(InstanceId),
+                                          is_list(Targets) ->
+    _ = update_field(InstanceId, #entry.ae_targets, Targets),
+    ok.
+
 %% =============================================================================
 %% gen_server CALLBACKS
 %% =============================================================================
@@ -553,7 +592,8 @@ to_record(#{instance_id := Id} = M) ->
         applier_pid = maps:get(applier_pid, M, undefined),
         sup_pid = maps:get(sup_pid, M, undefined),
         overlay_tab = maps:get(overlay_tab, M, undefined),
-        fast_path = maps:get(fast_path, M, undefined)
+        fast_path = maps:get(fast_path, M, undefined),
+        ae_targets = maps:get(ae_targets, M, [])
     }.
 
 %% @private
@@ -572,7 +612,8 @@ to_map(#entry{
     applier_pid = ApplierPid,
     sup_pid = SupPid,
     overlay_tab = OverlayTab,
-    fast_path = FastPath
+    fast_path = FastPath,
+    ae_targets = AeTargets
 }) ->
     #{
         instance_id => Id,
@@ -589,5 +630,6 @@ to_map(#entry{
         applier_pid => ApplierPid,
         sup_pid => SupPid,
         overlay_tab => OverlayTab,
-        fast_path => FastPath
+        fast_path => FastPath,
+        ae_targets => AeTargets
     }.

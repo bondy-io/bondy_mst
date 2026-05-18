@@ -84,7 +84,13 @@ does not police this.
     pattern :: pattern()
 }).
 
--record(state, {}).
+-record(state, {
+    %% Fresh `make_ref()` per gen_server start. Exposed via
+    %% `current_epoch/0` and broadcast on `bondy_mst_db_events` under
+    %% topic `bondy_mst_db_dispatcher_started`. Subscribers cache the
+    %% epoch and treat a change as "dispatcher was restarted; re-subscribe".
+    epoch :: reference()
+}).
 
 -type pattern() :: all
                  | {prefix, binary() | list()}
@@ -100,6 +106,10 @@ does not police this.
 -export([unsubscribe/1]).
 -export([publish/4]).
 -export([subscription_count/0]).
+-export([subscription_count/1]).
+
+%% Restart-recovery protocol (`MST_DB_DESIGN.md` §12.3, §18 item 11).
+-export([current_epoch/0]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
@@ -163,6 +173,56 @@ subscription_count() ->
     ets:info(?TABLE, size).
 
 
+-doc("""
+Number of live subscriptions for the given namespace. The walk uses the
+same match-spec as the per-publish select, so this is `O(table_size)`
+in the worst case; intended for low-frequency callers (metrics tick).
+""").
+-spec subscription_count(atom()) -> non_neg_integer().
+
+subscription_count(NS) when is_atom(NS) ->
+    ets:select_count(
+        ?TABLE,
+        [{#sub{ns = NS, _ = '_'}, [], [true]}]
+    ).
+
+
+-doc("""
+Return the current epoch reference. A new epoch is allocated on each
+gen_server start and broadcast on
+`bondy_mst_db_events:notify(bondy_mst_db_dispatcher_started, Epoch)`.
+Subscribers cache the epoch and treat any change as "dispatcher was
+restarted; re-subscribe".
+""").
+-spec current_epoch() -> reference().
+
+current_epoch() ->
+    gen_server:call(?MODULE, current_epoch).
+
+
+%% =============================================================================
+%% Telemetry (`MST_DB_DESIGN.md` §16)
+%% =============================================================================
+
+emit_subscribe_event(NS, Pattern) ->
+    PatType = pattern_type(Pattern),
+    Current = subscription_count(NS),
+    telemetry:execute(
+        [bondy_mst_db, subscribe],
+        #{},
+        #{namespace => NS,
+          pattern_type => PatType,
+          current_subscribers => Current}
+    ).
+
+
+pattern_type(all)            -> all;
+pattern_type({prefix, _})    -> prefix;
+pattern_type({match, _})     -> match;
+pattern_type({exact, _})     -> exact;
+pattern_type(_)              -> unknown.
+
+
 %% =============================================================================
 %% Pattern matching
 %% =============================================================================
@@ -201,7 +261,9 @@ init([]) ->
         {keypos, #sub.ref},
         {read_concurrency, true}
     ]),
-    {ok, #state{}}.
+    Epoch = erlang:make_ref(),
+    self() ! {broadcast_started, Epoch},
+    {ok, #state{epoch = Epoch}}.
 
 handle_call({subscribe, NS, Pid, Pattern}, _From, State) ->
     Ref = erlang:make_ref(),
@@ -214,6 +276,7 @@ handle_call({subscribe, NS, Pid, Pattern}, _From, State) ->
         pattern = Pattern
     },
     true = ets:insert(?TABLE, Row),
+    emit_subscribe_event(NS, Pattern),
     {reply, {ok, Ref}, State};
 
 handle_call({unsubscribe, Ref}, _From, State) ->
@@ -226,12 +289,21 @@ handle_call({unsubscribe, Ref}, _From, State) ->
     end,
     {reply, ok, State};
 
+handle_call(current_epoch, _From, #state{epoch = E} = State) ->
+    {reply, E, State};
+
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown}, State}.
 
 handle_cast(_, State) ->
     {noreply, State}.
 
+handle_info({broadcast_started, Epoch}, State) ->
+    catch bondy_mst_db_events:notify(
+        bondy_mst_db_dispatcher_started,
+        Epoch
+    ),
+    {noreply, State};
 handle_info({'DOWN', Mon, process, _Pid, _Reason}, State) ->
     MS = [{#sub{monitor = Mon, _ = '_'}, [], [true]}],
     _ = ets:select_delete(?TABLE, MS),

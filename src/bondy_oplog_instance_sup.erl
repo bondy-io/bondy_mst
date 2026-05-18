@@ -231,9 +231,19 @@ applier_opts(InstanceId, Opts) ->
     %% to locate the on-disk `consumer.offset`.
     WalDir = iolist_to_binary(filename:join(Base, InstanceId)),
     Applier0 = maps:get(applier, Opts, #{}),
+    %% `ae_targets` is conceptually per-instance (both the applier and
+    %% AE rounds bump the same set) so we accept it at the top level
+    %% of the instance opts and pass it through to the applier here.
+    %% Per-applier override (`Opts.applier.ae_targets`) wins so callers
+    %% who set it under the older shipped surface keep working; this
+    %% is the only legitimate path for divergent applier-vs-AE target
+    %% lists and is not expected in practice.
+    AeTargets0 = maps:get(ae_targets, Opts, []),
+    AeTargets = maps:get(ae_targets, Applier0, AeTargets0),
     Applier0#{
         instance_id => InstanceId,
-        wal_dir => WalDir
+        wal_dir => WalDir,
+        ae_targets => AeTargets
     }.
 
 %% @private

@@ -273,11 +273,41 @@ pull_until_complete(
 
 %% @private
 maybe_record({ok, Root}, Instance, Peer, true) when is_binary(Root) ->
-    bondy_oplog_peer_state:record_sync_complete(
+    ok = bondy_oplog_peer_state:record_sync_complete(
         Peer, Instance, Root
-    );
+    ),
+    ok = bump_ae_on_sync(Instance, Peer);
 maybe_record(_, _, _, _) ->
     ok.
+
+
+%% @private
+%% Substrate read-side freshness wiring (MST_DB_DESIGN §18 item 8).
+%% After a successful AE round, bump every shard the consumer
+%% registered for this instance so long-quiet shards (no writer
+%% activity) do not trip `{stale, _}` purely on inactivity.
+%%
+%% Uses `bondy_mst_db_registry:bump_ae_targets/2` so the AE-side bump
+%% shares a primitive — and timing semantics — with the applier-side
+%% bump in `bondy_oplog_applier:bump_ae_targets/1`. Empty target list
+%% is a strict no-op.
+bump_ae_on_sync(Instance, Peer) ->
+    case bondy_oplog_registry:ae_targets(Instance) of
+        [] ->
+            ok;
+        undefined ->
+            ok;
+        Targets ->
+            Now = erlang:monotonic_time(millisecond),
+            {Bumped, NotFound} =
+                bondy_mst_db_registry:bump_ae_targets(Targets, Now),
+            telemetry:execute(
+                [bondy_oplog, sync, ae_bumped],
+                #{count => Bumped, not_found => NotFound},
+                #{instance_id => Instance, peer => Peer, now_ms => Now}
+            ),
+            ok
+    end.
 
 %% @private
 %% Inserts pages into the local store. When the backend supports

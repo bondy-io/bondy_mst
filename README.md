@@ -55,6 +55,7 @@ the Quick Start. The rest of this README assumes those concepts.
 - [Lifecycle](#lifecycle)
 - [Writing events](#writing-events)
   - [Concurrency and the lock-free fast path](#concurrency-and-the-lock-free-fast-path)
+  - [Performance tips](#performance-tips)
 - [Reading and querying](#reading-and-querying)
 - [Replication](#replication)
 - [Compaction and snapshots](#compaction-and-snapshots)
@@ -471,6 +472,67 @@ This is automatic — same `append/2,3` and `append_many/2` API.
 
 **The `bench/README.md`** has measured numbers and a longer
 discussion of the concurrency model.
+
+### Performance tips
+
+The install pipeline applies events from the WAL into the MST inside
+the per-instance gen_server. That gen_server is the only writer to the
+MST handle; all reads bypass it via the registry-published snapshot.
+A handful of choices in how you call the API change throughput by an
+order of magnitude:
+
+**Prefer `append_many/2` over a loop of `append/2` when you have more
+than one event to write.** A 100-event batch is installed via a single
+`bondy_mst:put_batch/2` call that builds a small in-process MST from
+the batch and merges it into the live tree in one traversal. Compared
+to 100 individual appends, this collapses ~600 page rebuilds and hashes
+down to ~15, and amortises the per-cast publish, overlay-evict, HLC
+update, and telemetry emit. Measured: ~3× lower per-event install cost
+and ~3× higher sustained throughput on the bench's `append_many` scenarios.
+
+**Keep the validator stateless if you can.** The default
+`bondy_oplog_validator_trust` advertises `is_stateless/0 -> true` and
+gets the lock-free fast path: the calling process builds and signs
+events in-process, calls the WAL gen_server directly, and stages
+overlay rows without routing through the instance gen_server. Stateful
+validators (anything that doesn't export `is_stateless/0 -> true`) fall
+back to the gen_server path so the validator's per-event state
+mutations stay serialised. Both paths share the same `append/2,3`
+and `append_many/2` API — the routing is automatic.
+
+**Tune the overlay cap if you have bursty writers.** The default
+backpressure caps are 10,000 events / 5 MB. When workers push faster
+than the applier can drain into the MST, `append/2,3` and
+`append_many/2` return `{error, backpressure}` once either cap is
+crossed. If your workload is bursty and you have memory to spare,
+increase the caps:
+
+```erlang
+{ok, _} = bondy_oplog:start_instance(Id, #{
+    max_overlay_events => 100_000,
+    max_overlay_bytes  => 50 * 1024 * 1024
+}).
+```
+
+A larger cap absorbs more in-flight events but extends the worst-case
+wait for `await_apply/1,2` (used by callers that need read-your-writes
+beyond the overlay's window) — the applier still has to drain it. Pick
+a value matched to your bursts; for steady-state workloads the default
+is usually fine.
+
+**Use `await_apply/1,2` sparingly.** It blocks until the overlay is
+empty — useful for tests and for read-your-writes barriers, but doing
+it in a tight loop forces every caller to wait for the applier to
+catch up. Reads via `get/2`, `fold_range/5`, `first_key/1`,
+`latest_key/1`, and `size/1` already see the overlay so they observe
+freshly appended events without an `await_apply`.
+
+**WAL fsync mode.** `per_write` is the default and gives durability
+on every successful return at the cost of one fsync per WAL frame
+(~5k frames/sec on commodity SSDs). For higher append throughput when
+you can tolerate a small window of post-ack data loss on a hard crash,
+configure `batched` mode and use `await_durable/1,2` at explicit
+barriers. See `bondy_oplog_wal`'s moduledoc.
 
 ---
 
@@ -949,6 +1011,9 @@ quiescent. Trigger manually via `bondy_oplog:sync/2,3` and
 | `snapshot_store` | `bondy_oplog_snapshot_store_ets` | In-memory or `_file`. |
 | `snapshot_store_opts` | `#{}` | E.g. `#{path => <<"...">>}` for `_file`. |
 | `max_working_set` | `infinity` | Cap on live events; `append` returns `working_set_full` past it. |
+| `max_overlay_events` | `10_000` | Overlay backpressure cap (events). `append*` returns `{error, backpressure}` past it. |
+| `max_overlay_bytes` | `5 * 1024 * 1024` | Overlay backpressure cap (bytes). `append*` returns `{error, backpressure}` past it. |
+| `overlay_throttle` | `drop` | Behaviour on overlay-cap breach. Only `drop` is currently supported. |
 | `hlc_seed` | `0` | Initial HLC value. Auto-seeded from MST/snapshot at init when applicable. |
 | `seq_seed` | `0` | Initial Seq value. Auto-seeded from MST at init. |
 
@@ -1002,9 +1067,28 @@ T2 = bondy_mst:put(T1, <<"k2">>, <<"v2">>),
 RootHash = bondy_mst:root(T2).
 ```
 
-API surface includes `put/3`, `get/2,3`, `delete/2`, `merge/2,3`,
-`missing_set/2`, `fold/3,4`, `first/1,2`, `last/1,2`, `to_list/1`,
-`diff_to_list/2`, `gc/1,2`, etc.
+For bulk inserts, prefer `put_batch/2`:
+
+```erlang
+T = bondy_mst:put_batch(T0, [
+    {<<"k1">>, <<"v1">>},
+    {<<"k2">>, <<"v2">>},
+    {<<"k3">>, <<"v3">>}
+]).
+```
+
+`put_batch/2` builds a small volatile in-process MST from the input
+pairs and merges it into the receiver in a single tree traversal —
+one spine rebuild for the whole batch instead of one per entry. For
+batches larger than a few items it is several times faster than the
+equivalent `lists:foldl(fun put/3, T, Items)`; the receiver's
+`comparator`, `merger`, and `hash_algorithm` are used, and collisions
+with existing keys invoke the configured merger exactly as `put/3`
+would. For `N=1` it falls through to `put/3` with no overhead.
+
+API surface includes `put/3`, `put_batch/2`, `get/2,3`, `delete/2`,
+`merge/2,3`, `missing_set/2`, `fold/3,4`, `first/1,2`, `last/1,2`,
+`to_list/1`, `diff_to_list/2`, `gc/1,2`, etc.
 
 This is the building block. The replication layer is built on top.
 

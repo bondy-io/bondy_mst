@@ -93,14 +93,25 @@ keeps reads parallel.
     %% projection commit (or by anti-entropy on each successful round).
     %% Stored as `monotonic_time(millisecond)`; read wait-free by
     %% `ensure_fresh/2` (`MST_DB_DESIGN.md` §11).
-    ae_atomics         :: atomics:atomics_ref()
+    ae_atomics         :: atomics:atomics_ref(),
+    %% Per-namespace policy (§15). `ap` (default) places no constraint
+    %% on reads; `cp` rejects `eventual`-consistency batch reads to
+    %% prevent unfenced staleness. Owners pass this on `register/4`;
+    %% the substrate trusts the value to be consistent across shards
+    %% of the same namespace (consumer responsibility).
+    consistency_class  :: ap | cp
 }).
 
 -record(state, {
     %% MonitorRef -> shard_key()
     mon_to_key = #{} :: #{reference() := shard_key()},
     %% shard_key() -> MonitorRef
-    key_to_mon = #{} :: #{shard_key() := reference()}
+    key_to_mon = #{} :: #{shard_key() := reference()},
+    %% Fresh `make_ref()` per gen_server start. Exposed via
+    %% `current_epoch/0` and broadcast on `bondy_mst_db_events`
+    %% under topic `bondy_mst_db_registry_started`. Owners cache the
+    %% epoch and treat a change as "registry was restarted; re-register".
+    epoch :: reference()
 }).
 
 -type shard_key()   :: {atom(), atom(), non_neg_integer()}.
@@ -120,7 +131,11 @@ keeps reads parallel.
     %% Optional. Pid the registry will monitor; when this process exits
     %% the registration is torn down automatically. Defaults to the
     %% calling process.
-    owner => pid()
+    owner => pid(),
+    %% Optional. Per-namespace consistency policy (`MST_DB_DESIGN.md`
+    %% §15). Defaults to `ap`. See `read_batch/2` for the enforcement
+    %% rule.
+    consistency_class => ap | cp
 }.
 
 -export_type([shard_entry/0, config/0]).
@@ -134,9 +149,14 @@ keeps reads parallel.
 -export([shard_count/2]).
 -export([list/0]).
 
+%% Restart-recovery protocol (`MST_DB_DESIGN.md` §11.1, §18 item 11).
+-export([current_epoch/0]).
+
 %% Freshness (`MST_DB_DESIGN.md` §11).
 -export([bump_ae/3]).
 -export([bump_ae/4]).
+-export([bump_ae_targets/1]).
+-export([bump_ae_targets/2]).
 -export([last_ae_at/3]).
 -export([shards_for/1]).
 -export([namespaces/0]).
@@ -151,6 +171,10 @@ keeps reads parallel.
 -export([entry_fold_module/1]).
 -export([entry_shard_count/1]).
 -export([entry_ae_atomics/1]).
+-export([entry_consistency_class/1]).
+
+%% Namespace-level consistency_class lookup (`MST_DB_DESIGN.md` §15).
+-export([consistency_class/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
@@ -202,6 +226,19 @@ register(NS, Index, Shard, Config)
 
 unregister(NS, Index, Shard) ->
     gen_server:call(?MODULE, {unregister, {NS, Index, Shard}}).
+
+
+-doc("""
+Return the current epoch reference. A new epoch is allocated on each
+gen_server start and broadcast on
+`bondy_mst_db_events:notify(bondy_mst_db_registry_started, Epoch)`.
+Owners cache the epoch they last saw and treat any change as
+"registry was restarted; re-register every shard I own".
+""").
+-spec current_epoch() -> reference().
+
+current_epoch() ->
+    gen_server:call(?MODULE, current_epoch).
 
 
 -spec lookup(atom(), atom(), non_neg_integer()) ->
@@ -267,6 +304,45 @@ bump_ae(NS, Index, Shard, Now) when is_integer(Now) ->
         not_found ->
             not_found
     end.
+
+
+-doc("""
+Bump every shard in `Targets` with a single shared
+`erlang:monotonic_time(millisecond)` so the batch observes the same
+"now". Returns `{Bumped, NotFound}` counts for telemetry. An empty
+list is a strict no-op and returns `{0, 0}`.
+""").
+-spec bump_ae_targets([shard_key()]) ->
+    {non_neg_integer(), non_neg_integer()}.
+
+bump_ae_targets([]) ->
+    {0, 0};
+bump_ae_targets(Targets) when is_list(Targets) ->
+    bump_ae_targets(Targets, erlang:monotonic_time(millisecond)).
+
+
+-doc("""
+Like `bump_ae_targets/1` but caller supplies the monotonic
+millisecond timestamp so the same "now" can be reused across multiple
+target lists (e.g., when both the applier and an AE round complete in
+the same logical tick).
+""").
+-spec bump_ae_targets([shard_key()], integer()) ->
+    {non_neg_integer(), non_neg_integer()}.
+
+bump_ae_targets([], _Now) ->
+    {0, 0};
+bump_ae_targets(Targets, Now) when is_list(Targets), is_integer(Now) ->
+    lists:foldl(
+        fun({NS, Index, Shard}, {B, NF}) ->
+            case bump_ae(NS, Index, Shard, Now) of
+                ok        -> {B + 1, NF};
+                not_found -> {B, NF + 1}
+            end
+        end,
+        {0, 0},
+        Targets
+    ).
 
 
 -doc("""
@@ -342,6 +418,31 @@ entry_overlay(#entry{overlay = V}) -> V.
 entry_fold_module(#entry{fold_module = V}) -> V.
 entry_shard_count(#entry{shard_count = V}) -> V.
 entry_ae_atomics(#entry{ae_atomics = V}) -> V.
+entry_consistency_class(#entry{consistency_class = V}) -> V.
+
+
+-doc("""
+Return the consistency class declared for the namespace. Reads it from
+any registered shard of the namespace (the substrate trusts the value
+to be consistent across shards — see `register/4`). Returns `ap` for an
+unknown namespace, matching the default.
+""").
+-spec consistency_class(atom()) -> ap | cp.
+
+consistency_class(NS) when is_atom(NS) ->
+    MS = [{
+        #entry{
+            key = {NS, '_', '_'},
+            consistency_class = '$1',
+            _ = '_'
+        },
+        [],
+        ['$1']
+    }],
+    case ets:select(?TABLE, MS, 1) of
+        {[Class], _} -> Class;
+        '$end_of_table' -> ap
+    end.
 
 
 %% =============================================================================
@@ -356,7 +457,13 @@ init([]) ->
         {keypos, #entry.key},
         {read_concurrency, true}
     ]),
-    {ok, #state{}}.
+    Epoch = erlang:make_ref(),
+    %% Broadcast asynchronously after init returns so subscribers wake
+    %% up *after* the registry is in `ready` state. Synchronous notify
+    %% from inside init would still work because the subscribers are
+    %% other processes, but doing the work inline keeps init fast.
+    self() ! {broadcast_started, Epoch},
+    {ok, #state{epoch = Epoch}}.
 
 handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
     Key = {NS, Index, Shard},
@@ -387,7 +494,8 @@ handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
         projection_handle = maps:get(projection_handle, Config),
         overlay = maps:get(overlay, Config, undefined),
         fold_module = maps:get(fold_module, Config),
-        ae_atomics = Ae
+        ae_atomics = Ae,
+        consistency_class = maps:get(consistency_class, Config, ap)
     },
     true = ets:insert(?TABLE, Entry),
     State2 = State1#state{
@@ -401,11 +509,24 @@ handle_call({unregister, Key}, _From, State0) ->
     true = ets:delete(?TABLE, Key),
     {reply, ok, State1};
 
+handle_call(current_epoch, _From, #state{epoch = E} = State) ->
+    {reply, E, State};
+
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown}, State}.
 
 handle_cast(_, State) -> {noreply, State}.
 
+handle_info({broadcast_started, Epoch}, State) ->
+    %% `bondy_mst_db_events` is started before this module in
+    %% `bondy_oplog_sup`, so the notify is safe at init time. If the
+    %% events module is down, swallow the error — it is a diagnostic
+    %% gap, not a substrate-correctness issue.
+    catch bondy_mst_db_events:notify(
+        bondy_mst_db_registry_started,
+        Epoch
+    ),
+    {noreply, State};
 handle_info({'DOWN', Mon, process, _Pid, _Reason}, State0) ->
     case maps:take(Mon, State0#state.mon_to_key) of
         {Key, MonToKey1} ->
@@ -436,8 +557,16 @@ code_change(_, State, _) -> {ok, State}.
 
 validate_config(Config) ->
     case [K || K <- ?REQUIRED_FIELDS, not maps:is_key(K, Config)] of
-        []      -> ok;
+        []      -> validate_consistency_class(Config);
         [K | _] -> {error, {missing_required_field, K}}
+    end.
+
+
+validate_consistency_class(Config) ->
+    case maps:find(consistency_class, Config) of
+        {ok, V} when V =:= ap; V =:= cp -> ok;
+        {ok, Bad} -> {error, {invalid_consistency_class, Bad}};
+        error -> ok
     end.
 
 

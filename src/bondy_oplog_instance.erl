@@ -1341,6 +1341,12 @@ init({InstanceId, Opts}) ->
     %% outlived a one_for_all restart) is overwritten. Symmetric with
     %% `set_wal_pid/2` / `set_applier_pid/2`.
     ok = bondy_oplog_registry:set_overlay_tab(InstanceId, Overlay),
+    %% Publish the substrate read-side AE targets (`MST_DB_DESIGN.md`
+    %% §18 items 6 & 8). Top-level instance opt; immutable for the
+    %% instance's lifetime. Validation is deferred to startup: a
+    %% malformed list crashes init before any peer can interact.
+    AeTargets = validate_ae_targets(maps:get(ae_targets, Opts, [])),
+    ok = bondy_oplog_registry:set_ae_targets(InstanceId, AeTargets),
     %% Publish the lock-free `append_fast` bundle iff the validator
     %% advertises `is_stateless/0 -> true`. The bundle lets callers
     %% build an event, hit the WAL gen_server directly, and stage
@@ -1378,6 +1384,26 @@ build_fast_path(#state{validator_module = ValidatorMod} = State) ->
 validator_is_stateless(Mod) ->
     erlang:function_exported(Mod, is_stateless, 0) andalso
         Mod:is_stateless().
+
+%% @private
+%% Validate `ae_targets :: [{atom(), atom(), non_neg_integer()}]` at
+%% startup so a typo in the supervisor child-spec surfaces as an init
+%% crash rather than a silent freshness regression at the first AE
+%% round. Returns the (unchanged) list on success and raises on the
+%% first malformed entry; `init/1` is wrapped by the supervisor so the
+%% error reaches the caller cleanly.
+validate_ae_targets(Targets) when is_list(Targets) ->
+    lists:foreach(fun assert_ae_target/1, Targets),
+    Targets;
+validate_ae_targets(Other) ->
+    error({invalid_ae_targets, Other}).
+
+assert_ae_target({NS, Index, Shard})
+        when is_atom(NS), is_atom(Index),
+             is_integer(Shard), Shard >= 0 ->
+    ok;
+assert_ae_target(Bad) ->
+    error({invalid_ae_target, Bad}).
 
 handle_call(Req, From, State0) ->
     Result = do_handle_call(Req, From, State0),

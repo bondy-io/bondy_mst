@@ -76,6 +76,66 @@ resume frame is an idempotent no-op.
 |---|---|---|
 | `commit_every`      | `64`    | Apply this many events between `consumer.offset` flushes. |
 | `poll_interval_ms`  | `5`     | Backstop sleep when `await_durable/3` returns sooner than expected. The hot path long-polls rather than sleeping; this only affects the rare error fallback. |
+| `ae_targets`        | `[]`    | List of `{Namespace, Index, Shard}` tuples whose AE-freshness counters are bumped via `bondy_mst_db_registry:bump_ae/4` after every successful commit. Empty list disables the wiring. |
+| `publish_ns`        | `undefined` | Namespace under which post-apply events are published via `bondy_mst_db:publish/4`. `undefined` disables publishing. Requires `publish_fun`. |
+| `publish_fun`       | `undefined` | `fun((bondy_oplog_event:t()) -> {Key, Op} \| skip)` invoked per verified event to derive the `(Key, Op)` pair forwarded to subscribers. `skip` suppresses publish for that event. Required when `publish_ns` is set. |
+
+## Substrate read-side wiring
+
+The applier optionally drives the read-side substrate
+(`MST_DB_DESIGN.md` §11/§12). Both hooks are opt-in and consumer-
+configured; defaults are no-ops so existing instances are unaffected.
+
+- **Freshness (`bump_ae`)** — after every successful commit
+  (`commit_now/1` flushed `consumer.offset` and advanced the WAL
+  committed-segment marker) the applier walks `ae_targets` and bumps
+  each shard's AE atomic counter with a single shared
+  `monotonic_time(millisecond)` so a batch of shards observes the same
+  "now". Missing registry entries are tolerated and surfaced via a
+  `not_found` counter in telemetry; they typically indicate a
+  registration race during startup. The AE-side bump path (long-quiet
+  shards) is a separate follow-on (`MST_DB_DESIGN.md §18` item 8).
+- **Subscriptions (`publish`)** — after `apply_batch/2` produces a
+  non-empty verified set the applier walks the set in order and calls
+  `publish_fun` per event. The applier passes `(Namespace, Key, Hlc,
+  Op)` to `bondy_mst_db:publish/4`. Delivery is best-effort
+  (dispatcher walks subscribers; no round-trip; pattern matching runs
+  in the applier process). Events for which `publish_fun` returns
+  `skip` are not published. The applier's own mailbox is never
+  blocked on delivery.
+
+  **Timing — at-apply, not at-commit.** Publishing fires inside
+  `apply_batch/2` (per verified event, in HLC-monotonic order). This
+  deviates from `MST_DB_DESIGN.md §18` item 7's "Same as (6)" hint —
+  which would batch publish into `commit_now/1` to mirror bump_ae —
+  and was chosen deliberately on the live system:
+
+  - Latency: at-commit would batch up to `commit_every` events (default
+    64) into one burst delivered at the commit barrier. At-apply
+    publishes per event with no added queueing delay.
+  - Commit-barrier cost: `commit_now/1` is already a synchronous
+    barrier (it issues `drain_install_queue` against the instance
+    gen_server). Folding an N-event publish pass into that barrier
+    would extend it linearly in the batch size with ETS `select`s and
+    `erlang:send/2`s.
+  - Graceful-shutdown gap: at-commit would require an in-memory
+    accumulator drained from `terminate/2`. The shutdown path already
+    writes `consumer.offset` independently, so a partial drain failure
+    would silently lose subscriber notifications without a way for
+    crash recovery to recover them (the offset advanced).
+  - Crash semantics: at-least-once delivery is the contract on either
+    side (a crash between apply and commit re-applies events on
+    restart, producing duplicates regardless of timing). Subscribers
+    must be idempotent or self-dedup — this is the contract.
+  - Read consistency: readers via `bondy_oplog:read/3` see the new
+    value as soon as the overlay/MST holds it (before commit), so
+    at-apply publishes already align with what concurrent readers
+    observe. Substrate-side reads through `bondy_mst_db:read/3` depend
+    on a separate projection-write path (out of scope here).
+
+  Subscribers that need commit-coherent batching can coalesce
+  consumer-side; the substrate's `commit_every` parameter is not the
+  right knob for subscriber delivery cadence.
 """).
 
 -record(state, {
@@ -114,14 +174,34 @@ resume frame is an idempotent no-op.
     %% F8 documents this as a known gap; F9's cross-PR QA will track
     %% resolution.
     fold_module :: bondy_oplog_fold:strategy() | undefined,
-    fold_state :: term()
+    fold_state :: term(),
+    %% Substrate read-side wiring (MST_DB_DESIGN §11). Shards bumped
+    %% via `bondy_mst_db_registry:bump_ae/4` after each successful
+    %% commit. Empty list disables the wiring.
+    ae_targets = [] :: [shard_key()],
+    %% Substrate subscription wiring (MST_DB_DESIGN §12). When both
+    %% `publish_ns` and `publish_fun` are set, every verified event in
+    %% an applied batch is forwarded to `bondy_mst_db:publish/4` at
+    %% apply time. See moduledoc "Substrate read-side wiring" for the
+    %% rationale behind the at-apply timing.
+    publish_ns :: atom() | undefined,
+    publish_fun :: publish_fun() | undefined
 }).
+
+-type shard_key()   :: {atom(), atom(), non_neg_integer()}.
+-type publish_fun() :: fun((bondy_oplog_event:t()) ->
+    {Key :: term(), Op :: term()} | skip).
 
 -type opts() :: #{
     instance_id := instance_id(),
     wal_dir := file:filename_all(),
     commit_every => pos_integer(),
-    poll_interval_ms => pos_integer()
+    poll_interval_ms => pos_integer(),
+    %% Substrate read-side wiring (MST_DB_DESIGN §18 item 6).
+    ae_targets => [shard_key()],
+    %% Substrate subscription wiring (MST_DB_DESIGN §18 item 7).
+    publish_ns => atom(),
+    publish_fun => publish_fun()
 }.
 
 -export_type([opts/0]).
@@ -239,6 +319,17 @@ init(#{instance_id := InstanceId, wal_dir := WalDir} = Opts) ->
     process_flag(message_queue_data, off_heap),
     CommitEvery = maps:get(commit_every, Opts, ?DEFAULT_COMMIT_EVERY),
     PollMs = maps:get(poll_interval_ms, Opts, ?DEFAULT_POLL_INTERVAL_MS),
+    case validate_substrate_opts(Opts) of
+        ok ->
+            do_init(InstanceId, WalDir, CommitEvery, PollMs, Opts);
+        {error, _} = Err ->
+            {stop, Err}
+    end.
+
+do_init(InstanceId, WalDir, CommitEvery, PollMs, Opts) ->
+    AeTargets = maps:get(ae_targets, Opts, []),
+    PublishNs = maps:get(publish_ns, Opts, undefined),
+    PublishFun = maps:get(publish_fun, Opts, undefined),
     case resolve_siblings(InstanceId) of
         {ok, InstP, WalP, MST, Watermark} ->
             CO = read_consumer_offset(WalDir),
@@ -263,7 +354,10 @@ init(#{instance_id := InstanceId, wal_dir := WalDir} = Opts) ->
                         validator_module = ValidatorMod,
                         validator_state = ValidatorState,
                         fold_module = FoldMod,
-                        fold_state = FoldState0
+                        fold_state = FoldState0,
+                        ae_targets = AeTargets,
+                        publish_ns = PublishNs,
+                        publish_fun = PublishFun
                     },
                     ok = bondy_oplog_registry:set_applier_pid(
                         InstanceId, self()
@@ -517,7 +611,9 @@ apply_batch(#state{instance_id = Id} = State, Batch) ->
                 State#state.instance_pid,
                 {install_local_batch, Verified}
             ),
-            apply_fold_batch(State, Verified)
+            State1 = apply_fold_batch(State, Verified),
+            ok = publish_batch(State1, Verified),
+            State1
     end.
 
 %% @private
@@ -781,6 +877,7 @@ commit_now(#state{
         ok ->
             Seg = bondy_oplog_wal_state:committed_segment(CO),
             ok = notify_committed_segment(InstanceId, WalPid, Seg),
+            ok = bump_ae_targets(State),
             State#state{uncommitted = 0};
         {error, Reason} ->
             ?LOG_WARNING(#{
@@ -857,4 +954,126 @@ await_or_idle(#state{iter = Iter, wal_pid = WalPid,
             %% CPU re-asking immediately.
             timer:sleep(PollMs)
     end,
+    ok.
+
+%% @private
+%% Validate the substrate-wiring opts at init/1. Both hooks are opt-in;
+%% the validation rejects partial configurations early so a typo in the
+%% supervisor child-spec surfaces as a startup failure instead of a
+%% silent no-op at the first publish call.
+validate_substrate_opts(Opts) ->
+    case validate_ae_targets(maps:get(ae_targets, Opts, [])) of
+        ok -> validate_publish_opts(Opts);
+        {error, _} = Err -> Err
+    end.
+
+validate_ae_targets([]) ->
+    ok;
+validate_ae_targets([{NS, Index, Shard} | Rest])
+        when is_atom(NS), is_atom(Index),
+             is_integer(Shard), Shard >= 0 ->
+    validate_ae_targets(Rest);
+validate_ae_targets([Bad | _]) ->
+    {error, {invalid_ae_target, Bad}};
+validate_ae_targets(Bad) ->
+    {error, {invalid_ae_targets, Bad}}.
+
+validate_publish_opts(Opts) ->
+    NS  = maps:get(publish_ns, Opts, undefined),
+    Fun = maps:get(publish_fun, Opts, undefined),
+    case {NS, Fun} of
+        {undefined, undefined} -> ok;
+        {Atom, F} when is_atom(Atom), is_function(F, 1) -> ok;
+        _ -> {error, {invalid_publish_opts, NS, Fun}}
+    end.
+
+%% @private
+%% Walks `Verified` in HLC-monotonic order and publishes each event via
+%% `bondy_mst_db:publish/4`. A `publish_fun` returning `skip` suppresses
+%% delivery for that event; a raise is logged and treated as `skip` so
+%% a misbehaving derivation cannot wedge the applier. Best-effort
+%% delivery; the dispatcher walks subscribers in this process.
+publish_batch(#state{publish_ns = undefined}, _Verified) ->
+    ok;
+publish_batch(#state{publish_fun = undefined}, _Verified) ->
+    ok;
+publish_batch(#state{instance_id = Id, publish_ns = NS,
+                     publish_fun = Fun}, Verified) ->
+    {Count, Skipped} = lists:foldl(
+        fun(Event, {C, S}) ->
+            case derive_publish(Fun, Event, Id) of
+                skip ->
+                    {C, S + 1};
+                {Key, Op} ->
+                    Hlc = bondy_oplog_event:key_hlc(
+                        bondy_oplog_event:key(Event)
+                    ),
+                    ok = bondy_mst_db:publish(NS, Key, Hlc, Op),
+                    {C + 1, S}
+            end
+        end,
+        {0, 0},
+        Verified
+    ),
+    telemetry:execute(
+        [bondy_oplog, applier, published],
+        #{count => Count, skipped => Skipped},
+        #{instance_id => Id, namespace => NS}
+    ),
+    ok.
+
+derive_publish(Fun, Event, InstanceId) ->
+    try Fun(Event) of
+        skip            -> skip;
+        {K, Op}         -> {K, Op};
+        Bad             ->
+            log_publish_fun_bad_return(InstanceId, Event, Bad),
+            skip
+    catch
+        C:R:S ->
+            log_publish_fun_raised(InstanceId, Event, C, R, S),
+            skip
+    end.
+
+log_publish_fun_bad_return(InstanceId, Event, Bad) ->
+    ?LOG_WARNING(#{
+        description =>
+            "bondy_oplog_applier publish_fun returned an unexpected "
+            "shape; event will not be published",
+        instance_id => InstanceId,
+        key => bondy_oplog_event:key(Event),
+        return => Bad
+    }).
+
+log_publish_fun_raised(InstanceId, Event, C, R, S) ->
+    ?LOG_WARNING(#{
+        description =>
+            "bondy_oplog_applier publish_fun raised; event will not "
+            "be published",
+        instance_id => InstanceId,
+        key => bondy_oplog_event:key(Event),
+        class => C,
+        reason => R,
+        stacktrace => S
+    }).
+
+%% @private
+%% Bump the AE atomic counter for every shard in `ae_targets` with a
+%% shared `monotonic_time(millisecond)` so the batch observes the same
+%% "now". `not_found` is treated as benign (the registry entry may be
+%% torn down concurrently during shutdown) and counted in telemetry.
+%% Delegates the per-shard write to
+%% `bondy_mst_db_registry:bump_ae_targets/2` so the applier-side and
+%% AE-side wirings share one primitive.
+bump_ae_targets(#state{ae_targets = []}) ->
+    ok;
+bump_ae_targets(#state{instance_id = Id, ae_targets = Targets}) ->
+    Now = erlang:monotonic_time(millisecond),
+    {Bumped, NotFound} =
+        bondy_mst_db_registry:bump_ae_targets(Targets, Now),
+    telemetry:execute(
+        [bondy_oplog, applier, ae_bumped],
+        #{count => Bumped, not_found => NotFound},
+        #{instance_id => Id, now_ms => Now}
+    ),
     ok.
