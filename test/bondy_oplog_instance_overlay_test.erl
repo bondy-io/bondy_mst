@@ -33,15 +33,19 @@ cleanup(_) ->
     ok.
 
 overlay_test_() ->
+    %% 30s per-test timeout (eunit default is 5s). Several tests here
+    %% call `await_apply/1` which polls the overlay; under whole-suite
+    %% load that drain can take longer than 5s and race the eunit
+    %% watchdog into a `*timed out*` cancellation.
     {setup, fun setup/0, fun cleanup/1, [
-        fun get_after_append_hits_overlay/0,
-        fun fold_range_merges_overlay_and_mst/0,
-        fun size_includes_overlay_rows/0,
-        fun first_and_latest_merge_overlay/0,
-        fun await_apply_drains_overlay/0,
-        fun overlay_events_cap_returns_backpressure/0,
-        fun overlay_value_round_trip/0,
-        fun overlay_evicts_after_apply/0
+        {timeout, 30, fun get_after_append_hits_overlay/0},
+        {timeout, 30, fun fold_range_merges_overlay_and_mst/0},
+        {timeout, 30, fun size_includes_overlay_rows/0},
+        {timeout, 30, fun first_and_latest_merge_overlay/0},
+        {timeout, 30, fun await_apply_drains_overlay/0},
+        {timeout, 30, fun overlay_events_cap_returns_backpressure/0},
+        {timeout, 30, fun overlay_value_round_trip/0},
+        {timeout, 30, fun overlay_evicts_after_apply/0}
     ]}.
 
 %% =============================================================================

@@ -20,19 +20,25 @@ cleanup(_) ->
     ok.
 
 compaction_test_() ->
+    %% Each test gets a 30s per-test timeout. The eunit default is 5s,
+    %% which is too tight for tests that call `bondy_oplog:query/2` or
+    %% `await_apply/1` — those wait for the applier to drain the WAL
+    %% and under whole-suite load that occasionally takes longer than
+    %% 5s, racing the eunit watchdog into a `*timed out*` cancellation
+    %% even though the substrate is functioning correctly.
     {setup, fun setup/0, fun cleanup/1, [
-        fun no_crdt_module_returns_error/0,
-        fun compact_with_no_peers_is_no_change/0,
-        fun compact_after_sync_advances_watermark/0,
-        fun compaction_truncates_mst/0,
-        fun snapshot_state_is_correct/0,
-        fun query_after_compact_returns_consistent_value/0,
-        fun query_stable_returns_snapshot_only/0,
-        fun query_hot_includes_live_events/0,
-        fun watermark_filter_drops_old_remote_events/0,
-        fun deterministic_snapshot_across_replicas/0,
-        fun idempotent_compact/0,
-        fun query_with_no_events_yet/0
+        {timeout, 30, fun no_crdt_module_returns_error/0},
+        {timeout, 30, fun compact_with_no_peers_is_no_change/0},
+        {timeout, 30, fun compact_after_sync_advances_watermark/0},
+        {timeout, 30, fun compaction_truncates_mst/0},
+        {timeout, 30, fun snapshot_state_is_correct/0},
+        {timeout, 30, fun query_after_compact_returns_consistent_value/0},
+        {timeout, 30, fun query_stable_returns_snapshot_only/0},
+        {timeout, 30, fun query_hot_includes_live_events/0},
+        {timeout, 30, fun watermark_filter_drops_old_remote_events/0},
+        {timeout, 30, fun deterministic_snapshot_across_replicas/0},
+        {timeout, 30, fun idempotent_compact/0},
+        {timeout, 30, fun query_with_no_events_yet/0}
     ]}.
 
 no_crdt_module_returns_error() ->

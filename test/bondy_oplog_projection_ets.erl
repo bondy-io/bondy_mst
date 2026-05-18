@@ -2,8 +2,11 @@
 %% In-memory `bondy_oplog_projection_adapter` for tests.
 %%
 %% Backs the projection with a single `ordered_set` ETS table per
-%% (NS, Index, Shard). Suitable only for tests; production consumers
-%% should provide a persistent adapter (Leveled, RocksDB, etc.).
+%% (NS, Index, Shard). Bucket is part of the ETS key: the row tuple is
+%% `{{Bucket, Key}, Frame}`, so an `ordered_set` scan keeps a single
+%% bucket's rows contiguous in `(Bucket, Key)` lexicographic order.
+%% Suitable only for tests; production consumers should provide a
+%% persistent adapter (Leveled, RocksDB, etc.).
 %% =============================================================================
 
 -module(bondy_oplog_projection_ets).
@@ -13,10 +16,10 @@
 -export([
     open/4,
     close/1,
-    get/2,
+    get/3,
     put_batch/2,
-    range/4,
-    delete/2,
+    range/5,
+    delete/3,
     info/1
 ]).
 
@@ -32,26 +35,30 @@ close(Tab) ->
     true = ets:delete(Tab),
     ok.
 
-get(Tab, Key) ->
-    case ets:lookup(Tab, Key) of
+get(Tab, Bucket, Key) ->
+    case ets:lookup(Tab, {Bucket, Key}) of
         [{_, Frame}] -> {ok, Frame};
         [] -> not_found
     end.
 
 put_batch(Tab, Entries) ->
-    true = ets:insert(Tab, Entries),
+    Rows = [{{B, K}, F} || {B, K, F} <- Entries],
+    true = ets:insert(Tab, Rows),
     ok.
 
-range(Tab, Low, High, Opts) ->
+range(Tab, Bucket, Low, High, Opts) ->
     Limit = maps:get(limit, Opts, 1000),
     Direction = maps:get(direction, Opts, asc),
+    %% Rows are keyed by `{Bucket, Key}`. To scan a single bucket's
+    %% `[Low, High)` we constrain the composite key to that bucket.
     MS = [{
-        {'$1', '$2'},
+        {{'$1', '$2'}, '$3'},
         [
-            {'>=', '$1', {const, Low}},
-            {'<',  '$1', {const, High}}
+            {'=:=', '$1', {const, Bucket}},
+            {'>=',  '$2', {const, Low}},
+            {'<',   '$2', {const, High}}
         ],
-        [{{'$1', '$2'}}]
+        [{{'$2', '$3'}}]
     }],
     Result = case ets:select(Tab, MS, Limit) of
         '$end_of_table' -> [];
@@ -63,8 +70,8 @@ range(Tab, Low, High, Opts) ->
     end,
     {ok, Ordered}.
 
-delete(Tab, Key) ->
-    true = ets:delete(Tab, Key),
+delete(Tab, Bucket, Key) ->
+    true = ets:delete(Tab, {Bucket, Key}),
     ok.
 
 info(Tab) ->

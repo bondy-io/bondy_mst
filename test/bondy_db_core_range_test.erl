@@ -214,11 +214,11 @@ materialise(PH, Key, State, Hlc) ->
         Hlc,
         bondy_oplog_fold:encode_state(lww_register, State)
     ),
-    ok = bondy_oplog_projection_ets:put_batch(PH, [{Key, Frame}]).
+    ok = bondy_oplog_projection_ets:put_batch(PH, [{<<>>, Key, Frame}]).
 
 overlay_insert(OV, Key, Hlc, Op) ->
     Event = mk_event(Hlc, <<"origin">>, Hlc, Op),
-    ok = bondy_oplog_db_overlay:insert(OV, Key, Event).
+    ok = bondy_oplog_db_overlay:insert(OV, <<>>, Key, Event).
 
 setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
     {ok, CH} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),

@@ -85,7 +85,7 @@ unknown_namespace_returns_ap() ->
 eventual_on_cp_is_rejected() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => cp}),
-    Reads = [{NS, primary, <<"k">>}],
+    Reads = [{NS, primary, <<>>, <<"k">>}],
     Result = bondy_db_core:read_batch(Reads, #{consistency => eventual}),
     ?assertMatch({error, {consistency_class_violation, NS, cp, eventual}},
                  Result),
@@ -95,7 +95,7 @@ eventual_on_cp_is_rejected() ->
 causal_on_cp_passes() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => cp}),
-    Reads = [{NS, primary, <<"k">>}],
+    Reads = [{NS, primary, <<>>, <<"k">>}],
     %% causal + infinity max_lag = always passes the freshness check.
     Result = bondy_db_core:read_batch(Reads, #{
         consistency => causal, max_lag => infinity
@@ -107,7 +107,7 @@ causal_on_cp_passes() ->
 snapshot_on_cp_passes() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => cp}),
-    Reads = [{NS, primary, <<"k">>}],
+    Reads = [{NS, primary, <<>>, <<"k">>}],
     Result = bondy_db_core:read_batch(Reads, #{
         consistency => snapshot, max_lag => infinity
     }),
@@ -118,7 +118,7 @@ snapshot_on_cp_passes() ->
 eventual_on_ap_passes() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => ap}),
-    Reads = [{NS, primary, <<"k">>}],
+    Reads = [{NS, primary, <<>>, <<"k">>}],
     Result = bondy_db_core:read_batch(Reads, #{consistency => eventual}),
     ?assertMatch({ok, _, _}, Result),
     teardown_shard(Setup).
@@ -129,7 +129,7 @@ mixed_batch_with_cp_member_is_rejected() ->
     NSB = mk_ns(),
     {SetupA, _} = setup_shard(NSA, primary, 0, #{consistency_class => ap}),
     {SetupB, _} = setup_shard(NSB, primary, 0, #{consistency_class => cp}),
-    Reads = [{NSA, primary, <<"a">>}, {NSB, primary, <<"b">>}],
+    Reads = [{NSA, primary, <<>>, <<"a">>}, {NSB, primary, <<>>, <<"b">>}],
     Result = bondy_db_core:read_batch(Reads, #{consistency => eventual}),
     ?assertMatch({error, {consistency_class_violation, NSB, cp, eventual}},
                  Result),

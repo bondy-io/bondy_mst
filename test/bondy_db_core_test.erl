@@ -11,6 +11,9 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+%% Default bucket the read/3 backward-compat alias substitutes.
+-define(B, <<>>).
+
 %% Per-test setup creates a single (NS, primary, 0) shard backed by the
 %% reference ETS cache + the in-memory projection adapter + a fresh
 %% overlay, then registers it with bondy_db_core_registry.
@@ -74,7 +77,7 @@ read_returns_projection_value_when_no_overlay() ->
         42,
         bondy_oplog_fold:encode_state(lww_register, State)
     ),
-    ok = bondy_oplog_projection_ets:put_batch(PH, [{<<"k">>, Frame}]),
+    ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, <<"k">>, Frame}]),
     ?assertEqual({{set, <<"v">>, 42}, 42},
                  bondy_db_core:read(NS, primary, <<"k">>)),
     teardown_shard(Setup).
@@ -88,10 +91,10 @@ read_merges_overlay_with_projection() ->
         10,
         bondy_oplog_fold:encode_state(lww_register, {set, <<"old">>, 10})
     ),
-    ok = bondy_oplog_projection_ets:put_batch(PH, [{<<"k">>, OldFrame}]),
+    ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, <<"k">>, OldFrame}]),
     %% Overlay carries a newer event at HLC=20.
     Event = mk_event(20, <<"o">>, 0, {set, 20, <<"new">>}),
-    ok = bondy_oplog_db_overlay:insert(OV, <<"k">>, Event),
+    ok = bondy_oplog_db_overlay:insert(OV, ?B, <<"k">>, Event),
     ?assertEqual({{set, <<"new">>, 20}, 20},
                  bondy_db_core:read(NS, primary, <<"k">>)),
     teardown_shard(Setup).
@@ -104,11 +107,11 @@ read_hits_cache_after_first_slow_read() ->
         7,
         bondy_oplog_fold:encode_state(lww_register, {set, <<"v">>, 7})
     ),
-    ok = bondy_oplog_projection_ets:put_batch(PH, [{<<"k">>, Frame}]),
+    ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, <<"k">>, Frame}]),
     %% First read: slow path populates the cache.
     {{set, <<"v">>, 7}, 7} = bondy_db_core:read(NS, primary, <<"k">>),
     ?assertMatch({ok, {{set, <<"v">>, 7}, 7}},
-                 bondy_oplog_cache_ets:get(CH, <<"k">>)),
+                 bondy_oplog_cache_ets:get(CH, ?B, <<"k">>)),
     teardown_shard(Setup).
 
 cache_returns_value_unchanged_when_set() ->
@@ -118,7 +121,7 @@ cache_returns_value_unchanged_when_set() ->
     %% Pre-populate the cache directly with a synthetic value; the read
     %% must come back from cache (projection is empty so a slow path
     %% would return `undefined`).
-    ok = bondy_oplog_cache_ets:put(CH, <<"k">>, {{set, <<"v">>, 99}, 99}),
+    ok = bondy_oplog_cache_ets:put(CH, ?B, <<"k">>, {{set, <<"v">>, 99}, 99}),
     ?assertEqual({{set, <<"v">>, 99}, 99},
                  bondy_db_core:read(NS, primary, <<"k">>)),
     teardown_shard(Setup).
@@ -128,12 +131,12 @@ write_through_updates_existing_cache_entry() ->
     {Setup, #{cache_handle := CH}} =
         setup_shard(NS, primary, 0, 1, lww_register),
     %% Pre-populate the cache with HLC=5.
-    ok = bondy_oplog_cache_ets:put(CH, <<"k">>, {{set, <<"v1">>, 5}, 5}),
+    ok = bondy_oplog_cache_ets:put(CH, ?B, <<"k">>, {{set, <<"v1">>, 5}, 5}),
     %% Push a write-through with a newer event.
     Event = mk_event(10, <<"o">>, 0, {set, 10, <<"v2">>}),
     ok = bondy_db_core:write_through(NS, primary, <<"k">>, Event),
     ?assertEqual({ok, {{set, <<"v2">>, 10}, 10}},
-                 bondy_oplog_cache_ets:get(CH, <<"k">>)),
+                 bondy_oplog_cache_ets:get(CH, ?B, <<"k">>)),
     teardown_shard(Setup).
 
 write_through_skips_when_key_not_cached() ->
@@ -143,7 +146,7 @@ write_through_skips_when_key_not_cached() ->
     Event = mk_event(10, <<"o">>, 0, {set, 10, <<"v">>}),
     ok = bondy_db_core:write_through(NS, primary, <<"k">>, Event),
     %% Still cold.
-    ?assertEqual(not_found, bondy_oplog_cache_ets:get(CH, <<"k">>)),
+    ?assertEqual(not_found, bondy_oplog_cache_ets:get(CH, ?B, <<"k">>)),
     teardown_shard(Setup).
 
 %% =============================================================================
@@ -187,7 +190,9 @@ pick_key_for_shard(_NS, _Index, TargetShard) ->
 
 pick_key_for_shard_loop(TargetShard, N) ->
     Key = list_to_binary("k" ++ integer_to_list(N)),
-    case erlang:phash2(Key, 4) of
+    %% Shard hash uses {Bucket, Key} composite; the read/3 backward-compat
+    %% alias substitutes Bucket = <<>>, so match that here.
+    case erlang:phash2({?B, Key}, 4) of
         TargetShard -> Key;
         _ -> pick_key_for_shard_loop(TargetShard, N + 1)
     end.

@@ -301,7 +301,8 @@ register_shard(NS, Index, Shard) ->
         cache_handle       => undefined,
         projection_adapter => bondy_oplog_projection_adapter,
         projection_handle  => undefined,
-        fold_module        => lww_register
+        fold_module        => lww_register,
+        overlay            => disabled
     }).
 
 

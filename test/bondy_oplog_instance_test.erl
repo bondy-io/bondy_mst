@@ -19,32 +19,36 @@ cleanup(_) ->
     ok.
 
 instance_test_() ->
+    %% 30s per-test timeout (eunit default is 5s). Tests that call
+    %% `await_apply/1`, `range/3`, or `concurrent_appends` wait for
+    %% the applier to drain — under whole-suite load that occasionally
+    %% takes longer than 5s and races the eunit watchdog.
     {setup, fun setup/0, fun cleanup/1, [
-        fun empty_root_is_undefined/0,
-        fun append_changes_root/0,
-        fun append_round_trip/0,
-        fun append_orders_keys/0,
-        fun append_meta_round_trip/0,
-        fun idempotent_append_remote/0,
-        fun deterministic_root_across_replicas/0,
-        fun fold_range_inclusive/0,
-        fun range_returns_events_in_key_order/0,
-        fun truncate_prefix/0,
-        fun truncate_prefix_advances_watermark/0,
-        fun size_tracks_inserts_and_truncations/0,
-        fun concurrent_appends_unique_and_ordered/0,
-        fun append_many_atomic/0,
-        fun first_and_latest_keys/0,
-        fun rejects_remote_event_with_local_origin/0,
-        fun info_returns_diagnostic/0,
-        fun divergent_remote_events_are_quarantined/0,
-        fun custom_validator_can_reject_remote/0,
-        fun refresh_validator_rotates_applier_snapshot/0,
-        fun refresh_validator_noop_when_callback_not_exported/0,
-        fun refresh_validator_returns_error_when_no_applier/0,
-        fun refresh_validator_in_flight_keeps_old_snapshot/0,
-        fun list_instances_reports_running/0,
-        fun start_instance_idempotent/0
+        {timeout, 30, fun empty_root_is_undefined/0},
+        {timeout, 30, fun append_changes_root/0},
+        {timeout, 30, fun append_round_trip/0},
+        {timeout, 30, fun append_orders_keys/0},
+        {timeout, 30, fun append_meta_round_trip/0},
+        {timeout, 30, fun idempotent_append_remote/0},
+        {timeout, 30, fun deterministic_root_across_replicas/0},
+        {timeout, 30, fun fold_range_inclusive/0},
+        {timeout, 30, fun range_returns_events_in_key_order/0},
+        {timeout, 30, fun truncate_prefix/0},
+        {timeout, 30, fun truncate_prefix_advances_watermark/0},
+        {timeout, 30, fun size_tracks_inserts_and_truncations/0},
+        {timeout, 60, fun concurrent_appends_unique_and_ordered/0},
+        {timeout, 30, fun append_many_atomic/0},
+        {timeout, 30, fun first_and_latest_keys/0},
+        {timeout, 30, fun rejects_remote_event_with_local_origin/0},
+        {timeout, 30, fun info_returns_diagnostic/0},
+        {timeout, 30, fun divergent_remote_events_are_quarantined/0},
+        {timeout, 30, fun custom_validator_can_reject_remote/0},
+        {timeout, 30, fun refresh_validator_rotates_applier_snapshot/0},
+        {timeout, 30, fun refresh_validator_noop_when_callback_not_exported/0},
+        {timeout, 30, fun refresh_validator_returns_error_when_no_applier/0},
+        {timeout, 30, fun refresh_validator_in_flight_keeps_old_snapshot/0},
+        {timeout, 30, fun list_instances_reports_running/0},
+        {timeout, 30, fun start_instance_idempotent/0}
     ]}.
 
 empty_root_is_undefined() ->
@@ -167,7 +171,12 @@ fold_range_inclusive() ->
 range_returns_events_in_key_order() ->
     Id = mk_id(),
     {ok, _} = bondy_oplog:start_instance(Id),
-    _ = [bondy_oplog:append(Id, N) || N <- lists:seq(1, 20)],
+    %% Capture append returns so a silent `{error, _}` from one of
+    %% the writes does not masquerade as a read-path bug downstream.
+    AppendKeys = [bondy_oplog:append(Id, N) || N <- lists:seq(1, 20)],
+    Bad = [R || R <- AppendKeys, not is_tuple(R)
+                                 orelse element(1, R) =:= error],
+    ?assertEqual([], Bad),
     Min = bondy_oplog_event:min_key(),
     Max = bondy_oplog_event:max_key_for_hlc(16#FFFFFFFFFFFFFFFF),
     Es = bondy_oplog:range(Id, Min, Max),

@@ -130,9 +130,9 @@ prop_fenced_read_excludes_past_fence() ->
                 MaxH = max_hlc(Events),
                 Fence = MaxH div 2,
                 {ok, Map, _F} = bondy_db_core:read_batch(
-                    [{NS, primary, Key}], #{fence => Fence}
+                    [{NS, primary, <<>>, Key}], #{fence => Fence}
                 ),
-                Got = maps:get({NS, primary, Key}, Map),
+                Got = maps:get({NS, primary, <<>>, Key}, Map),
                 Filtered = [E || E <- Events, hlc_of_event(E) =< Fence],
                 Expected = expected_read(Filtered),
                 equal_read_result(Got, Expected)
@@ -344,7 +344,7 @@ populate_overlay(NS, Key, Events) ->
         fun(E) ->
             Hlc = hlc_of_event(E),
             Event = mk_event(Hlc, E),
-            ok = bondy_oplog_db_overlay:insert(OV, Key, Event)
+            ok = bondy_oplog_db_overlay:insert(OV, <<>>, Key, Event)
         end,
         Events
     ).
@@ -354,7 +354,7 @@ insert_overlay(NS, Key, E) ->
     OV = bondy_db_core_registry:entry_overlay(Entry),
     Hlc = hlc_of_event(E),
     Event = mk_event(Hlc, E),
-    ok = bondy_oplog_db_overlay:insert(OV, Key, Event).
+    ok = bondy_oplog_db_overlay:insert(OV, <<>>, Key, Event).
 
 materialise(NS, Key, {set, _, _} = State) ->
     {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
@@ -363,7 +363,7 @@ materialise(NS, Key, {set, _, _} = State) ->
         hlc_of(State),
         bondy_oplog_fold:encode_state(?STRATEGY, State)
     ),
-    ok = ?PROJ_MOD:put_batch(PH, [{Key, Frame}]);
+    ok = ?PROJ_MOD:put_batch(PH, [{<<>>, Key, Frame}]);
 materialise(NS, Key, {cleared, _} = State) ->
     {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
     PH = bondy_db_core_registry:entry_projection_handle(Entry),
@@ -371,7 +371,7 @@ materialise(NS, Key, {cleared, _} = State) ->
         hlc_of(State),
         bondy_oplog_fold:encode_state(?STRATEGY, State)
     ),
-    ok = ?PROJ_MOD:put_batch(PH, [{Key, Frame}]);
+    ok = ?PROJ_MOD:put_batch(PH, [{<<>>, Key, Frame}]);
 materialise(_NS, _Key, undefined) ->
     ok.
 

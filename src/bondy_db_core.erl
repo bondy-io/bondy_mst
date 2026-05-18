@@ -13,36 +13,61 @@ Read-side substrate primitive (`MST_DB_DESIGN.md`).
 
 Composes a projection adapter (any persistent KV implementing
 `bondy_oplog_projection_adapter`), a cache adapter (any read cache
-implementing `bondy_oplog_cache_adapter`), and a per-shard overlay
+implementing `bondy_oplog_cache_adapter`), and an optional overlay
 (`bondy_oplog_db_overlay`) into a single read API parameterised by
 the namespace's fold strategy.
 
-The read path is:
+## Address dimensions
 
-1. **Cache hit** — return immediately. Sub-microsecond.
+Cells are addressed by **four** dimensions:
+
+- **NS** — a config-group identifier; the registry maps `(NS, Index, Shard)`
+  to `{fold_module, shard_count, projection_adapter, cache_adapter, ...}`.
+  NS does not appear in the data itself; it is purely routing/config.
+- **Index** — `primary` for the cell store, or one of the secondary
+  indexes (different projections of the same events).
+- **Bucket** — the storage-layer partition (leveled/Riak-native). Bucket
+  is a call-time parameter; many buckets share one `(NS, Index, Shard)`
+  registry entry. Adding or removing a bucket is data-plane work, not
+  registry work.
+- **Key** — the cell identifier inside `(Bucket)`.
+
+Shard is derived as `phash2({Bucket, Key}, shard_count(NS, Index))`
+(Riak-style composite hashing) so a single bucket spreads evenly across
+the NS's shards.
+
+## Read path
+
+1. **Cache hit** — `Cache:get(Handle, Bucket, Key)` returns immediately.
 2. **Cache miss** — read the projection cell, decode the frame,
    merge overlay events whose HLC is newer than the cell's HLC,
    apply the fold, populate the cache, return.
 
 This module is read-only; writes flow through `bondy_oplog_instance`
 and reach the projection via the applier. Writers can call
-`write_through/4` after appending an event to keep the hot cache
+`write_through/5` after appending an event to keep the hot cache
 coherent.
 
 See `bondy_db_core_registry` for how shard handles are published. The
 substrate does not own shard lifecycles — owners (writers, applier,
-test setups) register the four-tuple
-`{cache_handle, projection_handle, overlay, fold_module}` for each
-`(namespace, index, shard)` they manage.
+test setups) register the four-tuple `{cache_handle, projection_handle,
+overlay, fold_module}` for each `(NS, Index, Shard)` they manage.
 """).
 
 -export([read/3]).
 -export([read/4]).
+-export([read/5]).
 -export([read_batch/2]).
 -export([range/4]).
+-export([range/5]).
+-export([range_all/4]).
+-export([range_all/5]).
 -export([read_at_hlc/3]).
+-export([read_at_hlc/4]).
 -export([write_through/4]).
+-export([write_through/5]).
 -export([shard_for/3]).
+-export([shard_for/4]).
 -export([ensure_fresh/2]).
 -export([ensure_fresh_for_keys/2]).
 -export([freshness/1]).
@@ -50,6 +75,7 @@ test setups) register the four-tuple
 -export([unsubscribe/1]).
 -export([publish/4]).
 
+-export_type([bucket/0]).
 -export_type([read_opts/0]).
 -export_type([read_result/0]).
 -export_type([read_batch_opts/0]).
@@ -60,12 +86,13 @@ test setups) register the four-tuple
 -export_type([range_result/0]).
 -export_type([range_spec/0]).
 
+-type bucket()      :: term().
 -type read_opts()   :: map().
 -type read_result() :: {Value :: term(), Hlc :: bondy_oplog_hlc:hlc()}
                      | undefined.
 
 -type consistency()       :: eventual | causal | snapshot.
--type batch_key()         :: {atom(), atom(), term()}.
+-type batch_key()         :: {atom(), atom(), bucket(), term()}.
 -type read_batch_opts()   :: #{
     fence              => bondy_oplog_hlc:hlc(),
     max_lag            => non_neg_integer() | infinity,
@@ -89,6 +116,14 @@ test setups) register the four-tuple
 %% API
 %% =============================================================================
 
+-doc("""
+Backward-compatible point read in the default `(NS, primary, '', Key)`
+slot — `Bucket = <<>>` is the canonical empty bucket for single-tenant
+consumers.
+
+Prefer `read/4` (with explicit Bucket) for any multi-tenant or
+multi-bucket setup.
+""").
 -spec read(
     Namespace :: atom(),
     Index :: atom(),
@@ -96,24 +131,36 @@ test setups) register the four-tuple
 ) -> read_result() | {error, term()}.
 
 read(NS, Index, Key) ->
-    read(NS, Index, Key, #{}).
+    read(NS, Index, <<>>, Key, #{}).
 
 
 -spec read(
     Namespace :: atom(),
     Index :: atom(),
+    Bucket :: bucket(),
+    Key :: term()
+) -> read_result() | {error, term()}.
+
+read(NS, Index, Bucket, Key) ->
+    read(NS, Index, Bucket, Key, #{}).
+
+
+-spec read(
+    Namespace :: atom(),
+    Index :: atom(),
+    Bucket :: bucket(),
     Key :: term(),
     Opts :: read_opts()
 ) -> read_result() | {error, term()}.
 
-read(NS, Index, Key, _Opts) ->
-    case resolve_shard(NS, Index, Key) of
+read(NS, Index, Bucket, Key, _Opts) ->
+    case resolve_shard(NS, Index, Bucket, Key) of
         {ok, Entry} ->
             {_NS, _Idx, Shard} = bondy_db_core_registry:entry_key(Entry),
             T0 = erlang:monotonic_time(microsecond),
-            {Result, Source} = do_read_traced(Entry, Key),
+            {Result, Source} = do_read_traced(Entry, Bucket, Key),
             DurUs = erlang:monotonic_time(microsecond) - T0,
-            emit_read_event(NS, Index, Shard, Source, DurUs, Result),
+            emit_read_event(NS, Index, Shard, Bucket, Source, DurUs, Result),
             Result;
         {error, _} = Err ->
             Err
@@ -124,31 +171,11 @@ read(NS, Index, Key, _Opts) ->
 Coalesced multi-cell read with optional fence and skew constraints
 (`MST_DB_DESIGN.md` §8).
 
-`Reads` is a list of `{Namespace, Index, Key}` triples. The result is a
-map keyed by the same triple, mapping to the per-cell `read_result()`.
+`Reads` is a list of `{Namespace, Index, Bucket, Key}` four-tuples. The
+result is a map keyed by the same four-tuple, mapping to the per-cell
+`read_result()`.
 
-## Opts
-
-- `fence` — HLC defining the as-of point. Overlay events with
-  `HLC > fence` are excluded. Projection cells whose `last_modified_hlc`
-  has already advanced past the fence are returned as-is — the caller
-  observes the higher HLC in the result. Defaults to "no fence" (no
-  upper bound on overlay events).
-- `max_lag` — bound on the staleness window for the freshness predicate.
-  Defaults to `infinity`. Finite values invoke `ensure_fresh/2` against
-  the per-shard AE counters; on staleness the batch returns
-  `{error, {stale, [Namespace]}}`.
-- `require_skew_below` — if set, the batch returns only if the spread
-  between the highest and lowest HLC in the result is below the bound
-  (millisecond units, derived from the HLC's physical part). On breach,
-  returns `{error, {skew_too_large, Skew, Bound}}`.
-- `consistency` — `eventual` (no freshness check; cheapest), `causal`
-  (enforce `max_lag`), or `snapshot` (enforce `max_lag` + skew bound at
-  `max_lag / 2`).
-
-Returns `{ok, Results, Fence}` on success, where `Fence` is the resolved
-fence (caller-supplied or substrate-chosen). On any error returns
-`{error, _}`.
+See module doc for `Opts` semantics.
 """).
 -spec read_batch([batch_key()], read_batch_opts()) ->
     {ok, read_batch_result(), bondy_oplog_hlc:hlc()} | {error, term()}.
@@ -158,17 +185,10 @@ read_batch(Reads, Opts) when is_list(Reads), is_map(Opts) ->
     Fence = maps:get(fence, Opts, infinity),
     {EffectiveMaxLag, EffectiveSkew} = apply_consistency(Consistency, Opts),
     T0 = erlang:monotonic_time(microsecond),
-    %% Per-namespace policy (§15): `cp` namespaces refuse `eventual`
-    %% reads to prevent unfenced staleness. `causal` and `snapshot`
-    %% are allowed under either class.
     Result = case check_consistency_class(Reads, Consistency) of
         {error, _} = ClassErr ->
             ClassErr;
         ok ->
-            %% Per-key freshness: only the shards the batch actually
-            %% touches participate in the staleness check. A cold
-            %% shard elsewhere in the namespace cannot fail a batch
-            %% that does not read from it.
             case ensure_fresh_predicate_for_keys(Reads, EffectiveMaxLag) of
                 {error, _} = Err ->
                     Err;
@@ -188,17 +208,8 @@ read_batch(Reads, Opts) when is_list(Reads), is_map(Opts) ->
 
 
 -doc("""
-Refresh the cache for `Key` after an event is accepted by the writer.
-
-If the key is currently cached, the writer's fold is applied to the
-cached value and the new `{Value, Hlc}` is written back. If the key
-is not cached, this is a no-op — the next read will populate it from
-the projection + overlay.
-
-This is the §5.1 write-through path. Callers are the writer process
-(after a local append) and the applier (after a remote enqueue) —
-both run on a per-shard ownership discipline so concurrent writers
-for the same key do not exist.
+Backward-compatible write-through in the default `<<>>` bucket slot.
+Prefer `write_through/5` for any Bucket-aware setup.
 """).
 -spec write_through(
     Namespace :: atom(),
@@ -208,74 +219,93 @@ for the same key do not exist.
 ) -> ok | {error, term()}.
 
 write_through(NS, Index, Key, Event) ->
-    case resolve_shard(NS, Index, Key) of
+    write_through(NS, Index, <<>>, Key, Event).
+
+
+-spec write_through(
+    Namespace :: atom(),
+    Index :: atom(),
+    Bucket :: bucket(),
+    Key :: term(),
+    Event :: bondy_oplog_event:t()
+) -> ok | {error, term()}.
+
+write_through(NS, Index, Bucket, Key, Event) ->
+    case resolve_shard(NS, Index, Bucket, Key) of
         {ok, Entry} ->
-            do_write_through(Entry, Key, Event);
+            do_write_through(Entry, Bucket, Key, Event);
         {error, _} = Err ->
             Err
     end.
 
 
 -doc("""
-Shard selector. Uses `phash2/2` over the substrate's full shard count
-for the `(namespace, index)` pair. Returns `{error, no_shards}` if no
-shards are registered for `(NS, Index)`.
+Shard selector. Hashes `{Bucket, Key}` (Riak-style) over the substrate's
+shard count for `(NS, Index)`. Returns `{error, no_shards}` if no shards
+are registered for the namespace.
 """).
--spec shard_for(atom(), atom(), term()) ->
+-spec shard_for(atom(), atom(), bucket(), term()) ->
     {ok, non_neg_integer()} | {error, no_shards}.
 
-shard_for(NS, Index, Key) ->
+shard_for(NS, Index, Bucket, Key) ->
     case bondy_db_core_registry:shard_count(NS, Index) of
-        {ok, Count} -> {ok, erlang:phash2(Key, Count)};
+        {ok, Count} -> {ok, erlang:phash2({Bucket, Key}, Count)};
         not_found   -> {error, no_shards}
     end.
 
 
 -doc("""
-Single-shard range scan (`MST_DB_DESIGN.md` §9).
+Backward-compatible shard selector for the default `<<>>` bucket.
+Hashes `{<<>>, Key}` which is identical to the historical Key-only
+behaviour modulo the constant prefix — kept so legacy callers that
+never used Bucket still address the same shards.
+""").
+-spec shard_for(atom(), atom(), term()) ->
+    {ok, non_neg_integer()} | {error, no_shards}.
 
-Returns all cells whose key lies in `[Low, High)` within one shard,
-merging the projection's materialised state with any pending overlay
-events. The result is sorted by key (ascending unless `direction => desc`)
-and trimmed to `limit` rows.
+shard_for(NS, Index, Key) ->
+    shard_for(NS, Index, <<>>, Key).
 
-## Shard selection
 
-By default the shard is inferred from `Low` via `shard_for/3` —
-appropriate when the caller knows all keys in the range hash to the
-same shard (e.g., when the range is itself derived from a shard key).
-For hash-sharded namespaces where the range spans multiple shards, the
-caller must scatter the call across shards and merge results.
+-doc("""
+Backward-compatible range scan in the default `<<>>` bucket slot. See
+`range/5` for the Bucket-aware version.
+""").
+-spec range(atom(), atom(), range_spec(), range_opts()) ->
+    {ok, range_result()} | {error, term()}.
 
-Callers can override the shard with `shard => N` in the opts.
+range(NS, Index, Spec, Opts) ->
+    range(NS, Index, <<>>, Spec, Opts).
+
+
+-doc("""
+Single-shard range scan over `[Low, High)` inside `Bucket`
+(`MST_DB_DESIGN.md` §9).
+
+The shard is selected by `phash2({Bucket, Low}, ShardCount)` unless the
+caller passes `Opts#{shard => N}`. Callers whose `[Low, High)` spans
+more than one shard MUST scatter across shards themselves and merge
+the results.
 
 ## Opts
 
 - `limit` — max rows in the result (default `1000`).
 - `direction` — `asc` (default) or `desc`.
 - `include_overlay` — set `false` to exclude pending events (default `true`).
-- `fence` — HLC ceiling for overlay events (default `infinity` — no fence).
-- `shard` — explicit shard override (default: `phash2(Low, ShardCount)`).
-
-## Result
-
-`{ok, [{Key, Value, Hlc}]}`. The result is **single-shot**: trimmed to
-`limit` rows. Pagination is not supported by the substrate — overlay
-merging interacts poorly with stateful continuation and the current
-consumer base does not need it. Callers that need more must either
-raise `limit` or scatter via `shard => N` and merge themselves.
+- `fence` — HLC ceiling for overlay events (default `infinity`).
+- `shard` — explicit shard override.
 """).
--spec range(atom(), atom(), range_spec(), range_opts()) ->
+-spec range(atom(), atom(), bucket(), range_spec(), range_opts()) ->
     {ok, range_result()} | {error, term()}.
 
-range(NS, Index, {Low, High}, Opts) when is_map(Opts) ->
-    case resolve_shard_for_range(NS, Index, Low, Opts) of
+range(NS, Index, Bucket, {Low, High}, Opts) when is_map(Opts) ->
+    case resolve_shard_for_range(NS, Index, Bucket, Low, Opts) of
         {ok, Entry} ->
             {_NS, _Idx, Shard} = bondy_db_core_registry:entry_key(Entry),
             T0 = erlang:monotonic_time(microsecond),
-            Result = do_range(Entry, Low, High, Opts),
+            Result = do_range(Entry, Bucket, Low, High, Opts),
             DurUs = erlang:monotonic_time(microsecond) - T0,
-            emit_range_event(NS, Index, Shard, Result, DurUs),
+            emit_range_event(NS, Index, Shard, Bucket, Result, DurUs),
             Result;
         {error, _} = Err ->
             Err
@@ -283,22 +313,81 @@ range(NS, Index, {Low, High}, Opts) when is_map(Opts) ->
 
 
 -doc("""
-Point-in-time read against the primary index (`MST_DB_DESIGN.md` §10).
+Backward-compatible cross-shard range over the default `<<>>` bucket
+slot. See `range_all/5` for the Bucket-aware version.
+""").
+-spec range_all(atom(), atom(), range_spec(), range_opts()) ->
+    {ok, range_result()} | {error, term()}.
 
-Returns the cell value as of HLC `T`. The projection is consulted first:
+range_all(NS, Index, Spec, Opts) ->
+    range_all(NS, Index, <<>>, Spec, Opts).
 
-- If the projection's `last_modified_hlc` is `=< T`, overlay events with
-  HLC in `(ProjHlc, T]` are folded onto the projection state and the
-  result is returned with its computed HLC.
-- If the projection has already advanced past `T`, the substrate refuses
-  with `{error, {historical_read_unavailable, ProjHlc, T}}`. True MVCC
-  retention is opt-in per namespace and deferred.
-- If neither the projection nor any overlay event matches, the fold's
-  initial value is returned at HLC `0`.
 
-This API is restricted to the primary index; secondary-index historical
-reads require richer machinery (per-secondary version retention) and are
-out of scope.
+-doc("""
+Cross-shard range scan over `[Low, High)` inside `Bucket`
+(`MST_DB_DESIGN.md` §18 item 2).
+
+Scatters the range to every shard registered under `(NS, Index)`, runs
+the single-shard `range/5` per shard with `Opts#{shard => Shard}`, then
+merges the per-shard results into a single globally-sorted list.
+
+## Opts
+
+- `limit` — global cap on rows in the result (default `1000`). Applied
+  after merge.
+- `direction` — `asc` (default) or `desc`.
+- `include_overlay` — set `false` to exclude pending events (default
+  `true`). Propagated to every per-shard scan.
+- `fence` — HLC ceiling for overlay events (default `infinity`).
+  Propagated to every per-shard scan.
+
+## Correctness of per-shard limit propagation
+
+Per-shard calls pass the caller's `limit` verbatim. Because each shard's
+result is already globally sorted on the shard, and the merged result
+is bounded above by the union of the per-shard top-`Limit`s, every key
+that would appear in the global top-`Limit` is present in at least one
+per-shard top-`Limit`. Truncating the merged list to `Limit` is
+therefore correct.
+
+## Error semantics
+
+If any shard returns `{error, _}` the call surfaces that error and
+discards results from other shards. No partial results are returned.
+
+If `(NS, Index)` has no registered shards the call returns `{ok, []}`.
+""").
+-spec range_all(atom(), atom(), bucket(), range_spec(), range_opts()) ->
+    {ok, range_result()} | {error, term()}.
+
+range_all(NS, Index, Bucket, {Low, High}, Opts)
+        when is_atom(NS), is_atom(Index), is_map(Opts) ->
+    Direction = maps:get(direction, Opts, asc),
+    Limit     = maps:get(limit, Opts, 1000),
+    Shards = shards_in(NS, Index),
+    T0 = erlang:monotonic_time(microsecond),
+    Result = scatter_range(Shards, NS, Index, Bucket, Low, High, Opts),
+    DurUs = erlang:monotonic_time(microsecond) - T0,
+    case Result of
+        {ok, Rows} ->
+            Merged = merge_sorted_ranges(Rows, Direction),
+            Truncated = lists:sublist(Merged, Limit),
+            emit_range_all_event(
+                NS, Index, Bucket, length(Shards),
+                length(Truncated), DurUs
+            ),
+            {ok, Truncated};
+        {error, _} = Err ->
+            emit_range_all_error_event(
+                NS, Index, Bucket, length(Shards), Err, DurUs
+            ),
+            Err
+    end.
+
+
+-doc("""
+Backward-compatible point-in-time read in the default `<<>>` bucket
+slot. See `read_at_hlc/4` for the Bucket-aware version.
 """).
 -spec read_at_hlc(
     Namespace :: atom(),
@@ -307,11 +396,31 @@ out of scope.
 ) -> {ok, Value :: term(), Hlc :: bondy_oplog_hlc:hlc()}
    | {error, term()}.
 
-read_at_hlc(NS, Key, T) when is_integer(T), T >= 0 ->
+read_at_hlc(NS, Key, T) ->
+    read_at_hlc(NS, <<>>, Key, T).
+
+
+-doc("""
+Point-in-time read against the primary index (`MST_DB_DESIGN.md` §10).
+
+Returns the cell value as of HLC `T`. See module doc for the historical-
+read semantics; the substrate refuses with
+`{error, {historical_read_unavailable, ProjHlc, T}}` if the projection
+has already advanced past `T`.
+""").
+-spec read_at_hlc(
+    Namespace :: atom(),
+    Bucket :: bucket(),
+    Key :: term(),
+    T :: bondy_oplog_hlc:hlc()
+) -> {ok, Value :: term(), Hlc :: bondy_oplog_hlc:hlc()}
+   | {error, term()}.
+
+read_at_hlc(NS, Bucket, Key, T) when is_integer(T), T >= 0 ->
     T0 = erlang:monotonic_time(microsecond),
-    Result = case resolve_shard(NS, primary, Key) of
+    Result = case resolve_shard(NS, primary, Bucket, Key) of
         {ok, Entry} ->
-            do_read_at_hlc(Entry, Key, T);
+            do_read_at_hlc(Entry, Bucket, Key, T);
         {error, _} = Err ->
             Err
     end,
@@ -324,18 +433,6 @@ read_at_hlc(NS, Key, T) when is_integer(T), T >= 0 ->
 Freshness predicate (`MST_DB_DESIGN.md` §11). Returns `ok` iff every
 shard of every supplied namespace has had a `bump_ae/3` within
 `MaxLag` milliseconds of "now".
-
-Wait-free: each per-shard check is a single `atomics:get/2` plus a
-subtraction. With `MaxLag = infinity`, returns `ok` immediately.
-
-`{stale, NSs}` lists the namespaces with at least one shard whose
-last-AE timestamp is older than the bound. The list is sorted and
-deduplicated.
-
-Namespaces with no registered shards are treated as vacuously fresh —
-there are no shards to fail the check. Callers that need
-"unknown namespace = stale" semantics should consult
-`bondy_db_core_registry:namespaces/0` before calling.
 """).
 -spec ensure_fresh([atom()], non_neg_integer() | infinity) ->
     ok | {stale, [atom()]}.
@@ -362,13 +459,10 @@ ensure_fresh(NSs, MaxLag)
 
 -doc("""
 Like `ensure_fresh/2` but only inspects the shards actually touched by
-the supplied keys. Cheaper when the read set covers a small fraction
-of a hash-sharded namespace.
-
-Returns `ok` or `{stale, [Namespace]}` — same shape as `ensure_fresh/2`.
+the supplied keys.
 """).
 -spec ensure_fresh_for_keys(
-    [{atom(), atom(), term()}],
+    [batch_key()],
     non_neg_integer() | infinity
 ) -> ok | {stale, [atom()]}.
 
@@ -384,11 +478,6 @@ ensure_fresh_for_keys(Reads, MaxLag)
          || {NS, Ae} <- Touched,
             (Now - atomics:get(Ae, 1)) > MaxLag]),
     DurUs = erlang:monotonic_time(microsecond) - T0,
-    %% `namespaces_checked` here is the count of distinct shards we
-    %% actually inspected — not the namespace count — because
-    %% `ensure_fresh_for_keys/2` operates per-shard, not per-namespace.
-    %% A consumer comparing the two events should treat this number as
-    %% "shards inspected" semantically.
     emit_ensure_fresh_event(length(Touched), length(Stale), DurUs),
     case Stale of
         [] -> ok;
@@ -398,12 +487,7 @@ ensure_fresh_for_keys(Reads, MaxLag)
 
 -doc("""
 Return per-shard freshness lag for the namespace as a map keyed by
-`{Index, Shard}` with values in milliseconds (`Now - last_ae_at`).
-A never-bumped shard returns the time since the monotonic epoch — a
-large positive number — which is intentional: it surfaces the
-unbumped state rather than hiding it as `0`.
-
-Returns `#{}` for an unknown namespace.
+`{Index, Shard}` with values in milliseconds.
 """).
 -spec freshness(atom()) ->
     #{{atom(), non_neg_integer()} := integer()}.
@@ -420,25 +504,6 @@ freshness(NS) when is_atom(NS) ->
     ).
 
 
--doc("""
-Subscribe the caller to events on `Namespace` matching `Pattern`
-(`MST_DB_DESIGN.md` §12). Returns a `SubRef` the caller can pass to
-`unsubscribe/1`. Subscriptions are local-only (do not cross nodes).
-
-Subscribers receive
-
-```erlang
-{bondy_db_core_event, Namespace, Key, Hlc, Operation}
-```
-
-messages whenever `publish/4` is invoked with a matching `(NS, Key)`
-pair. Patterns: `all`, `{prefix, P}`, `{match, F}`, or `{exact, T}`.
-The pattern type is closed — bare terms are not accepted. See
-`bondy_db_core_dispatcher` for the reference implementation.
-
-If the subscriber process exits, its subscription is dropped
-automatically via a monitor held by the dispatcher.
-""").
 -spec subscribe(atom(), bondy_db_core_dispatcher:pattern()) ->
     {ok, reference()}.
 
@@ -452,16 +517,6 @@ unsubscribe(SubRef) ->
     bondy_db_core_dispatcher:unsubscribe(SubRef).
 
 
--doc("""
-Publish a post-projection-commit event. Wired by the applier in a
-follow-on PR; exposed here as the public publishing surface so the
-reference dispatcher can be exercised without going through the
-applier.
-
-Delivery is best-effort: every subscriber whose pattern matches
-receives the message via `erlang:send/2`. The walk runs in the caller
-process (no gen_server round-trip).
-""").
 -spec publish(atom(), term(), bondy_oplog_hlc:hlc(), term()) -> ok.
 
 publish(NS, Key, Hlc, Op) ->
@@ -472,8 +527,8 @@ publish(NS, Key, Hlc, Op) ->
 %% Read path
 %% =============================================================================
 
-resolve_shard(NS, Index, Key) ->
-    case shard_for(NS, Index, Key) of
+resolve_shard(NS, Index, Bucket, Key) ->
+    case shard_for(NS, Index, Bucket, Key) of
         {ok, Shard} ->
             case bondy_db_core_registry:lookup(NS, Index, Shard) of
                 {ok, Entry} -> {ok, Entry};
@@ -484,21 +539,22 @@ resolve_shard(NS, Index, Key) ->
     end.
 
 
-do_read_traced(Entry, Key) ->
+do_read_traced(Entry, Bucket, Key) ->
     CA = bondy_db_core_registry:entry_cache_adapter(Entry),
     CH = bondy_db_core_registry:entry_cache_handle(Entry),
-    case CA:get(CH, Key) of
+    case CA:get(CH, Bucket, Key) of
         {ok, {Value, Hlc}} ->
             {{Value, Hlc}, cache};
         not_found ->
-            slow_read_traced(Entry, Key)
+            slow_read_traced(Entry, Bucket, Key)
     end.
 
 
-slow_read_traced(Entry, Key) ->
+slow_read_traced(Entry, Bucket, Key) ->
     Strategy = bondy_db_core_registry:entry_fold_module(Entry),
-    {ProjValue, ProjHlc, ProjHadFrame} = read_projection(Entry, Key, Strategy),
-    OverlayEvents = read_overlay(Entry, Key, ProjHlc),
+    {ProjValue, ProjHlc, ProjHadFrame} =
+        read_projection(Entry, Bucket, Key, Strategy),
+    OverlayEvents = read_overlay(Entry, Bucket, Key, ProjHlc),
     OverlayApplied = OverlayEvents =/= [],
     {Value, Hlc} = fold_events(Strategy, ProjValue, ProjHlc, OverlayEvents),
     Source = source_for(ProjHadFrame, OverlayApplied),
@@ -508,24 +564,21 @@ slow_read_traced(Entry, Key) ->
         _ ->
             CA = bondy_db_core_registry:entry_cache_adapter(Entry),
             CH = bondy_db_core_registry:entry_cache_handle(Entry),
-            ok = CA:put(CH, Key, {Value, Hlc}),
+            ok = CA:put(CH, Bucket, Key, {Value, Hlc}),
             {{Value, Hlc}, Source}
     end.
 
 
-%% `projection` covers both "projection had a frame, no overlay" and the
-%% degenerate "neither projection nor overlay" case — the projection was
-%% the last source consulted in either path.
 source_for(true,  false) -> projection;
 source_for(true,  true)  -> projection_with_overlay;
 source_for(false, true)  -> overlay_only;
 source_for(false, false) -> projection.
 
 
-read_projection(Entry, Key, Strategy) ->
+read_projection(Entry, Bucket, Key, Strategy) ->
     PA = bondy_db_core_registry:entry_projection_adapter(Entry),
     PH = bondy_db_core_registry:entry_projection_handle(Entry),
-    case PA:get(PH, Key) of
+    case PA:get(PH, Bucket, Key) of
         not_found ->
             {bondy_oplog_fold:initial_value(Strategy), 0, false};
         {ok, Frame} ->
@@ -534,10 +587,10 @@ read_projection(Entry, Key, Strategy) ->
     end.
 
 
-read_overlay(Entry, Key, AfterHlc) ->
+read_overlay(Entry, Bucket, Key, AfterHlc) ->
     case bondy_db_core_registry:entry_overlay(Entry) of
-        undefined -> [];
-        Tab -> bondy_oplog_db_overlay:events_for(Tab, Key, AfterHlc)
+        disabled -> [];
+        Tab -> bondy_oplog_db_overlay:events_for(Tab, Bucket, Key, AfterHlc)
     end.
 
 
@@ -560,10 +613,6 @@ fold_events(Strategy, Value0, _Hlc0, Events) ->
 %% Batch read path
 %% =============================================================================
 
-%% `consistency` is a preset that adjusts which checks fire; explicit
-%% per-call options (`max_lag`, `require_skew_below`) layer on top. For
-%% `eventual`, freshness is always skipped (the whole point) but an
-%% explicit skew bound is still honoured.
 apply_consistency(eventual, Opts) ->
     {infinity, maps:get(require_skew_below, Opts, undefined)};
 apply_consistency(causal, Opts) ->
@@ -579,9 +628,6 @@ apply_consistency(snapshot, Opts) ->
     {MaxLag, Bound}.
 
 
-%% Per-key freshness predicate: defers to `ensure_fresh_for_keys/2`,
-%% then maps the `{stale, _}` return shape to `{error, _}` for the
-%% batch caller.
 ensure_fresh_predicate_for_keys(_Reads, infinity) ->
     ok;
 ensure_fresh_predicate_for_keys(Reads, MaxLag) ->
@@ -591,16 +637,11 @@ ensure_fresh_predicate_for_keys(Reads, MaxLag) ->
     end.
 
 
-%% For each Read, resolve (NS, Index, Key) → (NS, AeAtomics). Dedupes by
-%% `(NS, Index, Shard)` BEFORE the per-shard registry lookup so a batch
-%% with many keys hashing to the same shard pays one lookup, not N.
-%% Reads that map to an unregistered shard are skipped — the per-cell
-%% `compute_batch` surfaces those as `{error, no_shards}` and they are
-%% not freshness questions.
+%% Dedup shards before per-shard registry lookups.
 touched_shards(Reads) ->
     ShardSet = lists:foldl(
-        fun({NS, Index, Key}, Acc) ->
-            case shard_for(NS, Index, Key) of
+        fun({NS, Index, Bucket, Key}, Acc) ->
+            case shard_for(NS, Index, Bucket, Key) of
                 {ok, Shard} -> Acc#{{NS, Index, Shard} => []};
                 {error, _}  -> Acc
             end
@@ -625,26 +666,26 @@ touched_shards(Reads) ->
 
 compute_batch(Reads, Fence) ->
     maps:from_list([
-        {{NS, Idx, Key}, read_at_fence(NS, Idx, Key, Fence)}
-        || {NS, Idx, Key} <- Reads
+        {{NS, Idx, Bucket, Key},
+         read_at_fence(NS, Idx, Bucket, Key, Fence)}
+        || {NS, Idx, Bucket, Key} <- Reads
     ]).
 
 
-read_at_fence(NS, Index, Key, Fence) ->
-    case resolve_shard(NS, Index, Key) of
+read_at_fence(NS, Index, Bucket, Key, Fence) ->
+    case resolve_shard(NS, Index, Bucket, Key) of
         {ok, Entry} ->
-            fenced_read(Entry, Key, Fence);
+            fenced_read(Entry, Bucket, Key, Fence);
         {error, _} = Err ->
             Err
     end.
 
 
-fenced_read(Entry, Key, Fence) ->
-    %% Fenced reads bypass the cache: the cache holds the "now" value,
-    %% not the as-of-fence value. The slow path always runs.
+fenced_read(Entry, Bucket, Key, Fence) ->
     Strategy = bondy_db_core_registry:entry_fold_module(Entry),
-    {ProjValue, ProjHlc, _ProjHadFrame} = read_projection(Entry, Key, Strategy),
-    OverlayEvents = fenced_overlay(Entry, Key, ProjHlc, Fence),
+    {ProjValue, ProjHlc, _ProjHadFrame} =
+        read_projection(Entry, Bucket, Key, Strategy),
+    OverlayEvents = fenced_overlay(Entry, Bucket, Key, ProjHlc, Fence),
     {Value, Hlc} = fold_events(Strategy, ProjValue, ProjHlc, OverlayEvents),
     case Value of
         undefined -> undefined;
@@ -652,17 +693,18 @@ fenced_read(Entry, Key, Fence) ->
     end.
 
 
-fenced_overlay(Entry, Key, AfterHlc, infinity) ->
-    %% No fence: behave like a regular slow read.
-    read_overlay(Entry, Key, AfterHlc);
-fenced_overlay(Entry, Key, AfterHlc, Fence) ->
+fenced_overlay(Entry, Bucket, Key, AfterHlc, infinity) ->
+    read_overlay(Entry, Bucket, Key, AfterHlc);
+fenced_overlay(Entry, Bucket, Key, AfterHlc, Fence) ->
     case bondy_db_core_registry:entry_overlay(Entry) of
-        undefined -> [];
-        Tab -> bondy_oplog_db_overlay:events_for_window(Tab, Key, AfterHlc, Fence)
+        disabled -> [];
+        Tab ->
+            bondy_oplog_db_overlay:events_for_window(
+                Tab, Bucket, Key, AfterHlc, Fence
+            )
     end.
 
 
-%% Skew = max(physical) - min(physical) across the result HLCs.
 check_skew(_Results, undefined) ->
     ok;
 check_skew(_Results, infinity) ->
@@ -701,10 +743,10 @@ physical(Hlc) ->
 %% Range
 %% =============================================================================
 
-resolve_shard_for_range(NS, Index, Low, Opts) ->
+resolve_shard_for_range(NS, Index, Bucket, Low, Opts) ->
     case maps:get(shard, Opts, undefined) of
         undefined ->
-            case shard_for(NS, Index, Low) of
+            case shard_for(NS, Index, Bucket, Low) of
                 {ok, Shard} -> registry_lookup(NS, Index, Shard);
                 {error, _} = Err -> Err
             end;
@@ -720,7 +762,7 @@ registry_lookup(NS, Index, Shard) ->
     end.
 
 
-do_range(Entry, Low, High, Opts) ->
+do_range(Entry, Bucket, Low, High, Opts) ->
     Limit          = maps:get(limit, Opts, 1000),
     Direction      = maps:get(direction, Opts, asc),
     IncludeOverlay = maps:get(include_overlay, Opts, true),
@@ -729,10 +771,11 @@ do_range(Entry, Low, High, Opts) ->
     PA             = bondy_db_core_registry:entry_projection_adapter(Entry),
     PH             = bondy_db_core_registry:entry_projection_handle(Entry),
 
-    case PA:range(PH, Low, High, Opts) of
+    case PA:range(PH, Bucket, Low, High, Opts) of
         {ok, ProjEntries} ->
-            OverlayEntries = overlay_for_range(Entry, Low, High,
-                                               Fence, IncludeOverlay),
+            OverlayEntries = overlay_for_range(
+                Entry, Bucket, Low, High, Fence, IncludeOverlay
+            ),
             Merged = merge_range(Strategy, ProjEntries, OverlayEntries),
             Ordered = case Direction of
                 asc  -> Merged;
@@ -744,17 +787,19 @@ do_range(Entry, Low, High, Opts) ->
     end.
 
 
-overlay_for_range(_Entry, _Low, _High, _Fence, false) ->
+overlay_for_range(_Entry, _Bucket, _Low, _High, _Fence, false) ->
     [];
-overlay_for_range(Entry, Low, High, Fence, true) ->
+overlay_for_range(Entry, Bucket, Low, High, Fence, true) ->
     case bondy_db_core_registry:entry_overlay(Entry) of
-        undefined -> [];
-        Tab       -> bondy_oplog_db_overlay:range_window(Tab, Low, High, Fence)
+        disabled -> [];
+        Tab ->
+            bondy_oplog_db_overlay:range_window(
+                Tab, Bucket, Low, High, Fence
+            )
     end.
 
 
 merge_range(Strategy, ProjEntries, OverlayEntries) ->
-    %% Group: KeyMap = #{Key => {ProjFrame | undefined, [Event]}}
     Init = maps:from_list([{K, {F, []}} || {K, F} <- ProjEntries]),
     Grouped = lists:foldl(
         fun({K, E}, M) ->
@@ -778,6 +823,52 @@ merge_range(Strategy, ProjEntries, OverlayEntries) ->
     ).
 
 
+shards_in(NS, Index) ->
+    [E
+     || E <- bondy_db_core_registry:shards_for(NS),
+        begin
+            {_NS, Idx, _Sh} = bondy_db_core_registry:entry_key(E),
+            Idx =:= Index
+        end].
+
+
+scatter_range([], _NS, _Index, _Bucket, _Low, _High, _Opts) ->
+    {ok, []};
+scatter_range(Shards, NS, Index, Bucket, Low, High, Opts) ->
+    scatter_range_loop(Shards, NS, Index, Bucket, Low, High, Opts, []).
+
+
+scatter_range_loop([], _NS, _Index, _Bucket, _Low, _High, _Opts, Acc) ->
+    {ok, Acc};
+scatter_range_loop([Entry | Rest], NS, Index, Bucket, Low, High, Opts, Acc) ->
+    {_NS, _Idx, Shard} = bondy_db_core_registry:entry_key(Entry),
+    PerShardOpts = Opts#{shard => Shard},
+    case range(NS, Index, Bucket, {Low, High}, PerShardOpts) of
+        {ok, Rows} ->
+            scatter_range_loop(
+                Rest, NS, Index, Bucket, Low, High, Opts, [Rows | Acc]
+            );
+        {error, _} = Err ->
+            Err
+    end.
+
+
+%% Multi-way merge of per-shard range results into a single globally
+%% sorted list. Each input list is already sorted by Key for the
+%% requested direction; shards partition the keyspace under
+%% `phash2({Bucket, Key}, ShardCount)` so the union has no Key
+%% collisions, and a flat sort over the concatenation is correct.
+merge_sorted_ranges([], _Direction) ->
+    [];
+merge_sorted_ranges(PerShardRows, Direction) ->
+    Flat = lists:append(PerShardRows),
+    Comparator = case Direction of
+        asc  -> fun({K1, _, _}, {K2, _, _}) -> K1 =< K2 end;
+        desc -> fun({K1, _, _}, {K2, _, _}) -> K1 >= K2 end
+    end,
+    lists:sort(Comparator, Flat).
+
+
 emit_range_cell(Strategy, Frame, Events) ->
     {ProjValue, ProjHlc} = case Frame of
         undefined ->
@@ -786,7 +877,6 @@ emit_range_cell(Strategy, Frame, Events) ->
             {H, Body} = bondy_oplog_cell_frame:decode(Bin),
             {bondy_oplog_fold:decode_state(Strategy, Body), H}
     end,
-    %% Per-cell: only events newer than the projection's HLC apply.
     Applicable = [
         E || E <- Events,
              bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)) > ProjHlc
@@ -802,14 +892,15 @@ emit_range_cell(Strategy, Frame, Events) ->
 %% Point-in-time read
 %% =============================================================================
 
-do_read_at_hlc(Entry, Key, T) ->
+do_read_at_hlc(Entry, Bucket, Key, T) ->
     Strategy = bondy_db_core_registry:entry_fold_module(Entry),
-    {ProjValue, ProjHlc, _ProjHadFrame} = read_projection(Entry, Key, Strategy),
+    {ProjValue, ProjHlc, _ProjHadFrame} =
+        read_projection(Entry, Bucket, Key, Strategy),
     case ProjHlc > T of
         true ->
             {error, {historical_read_unavailable, ProjHlc, T}};
         false ->
-            OverlayEvents = fenced_overlay(Entry, Key, ProjHlc, T),
+            OverlayEvents = fenced_overlay(Entry, Bucket, Key, ProjHlc, T),
             {Value, Hlc} = fold_events(Strategy, ProjValue, ProjHlc, OverlayEvents),
             case Value of
                 undefined ->
@@ -824,15 +915,11 @@ do_read_at_hlc(Entry, Key, T) ->
 %% Write-through
 %% =============================================================================
 
-%% Walk distinct namespaces in the batch; the first one that declares
-%% `cp` and conflicts with an `eventual` request short-circuits with the
-%% violation. `causal` and `snapshot` always pass — they invoke the
-%% freshness predicate which is sufficient for `cp`'s guarantee.
 check_consistency_class(_Reads, Consistency)
         when Consistency =/= eventual ->
     ok;
 check_consistency_class(Reads, eventual) ->
-    NSs = lists:usort([NS || {NS, _Idx, _K} <- Reads]),
+    NSs = lists:usort([NS || {NS, _Idx, _B, _K} <- Reads]),
     case lists:dropwhile(
         fun(NS) -> bondy_db_core_registry:consistency_class(NS) =/= cp end,
         NSs
@@ -843,11 +930,30 @@ check_consistency_class(Reads, eventual) ->
     end.
 
 
+do_write_through(Entry, Bucket, Key, Event) ->
+    CA = bondy_db_core_registry:entry_cache_adapter(Entry),
+    CH = bondy_db_core_registry:entry_cache_handle(Entry),
+    case CA:get(CH, Bucket, Key) of
+        not_found ->
+            ok;
+        {ok, {OldValue, _OldHlc}} ->
+            Strategy = bondy_db_core_registry:entry_fold_module(Entry),
+            Op = bondy_oplog_event:op(Event),
+            case bondy_oplog_fold:apply_event(Strategy, OldValue, Op) of
+                undefined ->
+                    ok = CA:delete(CH, Bucket, Key);
+                NewValue ->
+                    NewHlc = bondy_oplog_fold:hlc(Strategy, NewValue),
+                    ok = CA:put(CH, Bucket, Key, {NewValue, NewHlc})
+            end
+    end.
+
+
 %% =============================================================================
 %% Telemetry (`MST_DB_DESIGN.md` §16)
 %% =============================================================================
 
-emit_read_event(NS, Index, Shard, Source, DurUs, Result) ->
+emit_read_event(NS, Index, Shard, Bucket, Source, DurUs, Result) ->
     {Hit, ValueBytes} = case Result of
         {Value, _Hlc} when Value =/= undefined ->
             {Source =:= cache, erlang:external_size(Value)};
@@ -857,12 +963,13 @@ emit_read_event(NS, Index, Shard, Source, DurUs, Result) ->
     telemetry:execute(
         [bondy_db_core, read],
         #{duration_us => DurUs, hit => Hit, value_bytes => ValueBytes},
-        #{namespace => NS, index => Index, shard => Shard, source => Source}
+        #{namespace => NS, index => Index, shard => Shard,
+          bucket => Bucket, source => Source}
     ).
 
 
 emit_read_batch_event(Reads, Fence, Result, DurUs) ->
-    NSs = lists:usort([NS || {NS, _Idx, _K} <- Reads]),
+    NSs = lists:usort([NS || {NS, _Idx, _B, _K} <- Reads]),
     {ReadCount, TotalBytes, SkewMs} = batch_summary(Result),
     telemetry:execute(
         [bondy_db_core, read_batch],
@@ -874,9 +981,6 @@ emit_read_batch_event(Reads, Fence, Result, DurUs) ->
     ).
 
 
-%% On error we report the request shape but cannot describe values: the
-%% batch was rejected before any cells were read. `read_count` falls back
-%% to the requested length so the event still reflects what was asked.
 batch_summary({ok, Results, _Fence}) ->
     Values = maps:values(Results),
     Bytes = lists:foldl(
@@ -899,7 +1003,7 @@ batch_summary(_Err) ->
     {0, 0, 0}.
 
 
-emit_range_event(NS, Index, Shard, Result, DurUs) ->
+emit_range_event(NS, Index, Shard, Bucket, Result, DurUs) ->
     {Entries, Bytes} = case Result of
         {ok, Rows} ->
             B = lists:foldl(
@@ -916,7 +1020,29 @@ emit_range_event(NS, Index, Shard, Result, DurUs) ->
         #{duration_us => DurUs,
           entries_returned => Entries,
           scanned_bytes => Bytes},
-        #{namespace => NS, index => Index, shard => Shard}
+        #{namespace => NS, index => Index, shard => Shard,
+          bucket => Bucket}
+    ).
+
+
+emit_range_all_event(NS, Index, Bucket, ShardCount, EntriesReturned, DurUs) ->
+    telemetry:execute(
+        [bondy_db_core, range_all],
+        #{duration_us => DurUs,
+          shards_scanned => ShardCount,
+          entries_returned => EntriesReturned},
+        #{namespace => NS, index => Index, bucket => Bucket}
+    ).
+
+
+emit_range_all_error_event(NS, Index, Bucket, ShardCount, {error, Reason}, DurUs) ->
+    telemetry:execute(
+        [bondy_db_core, range_all],
+        #{duration_us => DurUs,
+          shards_scanned => ShardCount,
+          entries_returned => 0},
+        #{namespace => NS, index => Index, bucket => Bucket,
+          refused => true, reason => Reason}
     ).
 
 
@@ -946,25 +1072,3 @@ emit_ensure_fresh_event(NSsChecked, StaleCount, DurUs) ->
           stale_count => StaleCount},
         #{}
     ).
-
-
-do_write_through(Entry, Key, Event) ->
-    CA = bondy_db_core_registry:entry_cache_adapter(Entry),
-    CH = bondy_db_core_registry:entry_cache_handle(Entry),
-    case CA:get(CH, Key) of
-        not_found ->
-            ok;
-        {ok, {OldValue, _OldHlc}} ->
-            Strategy = bondy_db_core_registry:entry_fold_module(Entry),
-            Op = bondy_oplog_event:op(Event),
-            case bondy_oplog_fold:apply_event(Strategy, OldValue, Op) of
-                undefined ->
-                    %% Fold collapsed the cell to absent (e.g., delete-
-                    %% style strategy). Invalidate the cache rather than
-                    %% calling `hlc/2` on `undefined`, which would crash.
-                    ok = CA:delete(CH, Key);
-                NewValue ->
-                    NewHlc = bondy_oplog_fold:hlc(Strategy, NewValue),
-                    ok = CA:put(CH, Key, {NewValue, NewHlc})
-            end
-    end.

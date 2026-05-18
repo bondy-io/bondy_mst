@@ -12,10 +12,21 @@ setup() ->
     bondy_oplog_sync_scheduler:set_peer_source(
         bondy_oplog_peer_source_static, #{peers => []}
     ),
+    %% Disable periodic ticks. The tests assert on explicit
+    %% `trigger/0` invocations and on the exact count of dispatches
+    %% the test produced — a stray periodic tick (default 500ms
+    %% cadence) firing the configured dispatch fun in the window
+    %% between the two `start_instance/1` calls of
+    %% `dispatch_per_running_instance` produces an extra dispatch
+    %% message that breaks the assertion.
+    ok = bondy_oplog_sync_scheduler:set_interval_ms(0),
     ok.
 
 cleanup(_) ->
     bondy_oplog_sync_scheduler:set_dispatch(undefined),
+    %% Restore the default cadence; other suites may rely on periodic
+    %% behaviour.
+    ok = bondy_oplog_sync_scheduler:set_interval_ms(500),
     [
         bondy_oplog:stop_instance(I)
      || I <- bondy_oplog:list_instances()

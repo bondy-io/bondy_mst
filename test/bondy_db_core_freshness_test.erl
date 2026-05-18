@@ -117,7 +117,7 @@ ensure_fresh_for_keys_only_checks_touched_shards() ->
     ?assertEqual(
         ok,
         bondy_db_core:ensure_fresh_for_keys(
-            [{NS, primary, K0}],
+            [{NS, primary, <<>>, K0}],
             1_000_000
         )
     ),
@@ -125,7 +125,7 @@ ensure_fresh_for_keys_only_checks_touched_shards() ->
     ?assertEqual(
         {stale, [NS]},
         bondy_db_core:ensure_fresh_for_keys(
-            [{NS, primary, K1}],
+            [{NS, primary, <<>>, K1}],
             1_000_000
         )
     ),
@@ -138,7 +138,7 @@ ensure_fresh_for_keys_infinity_skips() ->
     ?assertEqual(
         ok,
         bondy_db_core:ensure_fresh_for_keys(
-            [{NS, primary, <<"k">>}],
+            [{NS, primary, <<>>, <<"k">>}],
             infinity
         )
     ),

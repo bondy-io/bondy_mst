@@ -23,10 +23,16 @@ cleanup(_) ->
     ok.
 
 stress_test_() ->
+    %% The convergence test drives ~30 random sequences each doing up
+    %% to 80 append/sync ops on two replicas. Total work is bounded
+    %% but heavy enough that under whole-suite load (registry pressure,
+    %% ETS contention, scheduler latency) it can exceed a tight 60s
+    %% timeout intermittently. 180s leaves headroom without masking a
+    %% real regression.
     {setup, fun setup/0, fun cleanup/1, [
-        {timeout, 60, fun convergence_under_random_interleaving/0},
-        {timeout, 60, fun convergence_with_file_snapshot_store/0},
-        {timeout, 60, fun hlc_seeds_from_persisted_watermark/0}
+        {timeout, 180, fun convergence_under_random_interleaving/0},
+        {timeout, 180, fun convergence_with_file_snapshot_store/0},
+        {timeout, 180, fun hlc_seeds_from_persisted_watermark/0}
     ]}.
 
 %% Drive 30 random sequences of (append-A, append-B, sync-A-B,

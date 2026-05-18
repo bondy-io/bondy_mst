@@ -47,7 +47,7 @@ telemetry_test_() ->
 read_cache_hit_emits_source_cache() ->
     NS = mk_ns(),
     {Setup, #{cache_handle := CH}} = setup_shard(NS, primary, 0),
-    ok = bondy_oplog_cache_ets:put(CH, <<"k">>, {{set, <<"v">>, 99}, 99}),
+    ok = bondy_oplog_cache_ets:put(CH, <<>>, <<"k">>, {{set, <<"v">>, 99}, 99}),
     with_handler(?EVENTS, fun() ->
         {{set, <<"v">>, 99}, 99} = bondy_db_core:read(NS, primary, <<"k">>)
     end),
@@ -79,7 +79,7 @@ read_with_overlay_emits_projection_with_overlay() ->
     {Setup, #{projection := PH, overlay := OV}} = setup_shard(NS, primary, 0),
     seed_projection(PH, <<"k">>, 10, {set, <<"old">>, 10}),
     Event = mk_event(20, <<"o">>, 0, {set, 20, <<"new">>}),
-    ok = bondy_oplog_db_overlay:insert(OV, <<"k">>, Event),
+    ok = bondy_oplog_db_overlay:insert(OV, <<>>, <<"k">>, Event),
     with_handler(?EVENTS, fun() ->
         {{set, <<"new">>, 20}, 20} =
             bondy_db_core:read(NS, primary, <<"k">>)
@@ -94,7 +94,7 @@ read_overlay_only_emits_source_overlay_only() ->
     {Setup, #{overlay := OV}} = setup_shard(NS, primary, 0),
     %% No projection write — cell exists only in overlay.
     Event = mk_event(15, <<"o">>, 0, {set, 15, <<"v">>}),
-    ok = bondy_oplog_db_overlay:insert(OV, <<"k">>, Event),
+    ok = bondy_oplog_db_overlay:insert(OV, <<>>, <<"k">>, Event),
     with_handler(?EVENTS, fun() ->
         {{set, <<"v">>, 15}, 15} =
             bondy_db_core:read(NS, primary, <<"k">>)
@@ -111,7 +111,7 @@ read_batch_event_carries_namespaces_and_fence() ->
     {SetupB, #{projection := PB}} = setup_shard(NSB, primary, 0),
     seed_projection(PA, <<"a">>, 11, {set, <<"av">>, 11}),
     seed_projection(PB, <<"b">>, 22, {set, <<"bv">>, 22}),
-    Reads = [{NSA, primary, <<"a">>}, {NSB, primary, <<"b">>}],
+    Reads = [{NSA, primary, <<>>, <<"a">>}, {NSB, primary, <<>>, <<"b">>}],
     with_handler(?EVENTS, fun() ->
         {ok, _, _} = bondy_db_core:read_batch(Reads, #{fence => 100})
     end),
@@ -248,7 +248,7 @@ seed_projection(PH, Key, Hlc, State) ->
         Hlc,
         bondy_oplog_fold:encode_state(lww_register, State)
     ),
-    ok = bondy_oplog_projection_ets:put_batch(PH, [{Key, Frame}]).
+    ok = bondy_oplog_projection_ets:put_batch(PH, [{<<>>, Key, Frame}]).
 
 
 %% Attach a handler that forwards every event to the test process,

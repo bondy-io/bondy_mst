@@ -6,15 +6,20 @@
 %% down. There is no `bondy_db` / shared-supervisor plumbing — the
 %% adapter is verified in isolation against an inline-managed Bookie.
 %%
+%% Bucket is a first-class call-time parameter (`MST_DB_DESIGN.md` §18
+%% item 14): every data callback (`get/3`, `put_batch/2`,
+%% `range/5`, `delete/3`) takes it explicitly.
+%%
 %% Covers:
-%%   - open/4 invalid-opts rejection
+%%   - open/4 invalid-opts rejection (missing Bookie)
 %%   - close/1 is a no-op against the underlying Bookie
-%%   - get/2 hit and miss
-%%   - put_batch/2 of varying sizes including empty
-%%   - delete/2 removes the key
-%%   - range/4: empty, asc, desc, limit, half-open exclusion of High,
+%%   - get hit and miss
+%%   - put_batch of varying sizes including empty
+%%   - delete removes the (bucket, key) row
+%%   - distinct buckets do not collide
+%%   - range: empty, asc, desc, limit, half-open exclusion of High,
 %%     limit smaller than range, limit larger than range
-%%   - info/1 returns the expected map shape
+%%   - info returns the expected map shape
 %% =============================================================================
 
 -module(bondy_oplog_projection_leveled_test).
@@ -35,20 +40,20 @@ adapter_test_() ->
         [
             fun open_with_valid_opts/1,
             fun open_with_missing_bookie_is_rejected/1,
-            fun open_with_missing_bucket_is_rejected/1,
             fun close_is_a_noop/1,
             fun get_returns_not_found_for_missing_key/1,
             fun put_then_get_roundtrip/1,
             fun put_batch_with_multiple_entries/1,
             fun put_batch_with_empty_list/1,
             fun delete_removes_the_key/1,
+            fun distinct_buckets_do_not_collide/1,
             fun range_returns_empty_for_no_data/1,
             fun range_excludes_the_high_bound/1,
             fun range_respects_limit/1,
             fun range_limit_larger_than_data_returns_all/1,
             fun range_asc_returns_ascending/1,
             fun range_desc_returns_reversed/1,
-            fun info_reports_backend_and_bucket/1
+            fun info_reports_backend_and_bookie/1
         ]}.
 
 %% =============================================================================
@@ -72,22 +77,15 @@ cleanup({Pid, Dir}) ->
 
 open_with_valid_opts({Pid, _Dir}) ->
     fun() ->
-        {ok, Handle} = ?MOD:open(ns, idx, 0, #{bookie => Pid, bucket => ?BUCKET}),
-        ?assertMatch(#{bookie := Pid, bucket := ?BUCKET}, Handle)
+        {ok, Handle} = ?MOD:open(ns, idx, 0, #{bookie => Pid}),
+        ?assertMatch(#{bookie := Pid}, Handle)
     end.
 
 
 open_with_missing_bookie_is_rejected({_Pid, _Dir}) ->
     fun() ->
         ?assertMatch({error, {invalid_opts, _}},
-                     ?MOD:open(ns, idx, 0, #{bucket => ?BUCKET}))
-    end.
-
-
-open_with_missing_bucket_is_rejected({Pid, _Dir}) ->
-    fun() ->
-        ?assertMatch({error, {invalid_opts, _}},
-                     ?MOD:open(ns, idx, 0, #{bookie => Pid}))
+                     ?MOD:open(ns, idx, 0, #{}))
     end.
 
 
@@ -103,24 +101,24 @@ close_is_a_noop({Pid, _Dir}) ->
 get_returns_not_found_for_missing_key({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        ?assertEqual(not_found, ?MOD:get(H, <<"nope">>))
+        ?assertEqual(not_found, ?MOD:get(H, ?BUCKET, <<"nope">>))
     end.
 
 
 put_then_get_roundtrip({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        ok = ?MOD:put_batch(H, [{<<"k1">>, <<"v1">>}]),
-        ?assertEqual({ok, <<"v1">>}, ?MOD:get(H, <<"k1">>))
+        ok = ?MOD:put_batch(H, [{?BUCKET, <<"k1">>, <<"v1">>}]),
+        ?assertEqual({ok, <<"v1">>}, ?MOD:get(H, ?BUCKET, <<"k1">>))
     end.
 
 
 put_batch_with_multiple_entries({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        Entries = [{key_n(I), value_n(I)} || I <- lists:seq(1, 10)],
+        Entries = [{?BUCKET, key_n(I), value_n(I)} || I <- lists:seq(1, 10)],
         ok = ?MOD:put_batch(H, Entries),
-        [?assertEqual({ok, value_n(I)}, ?MOD:get(H, key_n(I)))
+        [?assertEqual({ok, value_n(I)}, ?MOD:get(H, ?BUCKET, key_n(I)))
             || I <- lists:seq(1, 10)],
         ok
     end.
@@ -136,10 +134,22 @@ put_batch_with_empty_list({Pid, _Dir}) ->
 delete_removes_the_key({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        ok = ?MOD:put_batch(H, [{<<"k">>, <<"v">>}]),
-        ?assertEqual({ok, <<"v">>}, ?MOD:get(H, <<"k">>)),
-        ok = ?MOD:delete(H, <<"k">>),
-        ?assertEqual(not_found, ?MOD:get(H, <<"k">>))
+        ok = ?MOD:put_batch(H, [{?BUCKET, <<"k">>, <<"v">>}]),
+        ?assertEqual({ok, <<"v">>}, ?MOD:get(H, ?BUCKET, <<"k">>)),
+        ok = ?MOD:delete(H, ?BUCKET, <<"k">>),
+        ?assertEqual(not_found, ?MOD:get(H, ?BUCKET, <<"k">>))
+    end.
+
+
+distinct_buckets_do_not_collide({Pid, _Dir}) ->
+    fun() ->
+        H = handle(Pid),
+        ok = ?MOD:put_batch(H, [
+            {<<"b1">>, <<"k">>, <<"v1">>},
+            {<<"b2">>, <<"k">>, <<"v2">>}
+        ]),
+        ?assertEqual({ok, <<"v1">>}, ?MOD:get(H, <<"b1">>, <<"k">>)),
+        ?assertEqual({ok, <<"v2">>}, ?MOD:get(H, <<"b2">>, <<"k">>))
     end.
 
 
@@ -147,7 +157,7 @@ range_returns_empty_for_no_data({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
         ?assertEqual({ok, []},
-                     ?MOD:range(H, <<"a">>, <<"z">>, #{}))
+                     ?MOD:range(H, ?BUCKET, <<"a">>, <<"z">>, #{}))
     end.
 
 
@@ -155,12 +165,13 @@ range_excludes_the_high_bound({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
         ok = ?MOD:put_batch(H, [
-            {<<"k01">>, <<"v01">>},
-            {<<"k02">>, <<"v02">>},
-            {<<"k03">>, <<"v03">>}
+            {?BUCKET, <<"k01">>, <<"v01">>},
+            {?BUCKET, <<"k02">>, <<"v02">>},
+            {?BUCKET, <<"k03">>, <<"v03">>}
         ]),
         %% [k01, k03) — must include k01 and k02, exclude k03.
-        {ok, Rows} = ?MOD:range(H, <<"k01">>, <<"k03">>, #{limit => 100}),
+        {ok, Rows} = ?MOD:range(H, ?BUCKET, <<"k01">>, <<"k03">>,
+                                #{limit => 100}),
         Keys = [K || {K, _} <- Rows],
         ?assertEqual([<<"k01">>, <<"k02">>], Keys)
     end.
@@ -169,9 +180,10 @@ range_excludes_the_high_bound({Pid, _Dir}) ->
 range_respects_limit({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        Entries = [{key_n(I), value_n(I)} || I <- lists:seq(1, 10)],
+        Entries = [{?BUCKET, key_n(I), value_n(I)} || I <- lists:seq(1, 10)],
         ok = ?MOD:put_batch(H, Entries),
-        {ok, Rows} = ?MOD:range(H, key_n(1), key_n(11), #{limit => 3}),
+        {ok, Rows} = ?MOD:range(H, ?BUCKET, key_n(1), key_n(11),
+                                #{limit => 3}),
         ?assertEqual(3, length(Rows)),
         %% First three in ascending order.
         ?assertEqual([key_n(1), key_n(2), key_n(3)], [K || {K, _} <- Rows])
@@ -181,9 +193,10 @@ range_respects_limit({Pid, _Dir}) ->
 range_limit_larger_than_data_returns_all({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        Entries = [{key_n(I), value_n(I)} || I <- lists:seq(1, 5)],
+        Entries = [{?BUCKET, key_n(I), value_n(I)} || I <- lists:seq(1, 5)],
         ok = ?MOD:put_batch(H, Entries),
-        {ok, Rows} = ?MOD:range(H, key_n(1), key_n(99), #{limit => 100}),
+        {ok, Rows} = ?MOD:range(H, ?BUCKET, key_n(1), key_n(99),
+                                #{limit => 100}),
         ?assertEqual(5, length(Rows))
     end.
 
@@ -192,11 +205,12 @@ range_asc_returns_ascending({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
         ok = ?MOD:put_batch(H, [
-            {<<"k01">>, <<"v01">>},
-            {<<"k02">>, <<"v02">>},
-            {<<"k03">>, <<"v03">>}
+            {?BUCKET, <<"k01">>, <<"v01">>},
+            {?BUCKET, <<"k02">>, <<"v02">>},
+            {?BUCKET, <<"k03">>, <<"v03">>}
         ]),
-        {ok, Rows} = ?MOD:range(H, <<"k01">>, <<"k99">>, #{direction => asc}),
+        {ok, Rows} = ?MOD:range(H, ?BUCKET, <<"k01">>, <<"k99">>,
+                                #{direction => asc}),
         ?assertEqual([<<"k01">>, <<"k02">>, <<"k03">>], [K || {K, _} <- Rows])
     end.
 
@@ -205,11 +219,12 @@ range_desc_returns_reversed({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
         ok = ?MOD:put_batch(H, [
-            {<<"k01">>, <<"v01">>},
-            {<<"k02">>, <<"v02">>},
-            {<<"k03">>, <<"v03">>}
+            {?BUCKET, <<"k01">>, <<"v01">>},
+            {?BUCKET, <<"k02">>, <<"v02">>},
+            {?BUCKET, <<"k03">>, <<"v03">>}
         ]),
-        {ok, Rows} = ?MOD:range(H, <<"k01">>, <<"k99">>, #{direction => desc}),
+        {ok, Rows} = ?MOD:range(H, ?BUCKET, <<"k01">>, <<"k99">>,
+                                #{direction => desc}),
         %% Matches the ETS adapter's contract: take first Limit rows in
         %% asc, then reverse for desc — i.e., desc with no limit returns
         %% the full range reversed.
@@ -217,12 +232,11 @@ range_desc_returns_reversed({Pid, _Dir}) ->
     end.
 
 
-info_reports_backend_and_bucket({Pid, _Dir}) ->
+info_reports_backend_and_bookie({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
         Info = ?MOD:info(H),
-        ?assertMatch(#{backend := leveled, bookie := Pid, bucket := ?BUCKET},
-                     Info)
+        ?assertMatch(#{backend := leveled, bookie := Pid}, Info)
     end.
 
 
@@ -231,7 +245,7 @@ info_reports_backend_and_bucket({Pid, _Dir}) ->
 %% =============================================================================
 
 handle(Pid) ->
-    {ok, H} = ?MOD:open(ns, idx, 0, #{bookie => Pid, bucket => ?BUCKET}),
+    {ok, H} = ?MOD:open(ns, idx, 0, #{bookie => Pid}),
     H.
 
 key_n(I) ->
@@ -253,7 +267,7 @@ make_tempdir() ->
 
 rmrf(Dir) ->
     %% Best-effort cleanup; leveled lays out files under Dir/journal and
-    %% Dir/ledger. file:del_dir_r/1 was added in OTP 23+.
+    %% Dir/ledger.
     case file:del_dir_r(Dir) of
         ok -> ok;
         {error, enoent} -> ok;

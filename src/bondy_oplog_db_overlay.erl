@@ -38,20 +38,23 @@ exhaustion.
 
 ## Key shape
 
-`{CellKey, EventHlc, EventKey}` where:
+`{{Bucket, Key}, EventHlc, EventKey}` where:
 
-- `CellKey :: term()` — the per-cell substrate key.
+- `{Bucket, Key}` — the substrate cell key composed of the storage-layer
+  partition and the per-cell id. The composition is internal to this
+  module; callers pass `Bucket` and `Key` as separate arguments.
 - `EventHlc :: bondy_oplog_hlc:hlc()` — the event's HLC, lifted out so
   HLC-windowed match-specs can compare it without unpacking the
   `event_key()` record.
 - `EventKey :: bondy_oplog_event:event_key()` — the full
   `{HLC, Origin, Seq}` triple. Used as the tie-breaker within the same
-  `(CellKey, EventHlc)` pair so different replicas' events at the same
-  HLC retain a deterministic order.
+  cell's events at the same HLC so different replicas' events retain a
+  deterministic order.
 
 `ordered_set` semantics sort rows lexicographically by this tuple, so
-`select/2` against a `CellKey` returns events in HLC order, with the
-inner record-tag comparison being a no-op (always `bondy_oplog_event_key`).
+`select/2` against a single `(Bucket, Key)` returns events in HLC order,
+with the inner record-tag comparison being a no-op (always
+`bondy_oplog_event_key`).
 
 ## Value
 
@@ -66,19 +69,22 @@ watermark, preserving rows that arrived after the batch was assembled.
 """).
 
 -export([new/0]).
--export([insert/3]).
--export([events_for/3]).
--export([events_for_window/4]).
--export([range/4]).
--export([range_window/4]).
+-export([insert/4]).
+-export([events_for/4]).
+-export([events_for_window/5]).
+-export([range/5]).
+-export([range_window/5]).
 -export([evict_to/3]).
 -export([size/1]).
 -export([delete/1]).
 
 -export_type([tid/0]).
+-export_type([bucket/0]).
+-export_type([key/0]).
 
 -type tid()        :: ets:tid().
--type cell_key()   :: term().
+-type bucket()     :: binary().
+-type cell_key()        :: binary().
 -type after_hlc()  :: bondy_oplog_hlc:hlc().
 
 %% =============================================================================
@@ -97,25 +103,26 @@ new() ->
     ]).
 
 
--spec insert(tid(), cell_key(), bondy_oplog_event:t()) -> ok.
+-spec insert(tid(), bucket(), cell_key(), bondy_oplog_event:t()) -> ok.
 
-insert(Tab, CellKey, Event) ->
+insert(Tab, Bucket, Key, Event) ->
     EventKey = bondy_oplog_event:key(Event),
     EventHlc = bondy_oplog_event:key_hlc(EventKey),
-    true = ets:insert(Tab, {{CellKey, EventHlc, EventKey}, Event}),
+    true = ets:insert(Tab, {{{Bucket, Key}, EventHlc, EventKey}, Event}),
     ok.
 
 
 -doc("""
-Return overlay events for `CellKey` whose HLC is strictly greater than
-`AfterHlc`, in HLC order (ascending). Caller typically passes the
+Return overlay events for `(Bucket, Key)` whose HLC is strictly greater
+than `AfterHlc`, in HLC order (ascending). Caller typically passes the
 projection's last-applied HLC as `AfterHlc`.
 """).
--spec events_for(tid(), cell_key(), after_hlc()) -> [bondy_oplog_event:t()].
+-spec events_for(tid(), bucket(), cell_key(), after_hlc()) ->
+    [bondy_oplog_event:t()].
 
-events_for(Tab, CellKey, AfterHlc) ->
+events_for(Tab, Bucket, Key, AfterHlc) ->
     MS = [{
-        {{CellKey, '$1', '_'}, '$2'},
+        {{{Bucket, Key}, '$1', '_'}, '$2'},
         [{'>', '$1', AfterHlc}],
         ['$2']
     }],
@@ -123,21 +130,22 @@ events_for(Tab, CellKey, AfterHlc) ->
 
 
 -doc("""
-Like `events_for/3` but additionally bounded above by `MaxHlc`
+Like `events_for/4` but additionally bounded above by `MaxHlc`
 (inclusive). Used by the fence-aware read paths (`read_batch/2`,
 `read_at_hlc/3`) to exclude overlay events that have moved past the
 caller's as-of point.
 """).
 -spec events_for_window(
     tid(),
+    bucket(),
     cell_key(),
     AfterHlc :: after_hlc(),
     MaxHlc :: bondy_oplog_hlc:hlc()
 ) -> [bondy_oplog_event:t()].
 
-events_for_window(Tab, CellKey, AfterHlc, MaxHlc) ->
+events_for_window(Tab, Bucket, Key, AfterHlc, MaxHlc) ->
     MS = [{
-        {{CellKey, '$1', '_'}, '$2'},
+        {{{Bucket, Key}, '$1', '_'}, '$2'},
         [
             {'>',  '$1', AfterHlc},
             {'=<', '$1', MaxHlc}
@@ -148,20 +156,23 @@ events_for_window(Tab, CellKey, AfterHlc, MaxHlc) ->
 
 
 -doc("""
-Range scan: return all overlay rows whose `CellKey` is in `[KeyLow, KeyHigh)`
-and whose HLC is strictly greater than `AfterHlc`. Result is a list of
-`{CellKey, Event}` tuples in `(CellKey, HLC)` ascending order.
+Range scan: return all overlay rows in `Bucket` whose `Key` is in
+`[KeyLow, KeyHigh)` and whose HLC is strictly greater than `AfterHlc`.
+Result is a list of `{Key, Event}` tuples in `(Key, HLC)` ascending
+order. `Bucket` is constant across the scan, so it is not repeated in
+each result tuple.
 """).
 -spec range(
     tid(),
+    bucket(),
     KeyLow :: cell_key(),
     KeyHigh :: cell_key(),
     after_hlc()
 ) -> [{cell_key(), bondy_oplog_event:t()}].
 
-range(Tab, KeyLow, KeyHigh, AfterHlc) ->
+range(Tab, Bucket, KeyLow, KeyHigh, AfterHlc) ->
     MS = [{
-        {{'$1', '$2', '_'}, '$3'},
+        {{{Bucket, '$1'}, '$2', '_'}, '$3'},
         [
             {'>=', '$1', {const, KeyLow}},
             {'<',  '$1', {const, KeyHigh}},
@@ -173,9 +184,9 @@ range(Tab, KeyLow, KeyHigh, AfterHlc) ->
 
 
 -doc("""
-Range scan bounded above by `MaxHlc` (inclusive). All overlay rows whose
-`CellKey` is in `[KeyLow, KeyHigh)` and whose HLC is `=< MaxHlc` are
-returned. `MaxHlc = infinity` removes the upper bound.
+Range scan bounded above by `MaxHlc` (inclusive). All overlay rows in
+`Bucket` whose `Key` is in `[KeyLow, KeyHigh)` and whose HLC is
+`=< MaxHlc` are returned. `MaxHlc = infinity` removes the upper bound.
 
 Used by `bondy_db_core:range/4` (`MST_DB_DESIGN.md` §9) for fence-aware
 range scans where the per-cell `> ProjHlc` filter is applied at the
@@ -183,16 +194,17 @@ merge step.
 """).
 -spec range_window(
     tid(),
+    bucket(),
     KeyLow :: cell_key(),
     KeyHigh :: cell_key(),
     MaxHlc :: bondy_oplog_hlc:hlc() | infinity
 ) -> [{cell_key(), bondy_oplog_event:t()}].
 
-range_window(Tab, KeyLow, KeyHigh, infinity) ->
-    range(Tab, KeyLow, KeyHigh, 0);
-range_window(Tab, KeyLow, KeyHigh, MaxHlc) when is_integer(MaxHlc) ->
+range_window(Tab, Bucket, KeyLow, KeyHigh, infinity) ->
+    range(Tab, Bucket, KeyLow, KeyHigh, 0);
+range_window(Tab, Bucket, KeyLow, KeyHigh, MaxHlc) when is_integer(MaxHlc) ->
     MS = [{
-        {{'$1', '$2', '_'}, '$3'},
+        {{{Bucket, '$1'}, '$2', '_'}, '$3'},
         [
             {'>=', '$1', {const, KeyLow}},
             {'<',  '$1', {const, KeyHigh}},

@@ -9,35 +9,75 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-Consumer-facing **cell-mechanics facade** backed by a pluggable
-`bondy_db_topology` (`MST_DB_DESIGN.md` §18 — PR9).
+Consumer-facing **cell-mechanics facade**, substrate-backed.
 
 `bondy_db` decouples the user-visible model (DB → tables → cells keyed
 by `(Realm, Key)`) from the physical layout (which Bookie owns which
-shard, which bucket holds which realm). Callers see one API; topology
-modules decide everything below it.
+shard, which bucket holds which entity type) via the
+`bondy_db_topology` behaviour, and wires writes through the substrate
+WAL+applier and reads through `bondy_db_core`'s cache + projection
+merge.
 
-## What this facade does
+## Substrate wiring
 
-- HLC management (per-DB clock; callers ask for fresh HLCs via
-  `tick/1`).
-- Topology-aware routing (`(Realm, Key) → projection-adapter handle`).
-- Cell frame encoding / decoding (`bondy_oplog_cell_frame`).
-- Read-modify-write of the cell state through the fold's
-  `apply_event/2` callback.
+`open_table/3` provisions, **per shard**:
 
-## What this facade does NOT do
+1. A projection adapter handle from the topology
+   (`Topology:route(Shard, TableState)`). The handle spans every realm
+   in the shard; realm isolation is done by encoding `Realm` into the
+   cell key.
+2. A per-shard ETS cache via `bondy_oplog_cache_ets`.
+3. A registry entry in `bondy_db_core_registry` mapping
+   `(Namespace, primary, Shard)` to the
+   `{cache_adapter, cache_handle, projection_adapter, projection_handle,
+   fold_module}` tuple.
+4. A `bondy_oplog_instance` with `cell_apply_target =>
+   {Namespace, primary, Shard}` so the applier writes the projection
+   on every replayed `{cell_apply, _, _, _}` event.
 
-- Define CRDT operations. The **fold module** owns the cell's state
-  representation and the event shape. `bondy_db:apply/4` takes a
-  fold-shaped event (`{set, H, V}` for LWW, `{add, H, Elem}` for
-  ORSWOT, `{incr, H, N}` for counters, …) and hands it to the fold's
-  `apply_event/2`. `bondy_db:read/3` returns the raw decoded state and
-  the caller pattern-matches per their CRDT. The facade never inspects
-  event or state shapes.
-- WAL, overlay, applier, replication, cache. PR9 writes directly
-  through the topology-routed projection adapter; substrate integration
-  is a separate concern.
+The `Namespace` atom is derived deterministically as
+`list_to_atom(atom_to_list(DbName) ++ "_" ++ atom_to_list(EntityType))`
+so two DBs with a colliding `EntityType` on the same node get distinct
+substrate identities.
+
+## Realm → Bucket mapping
+
+The facade does not bake Realm into the cell key. Instead it asks the
+topology — via `Topology:bucket_for(EntityType, Realm, TableState)` —
+for the storage-layer **Bucket** the substrate should use, then calls
+`bondy_db_core` with `(NS, primary, Bucket, Key)`. The topology decides
+the composition rule:
+
+- `per_entity` returns `Bucket = Realm` (EntityType already implicit in
+  the Bookie).
+- `single_bookie` returns `Bucket = <<Realm, "/", EntityType>>`
+  (one Bookie holds everything, so Bucket disambiguates both).
+
+`Key` is the user-supplied key, **unmodified**. Range scans address
+`(Bucket, [Low, High))` directly.
+
+## Write path
+
+`apply/4` builds `{cell_apply, Bucket, Key, FoldEvent}` and calls
+`bondy_oplog:append/2`. The fold-state update happens inside the
+applier (`MST_DB_DESIGN.md` §6.3): the applier reads the current cell
+frame, decodes via the fold module, folds the event in via
+`apply_event/2`, encodes the new state, and writes it back through the
+projection adapter with Bucket and Key as separate operands. After
+the append, `apply/4` calls `bondy_oplog:await_apply/1` so the next
+`read/3` from the same caller sees the updated cell.
+
+## Read path
+
+`read/3` calls `bondy_db_core:read/4`. That goes through:
+
+1. Per-shard cache — a hit returns immediately.
+2. Cache miss — read the projection, decode, populate the cache,
+   return.
+
+Overlay merging is disabled at the facade level — the shard is
+registered with `overlay = disabled`. Read-your-writes is provided by
+`apply/4`'s `await_apply` step, not by an overlay merge.
 
 ## Lifecycle
 
@@ -46,61 +86,28 @@ modules decide everything below it.
     topology      => bondy_db_topology_per_entity,
     topology_opts => #{sup => MySup, dir => <<"/var/lib/bondy_db">>},
     shard_count   => 8,
-    fold_module   => bondy_oplog_fold_lww_register
+    fold_module   => lww_register
 }),
 
 {ok, Users}  = bondy_db:open_table(Db, users,  #{}),
 {ok, Tags}   = bondy_db:open_table(Db, tags,   #{
-    fold_module => bondy_oplog_fold_orset
+    fold_module => orset
 }),
 
-%% Register operations (LWW):
 H = bondy_db:tick(Users),
 ok = bondy_db:apply(Users, <<"r1">>, <<"alice">>, {set, H, <<"value">>}),
 {ok, {set, <<"value">>, H}, H} = bondy_db:read(Users, <<"r1">>, <<"alice">>),
-
-%% Set operations (ORSWOT):
-H2 = bondy_db:tick(Tags),
-ok = bondy_db:apply(Tags, <<"r1">>, <<"alice">>, {add, H2, <<"erlang">>}),
-{ok, OrsetState, _} = bondy_db:read(Tags, <<"r1">>, <<"alice">>),
 
 ok = bondy_db:close_table(Users),
 ok = bondy_db:close_table(Tags),
 ok = bondy_db:close(Db).
 ```
 
-## Read-modify-write
-
-`apply/4` reads the cell's current state, folds the supplied event
-onto it via `fold_module:apply_event/2`, and writes the result back.
-This is the same pipeline used by the substrate's applier — the only
-difference is that PR9 does not yet replicate the event or route it
-through the WAL. Idempotency, HLC monotonicity, and conflict
-resolution are inherited from the fold's contract.
-
-## Option cascading (K1)
-
-DB-level `Opts` cascade as table defaults; per-table `Opts` override.
-`fold_module` may be set at the DB level (and inherited) or at the
-table level (and overridden) — but every table MUST end up with a
-`fold_module`; `open_table/3` rejects calls otherwise.
-
-`shard_count` defaults to **8**. `topology` and `topology_opts` are
-DB-level only and do not cascade (topology decisions are made once
-per DB).
-
-## Concurrency
-
-`apply/4`, `read/3`, `range/5`, and `tick/1` are wait-free at the
-facade level — all state lives in the `Db` / `Table` handles. The
-topology decides whether per-shard or per-Bookie serialisation
-applies underneath. For the read-modify-write in `apply/4`, two
-concurrent writers targeting the same `(EntityType, Shard, Realm,
-Key)` cell race in the projection adapter; the fold's HLC-monotonic
-`apply_event/2` guarantees the later-HLC event wins regardless of
-arrival order, so the race is consistent — just not serialised. A
-follow-on PR will add per-shard ownership via the substrate's
-applier to make this serialised.
+`close_table/1` stops the per-shard oplog instances, unregisters the
+shards from `bondy_db_core_registry`, deletes the per-shard caches,
+and asks the topology to release its physical resources for the table.
+`close/1` then shuts down the topology (and any Bookies still owned by
+it).
 """).
 
 -export([open/2]).
@@ -116,7 +123,8 @@ applier to make this serialised.
 -export_type([db/0, table/0, realm/0]).
 
 -define(DEFAULT_SHARD_COUNT, 8).
--define(DEFAULT_FOLD,        bondy_oplog_fold_lww_register).
+-define(DEFAULT_FOLD,        lww_register).
+-define(INDEX,               primary).
 
 -type realm() :: binary().
 
@@ -133,9 +141,12 @@ applier to make this serialised.
     db_topology    := module(),
     db_hlc         := bondy_oplog_hlc:t(),
     entity_type    := atom(),
+    namespace      := atom(),
     shard_count    := pos_integer(),
-    fold_module    := module(),
-    table_state    := bondy_db_topology:table_state()
+    fold_module    := module() | atom(),
+    table_state    := bondy_db_topology:table_state(),
+    instance_ids   := #{non_neg_integer() := binary()},
+    cache_handles  := #{non_neg_integer() := term()}
 }.
 
 %% =============================================================================
@@ -157,7 +168,7 @@ Optional keys (cascade to table defaults):
 |---|---|---|
 | `topology_opts` | `#{}` | Passed to `Topology:init/2` |
 | `shard_count` | `8` | Default shard count for tables |
-| `fold_module` | `bondy_oplog_fold_lww_register` | Default fold strategy |
+| `fold_module` | `lww_register` | Default fold strategy |
 
 Returns the opaque `Db` handle. Callers MUST eventually call `close/1`
 to release the topology's physical resources.
@@ -187,22 +198,21 @@ open(Name, Opts) when is_atom(Name), is_map(Opts) ->
 
 
 -doc("""
-Open a logical table for `EntityType` inside `Db`. The topology
-provisions the physical resources (e.g., one Bookie per shard for the
-per-entity topology) and returns a per-table state stashed in the
-`Table` handle.
+Open a logical table for `EntityType` inside `Db`.
+
+The topology provisions the per-shard projection-adapter handles. The
+facade then registers each `(Namespace, primary, Shard)` triple with
+`bondy_db_core_registry`, starts a `bondy_oplog_instance` per shard
+with the substrate write-path wired up, and stashes the resulting
+state in the `Table` handle.
 
 Per-table `Opts` override DB-level defaults. The merged `Opts` MUST
 include `fold_module`. The chosen fold module determines:
 
 - the cell state representation (`encode_state/1` / `decode_state/1`),
-- the event shape accepted by `apply/4` (whatever
-  `apply_event/2` accepts),
-- the conflict-resolution rules used during `apply/4`'s
+- the event shape accepted by `apply/4`,
+- the conflict-resolution rules used during the applier's
   read-modify-write.
-
-The facade itself is fold-agnostic — choose a fold whose state and
-event shapes match the CRDT semantics the table needs.
 """).
 -spec open_table(
     Db :: db(),
@@ -217,18 +227,34 @@ open_table(#{topology := Topology, topology_state := State} = Db,
     case maps:find(fold_module, Merged) of
         {ok, FoldModule} when is_atom(FoldModule) ->
             ShardCount = maps:get(shard_count, Merged, ?DEFAULT_SHARD_COUNT),
+            DbName = maps:get(name, Db),
+            NS = namespace_atom(DbName, EntityType),
             case Topology:open_table(EntityType, ShardCount, Merged, State) of
                 {ok, TableState, _NewState} ->
-                    Table = #{
-                        db_name     => maps:get(name, Db),
-                        db_topology => Topology,
-                        db_hlc      => maps:get(hlc, Db),
-                        entity_type => EntityType,
-                        shard_count => ShardCount,
-                        fold_module => FoldModule,
-                        table_state => TableState
-                    },
-                    {ok, Table};
+                    case provision_shards(
+                            NS, DbName, EntityType, ShardCount,
+                            FoldModule, Topology, TableState) of
+                        {ok, InstanceIds, CacheHandles} ->
+                            {ok, #{
+                                db_name       => DbName,
+                                db_topology   => Topology,
+                                db_hlc        => maps:get(hlc, Db),
+                                entity_type   => EntityType,
+                                namespace     => NS,
+                                shard_count   => ShardCount,
+                                fold_module   => FoldModule,
+                                table_state   => TableState,
+                                instance_ids  => InstanceIds,
+                                cache_handles => CacheHandles
+                            }};
+                        {error, _} = Err ->
+                            %% Topology's open_table already provisioned
+                            %% adapter handles for this table — tear them
+                            %% down so a failed provisioning does not leak
+                            %% Bookies.
+                            _ = Topology:close_table(TableState, State),
+                            Err
+                    end;
                 {error, _} = Err ->
                     Err
             end;
@@ -238,13 +264,27 @@ open_table(#{topology := Topology, topology_state := State} = Db,
 
 
 -doc("""
-Release the resources owned by `Table`. Whether physical resources are
-actually freed is the topology's call — single_bookie keeps its
-Bookie alive across `close_table/1` and only stops it on `close/1`.
+Release the resources owned by `Table`. Stops every per-shard oplog
+instance, unregisters every shard from `bondy_db_core_registry`,
+deletes every per-shard cache table, then asks the topology to release
+its physical resources (Bookies, etc.).
+
+Whether physical resources are actually freed is still the topology's
+call — single_bookie keeps its Bookie alive across `close_table/1` and
+only stops it on `close/1`.
 """).
 -spec close_table(Table :: table()) -> ok.
 
-close_table(#{db_topology := Topology, table_state := TableState}) ->
+close_table(#{db_topology := Topology, table_state := TableState,
+              namespace := NS, shard_count := ShardCount,
+              instance_ids := InstanceIds,
+              cache_handles := CacheHandles}) ->
+    lists:foreach(
+        fun(Shard) ->
+            teardown_shard(NS, Shard, InstanceIds, CacheHandles)
+        end,
+        lists:seq(0, ShardCount - 1)
+    ),
     _ = Topology:close_table(TableState, undefined),
     ok.
 
@@ -252,6 +292,9 @@ close_table(#{db_topology := Topology, table_state := TableState}) ->
 -doc("""
 Tear down `Db`: stop every Bookie, release every resource. Calls the
 topology's `shutdown/1`.
+
+Callers SHOULD `close_table/1` each open table first. `close/1` does
+not chase open tables — it only walks the topology.
 """).
 -spec close(Db :: db()) -> ok.
 
@@ -275,21 +318,19 @@ tick(#{db_hlc := Hlc}) ->
 -doc("""
 Apply a fold-specific event to `(Realm, Key)` inside `Table`.
 
+Builds `{cell_apply, Bucket, Key, FoldEvent}` (Bucket composed via
+`Topology:bucket_for/3`) and appends it through the shard's oplog
+instance. Once the WAL append returns, blocks on
+`bondy_oplog:await_apply/1` so the projection write is visible to a
+subsequent `read/3` from the same caller (read-your-writes).
+
 The event shape is whatever the table's `fold_module:apply_event/2`
-accepts:
+accepts. Idempotency and conflict resolution are inherited from the
+fold's contract; the facade does not validate event shapes.
 
-- `bondy_oplog_fold_lww_register` — `{set, H, V} | {clear, H}`
-- `bondy_oplog_fold_orset` — `{add, H, E} | {remove, H, E}`
-- and so on for any user-supplied fold module.
-
-The facade reads the cell's current state, folds the event onto it,
-and writes the result back. Idempotency and conflict resolution are
-inherited from the fold's contract — `apply_event/2` is responsible
-for handling out-of-order events, ties, and resurrection semantics.
-
-Returns `ok` on success or `{error, _}` on adapter failure. The fold
-module is responsible for crashing on malformed events; the facade
-does not validate event shapes.
+Returns `ok` on successful WAL durability + applier commit, or
+`{error, _}` if the WAL refuses the append or the applier's drain
+times out.
 """).
 -spec apply(
     Table :: table(),
@@ -298,35 +339,45 @@ does not validate event shapes.
     Event :: term()
 ) -> ok | {error, term()}.
 
-apply(Table, Realm, Key, Event)
+apply(#{db_topology := Topology, table_state := TableState,
+        entity_type := EntityType} = Table,
+      Realm, Key, Event)
         when is_binary(Realm), is_binary(Key) ->
-    case route(Table, Realm, Key) of
-        {ok, Adapter, Handle} ->
-            Fold = maps:get(fold_module, Table),
-            OldState = read_state(Adapter, Handle, Key, Fold),
-            NewState = Fold:apply_event(OldState, Event),
-            write_state(Adapter, Handle, Key, Fold, NewState);
+    Bucket = Topology:bucket_for(EntityType, Realm, TableState),
+    InstanceId = instance_id_for(Table, Bucket, Key),
+    Op = {cell_apply, Bucket, Key, Event},
+    try bondy_oplog:append(InstanceId, Op) of
         {error, _} = Err ->
-            Err
+            Err;
+        _EventKey ->
+            await(InstanceId)
+    catch
+        exit:{noproc, _} ->
+            {error, {instance_unavailable, InstanceId}};
+        exit:{shutdown, _} ->
+            {error, {instance_unavailable, InstanceId}}
     end.
 
 
 -doc("""
 Read the decoded fold state for `(Realm, Key)` from `Table`.
 
+Routes through `bondy_db_core:read/4`, which hits the per-shard cache
+on the fast path and falls back to the projection + cache-populate on
+miss. The fold-decoded state is returned together with the cell's
+recorded HLC.
+
 Returns:
 
-- `{ok, State, Hlc}` — the cell's current fold state and the HLC
-  recorded in the cell frame. `State` shape is fold-specific; the
-  caller pattern-matches per their CRDT.
+- `{ok, State, Hlc}` — the cell's current fold state and HLC. `State`
+  shape is fold-specific; the caller pattern-matches per their CRDT.
 - `not_found` — no cell exists for `(Realm, Key)`.
-- `{error, _}` — adapter failure.
+- `{error, _}` — adapter or substrate failure.
 
-A cell whose state is the fold's `initial_value/0` (e.g., `undefined`
-for LWW, an empty set for ORSWOT) is **NOT** filtered out at this
-layer — the facade returns whatever the fold gives it. If a CRDT's
-"empty" state should be invisible to callers, the convenience wrapper
-above the facade applies that policy.
+A cell whose state is the fold's `initial_value/0` is **NOT** filtered
+out — the facade returns whatever the substrate gives it. If a CRDT's
+"empty" state should be invisible to callers, that policy lives above
+this facade.
 """).
 -spec read(
     Table :: table(),
@@ -336,17 +387,16 @@ above the facade applies that policy.
    | not_found
    | {error, term()}.
 
-read(Table, Realm, Key) when is_binary(Realm), is_binary(Key) ->
-    case route(Table, Realm, Key) of
-        {ok, Adapter, Handle} ->
-            case Adapter:get(Handle, Key) of
-                {ok, Frame} ->
-                    Fold = maps:get(fold_module, Table),
-                    {Hlc, Body} = bondy_oplog_cell_frame:decode(Frame),
-                    {ok, Fold:decode_state(Body), Hlc};
-                not_found ->
-                    not_found
-            end;
+read(#{namespace := NS, db_topology := Topology,
+       table_state := TableState, entity_type := EntityType},
+     Realm, Key)
+        when is_binary(Realm), is_binary(Key) ->
+    Bucket = Topology:bucket_for(EntityType, Realm, TableState),
+    case bondy_db_core:read(NS, ?INDEX, Bucket, Key) of
+        {Value, Hlc} when Value =/= undefined ->
+            {ok, Value, Hlc};
+        undefined ->
+            not_found;
         {error, _} = Err ->
             Err
     end.
@@ -360,13 +410,13 @@ passes `Opts#{shard => N}`. Callers whose `[Low, High)` spans more than
 one shard MUST scatter across shards themselves and merge the results;
 the facade does not do scatter-merge in v1.
 
-Returns `{ok, [{Key, State, Hlc}]}` — one row per cell present in the
-range, in ascending key order (or descending with
-`Opts#{direction => desc}`). `State` is the fold's decoded state,
-exactly as returned by `read/3`.
+Routes through `bondy_db_core:range/4`, which merges the projection
+with the per-shard overlay (currently always empty at this layer).
+Realm is folded into both bounds so the substrate scan stays inside
+the realm's prefix.
 
-`Opts` are passed through to the adapter's `range/4`; supported keys
-include `limit` (default 1000) and `direction`.
+Returns `{ok, [{Key, State, Hlc}]}` — one row per cell present in the
+range, in ascending key order. `State` is the fold's decoded state.
 """).
 -spec range(
     Table :: table(),
@@ -378,26 +428,16 @@ include `limit` (default 1000) and `direction`.
             Hlc :: bondy_oplog_hlc:hlc()}]}
    | {error, term()}.
 
-range(Table, Realm, Low, High, Opts)
+range(#{namespace := NS, shard_count := ShardCount,
+        db_topology := Topology, table_state := TableState,
+        entity_type := EntityType},
+      Realm, Low, High, Opts)
         when is_binary(Realm), is_binary(Low), is_binary(High),
              is_map(Opts) ->
-    ShardCount = maps:get(shard_count, Table),
-    Shard = maps:get(shard, Opts, erlang:phash2(Low, ShardCount)),
-    TableState = maps:get(table_state, Table),
-    Topology = maps:get(db_topology, Table),
-    case Topology:route(Shard, Realm, TableState) of
-        {ok, Adapter, Handle} ->
-            AdapterOpts = maps:without([shard], Opts),
-            case Adapter:range(Handle, Low, High, AdapterOpts) of
-                {ok, Entries} ->
-                    Fold = maps:get(fold_module, Table),
-                    {ok, [decode_row(K, F, Fold) || {K, F} <- Entries]};
-                {error, _} = Err ->
-                    Err
-            end;
-        {error, _} = Err ->
-            Err
-    end.
+    Bucket = Topology:bucket_for(EntityType, Realm, TableState),
+    Shard = maps:get(shard, Opts, erlang:phash2({Bucket, Low}, ShardCount)),
+    AdapterOpts = (maps:without([shard], Opts))#{shard => Shard},
+    bondy_db_core:range(NS, ?INDEX, Bucket, {Low, High}, AdapterOpts).
 
 
 -doc("""
@@ -415,12 +455,14 @@ info(#{name := Name, topology := Topology, opts := Opts}) ->
         opts     => Opts
     };
 info(#{entity_type := ET, shard_count := SC, fold_module := Fold,
-       db_name := DbName, db_topology := Topology}) ->
+       db_name := DbName, db_topology := Topology,
+       namespace := NS}) ->
     #{
         kind        => table,
         db_name     => DbName,
         topology    => Topology,
         entity_type => ET,
+        namespace   => NS,
         shard_count => SC,
         fold_module => Fold
     }.
@@ -430,10 +472,143 @@ info(#{entity_type := ET, shard_count := SC, fold_module := Fold,
 %% PRIVATE
 %% =============================================================================
 
-route(#{db_topology := Topology, table_state := TableState,
-        shard_count := ShardCount}, Realm, Key) ->
-    Shard = erlang:phash2(Key, ShardCount),
-    Topology:route(Shard, Realm, TableState).
+%% @private
+%% Atom is derived once per `open_table` from values supplied by the
+%% caller's own code — a bounded set, no atom-leak risk from untrusted
+%% input.
+namespace_atom(DbName, EntityType) ->
+    list_to_atom(
+        atom_to_list(DbName) ++ "_" ++ atom_to_list(EntityType)
+    ).
+
+
+%% @private
+%% Provision every shard of a newly opened table. On any failure, roll
+%% back partial provisioning so the caller does not inherit a half-built
+%% table.
+provision_shards(NS, DbName, EntityType, ShardCount, FoldModule,
+                 Topology, TableState) ->
+    provision_shards(NS, DbName, EntityType, ShardCount, FoldModule,
+                     Topology, TableState, 0, #{}, #{}).
+
+provision_shards(_NS, _DbName, _EntityType, ShardCount, _FoldModule,
+                 _Topology, _TableState, ShardCount, Ids, Caches) ->
+    {ok, Ids, Caches};
+provision_shards(NS, DbName, EntityType, ShardCount, FoldModule,
+                 Topology, TableState, Shard, Ids, Caches) ->
+    case provision_shard(NS, DbName, EntityType, ShardCount, FoldModule,
+                         Topology, TableState, Shard) of
+        {ok, InstanceId, CacheHandle} ->
+            provision_shards(NS, DbName, EntityType, ShardCount,
+                             FoldModule, Topology, TableState,
+                             Shard + 1,
+                             Ids#{Shard => InstanceId},
+                             Caches#{Shard => CacheHandle});
+        {error, _} = Err ->
+            lists:foreach(
+                fun(S) -> teardown_shard(NS, S, Ids, Caches) end,
+                lists:seq(0, Shard - 1)
+            ),
+            Err
+    end.
+
+
+%% @private
+provision_shard(NS, DbName, EntityType, ShardCount, FoldModule,
+                Topology, TableState, Shard) ->
+    case Topology:route(Shard, TableState) of
+        {ok, ProjAdapter, ProjHandle} ->
+            case bondy_oplog_cache_ets:init(NS, ?INDEX, Shard, #{}) of
+                {ok, CacheHandle} ->
+                    Config = #{
+                        shard_count        => ShardCount,
+                        cache_adapter      => bondy_oplog_cache_ets,
+                        cache_handle       => CacheHandle,
+                        projection_adapter => ProjAdapter,
+                        projection_handle  => ProjHandle,
+                        fold_module        => FoldModule,
+                        overlay            => disabled
+                    },
+                    case bondy_db_core_registry:register(
+                            NS, ?INDEX, Shard, Config) of
+                        ok ->
+                            start_shard_instance(
+                                NS, DbName, EntityType, Shard,
+                                FoldModule, CacheHandle);
+                        {error, _} = Err ->
+                            ok = bondy_oplog_cache_ets:close(CacheHandle),
+                            Err
+                    end;
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+
+%% @private
+start_shard_instance(NS, DbName, EntityType, Shard, FoldModule, CacheHandle) ->
+    InstanceId = encode_instance_id(DbName, EntityType, Shard),
+    Opts = #{
+        fold_module => FoldModule,
+        applier => #{
+            cell_apply_target => {NS, ?INDEX, Shard}
+        }
+    },
+    case bondy_oplog:start_instance(InstanceId, Opts) of
+        {ok, _Sup} ->
+            {ok, InstanceId, CacheHandle};
+        {error, _} = Err ->
+            ok = bondy_db_core_registry:unregister(NS, ?INDEX, Shard),
+            ok = bondy_oplog_cache_ets:close(CacheHandle),
+            Err
+    end.
+
+
+%% @private
+teardown_shard(NS, Shard, InstanceIds, CacheHandles) ->
+    case maps:get(Shard, InstanceIds, undefined) of
+        undefined -> ok;
+        InstanceId ->
+            _ = bondy_oplog:stop_instance(InstanceId),
+            ok
+    end,
+    _ = bondy_db_core_registry:unregister(NS, ?INDEX, Shard),
+    case maps:get(Shard, CacheHandles, undefined) of
+        undefined -> ok;
+        CacheHandle ->
+            _ = bondy_oplog_cache_ets:close(CacheHandle),
+            ok
+    end,
+    ok.
+
+
+%% @private
+%% Shard derivation matches `bondy_db_core`: `phash2({Bucket, Key}, N)`.
+%% That same composite is used to pick the instance_id so an `apply/4`
+%% and the subsequent `read/3` for the same `(Bucket, Key)` always hit
+%% the same shard's oplog instance and projection.
+instance_id_for(#{instance_ids := Ids, shard_count := SC}, Bucket, Key) ->
+    Shard = erlang:phash2({Bucket, Key}, SC),
+    maps:get(Shard, Ids).
+
+
+%% @private
+encode_instance_id(DbName, EntityType, Shard) ->
+    iolist_to_binary([
+        atom_to_binary(DbName, utf8), $/,
+        atom_to_binary(EntityType, utf8), $/,
+        integer_to_binary(Shard)
+    ]).
+
+
+%% @private
+await(InstanceId) ->
+    case bondy_oplog:await_apply(InstanceId) of
+        ok -> ok;
+        {error, timeout} = Err -> Err
+    end.
 
 
 merge_opts(DbOpts, TableOpts) ->
@@ -442,25 +617,3 @@ merge_opts(DbOpts, TableOpts) ->
     %% the cascade — a per-table override of those would be incoherent.
     Cascadable = maps:without([topology, topology_opts], DbOpts),
     maps:merge(Cascadable, TableOpts).
-
-
-read_state(Adapter, Handle, Key, Fold) ->
-    case Adapter:get(Handle, Key) of
-        not_found ->
-            Fold:initial_value();
-        {ok, Frame} ->
-            {_Hlc, Body} = bondy_oplog_cell_frame:decode(Frame),
-            Fold:decode_state(Body)
-    end.
-
-
-write_state(Adapter, Handle, Key, Fold, State) ->
-    Hlc = Fold:hlc(State),
-    Body = Fold:encode_state(State),
-    Frame = bondy_oplog_cell_frame:encode(Hlc, Body),
-    Adapter:put_batch(Handle, [{Key, Frame}]).
-
-
-decode_row(Key, Frame, Fold) ->
-    {Hlc, Body} = bondy_oplog_cell_frame:decode(Frame),
-    {Key, Fold:decode_state(Body), Hlc}.

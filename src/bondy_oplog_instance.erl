@@ -367,30 +367,37 @@ do_append_fast(InstanceId, FastPath, Op, Meta) ->
             %% Stateless validator: discard the returned state — by
             %% contract it equals the cached one.
             {Event, _} = ValidatorMod:sign_event(Event0, ValidatorState),
-            case fast_wal_append_batch(InstanceId, [Event]) of
-                ok ->
-                    %% Resolve the overlay tid fresh each call: it can
-                    %% briefly be `undefined` after a one_for_all
-                    %% restart before the new instance's init/1
-                    %% republishes it. Fall back to the gen_server
-                    %% path in that window.
-                    case bondy_oplog_registry:overlay_tab(InstanceId) of
-                        undefined ->
-                            append(InstanceId, Op, Meta);
-                        Tab ->
-                            true = ets:insert(
-                                Tab, [overlay_row(Event, local)]
-                            ),
-                            overlay_counters_add(Ctrs, [Event]),
+            %% Resolve the overlay tid up-front. It can briefly be
+            %% `undefined` after a one_for_all restart before the new
+            %% instance's init/1 republishes it; in that window we fall
+            %% back to the gen_server path which builds its own event.
+            case bondy_oplog_registry:overlay_tab(InstanceId) of
+                undefined ->
+                    append(InstanceId, Op, Meta);
+                Tab ->
+                    %% Stage the overlay row BEFORE the WAL append. See
+                    %% the matching comment in `do_append_local/3` —
+                    %% the applier reads from the WAL the instant it
+                    %% becomes durable, and an in-flight overlay insert
+                    %% races with `evict_overlay_batch/2`.
+                    true = ets:insert(Tab, [overlay_row(Event, local)]),
+                    overlay_counters_add(Ctrs, [Event]),
+                    case fast_wal_append_batch(InstanceId, [Event]) of
+                        ok ->
                             telemetry:execute(
                                 [bondy_oplog, instance, append],
                                 #{count => 1},
                                 #{instance_id => InstanceId}
                             ),
-                            Key
-                    end;
-                {error, _} = Err ->
-                    Err
+                            Key;
+                        {error, _} = Err ->
+                            %% WAL rejected the batch — drop the
+                            %% staged row so no phantom write is
+                            %% observable.
+                            ets:delete(Tab, Key),
+                            overlay_counters_sub(Ctrs, 1),
+                            Err
+                    end
             end;
         {error, _} = Err ->
             Err
@@ -456,31 +463,40 @@ do_append_many_fast(InstanceId, FastPath, Items) ->
             {Events, Keys} = build_events_fast(
                 HLC, SeqRef, Origin, ValidatorMod, ValidatorState, Items
             ),
-            case fast_wal_append_batch(InstanceId, Events) of
-                ok ->
-                    case bondy_oplog_registry:overlay_tab(InstanceId) of
-                        undefined ->
-                            %% Subtree mid-restart between WAL ack
-                            %% and overlay republish. The events are
-                            %% already durable; fall back to the
-                            %% gen_server which will reconcile via
-                            %% the applier. The caller sees the same
-                            %% effect as if the fast path had been
-                            %% disabled to begin with.
-                            append_many(InstanceId, Items);
-                        Tab ->
-                            Rows = [overlay_row(E, local) || E <- Events],
-                            true = ets:insert(Tab, Rows),
-                            overlay_counters_add(Ctrs, Events),
+            %% Resolve the overlay tid up-front; the rare `undefined`
+            %% window after a one_for_all restart routes through the
+            %% gen_server which mints its own keys.
+            case bondy_oplog_registry:overlay_tab(InstanceId) of
+                undefined ->
+                    append_many(InstanceId, Items);
+                Tab ->
+                    %% Stage overlay rows BEFORE the WAL append (see
+                    %% the matching comment on `do_append_local/3`).
+                    Rows = [overlay_row(E, local) || E <- Events],
+                    true = ets:insert(Tab, Rows),
+                    overlay_counters_add(Ctrs, Events),
+                    case fast_wal_append_batch(InstanceId, Events) of
+                        ok ->
                             telemetry:execute(
                                 [bondy_oplog, instance, append],
                                 #{count => Delta},
                                 #{instance_id => InstanceId}
                             ),
-                            Keys
-                    end;
-                {error, _} = Err ->
-                    Err
+                            Keys;
+                        {error, _} = Err ->
+                            %% Roll back the staged rows.
+                            lists:foreach(
+                                fun(E) ->
+                                    ets:delete(
+                                        Tab,
+                                        bondy_oplog_event:key(E)
+                                    )
+                                end,
+                                Events
+                            ),
+                            overlay_counters_sub(Ctrs, length(Events)),
+                            Err
+                    end
             end;
         {error, _} = Err ->
             Err
@@ -781,17 +797,14 @@ root_hash(Target) ->
     Acc
 ) -> Acc when Acc :: term().
 
-fold_range(Target, From, To, Fun, Acc0) when
-    is_binary(Target), is_function(Fun, 2)
-->
-    case bondy_oplog_registry:read_overlay_and_mst(Target) of
-        undefined ->
-            error({noproc, {?MODULE, Target}});
-        {Tab, MST} ->
-            OverlayQueue = overlay_range_tab(Tab, From, To),
-            fold_range_merged(MST, From, To, OverlayQueue, Fun, Acc0)
-    end;
 fold_range(Target, From, To, Fun, Acc0) when is_function(Fun, 2) ->
+    %% Routed through the gen_server so the MST snapshot and the
+    %% overlay scan are captured in the same callback — `publish/1`
+    %% (registry write) and `evict_overlay_batch/2` are sibling steps
+    %% of `install_local_batch`, but they are visible to a lock-free
+    %% reader at two independent moments. Under whole-suite load that
+    %% race was dropping events from `fold_range/5`. Sync hop cost is
+    %% acceptable for the rare admin / test use of range scans.
     gen_server:call(target(Target), {fold_range, From, To, Fun, Acc0}).
 
 -spec range(
@@ -813,46 +826,33 @@ truncate_prefix(Target, Watermark) ->
 
 -spec size(instance_id() | pid()) -> non_neg_integer().
 
-size(Target) when is_binary(Target) ->
-    %% Total events visible to the lock-free read path: events
-    %% already promoted to the MST + events still staged in the
-    %% overlay. The `install_local_batch` cast handler publishes the
-    %% new MST handle and evicts the matching overlay rows in the
-    %% same callback, so the two sets are disjoint at every observable
-    %% state — no double-count.
-    case bondy_oplog_registry:read_overlay_and_live_size(Target) of
-        undefined ->
-            error({noproc, {?MODULE, Target}});
-        {Tab, MstSize} ->
-            MstSize + overlay_size_tab(Tab)
-    end;
 size(Target) ->
+    %% Total events visible to the instance = `live_size` (events
+    %% promoted to the MST) + overlay row count. The two are
+    %% maintained in lockstep by `install_local_batch` (live_size +=
+    %% N, overlay -= N), but those updates are *not* observable to a
+    %% lock-free reader as a single atom. Routing through the
+    %% gen_server is the simplest way to read them in the same
+    %% callback — no `install_local_batch` cast can run while we are
+    %% the handler — so we always return a consistent snapshot.
+    %% Sync hop cost is acceptable for the stats / admin use of
+    %% `size/1`; hot-path callers stay on `get/2` and `append/2,3`.
     gen_server:call(target(Target), instance_size).
 
 -spec first_key(instance_id() | pid()) ->
     {ok, bondy_oplog_event:event_key()} | empty.
 
-first_key(Target) when is_binary(Target) ->
-    case bondy_oplog_registry:read_overlay_and_mst(Target) of
-        undefined ->
-            error({noproc, {?MODULE, Target}});
-        {Tab, MST} ->
-            merge_first_key_tab(Tab, MST)
-    end;
 first_key(Target) ->
+    %% Same MST-snapshot / overlay-scan atomicity story as
+    %% `fold_range/5` — route through the gen_server so the two
+    %% sources are read in a single handler.
     gen_server:call(target(Target), first_key).
 
 -spec latest_key(instance_id() | pid()) ->
     {ok, bondy_oplog_event:event_key()} | empty.
 
-latest_key(Target) when is_binary(Target) ->
-    case bondy_oplog_registry:read_overlay_and_mst(Target) of
-        undefined ->
-            error({noproc, {?MODULE, Target}});
-        {Tab, MST} ->
-            merge_latest_key_tab(Tab, MST)
-    end;
 latest_key(Target) ->
+    %% Same atomicity story as `first_key/1`.
     gen_server:call(target(Target), latest_key).
 
 ?DOC("""
@@ -1605,11 +1605,15 @@ do_handle_call({truncate_prefix, Watermark}, _From, #state{mst = MST0} = State) 
         watermark = NewWatermark
     }};
 do_handle_call(instance_size, _From, State) ->
-    %% MST live_size + overlay rows = total events (disjoint sets;
-    %% see `size/1`). Overlay count read from the shared atomic so
-    %% concurrent `append_fast/2,3` increments are reflected without
-    %% routing through this gen_server.
-    Total = State#state.live_size + atomics:get(State#state.overlay_counters, 1),
+    %% `live_size` + overlay row count, read in the same handler so
+    %% no `install_local_batch` cast can interleave between the two —
+    %% see `size/1`. Slot 1 of `overlay_counters` is shared with
+    %% `append_fast/2,3`, so it can transiently grow during this read
+    %% (a concurrent caller appending) but cannot shrink (only this
+    %% gen_server's `evict_overlay_batch/2` decrements it). The
+    %% returned value is therefore monotone over the read window.
+    Total = State#state.live_size +
+            atomics:get(State#state.overlay_counters, 1),
     {reply, Total, State};
 do_handle_call(origin, _From, State) ->
     {reply, State#state.origin, State};
@@ -1696,9 +1700,26 @@ do_handle_call(
                 State#state.hlc, bondy_oplog_event:key_hlc(LastKey)
             )
     end,
+    %% Re-seed `max_local_installed_seq` from the merged tree. A sync
+    %% can echo our own local events back to us (peer pulled them
+    %% from us earlier, then we pull our originated pages back in via
+    %% `pull_until_complete` → `integrate_peer_root`). When the
+    %% applier later dispatches those same WAL entries to
+    %% `install_local_batch`, the `is_fast_install` predicate uses
+    %% this watermark to decide between the fast install (blindly
+    %% bumps `live_size`) and the slow safe install (checks the MST
+    %% first). Without this refresh, the fast path double-bumps
+    %% `live_size` for the echoed event — visible to `size/1` as an
+    %% off-by-N overcount.
+    MaxLocalSeq =
+        case max_local_seq(MST2, State#state.origin) of
+            undefined -> State#state.max_local_installed_seq;
+            S -> erlang:max(S, State#state.max_local_installed_seq)
+        end,
     {reply, ok, State#state{
         mst = MST2,
-        live_size = compute_live_size(MST2)
+        live_size = compute_live_size(MST2),
+        max_local_installed_seq = MaxLocalSeq
     }};
 do_handle_call(current_watermark, _From, State) ->
     {reply, State#state.watermark, State};
@@ -1809,9 +1830,17 @@ terminate(_Reason, #state{
 %% `ets:select_delete/2` once the install lands.
 do_append_local(#state{} = State0, WalPid, Items) ->
     {Events, Keys, State1} = build_events(State0, Items),
+    %% Stage overlay rows BEFORE the WAL append. The applier reads
+    %% from the WAL the instant `append_batch/2` durably commits;
+    %% if we staged after, the applier could send
+    %% `install_local_batch` before the overlay row exists — its
+    %% `evict_overlay_batch/2` would then run as a no-op, and a
+    %% later overlay insert would leave an orphan row whose count
+    %% inflates `size/1`. Staging first guarantees the row is
+    %% visible the moment the WAL entry is.
+    State2 = stage_to_overlay(State1, Events),
     try bondy_oplog_wal:append_batch(WalPid, Events) of
         {ok, _Entries} ->
-            State2 = stage_to_overlay(State1, Events),
             telemetry:execute(
                 [bondy_oplog, instance, append],
                 #{count => length(Events)},
@@ -1819,13 +1848,39 @@ do_append_local(#state{} = State0, WalPid, Items) ->
             ),
             {ok, Keys, State2};
         {error, _} = E ->
+            %% WAL rejected the batch — roll back the overlay rows
+            %% so they cannot be served as a phantom write.
+            ok = unstage_overlay(State2, Events),
             E
     catch
-        exit:{noproc, _} -> {error, wal_unavailable};
-        exit:noproc -> {error, wal_unavailable};
-        exit:{normal, _} -> {error, wal_unavailable};
-        exit:{shutdown, _} -> {error, wal_unavailable}
+        exit:{noproc, _} ->
+            ok = unstage_overlay(State2, Events),
+            {error, wal_unavailable};
+        exit:noproc ->
+            ok = unstage_overlay(State2, Events),
+            {error, wal_unavailable};
+        exit:{normal, _} ->
+            ok = unstage_overlay(State2, Events),
+            {error, wal_unavailable};
+        exit:{shutdown, _} ->
+            ok = unstage_overlay(State2, Events),
+            {error, wal_unavailable}
     end.
+
+%% @private
+%% Undo the effect of `stage_to_overlay/2` for a batch whose WAL
+%% append did not succeed. Deletes every overlay row by key and
+%% decrements the shared counters by the same amount they were
+%% bumped — keeping the counters and the table in lockstep.
+unstage_overlay(#state{overlay = undefined}, _Events) ->
+    ok;
+unstage_overlay(#state{overlay = Tab, overlay_counters = Ctrs}, Events) ->
+    lists:foreach(
+        fun(E) -> ets:delete(Tab, bondy_oplog_event:key(E)) end,
+        Events
+    ),
+    overlay_counters_sub(Ctrs, length(Events)),
+    ok.
 
 %% @private
 %% Inserts every event in the batch into the per-instance overlay as

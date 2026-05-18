@@ -70,14 +70,22 @@ See `bondy_oplog_projection_adapter` for the persistent-state surface.
 """).
 
 -export_type([
-    handle/0
+    handle/0,
+    bucket/0
 ]).
 
 -type handle() :: any().
+-type bucket() :: term().
 
 %% =============================================================================
 %% BEHAVIOUR CALLBACKS
 %% =============================================================================
+
+%% Bucket is a first-class call-time parameter on every data callback —
+%% the same dimension the projection adapter exposes (`MST_DB_DESIGN.md`
+%% §6, §18 item 14). Implementations typically use a composite ETS key
+%% (`{Bucket, Key}`) so a single per-shard cache table serves every
+%% bucket inside the shard.
 
 -callback init(
     Namespace :: atom(),
@@ -88,16 +96,17 @@ See `bondy_oplog_projection_adapter` for the persistent-state surface.
 
 -callback close(handle()) -> ok.
 
--callback get(handle(), Key :: term()) ->
+-callback get(handle(), bucket(), Key :: term()) ->
     {ok, {Value :: term(), Hlc :: bondy_oplog_hlc:hlc()}} | not_found.
 
 -callback put(
     handle(),
+    bucket(),
     Key :: term(),
     {Value :: term(), Hlc :: bondy_oplog_hlc:hlc()}
 ) -> ok.
 
--callback delete(handle(), Key :: term()) -> ok.
+-callback delete(handle(), bucket(), Key :: term()) -> ok.
 
 -callback invalidate_all(handle()) -> ok.
 

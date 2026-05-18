@@ -9,10 +9,19 @@
 setup() ->
     {ok, _} = application:ensure_all_started(bondy_mst),
     bondy_oplog_gc_scheduler:set_trigger(undefined),
+    %% Disable periodic ticks for the duration of the suite — these
+    %% tests assert on explicit `trigger/0` and `trigger_for/1` calls
+    %% and a stray periodic tick (default 1s cadence) racing into the
+    %% test window has caused intermittent `unexpected_trigger_for_b`
+    %% failures under whole-suite load.
+    ok = bondy_oplog_gc_scheduler:set_interval_ms(0),
     ok.
 
 cleanup(_) ->
     bondy_oplog_gc_scheduler:set_trigger(undefined),
+    %% Restore the default periodic cadence so other suites that
+    %% expect periodic behaviour are not silently de-instrumented.
+    ok = bondy_oplog_gc_scheduler:set_interval_ms(1000),
     [
         bondy_oplog:stop_instance(I)
      || I <- bondy_oplog:list_instances()

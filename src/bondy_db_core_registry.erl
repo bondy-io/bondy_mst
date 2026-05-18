@@ -87,7 +87,7 @@ keeps reads parallel.
     cache_handle       :: term(),
     projection_adapter :: module(),
     projection_handle  :: term(),
-    overlay            :: bondy_oplog_db_overlay:tid() | undefined,
+    overlay            :: disabled | bondy_oplog_db_overlay:tid(),
     fold_module        :: bondy_oplog_fold:strategy(),
     %% Per-shard freshness counter, written by the applier on each
     %% projection commit (or by anti-entropy on each successful round).
@@ -123,7 +123,11 @@ keeps reads parallel.
     projection_adapter := module(),
     projection_handle := term(),
     fold_module := bondy_oplog_fold:strategy(),
-    overlay => bondy_oplog_db_overlay:tid(),
+    %% Required. Pass `disabled` to opt out of overlay-merge on the read
+    %% path (the facade does this — `apply/4`'s `await_apply` step
+    %% provides read-your-writes without an overlay). Pass a `tid()`
+    %% when overlay-merge is desired.
+    overlay := disabled | bondy_oplog_db_overlay:tid(),
     %% Optional. If absent, the registry allocates a single-counter
     %% atomics ref on register. Owners that want shared accounting
     %% (e.g., across a hot/cold reload) can pass their own ref.
@@ -151,6 +155,9 @@ keeps reads parallel.
 
 %% Restart-recovery protocol (`MST_DB_DESIGN.md` §11.1, §18 item 11).
 -export([current_epoch/0]).
+
+%% Diagnostic / invariant-checking helper.
+-export([snapshot_for_invariants/0]).
 
 %% Freshness (`MST_DB_DESIGN.md` §11).
 -export([bump_ae/3]).
@@ -239,6 +246,24 @@ Owners cache the epoch they last saw and treat any change as
 
 current_epoch() ->
     gen_server:call(?MODULE, current_epoch).
+
+
+-doc("""
+Atomic snapshot of `(ETS entries, mon_to_key, key_to_mon)` for
+invariant-checking callers. Runs inside the gen_server so the ETS
+read and the in-memory maps come from the same instant — an outside
+observer combining `sys:get_state/1` with `lookup/3` would race against
+DOWN handlers and unregister calls. Intended for tests and operator
+diagnostics; ordinary callers should use `lookup/3`.
+""").
+-spec snapshot_for_invariants() -> #{
+    entries     := [shard_entry()],
+    mon_to_key  := #{reference() := shard_key()},
+    key_to_mon  := #{shard_key() := reference()}
+}.
+
+snapshot_for_invariants() ->
+    gen_server:call(?MODULE, snapshot_for_invariants).
 
 
 -spec lookup(atom(), atom(), non_neg_integer()) ->
@@ -492,7 +517,7 @@ handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
         cache_handle = maps:get(cache_handle, Config),
         projection_adapter = maps:get(projection_adapter, Config),
         projection_handle = maps:get(projection_handle, Config),
-        overlay = maps:get(overlay, Config, undefined),
+        overlay = maps:get(overlay, Config),
         fold_module = maps:get(fold_module, Config),
         ae_atomics = Ae,
         consistency_class = maps:get(consistency_class, Config, ap)
@@ -511,6 +536,14 @@ handle_call({unregister, Key}, _From, State0) ->
 
 handle_call(current_epoch, _From, #state{epoch = E} = State) ->
     {reply, E, State};
+
+handle_call(snapshot_for_invariants, _From, State) ->
+    Snapshot = #{
+        entries    => ets:select(?TABLE, [{'_', [], ['$_']}]),
+        mon_to_key => State#state.mon_to_key,
+        key_to_mon => State#state.key_to_mon
+    },
+    {reply, Snapshot, State};
 
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown}, State}.
@@ -552,7 +585,7 @@ code_change(_, State, _) -> {ok, State}.
 
 -define(REQUIRED_FIELDS, [
     shard_count, cache_adapter, cache_handle,
-    projection_adapter, projection_handle, fold_module
+    projection_adapter, projection_handle, fold_module, overlay
 ]).
 
 validate_config(Config) ->

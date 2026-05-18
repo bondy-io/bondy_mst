@@ -43,9 +43,9 @@ The adapter's handle is the ETS tid. All callbacks are wait-free except
 -export([
     init/4,
     close/1,
-    get/2,
-    put/3,
-    delete/2,
+    get/3,
+    put/4,
+    delete/3,
     invalidate_all/1,
     info/1
 ]).
@@ -82,14 +82,11 @@ close(Tab) ->
     ok.
 
 
--spec get(ets:tid(), Key :: term()) ->
+-spec get(ets:tid(), Bucket :: term(), Key :: term()) ->
     {ok, {Value :: term(), Hlc :: bondy_oplog_hlc:hlc()}} | not_found.
 
-get(_Tab, '$max_entries') ->
-    %% Reserved key used to stash the eviction bound; never a user cell.
-    not_found;
-get(Tab, Key) ->
-    case ets:lookup(Tab, Key) of
+get(Tab, Bucket, Key) ->
+    case ets:lookup(Tab, {Bucket, Key}) of
         [] -> not_found;
         [{_, Value, Hlc}] -> {ok, {Value, Hlc}}
     end.
@@ -97,25 +94,21 @@ get(Tab, Key) ->
 
 -spec put(
     ets:tid(),
+    Bucket :: term(),
     Key :: term(),
     {Value :: term(), Hlc :: bondy_oplog_hlc:hlc()}
 ) -> ok.
 
-put(_Tab, '$max_entries', _) ->
-    %% Refuse to overwrite the reserved row.
-    ok;
-put(Tab, Key, {Value, Hlc}) ->
-    true = ets:insert(Tab, {Key, Value, Hlc}),
+put(Tab, Bucket, Key, {Value, Hlc}) ->
+    true = ets:insert(Tab, {{Bucket, Key}, Value, Hlc}),
     ok = maybe_evict(Tab),
     ok.
 
 
--spec delete(ets:tid(), Key :: term()) -> ok.
+-spec delete(ets:tid(), Bucket :: term(), Key :: term()) -> ok.
 
-delete(_Tab, '$max_entries') ->
-    ok;
-delete(Tab, Key) ->
-    true = ets:delete(Tab, Key),
+delete(Tab, Bucket, Key) ->
+    true = ets:delete(Tab, {Bucket, Key}),
     ok.
 
 
@@ -172,11 +165,12 @@ evict_until(Tab, N) ->
         Size when Size =< N + 1 ->
             ok;
         _ ->
+            %% Walk from the lowest key, skipping the reserved
+            %% `'$max_entries'` row, and drop one row per pass.
             case ets:first(Tab) of
                 '$end_of_table' ->
                     ok;
                 '$max_entries' ->
-                    %% Skip the reserved row; pick the next one.
                     case ets:next(Tab, '$max_entries') of
                         '$end_of_table' -> ok;
                         Next ->

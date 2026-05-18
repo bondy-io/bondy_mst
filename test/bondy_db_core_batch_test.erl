@@ -1,17 +1,19 @@
 %% =============================================================================
-%% Tests for `bondy_db_core:read_batch/2` (`MST_DB_DESIGN.md` §8, wired
-%% in D4).
+%% Tests for `bondy_db_core:read_batch/2` (`MST_DB_DESIGN.md` §8).
 %%
 %% Pins fence semantics (overlay events past the fence are excluded;
 %% projection cells past the fence are returned as-is), skew detection,
-%% the consistency-knob defaults, and the freshness predicate stub
-%% returning `{error, ensure_fresh_not_wired}` for finite max_lag (the
-%% real predicate lands in D7).
+%% the consistency-knob defaults, and per-shard freshness gating.
+%%
+%% Batch reads take 4-tuples `{NS, Index, Bucket, Key}` — Bucket is a
+%% first-class call-time parameter (`MST_DB_DESIGN.md` §18 item 14).
 %% =============================================================================
 
 -module(bondy_db_core_batch_test).
 
 -include_lib("eunit/include/eunit.hrl").
+
+-define(B, <<>>).
 
 setup() ->
     {ok, _} = application:ensure_all_started(bondy_mst),
@@ -51,8 +53,8 @@ single_cell_batch_returns_value() ->
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0, 1, lww_register),
     materialise(PH, <<"k">>, {set, <<"v">>, 42}, 42),
     {ok, Map, _Fence} =
-        bondy_db_core:read_batch([{NS, primary, <<"k">>}], #{}),
-    ?assertEqual(#{{NS, primary, <<"k">>} => {{set, <<"v">>, 42}, 42}}, Map),
+        bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{}),
+    ?assertEqual(#{{NS, primary, ?B, <<"k">>} => {{set, <<"v">>, 42}, 42}}, Map),
     teardown_shard(Setup).
 
 multi_cell_batch_returns_all_values() ->
@@ -62,44 +64,38 @@ multi_cell_batch_returns_all_values() ->
     materialise(PH, <<"b">>, {set, <<"vb">>, 20}, 20),
     materialise(PH, <<"c">>, {set, <<"vc">>, 30}, 30),
     Reads = [
-        {NS, primary, <<"a">>},
-        {NS, primary, <<"b">>},
-        {NS, primary, <<"c">>}
+        {NS, primary, ?B, <<"a">>},
+        {NS, primary, ?B, <<"b">>},
+        {NS, primary, ?B, <<"c">>}
     ],
     {ok, Map, _} = bondy_db_core:read_batch(Reads, #{}),
     ?assertEqual(3, map_size(Map)),
     ?assertEqual({{set, <<"va">>, 10}, 10},
-                 maps:get({NS, primary, <<"a">>}, Map)),
+                 maps:get({NS, primary, ?B, <<"a">>}, Map)),
     ?assertEqual({{set, <<"vb">>, 20}, 20},
-                 maps:get({NS, primary, <<"b">>}, Map)),
+                 maps:get({NS, primary, ?B, <<"b">>}, Map)),
     ?assertEqual({{set, <<"vc">>, 30}, 30},
-                 maps:get({NS, primary, <<"c">>}, Map)),
+                 maps:get({NS, primary, ?B, <<"c">>}, Map)),
     teardown_shard(Setup).
 
 batch_with_missing_shard_returns_error_per_cell() ->
-    %% Reads for an unregistered namespace surface the per-cell error
-    %% in the map; the batch itself still returns `ok`. Callers handle
-    %% partial failures by walking the result.
     NS = mk_ns(),
     {ok, Map, _} =
-        bondy_db_core:read_batch([{NS, primary, <<"missing">>}], #{}),
+        bondy_db_core:read_batch([{NS, primary, ?B, <<"missing">>}], #{}),
     ?assertEqual({error, no_shards},
-                 maps:get({NS, primary, <<"missing">>}, Map)).
+                 maps:get({NS, primary, ?B, <<"missing">>}, Map)).
 
 fence_excludes_overlay_events_past_it() ->
     NS = mk_ns(),
     {Setup, #{projection := PH, overlay := OV}} =
         setup_shard(NS, primary, 0, 1, lww_register),
-    %% Projection at HLC=5.
     materialise(PH, <<"k">>, {set, <<"old">>, 5}, 5),
-    %% Two overlay events: one at HLC=10, one at HLC=20.
     overlay_insert(OV, <<"k">>, 10, {set, 10, <<"mid">>}),
     overlay_insert(OV, <<"k">>, 20, {set, 20, <<"new">>}),
-    %% Fence at HLC=15 → only the HLC=10 overlay event applies.
     {ok, Map, _Fence} =
-        bondy_db_core:read_batch([{NS, primary, <<"k">>}], #{fence => 15}),
+        bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{fence => 15}),
     ?assertEqual({{set, <<"mid">>, 10}, 10},
-                 maps:get({NS, primary, <<"k">>}, Map)),
+                 maps:get({NS, primary, ?B, <<"k">>}, Map)),
     teardown_shard(Setup).
 
 fence_admits_overlay_events_at_or_below() ->
@@ -108,37 +104,32 @@ fence_admits_overlay_events_at_or_below() ->
         setup_shard(NS, primary, 0, 1, lww_register),
     materialise(PH, <<"k">>, {set, <<"old">>, 5}, 5),
     overlay_insert(OV, <<"k">>, 10, {set, 10, <<"mid">>}),
-    %% Fence at HLC=10 → the HLC=10 event is included (=< fence).
     {ok, Map, _} =
-        bondy_db_core:read_batch([{NS, primary, <<"k">>}], #{fence => 10}),
+        bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{fence => 10}),
     ?assertEqual({{set, <<"mid">>, 10}, 10},
-                 maps:get({NS, primary, <<"k">>}, Map)),
+                 maps:get({NS, primary, ?B, <<"k">>}, Map)),
     teardown_shard(Setup).
 
 fence_passes_through_projection_past_fence() ->
-    %% §8.2 — projection cells whose last_modified_hlc has advanced past
-    %% the fence are returned at their actual HLC, not synthesised back
-    %% in time.
     NS = mk_ns(),
     {Setup, #{projection := PH}} =
         setup_shard(NS, primary, 0, 1, lww_register),
     materialise(PH, <<"k">>, {set, <<"v">>, 100}, 100),
     {ok, Map, _} =
-        bondy_db_core:read_batch([{NS, primary, <<"k">>}], #{fence => 50}),
+        bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{fence => 50}),
     ?assertEqual({{set, <<"v">>, 100}, 100},
-                 maps:get({NS, primary, <<"k">>}, Map)),
+                 maps:get({NS, primary, ?B, <<"k">>}, Map)),
     teardown_shard(Setup).
 
 skew_within_bound_returns_ok() ->
     NS = mk_ns(),
     {Setup, #{projection := PH}} =
         setup_shard(NS, primary, 0, 1, lww_register),
-    %% HLCs separated by 50 ms in physical time.
     H1 = bondy_oplog_hlc:encode(1_000, 0),
     H2 = bondy_oplog_hlc:encode(1_050, 0),
     materialise(PH, <<"a">>, {set, <<"va">>, H1}, H1),
     materialise(PH, <<"b">>, {set, <<"vb">>, H2}, H2),
-    Reads = [{NS, primary, <<"a">>}, {NS, primary, <<"b">>}],
+    Reads = [{NS, primary, ?B, <<"a">>}, {NS, primary, ?B, <<"b">>}],
     {ok, _, _} = bondy_db_core:read_batch(Reads, #{require_skew_below => 100}),
     teardown_shard(Setup).
 
@@ -150,72 +141,61 @@ skew_above_bound_returns_error() ->
     H2 = bondy_oplog_hlc:encode(2_000, 0),
     materialise(PH, <<"a">>, {set, <<"va">>, H1}, H1),
     materialise(PH, <<"b">>, {set, <<"vb">>, H2}, H2),
-    Reads = [{NS, primary, <<"a">>}, {NS, primary, <<"b">>}],
+    Reads = [{NS, primary, ?B, <<"a">>}, {NS, primary, ?B, <<"b">>}],
     ?assertMatch({error, {skew_too_large, 1_000, 500}},
                  bondy_db_core:read_batch(Reads, #{require_skew_below => 500})),
     teardown_shard(Setup).
 
 consistency_eventual_skips_freshness() ->
-    %% Even with a finite max_lag, `eventual` skips the freshness check
-    %% (it's the cheapest mode and explicitly tolerant of staleness).
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
     {ok, _, _} = bondy_db_core:read_batch(
-        [{NS, primary, <<"k">>}],
+        [{NS, primary, ?B, <<"k">>}],
         #{consistency => eventual, max_lag => 50}
     ),
     teardown_shard(Setup).
 
 consistency_causal_unbumped_shard_is_stale() ->
-    %% A registered shard whose AE counter has never been bumped is
-    %% "infinitely stale": `Now - 0 = huge`, > any finite MaxLag.
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
     ?assertEqual(
         {error, {stale, [NS]}},
         bondy_db_core:read_batch(
-            [{NS, primary, <<"k">>}],
+            [{NS, primary, ?B, <<"k">>}],
             #{consistency => causal, max_lag => 100}
         )
     ),
     teardown_shard(Setup).
 
 consistency_causal_freshly_bumped_shard_is_fresh() ->
-    %% After `bump_ae/3`, the shard's last-AE is "now"; a generous
-    %% MaxLag accepts the batch.
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
     ok = bondy_db_core_registry:bump_ae(NS, primary, 0),
     {ok, _, _} =
         bondy_db_core:read_batch(
-            [{NS, primary, <<"k">>}],
+            [{NS, primary, ?B, <<"k">>}],
             #{consistency => causal, max_lag => 1_000_000}
         ),
     teardown_shard(Setup).
 
 consistency_causal_only_checks_touched_shards() ->
-    %% Per-key freshness: a batch hitting only shard 0 must succeed
-    %% even when shard 1 in the same namespace has never been bumped.
     NS = mk_ns(),
     {S0, _} = setup_shard(NS, primary, 0, 2, lww_register),
     {S1, _} = setup_shard(NS, primary, 1, 2, lww_register),
     ok = bondy_db_core_registry:bump_ae(NS, primary, 0),
-    %% Find a key that hashes to shard 0; the batch must NOT fail on
-    %% the unbumped shard 1.
     K0 = find_key_for_shard(NS, primary, 0),
     ?assertMatch(
         {ok, _, _},
         bondy_db_core:read_batch(
-            [{NS, primary, K0}],
+            [{NS, primary, ?B, K0}],
             #{consistency => causal, max_lag => 1_000_000}
         )
     ),
-    %% A key hitting shard 1 must still fail.
     K1 = find_key_for_shard(NS, primary, 1),
     ?assertEqual(
         {error, {stale, [NS]}},
         bondy_db_core:read_batch(
-            [{NS, primary, K1}],
+            [{NS, primary, ?B, K1}],
             #{consistency => causal, max_lag => 1_000_000}
         )
     ),
@@ -223,15 +203,6 @@ consistency_causal_only_checks_touched_shards() ->
     teardown_shard(S1).
 
 consistency_snapshot_applies_half_lag_skew() ->
-    %% Snapshot consistency pins skew to max_lag / 2. With max_lag=200,
-    %% skew bound = 100. Two cells separated by 150ms must fail the
-    %% skew check (the freshness check is bypassed by passing
-    %% `max_lag => infinity` and verifying the skew arithmetic alone).
-    %%
-    %% This test exercises the snapshot computation by overriding to
-    %% infinity max_lag (so D7 is not needed) and an explicit skew
-    %% smaller than the half-lag default — confirming the min() takes
-    %% the stricter of the two.
     NS = mk_ns(),
     {Setup, #{projection := PH}} =
         setup_shard(NS, primary, 0, 1, lww_register),
@@ -239,7 +210,7 @@ consistency_snapshot_applies_half_lag_skew() ->
     H2 = bondy_oplog_hlc:encode(1_150, 0),
     materialise(PH, <<"a">>, {set, <<"va">>, H1}, H1),
     materialise(PH, <<"b">>, {set, <<"vb">>, H2}, H2),
-    Reads = [{NS, primary, <<"a">>}, {NS, primary, <<"b">>}],
+    Reads = [{NS, primary, ?B, <<"a">>}, {NS, primary, ?B, <<"b">>}],
     ?assertMatch(
         {error, {skew_too_large, 150, 50}},
         bondy_db_core:read_batch(Reads, #{
@@ -263,7 +234,7 @@ find_key_for_shard(NS, Index, WantedShard) ->
 
 find_key_for_shard(NS, Index, WantedShard, N) when N < 10_000 ->
     K = integer_to_binary(N),
-    case bondy_db_core:shard_for(NS, Index, K) of
+    case bondy_db_core:shard_for(NS, Index, ?B, K) of
         {ok, WantedShard} -> K;
         _ -> find_key_for_shard(NS, Index, WantedShard, N + 1)
     end;
@@ -279,11 +250,11 @@ materialise(PH, Key, State, Hlc) ->
         Hlc,
         bondy_oplog_fold:encode_state(lww_register, State)
     ),
-    ok = bondy_oplog_projection_ets:put_batch(PH, [{Key, Frame}]).
+    ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, Key, Frame}]).
 
 overlay_insert(OV, Key, Hlc, Op) ->
     Event = mk_event(Hlc, <<"origin">>, Hlc, Op),
-    ok = bondy_oplog_db_overlay:insert(OV, Key, Event).
+    ok = bondy_oplog_db_overlay:insert(OV, ?B, Key, Event).
 
 setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
     {ok, CH} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),

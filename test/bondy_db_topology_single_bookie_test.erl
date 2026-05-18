@@ -27,13 +27,13 @@ topology_test_() ->
             fun init_rejects_missing_dir/1,
             fun open_table_does_not_start_new_bookie/1,
             fun open_two_tables_share_one_bookie/1,
-            fun route_bucket_is_realm_slash_entity/1,
-            fun route_distinct_realms_get_distinct_buckets/1,
-            fun route_distinct_entities_get_distinct_buckets/1,
+            fun route_returns_adapter_and_bookie_handle/1,
+            fun bucket_for_composes_realm_and_entity/1,
+            fun bucket_for_distinct_entities_distinct_buckets/1,
             fun close_table_is_a_noop/1,
             fun shutdown_stops_bookie_and_supervisor/1,
             fun end_to_end_put_get_through_topology/1,
-            fun bucket_isolation_across_realms/1
+            fun bucket_isolation_across_realms_via_key/1
         ]}.
 
 %% =============================================================================
@@ -103,34 +103,39 @@ open_two_tables_share_one_bookie({Sup, Dir}) ->
     end.
 
 
-route_bucket_is_realm_slash_entity({Sup, Dir}) ->
+route_returns_adapter_and_bookie_handle({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
         {ok, T,  _} = ?MOD:open_table(users, 8, #{}, S0),
-        {ok, Adapter, #{bucket := Bucket}} =
-            ?MOD:route(0, <<"realm-1">>, T),
+        {ok, Adapter, Handle} = ?MOD:route(0, T),
         ?assertEqual(bondy_oplog_projection_leveled, Adapter),
-        ?assertEqual(<<"realm-1/users">>, Bucket)
+        %% Bucket is supplied per-call via `bucket_for/3`; the handle
+        %% just carries the shared Bookie.
+        ?assertMatch(#{bookie := _}, Handle),
+        ?assertNot(maps:is_key(bucket, Handle))
     end.
 
 
-route_distinct_realms_get_distinct_buckets({Sup, Dir}) ->
+bucket_for_composes_realm_and_entity({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
-        {ok, T,  _} = ?MOD:open_table(users, 8, #{}, S0),
-        {ok, _, #{bucket := B1}} = ?MOD:route(0, <<"r1">>, T),
-        {ok, _, #{bucket := B2}} = ?MOD:route(0, <<"r2">>, T),
-        ?assertNotEqual(B1, B2)
+        {ok, T, _} = ?MOD:open_table(users, 8, #{}, S0),
+        %% Single Bookie holds every entity for every realm — the bucket
+        %% must encode both. The contract here pins the composition format.
+        ?assertEqual(
+            <<"realm-1/users">>,
+            ?MOD:bucket_for(users, <<"realm-1">>, T)
+        )
     end.
 
 
-route_distinct_entities_get_distinct_buckets({Sup, Dir}) ->
+bucket_for_distinct_entities_distinct_buckets({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
         {ok, Users,  _} = ?MOD:open_table(users,  8, #{}, S0),
         {ok, Tokens, _} = ?MOD:open_table(tokens, 8, #{}, S0),
-        {ok, _, #{bucket := UB}} = ?MOD:route(0, <<"r1">>, Users),
-        {ok, _, #{bucket := TB}} = ?MOD:route(0, <<"r1">>, Tokens),
+        UB = ?MOD:bucket_for(users,  <<"realm-1">>, Users),
+        TB = ?MOD:bucket_for(tokens, <<"realm-1">>, Tokens),
         ?assertNotEqual(UB, TB)
     end.
 
@@ -159,22 +164,31 @@ end_to_end_put_get_through_topology({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
         {ok, T,  _} = ?MOD:open_table(users, 8, #{}, S0),
-        {ok, Adapter, Handle} = ?MOD:route(0, <<"realm-1">>, T),
-        ok = Adapter:put_batch(Handle, [{<<"alice">>, <<"frame">>}]),
-        ?assertEqual({ok, <<"frame">>}, Adapter:get(Handle, <<"alice">>))
+        {ok, Adapter, Handle} = ?MOD:route(0, T),
+        Bucket = ?MOD:bucket_for(users, <<"realm-1">>, T),
+        ok = Adapter:put_batch(Handle, [{Bucket, <<"alice">>, <<"frame">>}]),
+        ?assertEqual({ok, <<"frame">>},
+                     Adapter:get(Handle, Bucket, <<"alice">>))
     end.
 
 
-bucket_isolation_across_realms({Sup, Dir}) ->
+bucket_isolation_across_realms_via_key({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
         {ok, T, _} = ?MOD:open_table(users, 8, #{}, S0),
-        {ok, Adapter, H1} = ?MOD:route(0, <<"realm-1">>, T),
-        {ok, _,       H2} = ?MOD:route(0, <<"realm-2">>, T),
-        ok = Adapter:put_batch(H1, [{<<"alice">>, <<"v1">>}]),
-        ?assertEqual({ok, <<"v1">>}, Adapter:get(H1, <<"alice">>)),
-        %% realm-2 cannot see realm-1's alice — buckets isolate them.
-        ?assertEqual(not_found, Adapter:get(H2, <<"alice">>))
+        {ok, Adapter, Handle} = ?MOD:route(0, T),
+        %% Realms are isolated at the Bucket level — `bucket_for/3`
+        %% composes (Realm, EntityType) so distinct realms land in
+        %% distinct buckets even with the same cell key.
+        B1 = ?MOD:bucket_for(users, <<"realm-1">>, T),
+        B2 = ?MOD:bucket_for(users, <<"realm-2">>, T),
+        ?assertNotEqual(B1, B2),
+        ok = Adapter:put_batch(Handle, [
+            {B1, <<"alice">>, <<"v1">>},
+            {B2, <<"alice">>, <<"v2">>}
+        ]),
+        ?assertEqual({ok, <<"v1">>}, Adapter:get(Handle, B1, <<"alice">>)),
+        ?assertEqual({ok, <<"v2">>}, Adapter:get(Handle, B2, <<"alice">>))
     end.
 
 

@@ -148,11 +148,16 @@ setup_namespaces() ->
      || N <- lists:seq(0, ?NS_POOL - 1)].
 
 assert_invariants() ->
-    State = sys:get_state(bondy_db_core_registry),
-    %% Use record_info-style access by index; the registry's #state{}
-    %% has mon_to_key in slot 2, key_to_mon in slot 3.
-    MonToKey = element(2, State),
-    KeyToMon = element(3, State),
+    %% Atomic snapshot: ETS rows and the two maps come from the same
+    %% gen_server callback instant. An outside observer combining
+    %% `sys:get_state/1` with `lookup/3` would race against DOWN
+    %% handlers and unregister calls — the snapshot would say "Key is
+    %% tracked" while the live ETS had already cleared the row.
+    #{
+        entries    := Entries,
+        mon_to_key := MonToKey,
+        key_to_mon := KeyToMon
+    } = bondy_db_core_registry:snapshot_for_invariants(),
     %% Map sizes must match.
     ?assertEqual(map_size(MonToKey), map_size(KeyToMon)),
     %% mon_to_key and key_to_mon are inverses.
@@ -168,19 +173,17 @@ assert_invariants() ->
         end,
         KeyToMon
     ),
-    %% Every tracked key has a matching ETS row.
+    %% Every tracked key has a matching ETS row (atomic snapshot).
+    EntryKeys = sets:from_list(
+        [bondy_db_core_registry:entry_key(E) || E <- Entries]
+    ),
     maps:foreach(
         fun(Key, _Mon) ->
-            {NS, Index, Shard} = Key,
-            ?assertMatch(
-                {ok, _},
-                bondy_db_core_registry:lookup(NS, Index, Shard)
-            )
+            ?assert(sets:is_element(Key, EntryKeys))
         end,
         KeyToMon
     ),
     %% Every ETS row has a matching monitor entry.
-    Entries = bondy_db_core_registry:list(),
     lists:foreach(
         fun(E) ->
             Key = bondy_db_core_registry:entry_key(E),

@@ -28,7 +28,7 @@ topology_test_() ->
             fun open_table_distinct_entities_get_distinct_bookies/1,
             fun route_returns_adapter_and_handle/1,
             fun route_distinct_shards_get_distinct_bookies/1,
-            fun route_same_shard_distinct_realms_share_bookie/1,
+            fun route_same_shard_returns_stable_handle/1,
             fun route_unknown_shard_returns_error/1,
             fun close_table_stops_bookies/1,
             fun shutdown_stops_supervisor_and_children/1,
@@ -123,9 +123,12 @@ route_returns_adapter_and_handle({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
         {ok, T, _} = ?MOD:open_table(users, 4, #{}, S0),
-        {ok, Adapter, Handle} = ?MOD:route(0, <<"realm-1">>, T),
+        {ok, Adapter, Handle} = ?MOD:route(0, T),
         ?assertEqual(bondy_oplog_projection_leveled, Adapter),
-        ?assertMatch(#{bookie := _, bucket := <<"realm-1">>}, Handle)
+        %% Bucket is per-call (supplied via `bucket_for/3`), so the
+        %% handle just carries the Bookie pid.
+        ?assertMatch(#{bookie := _}, Handle),
+        ?assertNot(maps:is_key(bucket, Handle))
     end.
 
 
@@ -133,22 +136,20 @@ route_distinct_shards_get_distinct_bookies({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
         {ok, T, _} = ?MOD:open_table(users, 4, #{}, S0),
-        {ok, _, #{bookie := B0}} = ?MOD:route(0, <<"r">>, T),
-        {ok, _, #{bookie := B1}} = ?MOD:route(1, <<"r">>, T),
+        {ok, _, #{bookie := B0}} = ?MOD:route(0, T),
+        {ok, _, #{bookie := B1}} = ?MOD:route(1, T),
         ?assertNotEqual(B0, B1)
     end.
 
 
-route_same_shard_distinct_realms_share_bookie({Sup, Dir}) ->
+route_same_shard_returns_stable_handle({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
         {ok, T, _} = ?MOD:open_table(users, 4, #{}, S0),
-        {ok, _, #{bookie := B0, bucket := Bk0}} =
-            ?MOD:route(0, <<"realm-1">>, T),
-        {ok, _, #{bookie := B1, bucket := Bk1}} =
-            ?MOD:route(0, <<"realm-2">>, T),
-        ?assertEqual(B0, B1),
-        ?assertNotEqual(Bk0, Bk1)
+        {ok, A0, H0} = ?MOD:route(0, T),
+        {ok, A1, H1} = ?MOD:route(0, T),
+        ?assertEqual(A0, A1),
+        ?assertEqual(H0, H1)
     end.
 
 
@@ -158,7 +159,7 @@ route_unknown_shard_returns_error({Sup, Dir}) ->
         {ok, T, _} = ?MOD:open_table(users, 4, #{}, S0),
         ?assertMatch(
             {error, {unknown_shard, 99}},
-            ?MOD:route(99, <<"realm-1">>, T)
+            ?MOD:route(99, T)
         )
     end.
 
@@ -191,12 +192,19 @@ end_to_end_put_get_through_topology({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
         {ok, T, _} = ?MOD:open_table(users, 4, #{}, S0),
-        {ok, Adapter, Handle} = ?MOD:route(0, <<"realm-1">>, T),
-        ok = Adapter:put_batch(Handle, [{<<"alice">>, <<"frame">>}]),
-        ?assertEqual({ok, <<"frame">>}, Adapter:get(Handle, <<"alice">>)),
-        %% Different realm must not see the value (different bucket).
-        {ok, _, Handle2} = ?MOD:route(0, <<"realm-2">>, T),
-        ?assertEqual(not_found, Adapter:get(Handle2, <<"alice">>))
+        {ok, Adapter, Handle} = ?MOD:route(0, T),
+        %% Per-entity: `bucket_for/3` returns the realm verbatim; the
+        %% facade folds the realm into the bucket and uses a bare cell
+        %% key. Drive the adapter with two distinct buckets (one per
+        %% realm) at the same key to exercise that path.
+        ok = Adapter:put_batch(Handle, [
+            {<<"realm-1">>, <<"alice">>, <<"f1">>},
+            {<<"realm-2">>, <<"alice">>, <<"f2">>}
+        ]),
+        ?assertEqual({ok, <<"f1">>},
+                     Adapter:get(Handle, <<"realm-1">>, <<"alice">>)),
+        ?assertEqual({ok, <<"f2">>},
+                     Adapter:get(Handle, <<"realm-2">>, <<"alice">>))
     end.
 
 

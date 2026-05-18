@@ -55,6 +55,7 @@ exceptions raised by a custom dispatch are caught and logged.
 -export([trigger/0]).
 -export([set_dispatch/1]).
 -export([set_peer_source/2]).
+-export([set_interval_ms/1]).
 -export([info/0]).
 
 %% gen_server callbacks
@@ -120,6 +121,20 @@ Replaces the peer source module and options at runtime.
 
 set_peer_source(Mod, Opts) when is_atom(Mod), is_map(Opts) ->
     gen_server:call(?MODULE, {set_peer_source, Mod, Opts}).
+
+?DOC("""
+Sets the periodic-tick interval (in milliseconds) at runtime. `0`
+disables periodic ticks entirely; explicit `trigger/0` still works.
+The currently-scheduled timer is cancelled and a new one armed with
+the new interval (if non-zero).
+
+Useful for operator tuning and for tests that need to suppress
+periodic firing while asserting on explicit triggers.
+""").
+-spec set_interval_ms(non_neg_integer()) -> ok.
+
+set_interval_ms(Ms) when is_integer(Ms), Ms >= 0 ->
+    gen_server:call(?MODULE, {set_interval_ms, Ms}).
 
 ?DOC("""
 Returns the scheduler's current configuration. Cheap.
@@ -197,6 +212,10 @@ handle_call({set_dispatch, Fun}, _From, State) ->
     {reply, ok, State#state{dispatch = Fun}};
 handle_call({set_peer_source, Mod, Opts}, _From, State) ->
     {reply, ok, State#state{peer_source = Mod, peer_source_opts = Opts}};
+handle_call({set_interval_ms, Ms}, _From, State0) ->
+    State1 = cancel_pending_tick(State0),
+    State2 = schedule_tick(State1#state{interval_ms = Ms}),
+    {reply, ok, State2};
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
@@ -267,6 +286,18 @@ safe_list_instances() ->
     catch
         _:_ -> []
     end.
+
+%% @private
+%% Cancels the in-flight `tick` timer (if any) and flushes any pending
+%% `tick` message that may already be in the gen_server's mailbox.
+%% Used by `set_interval_ms/1` so the new interval starts cleanly
+%% without a leftover tick at the old cadence.
+cancel_pending_tick(#state{tick_ref = undefined} = State) ->
+    State;
+cancel_pending_tick(#state{tick_ref = Ref} = State) ->
+    _ = erlang:cancel_timer(Ref, [{async, false}, {info, false}]),
+    receive tick -> ok after 0 -> ok end,
+    State#state{tick_ref = undefined}.
 
 %% @private
 schedule_tick(#state{enabled = false} = State) ->

@@ -14,9 +14,9 @@
 -export([
     init/4,
     close/1,
-    get/2,
-    put/3,
-    delete/2,
+    get/3,
+    put/4,
+    delete/3,
     invalidate_all/1,
     info/1
 ]).
@@ -32,13 +32,13 @@ close(Counter) ->
     _ = ets:update_counter(Counter, close_calls, {2, 1}, {close_calls, 0}),
     ok.
 
-get(_Counter, _Key) ->
+get(_Counter, _Bucket, _Key) ->
     not_found.
 
-put(_Counter, _Key, _Value) ->
+put(_Counter, _Bucket, _Key, _Value) ->
     ok.
 
-delete(_Counter, _Key) ->
+delete(_Counter, _Bucket, _Key) ->
     ok.
 
 invalidate_all(_Counter) ->

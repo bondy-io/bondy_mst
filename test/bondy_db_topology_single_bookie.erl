@@ -10,21 +10,22 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-Degenerate reference topology: one leveled Bookie for the whole DB
-(`MST_DB_DESIGN.md` §18 — PR9).
+Degenerate reference topology: one leveled Bookie for the whole DB.
 
 ```
 DB
 └── Bookie(single)
-    ├── bucket=<<"R1/users">>  alice → frame
-    ├── bucket=<<"R1/users">>  bob   → frame
-    ├── bucket=<<"R1/tokens">> tok-1 → frame
-    └── bucket=<<"R2/users">>  carol → frame
+    ├── bucket=<<"users">>   <<"R1/alice">>  → frame
+    ├── bucket=<<"users">>   <<"R1/bob">>    → frame
+    ├── bucket=<<"users">>   <<"R2/carol">>  → frame
+    └── bucket=<<"tokens">>  <<"R1/tok-1">>  → frame
 ```
 
 The Bookie is owned by the topology and shared across every table and
-shard. Bucket disambiguation collapses `(Realm, EntityType)` into a
-single binary so the keyspaces stay disjoint inside the one Bookie.
+shard. Buckets are keyed by `EntityType` only; realms are encoded into
+the key by the facade as `<<Realm/binary, "/", UserKey/binary>>` so
+the substrate sees a per-(entity, shard) keyspace without a separate
+bucket per realm.
 
 ## When to use it
 
@@ -54,9 +55,10 @@ Optional:
 ## State + TableState
 
 This topology starts the Bookie eagerly inside `init/2` so every table
-shares it. `TableState` is `#{bookie := Pid, entity_type := atom()}`;
-`route/3` builds the bucket from `(Realm, EntityType)` and returns a
-projection-adapter handle pointing at the shared Bookie.
+shares it. `TableState` is
+`#{bookie := Pid, entity_type := atom(), bucket := binary()}`;
+`route/2` returns the same per-shard projection-adapter handle for every
+shard, pointing at the shared Bookie with the table's bucket.
 
 `close_table/2` is a no-op (the Bookie stays up until `shutdown/1`),
 so opening and closing tables is cheap.
@@ -64,17 +66,18 @@ so opening and closing tables is cheap.
 ## Bucket format
 
 ```
-<<Realm/binary, "/", EntityType/binary>>
+EntityType (UTF-8 binary form of the atom)
 ```
 
-`EntityType` is the atom's UTF-8 binary form. A `/` separator is used
-because realms in Bondy are limited to `[A-Za-z0-9_\\-]` so the
-separator cannot collide with realm content.
+Realm is folded into the cell key by the facade, not the bucket — the
+bucket only disambiguates between entity types inside the single
+Bookie.
 """).
 
 -export([init/2]).
 -export([open_table/4]).
--export([route/3]).
+-export([route/2]).
+-export([bucket_for/3]).
 -export([close_table/2]).
 -export([shutdown/1]).
 
@@ -123,8 +126,9 @@ open_table(EntityType, _ShardCount, _TableOpts,
     %% Single_bookie ignores ShardCount at the physical level (there is
     %% only one Bookie); the facade still hashes keys into `shard_count`
     %% slots, but every shard for this topology routes to the same
-    %% Bookie. The hash distribution remains useful as a uniform spread
-    %% across the Bookie's internal hot keys.
+    %% Bookie. Bucket disambiguation happens via `bucket_for/3`, which
+    %% composes `(EntityType, Realm)` since neither the Bookie nor the
+    %% NS isolates them.
     TableState = #{
         bookie      => Bookie,
         entity_type => EntityType
@@ -132,11 +136,18 @@ open_table(EntityType, _ShardCount, _TableOpts,
     {ok, TableState, State}.
 
 
-route(_Shard, Realm, #{bookie := Bookie, entity_type := EntityType})
-        when is_binary(Realm) ->
-    Bucket = <<Realm/binary, "/", (atom_to_binary(EntityType, utf8))/binary>>,
-    Handle = #{bookie => Bookie, bucket => Bucket},
+route(_Shard, #{bookie := Bookie}) ->
+    Handle = #{bookie => Bookie},
     {ok, ?PROJECTION_ADAPTER, Handle}.
+
+
+-doc("""
+Single-bookie topology: one Bookie holds every table for every realm.
+The Bucket must therefore disambiguate both — `<<Realm, "/", EntityType>>`.
+""").
+bucket_for(EntityType, Realm, #{entity_type := EntityType})
+        when is_binary(Realm) ->
+    <<Realm/binary, "/", (atom_to_binary(EntityType, utf8))/binary>>.
 
 
 close_table(_TableState, State) ->

@@ -185,12 +185,28 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% apply time. See moduledoc "Substrate read-side wiring" for the
     %% rationale behind the at-apply timing.
     publish_ns :: atom() | undefined,
-    publish_fun :: publish_fun() | undefined
+    publish_fun :: publish_fun() | undefined,
+    %% Per-cell projection write wiring (`MST_DB_DESIGN.md` §6.3).
+    %% When set, events whose op matches `{cell_apply, Bucket, Key, FoldEvent}`
+    %% bypass the per-instance fold and instead do a read-modify-write
+    %% against the projection adapter registered for the configured
+    %% `(NS, Index, Shard)` triple in `bondy_db_core_registry`. The
+    %% cell's fold module (taken from the registry entry, which can
+    %% differ from the per-instance `fold_module`) drives the
+    %% decode/apply/encode cycle. `undefined` disables the path —
+    %% existing instances are unaffected.
+    cell_apply_ctx :: cell_apply_ctx() | undefined
 }).
 
 -type shard_key()   :: {atom(), atom(), non_neg_integer()}.
 -type publish_fun() :: fun((bondy_oplog_event:t()) ->
     {Key :: term(), Op :: term()} | skip).
+-type cell_apply_ctx() :: #{
+    shard_key       := shard_key(),
+    adapter         := module(),
+    handle          := term(),
+    fold_module     := bondy_oplog_fold:strategy()
+}.
 
 -type opts() :: #{
     instance_id := instance_id(),
@@ -201,7 +217,11 @@ configured; defaults are no-ops so existing instances are unaffected.
     ae_targets => [shard_key()],
     %% Substrate subscription wiring (MST_DB_DESIGN §18 item 7).
     publish_ns => atom(),
-    publish_fun => publish_fun()
+    publish_fun => publish_fun(),
+    %% Per-cell projection write wiring (MST_DB_DESIGN §6.3).
+    %% Setting this requires the shard to be already registered in
+    %% `bondy_db_core_registry`. Resolved eagerly at init/1.
+    cell_apply_target => shard_key()
 }.
 
 -export_type([opts/0]).
@@ -330,6 +350,16 @@ do_init(InstanceId, WalDir, CommitEvery, PollMs, Opts) ->
     AeTargets = maps:get(ae_targets, Opts, []),
     PublishNs = maps:get(publish_ns, Opts, undefined),
     PublishFun = maps:get(publish_fun, Opts, undefined),
+    case resolve_cell_apply_ctx(Opts) of
+        {ok, CellCtx} ->
+            do_init_2(InstanceId, WalDir, CommitEvery, PollMs, Opts,
+                AeTargets, PublishNs, PublishFun, CellCtx);
+        {error, _} = Err ->
+            {stop, Err}
+    end.
+
+do_init_2(InstanceId, WalDir, CommitEvery, PollMs, _Opts,
+          AeTargets, PublishNs, PublishFun, CellCtx) ->
     case resolve_siblings(InstanceId) of
         {ok, InstP, WalP, MST, Watermark} ->
             CO = read_consumer_offset(WalDir),
@@ -357,7 +387,8 @@ do_init(InstanceId, WalDir, CommitEvery, PollMs, Opts) ->
                         fold_state = FoldState0,
                         ae_targets = AeTargets,
                         publish_ns = PublishNs,
-                        publish_fun = PublishFun
+                        publish_fun = PublishFun,
+                        cell_apply_ctx = CellCtx
                     },
                     ok = bondy_oplog_registry:set_applier_pid(
                         InstanceId, self()
@@ -369,6 +400,32 @@ do_init(InstanceId, WalDir, CommitEvery, PollMs, Opts) ->
             end;
         {error, _} = Err ->
             {stop, Err}
+    end.
+
+%% @private
+%% Resolve the optional `cell_apply_target` into a `cell_apply_ctx`
+%% map of the projection adapter, handle, and fold module from the
+%% shard's registry entry. `not_found` is a hard error so a typo'd
+%% triple surfaces at startup instead of silently disabling the path.
+resolve_cell_apply_ctx(Opts) ->
+    case maps:get(cell_apply_target, Opts, undefined) of
+        undefined ->
+            {ok, undefined};
+        {NS, Index, Shard} = Key ->
+            case bondy_db_core_registry:lookup(NS, Index, Shard) of
+                {ok, Entry} ->
+                    {ok, #{
+                        shard_key   => Key,
+                        adapter     =>
+                            bondy_db_core_registry:entry_projection_adapter(Entry),
+                        handle      =>
+                            bondy_db_core_registry:entry_projection_handle(Entry),
+                        fold_module =>
+                            bondy_db_core_registry:entry_fold_module(Entry)
+                    }};
+                not_found ->
+                    {error, {cell_apply_target_not_registered, Key}}
+            end
     end.
 
 handle_call({enqueue_remote, Event}, From,
@@ -611,10 +668,30 @@ apply_batch(#state{instance_id = Id} = State, Batch) ->
                 State#state.instance_pid,
                 {install_local_batch, Verified}
             ),
-            State1 = apply_fold_batch(State, Verified),
-            ok = publish_batch(State1, Verified),
-            State1
+            {CellEvents, FoldEvents} = partition_by_op(Verified),
+            State1 = apply_fold_batch(State, FoldEvents),
+            State2 = apply_cell_batch(State1, CellEvents),
+            ok = publish_batch(State2, Verified),
+            State2
     end.
+
+%% @private
+%% Partitions a verified batch into `{CellApplyEvents, FoldEvents}`.
+%% `CellApplyEvents` are events whose op matches
+%% `{cell_apply, Bucket, Key, FoldEvent}`; these bypass the per-instance
+%% fold and instead drive a projection read-modify-write through
+%% `apply_cell_batch/2`. Everything else goes through the existing
+%% per-instance fold path.
+partition_by_op(Events) ->
+    lists:partition(
+        fun(E) ->
+            case bondy_oplog_event:op(E) of
+                {cell_apply, _, _, _} -> true;
+                _ -> false
+            end
+        end,
+        Events
+    ).
 
 %% @private
 %% Folds the verified events into the per-instance projection state.
@@ -624,6 +701,8 @@ apply_batch(#state{instance_id = Id} = State, Batch) ->
 %% (the applier continues to drain the WAL but the projection
 %% deviates from the WAL; F9 will track recovery semantics).
 apply_fold_batch(#state{fold_module = undefined} = State, _Verified) ->
+    State;
+apply_fold_batch(State, []) ->
     State;
 apply_fold_batch(#state{fold_module = Mod,
                         fold_state = FS0,
@@ -653,6 +732,84 @@ apply_fold_batch(#state{fold_module = Mod,
                 stacktrace => S
             }),
             State
+    end.
+
+%% @private
+%% Per-cell projection write path (`MST_DB_DESIGN.md` §6.3). Each event
+%% in `CellEvents` carries op `{cell_apply, Bucket, Key, FoldEvent}`. For
+%% each, read the cell's current frame from the projection adapter,
+%% decode to state via the fold's `decode_state/1`, fold the event in
+%% via `apply_event/2`, encode back, and write the new frame via
+%% `put_batch/2`. Bucket is a first-class call-time parameter on the
+%% projection adapter; the applier passes it through verbatim.
+apply_cell_batch(State, []) ->
+    State;
+apply_cell_batch(#state{cell_apply_ctx = undefined} = State, _Events) ->
+    State;
+apply_cell_batch(#state{cell_apply_ctx = Ctx,
+                        instance_id = Id} = State, Events) ->
+    #{adapter := Adapter, handle := Handle, fold_module := Fold} = Ctx,
+    lists:foreach(
+        fun(Event) ->
+            case bondy_oplog_event:op(Event) of
+                {cell_apply, Bucket, Key, FoldEvent} ->
+                    apply_one_cell(Id, Adapter, Handle, Fold,
+                                   Bucket, Key, FoldEvent);
+                _ ->
+                    ok
+            end
+        end,
+        Events
+    ),
+    State.
+
+%% @private
+apply_one_cell(Id, Adapter, Handle, Fold, Bucket, Key, FoldEvent) ->
+    try
+        OldState =
+            case Adapter:get(Handle, Bucket, Key) of
+                not_found ->
+                    bondy_oplog_fold:initial_value(Fold);
+                {ok, OldFrame} ->
+                    {_PrevHlc, OldBody} =
+                        bondy_oplog_cell_frame:decode(OldFrame),
+                    bondy_oplog_fold:decode_state(Fold, OldBody)
+            end,
+        NewState = bondy_oplog_fold:apply_event(Fold, OldState, FoldEvent),
+        Hlc = bondy_oplog_fold:hlc(Fold, NewState),
+        NewBody = bondy_oplog_fold:encode_state(Fold, NewState),
+        NewFrame = bondy_oplog_cell_frame:encode(Hlc, NewBody),
+        case Adapter:put_batch(Handle, [{Bucket, Key, NewFrame}]) of
+            ok ->
+                ok;
+            {error, Reason} ->
+                ?LOG_WARNING(#{
+                    description =>
+                        "bondy_oplog_applier projection write failed; "
+                        "the cell will be re-applied on the next replay "
+                        "of this event",
+                    instance_id => Id,
+                    bucket => Bucket,
+                    cell_key => Key,
+                    reason => Reason
+                }),
+                ok
+        end
+    catch
+        C:R:S ->
+            ?LOG_ERROR(#{
+                description =>
+                    "bondy_oplog_applier cell_apply raised; the cell "
+                    "has been skipped. Subtree continues to drain.",
+                instance_id => Id,
+                bucket => Bucket,
+                cell_key => Key,
+                fold_module => Fold,
+                class => C,
+                reason => R,
+                stacktrace => S
+            }),
+            ok
     end.
 
 %% @private
@@ -963,8 +1120,25 @@ await_or_idle(#state{iter = Iter, wal_pid = WalPid,
 %% silent no-op at the first publish call.
 validate_substrate_opts(Opts) ->
     case validate_ae_targets(maps:get(ae_targets, Opts, [])) of
-        ok -> validate_publish_opts(Opts);
-        {error, _} = Err -> Err
+        ok ->
+            case validate_publish_opts(Opts) of
+                ok -> validate_cell_apply_target(Opts);
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+validate_cell_apply_target(Opts) ->
+    case maps:get(cell_apply_target, Opts, undefined) of
+        undefined ->
+            ok;
+        {NS, Index, Shard}
+                when is_atom(NS), is_atom(Index),
+                     is_integer(Shard), Shard >= 0 ->
+            ok;
+        Bad ->
+            {error, {invalid_cell_apply_target, Bad}}
     end.
 
 validate_ae_targets([]) ->

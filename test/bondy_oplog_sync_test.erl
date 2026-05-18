@@ -20,16 +20,20 @@ cleanup(_) ->
     ok.
 
 sync_test_() ->
+    %% 30s per-test timeout (eunit default is 5s). Sync tests call
+    %% `bondy_oplog:sync/2` which internally awaits the applier's
+    %% drain; under whole-suite load that occasionally takes longer
+    %% than 5s and races the eunit watchdog.
     {setup, fun setup/0, fun cleanup/1, [
-        fun pull_converges_two_replicas/0,
-        fun pull_is_idempotent/0,
-        fun bidirectional_sync_full_convergence/0,
-        fun asymmetric_loads_converge/0,
-        fun sync_records_peer_state/0,
-        fun multi_instance_independence/0,
-        fun pull_when_peer_empty_is_noop/0,
-        fun pull_when_local_empty_pulls_everything/0,
-        fun missing_set_excludes_locally_present_pages/0
+        {timeout, 30, fun pull_converges_two_replicas/0},
+        {timeout, 30, fun pull_is_idempotent/0},
+        {timeout, 30, fun bidirectional_sync_full_convergence/0},
+        {timeout, 30, fun asymmetric_loads_converge/0},
+        {timeout, 30, fun sync_records_peer_state/0},
+        {timeout, 30, fun multi_instance_independence/0},
+        {timeout, 30, fun pull_when_peer_empty_is_noop/0},
+        {timeout, 30, fun pull_when_local_empty_pulls_everything/0},
+        {timeout, 30, fun missing_set_excludes_locally_present_pages/0}
     ]}.
 
 %% A pulls from B; A's tree afterwards must be the union of A's prior

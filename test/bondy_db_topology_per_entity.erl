@@ -10,9 +10,8 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-**T2** reference topology for `bondy_db` (`MST_DB_DESIGN.md` §18 — PR9):
-one leveled Bookie per `(EntityType, Shard)` shared across realms;
-bucket = Realm.
+**T2** reference topology for `bondy_db`: one leveled Bookie per
+`(EntityType, Shard)` shared across realms; bucket = EntityType binary.
 
 ```
 DB
@@ -25,14 +24,19 @@ DB
     └── ...
 ```
 
-Inside each Bookie:
+Inside each Bookie a single bucket holds every cell for the
+`(EntityType, Shard)`; realm is encoded into the key by the facade
+as `<<Realm/binary, "/", UserKey/binary>>` so realms are logically
+separated inside the bucket without requiring multiple physical
+buckets:
 
 ```
 Bookie(users, 0)
-├── bucket=<<"realm-1">>   alice → frame
-├── bucket=<<"realm-1">>   bob   → frame
-├── bucket=<<"realm-2">>   carol → frame
-└── bucket=<<"realm-2">>   dave  → frame
+└── bucket=<<"users">>
+    ├── <<"realm-1/alice">>   → frame
+    ├── <<"realm-1/bob">>     → frame
+    ├── <<"realm-2/carol">>   → frame
+    └── <<"realm-2/dave">>    → frame
 ```
 
 ## When to use it
@@ -66,20 +70,23 @@ Optional:
 #{
     entity_type := atom(),
     shard_count := pos_integer(),
+    bucket      := binary(),
     shards      := #{Shard :: non_neg_integer() := pid()}
 }
 ```
 
-## Realm-to-bucket
+## Bucket
 
-`Realm` binaries are passed through verbatim. Callers MUST keep realm
-names within leveled's bucket constraints (binary, non-empty,
-disjoint from the small set of leveled-internal bucket sentinels).
+Bucket is the UTF-8 binary form of the entity type atom. All cells for
+the `(EntityType, Shard)` live inside this one bucket — realm
+isolation happens above the topology, in the facade's cell-key
+encoding.
 """).
 
 -export([init/2]).
 -export([open_table/4]).
--export([route/3]).
+-export([route/2]).
+-export([bucket_for/3]).
 -export([close_table/2]).
 -export([shutdown/1]).
 
@@ -126,15 +133,25 @@ open_table(EntityType, ShardCount, _TableOpts, State)
     end.
 
 
-route(Shard, Realm, #{shards := Shards})
-        when is_integer(Shard), is_binary(Realm) ->
+route(Shard, #{shards := Shards}) when is_integer(Shard) ->
     case maps:find(Shard, Shards) of
         {ok, Bookie} ->
-            Handle = #{bookie => Bookie, bucket => Realm},
+            %% Bookie-only handle: Bucket is per-call, supplied by the
+            %% facade via `bucket_for/3` on every adapter invocation.
+            Handle = #{bookie => Bookie},
             {ok, ?PROJECTION_ADAPTER, Handle};
         error ->
             {error, {unknown_shard, Shard}}
     end.
+
+
+-doc("""
+Per-entity topology disambiguates EntityType by the Bookie itself —
+each `(EntityType, Shard)` has its own Bookie. The Bucket only needs
+to isolate realms inside that Bookie, so it is just the Realm verbatim.
+""").
+bucket_for(_EntityType, Realm, _TableState) when is_binary(Realm) ->
+    Realm.
 
 
 close_table(#{shards := Shards}, State) ->

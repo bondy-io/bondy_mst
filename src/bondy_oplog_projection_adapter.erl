@@ -20,34 +20,32 @@ binary frame:
 <<HlcLen:16, Hlc:HlcLen/binary, FoldedValueBytes/binary>>
 ```
 
-The substrate does not name a specific persistent store. Implementations
-can wrap Leveled, RocksDB, mnesia disc_copies, dets, or any other KV with
-sorted-key range support. Adapters are responsible for any namespacing
-(bucket-per-triple, prefix encoding, etc.); the substrate calls them with
-the conceptual `(NS, Index, Shard, Key)` and lets the adapter decide how
-to translate.
+## Bucket is a first-class call-time parameter
+
+Every data callback takes a `Bucket :: term()` as its primary argument
+alongside `Key`. The adapter maps `(Bucket, Key)` onto its native
+keyspace exactly as leveled / Riak do — Bucket is the storage-layer
+partition, not a sub-shard inside the handle.
+
+This keeps a single `handle()` reusable across every Bucket inside the
+shard. New Buckets do not require new handles, new registry entries, or
+adapter `open/4` calls; they just appear on the wire when the caller
+passes a new Bucket value to `get/3`, `put_batch/2`, `range/5`, or
+`delete/3`.
 
 ## Required callbacks
 
-- `open/4` — open the keyspace for an `(NS, Index, Shard)` triple. Called
-  once at instance startup; returns a handle threaded through all
-  subsequent calls.
-- `close/1` — release the handle. Called on instance shutdown.
-- `get/2` — single-key read; returns the on-disk frame (encoded by
-  `bondy_oplog_cell_frame:encode/2`).
-- `put_batch/2` — batched write. Called by the applier; the substrate
-  itself never single-writes the projection.
-- `range/4` — single-shot range scan; returns up to `limit` rows.
-  `bondy_db_core` wraps it with overlay merging. Consumers that need
-  more than one page must call again with a higher `limit` or scatter
-  via `shard => N`. Multi-batch streaming was considered and rejected
-  for the substrate: overlay merging interacts poorly with stateful
-  pagination, and the consumer base today does not need it. Adapters
-  MAY truncate at their own internal limit, but SHOULD return all rows
-  in `[Low, High)` up to the caller's `limit`.
-- `delete/2` — single-key delete. Used for GC and compaction.
-- `info/1` — implementation-specific introspection (size, file paths,
-  cache stats, etc.).
+- `open/4` — open the keyspace for an `(NS, Index, Shard)` triple.
+  Returns a Bucket-agnostic handle threaded through all subsequent
+  calls.
+- `close/1` — release the handle.
+- `get/3` — single-key read; returns the on-disk frame.
+- `put_batch/2` — batched write. Each entry carries its own `Bucket`
+  so a single batch can mix buckets when the caller wants to.
+- `range/5` — single-shot range scan within one `Bucket`. Cross-bucket
+  scans are the caller's responsibility (scatter and merge).
+- `delete/3` — single-key delete inside a Bucket.
+- `info/1` — implementation-specific introspection.
 
 Adapters MUST be safe under concurrent readers; `put_batch/2` may be
 single-writer (the substrate guarantees one applier per shard).
@@ -67,10 +65,12 @@ See `bondy_oplog_cache_adapter` for the orthogonal read-cache surface.
 
 -export_type([
     handle/0,
+    bucket/0,
     range_opts/0
 ]).
 
 -type handle()       :: any().
+-type bucket()       :: term().
 -type range_opts()   :: #{
     limit => pos_integer(),
     direction => asc | desc,
@@ -90,22 +90,23 @@ See `bondy_oplog_cache_adapter` for the orthogonal read-cache surface.
 
 -callback close(handle()) -> ok.
 
--callback get(handle(), Key :: term()) ->
+-callback get(handle(), bucket(), Key :: term()) ->
     {ok, Frame :: binary()} | not_found.
 
 -callback put_batch(
     handle(),
-    [{Key :: term(), Frame :: binary()}]
+    [{bucket(), Key :: term(), Frame :: binary()}]
 ) -> ok | {error, term()}.
 
 -callback range(
     handle(),
+    bucket(),
     Low :: term(),
     High :: term(),
     Opts :: range_opts()
 ) -> {ok, [{Key :: term(), Frame :: binary()}]}
    | {error, term()}.
 
--callback delete(handle(), Key :: term()) -> ok.
+-callback delete(handle(), bucket(), Key :: term()) -> ok.
 
 -callback info(handle()) -> #{atom() => term()}.

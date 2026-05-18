@@ -38,7 +38,7 @@
 -define(PROJ_MOD,  bondy_oplog_projection_leveled).
 -define(STRATEGY,  lww_register).
 -define(NUMTESTS,  30).
--define(BUCKET,    <<"proper">>).
+-define(BUCKET,    <<>>).
 
 -export([prop_read_returns_latest_fold_leveled/0]).
 -export([prop_range_monotonicity_leveled/0]).
@@ -154,8 +154,10 @@ start_shard(NS, Index, Shard, ShardCount) ->
     Dir = make_tempdir(),
     {ok, Bookie} = leveled_bookie:book_start(Dir, 2000, 100_000_000, none),
     {ok, CH} = ?CACHE_MOD:init(NS, Index, Shard, #{}),
+    %% Bucket is a call-time parameter; the leveled projection adapter's
+    %% handle only carries the Bookie pid.
     {ok, PH} = ?PROJ_MOD:open(NS, Index, Shard,
-                              #{bookie => Bookie, bucket => ?BUCKET}),
+                              #{bookie => Bookie}),
     OV = bondy_oplog_db_overlay:new(),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
         shard_count => ShardCount,
@@ -216,7 +218,7 @@ populate_overlay(NS, Key, Events) ->
         fun(E) ->
             Hlc = hlc_of_event(E),
             Event = mk_event(Hlc, E),
-            ok = bondy_oplog_db_overlay:insert(OV, Key, Event)
+            ok = bondy_oplog_db_overlay:insert(OV, ?BUCKET, Key, Event)
         end,
         Events
     ).
@@ -226,7 +228,7 @@ insert_overlay(NS, Key, E) ->
     OV = bondy_db_core_registry:entry_overlay(Entry),
     Hlc = hlc_of_event(E),
     Event = mk_event(Hlc, E),
-    ok = bondy_oplog_db_overlay:insert(OV, Key, Event).
+    ok = bondy_oplog_db_overlay:insert(OV, ?BUCKET, Key, Event).
 
 materialise(NS, Key, {set, _, _} = State) ->
     {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
@@ -235,7 +237,7 @@ materialise(NS, Key, {set, _, _} = State) ->
         hlc_of(State),
         bondy_oplog_fold:encode_state(?STRATEGY, State)
     ),
-    ok = ?PROJ_MOD:put_batch(PH, [{Key, Frame}]);
+    ok = ?PROJ_MOD:put_batch(PH, [{?BUCKET, Key, Frame}]);
 materialise(NS, Key, {cleared, _} = State) ->
     {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
     PH = bondy_db_core_registry:entry_projection_handle(Entry),
@@ -243,7 +245,7 @@ materialise(NS, Key, {cleared, _} = State) ->
         hlc_of(State),
         bondy_oplog_fold:encode_state(?STRATEGY, State)
     ),
-    ok = ?PROJ_MOD:put_batch(PH, [{Key, Frame}]);
+    ok = ?PROJ_MOD:put_batch(PH, [{?BUCKET, Key, Frame}]);
 materialise(_NS, _Key, undefined) ->
     ok.
 
