@@ -3,7 +3,7 @@
 %% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
 
--module(bondy_mst_db_dispatcher).
+-module(bondy_db_core_dispatcher).
 
 -behaviour(gen_server).
 
@@ -12,7 +12,7 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-Reference subscription dispatcher for `bondy_mst_db:subscribe/2`
+Reference subscription dispatcher for `bondy_db_core:subscribe/2`
 (`MST_DB_DESIGN.md` §12).
 
 Subscriptions are local-only (do not cross nodes). The dispatcher owns
@@ -25,7 +25,7 @@ no contention with subscribers.
 ## Table
 
 ```erlang
-ets:new(bondy_mst_db_dispatcher_tab, [
+ets:new(bondy_db_core_dispatcher_tab, [
     set,
     public,
     named_table,
@@ -53,7 +53,7 @@ compile time.
 Subscribers receive
 
 ```erlang
-{bondy_mst_db_event, Namespace, Key, Hlc, Operation}
+{bondy_db_core_event, Namespace, Key, Hlc, Operation}
 ```
 
 Delivery uses the bare send operator (`Pid ! Msg`), which is local-only
@@ -74,7 +74,7 @@ heartbeat publish that exercises the subscription). The substrate
 does not police this.
 """).
 
--define(TABLE, bondy_mst_db_dispatcher_tab).
+-define(TABLE, bondy_db_core_dispatcher_tab).
 
 -record(sub, {
     ref     :: reference(),
@@ -86,8 +86,8 @@ does not police this.
 
 -record(state, {
     %% Fresh `make_ref()` per gen_server start. Exposed via
-    %% `current_epoch/0` and broadcast on `bondy_mst_db_events` under
-    %% topic `bondy_mst_db_dispatcher_started`. Subscribers cache the
+    %% `current_epoch/0` and broadcast on `bondy_db_core_events` under
+    %% topic `bondy_db_core_dispatcher_started`. Subscribers cache the
     %% epoch and treat a change as "dispatcher was restarted; re-subscribe".
     epoch :: reference()
 }).
@@ -153,7 +153,7 @@ subscriber was matched.
 -spec publish(atom(), term(), bondy_oplog_hlc:hlc(), term()) -> ok.
 
 publish(NS, Key, Hlc, Op) ->
-    Msg = {bondy_mst_db_event, NS, Key, Hlc, Op},
+    Msg = {bondy_db_core_event, NS, Key, Hlc, Op},
     Subs = ets:select(?TABLE, [{#sub{ns = NS, _ = '_'}, [], ['$_']}]),
     lists:foreach(
         fun(#sub{pid = Pid, pattern = Pat}) ->
@@ -190,7 +190,7 @@ subscription_count(NS) when is_atom(NS) ->
 -doc("""
 Return the current epoch reference. A new epoch is allocated on each
 gen_server start and broadcast on
-`bondy_mst_db_events:notify(bondy_mst_db_dispatcher_started, Epoch)`.
+`bondy_db_core_events:notify(bondy_db_core_dispatcher_started, Epoch)`.
 Subscribers cache the epoch and treat any change as "dispatcher was
 restarted; re-subscribe".
 """).
@@ -208,7 +208,7 @@ emit_subscribe_event(NS, Pattern) ->
     PatType = pattern_type(Pattern),
     Current = subscription_count(NS),
     telemetry:execute(
-        [bondy_mst_db, subscribe],
+        [bondy_db_core, subscribe],
         #{},
         #{namespace => NS,
           pattern_type => PatType,
@@ -299,8 +299,8 @@ handle_cast(_, State) ->
     {noreply, State}.
 
 handle_info({broadcast_started, Epoch}, State) ->
-    catch bondy_mst_db_events:notify(
-        bondy_mst_db_dispatcher_started,
+    catch bondy_db_core_events:notify(
+        bondy_db_core_dispatcher_started,
         Epoch
     ),
     {noreply, State};

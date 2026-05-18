@@ -1,5 +1,5 @@
 %% =============================================================================
-%% End-to-end tests for `bondy_mst_db_events` and the restart-recovery
+%% End-to-end tests for `bondy_db_core_events` and the restart-recovery
 %% protocol (`MST_DB_DESIGN.md` §11.1, §12.3, §18 item 11).
 %%
 %% Verifies:
@@ -13,7 +13,7 @@
 %%   - registry restart wakes subscribers (and the new epoch differs)
 %% =============================================================================
 
--module(bondy_mst_db_events_test).
+-module(bondy_db_core_events_test).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -38,62 +38,62 @@ events_test_() ->
     ]}.
 
 %% =============================================================================
-%% bondy_mst_db_events primitive
+%% bondy_db_core_events primitive
 %% =============================================================================
 
 subscribe_receives_notify() ->
     Topic = mk_topic(),
-    ok = bondy_mst_db_events:subscribe(Topic),
-    ok = bondy_mst_db_events:notify(Topic, payload_1),
+    ok = bondy_db_core_events:subscribe(Topic),
+    ok = bondy_db_core_events:notify(Topic, payload_1),
     ?assertEqual(payload_1, expect_event(Topic, 200)),
-    bondy_mst_db_events:unsubscribe(Topic).
+    bondy_db_core_events:unsubscribe(Topic).
 
 
 unsubscribed_does_not_receive() ->
     Topic = mk_topic(),
-    ok = bondy_mst_db_events:subscribe(Topic),
-    ok = bondy_mst_db_events:unsubscribe(Topic),
-    ok = bondy_mst_db_events:notify(Topic, payload_2),
+    ok = bondy_db_core_events:subscribe(Topic),
+    ok = bondy_db_core_events:unsubscribe(Topic),
+    ok = bondy_db_core_events:notify(Topic, payload_2),
     ?assertEqual(timeout, try_expect_event(Topic, 100)).
 
 
 other_topic_does_not_match() ->
     TopicA = mk_topic(),
     TopicB = mk_topic(),
-    ok = bondy_mst_db_events:subscribe(TopicA),
-    ok = bondy_mst_db_events:notify(TopicB, payload_b),
+    ok = bondy_db_core_events:subscribe(TopicA),
+    ok = bondy_db_core_events:notify(TopicB, payload_b),
     ?assertEqual(timeout, try_expect_event(TopicA, 100)),
-    bondy_mst_db_events:unsubscribe(TopicA).
+    bondy_db_core_events:unsubscribe(TopicA).
 
 
 duplicate_subscribe_is_idempotent() ->
     Topic = mk_topic(),
-    ok = bondy_mst_db_events:subscribe(Topic),
-    ok = bondy_mst_db_events:subscribe(Topic),
-    ?assertEqual([self()], bondy_mst_db_events:subscribers(Topic)),
-    ok = bondy_mst_db_events:notify(Topic, payload_dup),
+    ok = bondy_db_core_events:subscribe(Topic),
+    ok = bondy_db_core_events:subscribe(Topic),
+    ?assertEqual([self()], bondy_db_core_events:subscribers(Topic)),
+    ok = bondy_db_core_events:notify(Topic, payload_dup),
     %% Only one message delivered.
     ?assertEqual(payload_dup, expect_event(Topic, 200)),
     ?assertEqual(timeout, try_expect_event(Topic, 100)),
-    bondy_mst_db_events:unsubscribe(Topic).
+    bondy_db_core_events:unsubscribe(Topic).
 
 
 subscriber_down_auto_removes() ->
     Topic = mk_topic(),
     Self = self(),
     {Sub, MonRef} = spawn_monitor(fun() ->
-        ok = bondy_mst_db_events:subscribe(Topic),
+        ok = bondy_db_core_events:subscribe(Topic),
         Self ! {subscribed, self()},
         receive die -> ok end
     end),
     receive {subscribed, Sub} -> ok after 200 -> error(no_subscribe_ack) end,
     %% Subscriber is in the table.
-    ?assert(lists:member(Sub, bondy_mst_db_events:subscribers(Topic))),
+    ?assert(lists:member(Sub, bondy_db_core_events:subscribers(Topic))),
     Sub ! die,
     receive {'DOWN', MonRef, process, Sub, _} -> ok end,
     %% Wait for the events module to process the DOWN.
-    _ = sys:get_state(bondy_mst_db_events),
-    ?assertNot(lists:member(Sub, bondy_mst_db_events:subscribers(Topic))).
+    _ = sys:get_state(bondy_db_core_events),
+    ?assertNot(lists:member(Sub, bondy_db_core_events:subscribers(Topic))).
 
 
 %% =============================================================================
@@ -103,12 +103,12 @@ subscriber_down_auto_removes() ->
 registry_emits_started_at_init() ->
     %% By this point the registry is already started (app:ensure_all_started),
     %% so we observe an epoch via current_epoch/0 and assert it is a ref.
-    Epoch = bondy_mst_db_registry:current_epoch(),
+    Epoch = bondy_db_core_registry:current_epoch(),
     ?assert(is_reference(Epoch)).
 
 
 dispatcher_emits_started_at_init() ->
-    Epoch = bondy_mst_db_dispatcher:current_epoch(),
+    Epoch = bondy_db_core_dispatcher:current_epoch(),
     ?assert(is_reference(Epoch)).
 
 
@@ -116,24 +116,24 @@ current_epoch_matches_broadcast() ->
     %% Subscribe to the started topic, then force a restart of the
     %% registry. The broadcast payload must equal what `current_epoch/0`
     %% returns after the restart settles.
-    ok = bondy_mst_db_events:subscribe(bondy_mst_db_registry_started),
-    Before = bondy_mst_db_registry:current_epoch(),
-    ok = kill_and_wait(bondy_mst_db_registry),
-    Payload = expect_event(bondy_mst_db_registry_started, 500),
-    After = bondy_mst_db_registry:current_epoch(),
+    ok = bondy_db_core_events:subscribe(bondy_db_core_registry_started),
+    Before = bondy_db_core_registry:current_epoch(),
+    ok = kill_and_wait(bondy_db_core_registry),
+    Payload = expect_event(bondy_db_core_registry_started, 500),
+    After = bondy_db_core_registry:current_epoch(),
     ?assertNotEqual(Before, After),
     ?assertEqual(Payload, After),
-    bondy_mst_db_events:unsubscribe(bondy_mst_db_registry_started).
+    bondy_db_core_events:unsubscribe(bondy_db_core_registry_started).
 
 
 registry_restart_changes_epoch_and_wakes_subscribers() ->
-    ok = bondy_mst_db_events:subscribe(bondy_mst_db_registry_started),
-    Before = bondy_mst_db_registry:current_epoch(),
-    ok = kill_and_wait(bondy_mst_db_registry),
-    After = expect_event(bondy_mst_db_registry_started, 500),
+    ok = bondy_db_core_events:subscribe(bondy_db_core_registry_started),
+    Before = bondy_db_core_registry:current_epoch(),
+    ok = kill_and_wait(bondy_db_core_registry),
+    After = expect_event(bondy_db_core_registry_started, 500),
     ?assertNotEqual(Before, After),
     ?assert(is_reference(After)),
-    bondy_mst_db_events:unsubscribe(bondy_mst_db_registry_started).
+    bondy_db_core_events:unsubscribe(bondy_db_core_registry_started).
 
 
 %% =============================================================================
@@ -147,7 +147,7 @@ mk_topic() ->
 
 expect_event(Topic, TimeoutMs) ->
     receive
-        {bondy_mst_db_event, Topic, Payload} -> Payload
+        {bondy_db_core_event, Topic, Payload} -> Payload
     after TimeoutMs ->
         erlang:error({no_event, Topic})
     end.
@@ -155,7 +155,7 @@ expect_event(Topic, TimeoutMs) ->
 
 try_expect_event(Topic, TimeoutMs) ->
     receive
-        {bondy_mst_db_event, Topic, Payload} -> Payload
+        {bondy_db_core_event, Topic, Payload} -> Payload
     after TimeoutMs ->
         timeout
     end.

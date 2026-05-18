@@ -1,5 +1,5 @@
 %% =============================================================================
-%% Stochastic churn test for `bondy_mst_db_registry`.
+%% Stochastic churn test for `bondy_db_core_registry`.
 %%
 %% Runs random sequences of {register, unregister, kill_owner} operations
 %% against a small pool of shard keys and owner processes. After every
@@ -13,7 +13,7 @@
 %% unregister and with re-registration over the same shard key.
 %% =============================================================================
 
--module(bondy_mst_db_registry_churn_test).
+-module(bondy_db_core_registry_churn_test).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -43,7 +43,7 @@ cleanup(Namespaces) ->
     %% be defensive in case a property regression leaks state.
     lists:foreach(
         fun(NS) ->
-            catch bondy_mst_db_registry:unregister(NS, primary, 0)
+            catch bondy_db_core_registry:unregister(NS, primary, 0)
         end,
         Namespaces
     ),
@@ -58,11 +58,11 @@ churn_invariants_hold() ->
         run_steps(?STEPS, Namespaces, Owners)
     after
         [exit(P, kill) || P <- Owners],
-        [catch bondy_mst_db_registry:unregister(NS, primary, 0)
+        [catch bondy_db_core_registry:unregister(NS, primary, 0)
          || NS <- Namespaces],
         %% Sync registry to absorb every pending DOWN before the next
         %% test starts.
-        _ = sys:get_state(bondy_mst_db_registry)
+        _ = sys:get_state(bondy_db_core_registry)
     end.
 
 run_steps(0, _NSes, _Owners) ->
@@ -73,7 +73,7 @@ run_steps(N, NSes, Owners) ->
     Owner = pick(Owners),
     perform(Action, NS, Owner),
     %% Force the gen_server to drain any pending DOWN messages.
-    _ = sys:get_state(bondy_mst_db_registry),
+    _ = sys:get_state(bondy_db_core_registry),
     assert_invariants(),
     run_steps(N - 1, NSes, [revive_if_dead(O) || O <- Owners]).
 
@@ -98,7 +98,7 @@ perform(register, NS, Owner) when is_pid(Owner) ->
             ok
     end;
 perform(unregister, NS, _Owner) ->
-    ok = bondy_mst_db_registry:unregister(NS, primary, 0);
+    ok = bondy_db_core_registry:unregister(NS, primary, 0);
 perform(kill_owner, _NS, Owner) when is_pid(Owner) ->
     case erlang:is_process_alive(Owner) of
         true  -> exit(Owner, kill);
@@ -121,7 +121,7 @@ owner_loop() ->
             PHandle = make_ref(),
             OV = bondy_oplog_db_overlay:new(),
             try
-                ok = bondy_mst_db_registry:register(NS, Index, Shard, #{
+                ok = bondy_db_core_registry:register(NS, Index, Shard, #{
                     shard_count => 1,
                     cache_adapter => bondy_oplog_cache_counting,
                     cache_handle => CHandle,
@@ -148,7 +148,7 @@ setup_namespaces() ->
      || N <- lists:seq(0, ?NS_POOL - 1)].
 
 assert_invariants() ->
-    State = sys:get_state(bondy_mst_db_registry),
+    State = sys:get_state(bondy_db_core_registry),
     %% Use record_info-style access by index; the registry's #state{}
     %% has mon_to_key in slot 2, key_to_mon in slot 3.
     MonToKey = element(2, State),
@@ -174,16 +174,16 @@ assert_invariants() ->
             {NS, Index, Shard} = Key,
             ?assertMatch(
                 {ok, _},
-                bondy_mst_db_registry:lookup(NS, Index, Shard)
+                bondy_db_core_registry:lookup(NS, Index, Shard)
             )
         end,
         KeyToMon
     ),
     %% Every ETS row has a matching monitor entry.
-    Entries = bondy_mst_db_registry:list(),
+    Entries = bondy_db_core_registry:list(),
     lists:foreach(
         fun(E) ->
-            Key = bondy_mst_db_registry:entry_key(E),
+            Key = bondy_db_core_registry:entry_key(E),
             ?assert(maps:is_key(Key, KeyToMon))
         end,
         Entries

@@ -3,7 +3,7 @@
 %% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
 
--module(bondy_mst_db_registry).
+-module(bondy_db_core_registry).
 
 -behaviour(gen_server).
 
@@ -13,9 +13,9 @@
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
 Node-shared registry of per-`(namespace, index, shard)` triples for
-`bondy_mst_db` (`MST_DB_DESIGN.md` §3, §5, §6).
+`bondy_db_core` (`MST_DB_DESIGN.md` §3, §5, §6).
 
-Each shard publishes one entry containing the handles `bondy_mst_db`
+Each shard publishes one entry containing the handles `bondy_db_core`
 needs to satisfy a read:
 
 | Field | Source |
@@ -78,7 +78,7 @@ constant-time, no global side effects, and `read_concurrency: true`
 keeps reads parallel.
 """).
 
--define(TABLE, bondy_mst_db_registry_tab).
+-define(TABLE, bondy_db_core_registry_tab).
 
 -record(entry, {
     key                :: shard_key(),
@@ -108,8 +108,8 @@ keeps reads parallel.
     %% shard_key() -> MonitorRef
     key_to_mon = #{} :: #{shard_key() := reference()},
     %% Fresh `make_ref()` per gen_server start. Exposed via
-    %% `current_epoch/0` and broadcast on `bondy_mst_db_events`
-    %% under topic `bondy_mst_db_registry_started`. Owners cache the
+    %% `current_epoch/0` and broadcast on `bondy_db_core_events`
+    %% under topic `bondy_db_core_registry_started`. Owners cache the
     %% epoch and treat a change as "registry was restarted; re-register".
     epoch :: reference()
 }).
@@ -231,7 +231,7 @@ unregister(NS, Index, Shard) ->
 -doc("""
 Return the current epoch reference. A new epoch is allocated on each
 gen_server start and broadcast on
-`bondy_mst_db_events:notify(bondy_mst_db_registry_started, Epoch)`.
+`bondy_db_core_events:notify(bondy_db_core_registry_started, Epoch)`.
 Owners cache the epoch they last saw and treat any change as
 "registry was restarted; re-register every shard I own".
 """).
@@ -518,12 +518,12 @@ handle_call(_Req, _From, State) ->
 handle_cast(_, State) -> {noreply, State}.
 
 handle_info({broadcast_started, Epoch}, State) ->
-    %% `bondy_mst_db_events` is started before this module in
+    %% `bondy_db_core_events` is started before this module in
     %% `bondy_oplog_sup`, so the notify is safe at init time. If the
     %% events module is down, swallow the error — it is a diagnostic
     %% gap, not a substrate-correctness issue.
-    catch bondy_mst_db_events:notify(
-        bondy_mst_db_registry_started,
+    catch bondy_db_core_events:notify(
+        bondy_db_core_registry_started,
         Epoch
     ),
     {noreply, State};

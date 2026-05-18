@@ -76,8 +76,8 @@ resume frame is an idempotent no-op.
 |---|---|---|
 | `commit_every`      | `64`    | Apply this many events between `consumer.offset` flushes. |
 | `poll_interval_ms`  | `5`     | Backstop sleep when `await_durable/3` returns sooner than expected. The hot path long-polls rather than sleeping; this only affects the rare error fallback. |
-| `ae_targets`        | `[]`    | List of `{Namespace, Index, Shard}` tuples whose AE-freshness counters are bumped via `bondy_mst_db_registry:bump_ae/4` after every successful commit. Empty list disables the wiring. |
-| `publish_ns`        | `undefined` | Namespace under which post-apply events are published via `bondy_mst_db:publish/4`. `undefined` disables publishing. Requires `publish_fun`. |
+| `ae_targets`        | `[]`    | List of `{Namespace, Index, Shard}` tuples whose AE-freshness counters are bumped via `bondy_db_core_registry:bump_ae/4` after every successful commit. Empty list disables the wiring. |
+| `publish_ns`        | `undefined` | Namespace under which post-apply events are published via `bondy_db_core:publish/4`. `undefined` disables publishing. Requires `publish_fun`. |
 | `publish_fun`       | `undefined` | `fun((bondy_oplog_event:t()) -> {Key, Op} \| skip)` invoked per verified event to derive the `(Key, Op)` pair forwarded to subscribers. `skip` suppresses publish for that event. Required when `publish_ns` is set. |
 
 ## Substrate read-side wiring
@@ -98,7 +98,7 @@ configured; defaults are no-ops so existing instances are unaffected.
 - **Subscriptions (`publish`)** — after `apply_batch/2` produces a
   non-empty verified set the applier walks the set in order and calls
   `publish_fun` per event. The applier passes `(Namespace, Key, Hlc,
-  Op)` to `bondy_mst_db:publish/4`. Delivery is best-effort
+  Op)` to `bondy_db_core:publish/4`. Delivery is best-effort
   (dispatcher walks subscribers; no round-trip; pattern matching runs
   in the applier process). Events for which `publish_fun` returns
   `skip` are not published. The applier's own mailbox is never
@@ -130,7 +130,7 @@ configured; defaults are no-ops so existing instances are unaffected.
   - Read consistency: readers via `bondy_oplog:read/3` see the new
     value as soon as the overlay/MST holds it (before commit), so
     at-apply publishes already align with what concurrent readers
-    observe. Substrate-side reads through `bondy_mst_db:read/3` depend
+    observe. Substrate-side reads through `bondy_db_core:read/3` depend
     on a separate projection-write path (out of scope here).
 
   Subscribers that need commit-coherent batching can coalesce
@@ -176,12 +176,12 @@ configured; defaults are no-ops so existing instances are unaffected.
     fold_module :: bondy_oplog_fold:strategy() | undefined,
     fold_state :: term(),
     %% Substrate read-side wiring (MST_DB_DESIGN §11). Shards bumped
-    %% via `bondy_mst_db_registry:bump_ae/4` after each successful
+    %% via `bondy_db_core_registry:bump_ae/4` after each successful
     %% commit. Empty list disables the wiring.
     ae_targets = [] :: [shard_key()],
     %% Substrate subscription wiring (MST_DB_DESIGN §12). When both
     %% `publish_ns` and `publish_fun` are set, every verified event in
-    %% an applied batch is forwarded to `bondy_mst_db:publish/4` at
+    %% an applied batch is forwarded to `bondy_db_core:publish/4` at
     %% apply time. See moduledoc "Substrate read-side wiring" for the
     %% rationale behind the at-apply timing.
     publish_ns :: atom() | undefined,
@@ -989,7 +989,7 @@ validate_publish_opts(Opts) ->
 
 %% @private
 %% Walks `Verified` in HLC-monotonic order and publishes each event via
-%% `bondy_mst_db:publish/4`. A `publish_fun` returning `skip` suppresses
+%% `bondy_db_core:publish/4`. A `publish_fun` returning `skip` suppresses
 %% delivery for that event; a raise is logged and treated as `skip` so
 %% a misbehaving derivation cannot wedge the applier. Best-effort
 %% delivery; the dispatcher walks subscribers in this process.
@@ -1008,7 +1008,7 @@ publish_batch(#state{instance_id = Id, publish_ns = NS,
                     Hlc = bondy_oplog_event:key_hlc(
                         bondy_oplog_event:key(Event)
                     ),
-                    ok = bondy_mst_db:publish(NS, Key, Hlc, Op),
+                    ok = bondy_db_core:publish(NS, Key, Hlc, Op),
                     {C + 1, S}
             end
         end,
@@ -1063,14 +1063,14 @@ log_publish_fun_raised(InstanceId, Event, C, R, S) ->
 %% "now". `not_found` is treated as benign (the registry entry may be
 %% torn down concurrently during shutdown) and counted in telemetry.
 %% Delegates the per-shard write to
-%% `bondy_mst_db_registry:bump_ae_targets/2` so the applier-side and
+%% `bondy_db_core_registry:bump_ae_targets/2` so the applier-side and
 %% AE-side wirings share one primitive.
 bump_ae_targets(#state{ae_targets = []}) ->
     ok;
 bump_ae_targets(#state{instance_id = Id, ae_targets = Targets}) ->
     Now = erlang:monotonic_time(millisecond),
     {Bumped, NotFound} =
-        bondy_mst_db_registry:bump_ae_targets(Targets, Now),
+        bondy_db_core_registry:bump_ae_targets(Targets, Now),
     telemetry:execute(
         [bondy_oplog, applier, ae_bumped],
         #{count => Bumped, not_found => NotFound},

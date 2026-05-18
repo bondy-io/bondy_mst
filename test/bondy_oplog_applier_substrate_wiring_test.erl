@@ -4,7 +4,7 @@
 %%
 %% Verifies:
 %%   - `publish_ns` + `publish_fun` opts forward verified events to
-%%     `bondy_mst_db:publish/4`; subscribers receive matching events.
+%%     `bondy_db_core:publish/4`; subscribers receive matching events.
 %%   - `publish_fun` returning `skip` suppresses delivery without
 %%     wedging the applier.
 %%   - `publish_fun` raising is tolerated (event not published, applier
@@ -27,8 +27,8 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_mst_db_registry:unregister(NS, primary, 0)
-     || NS <- bondy_mst_db_registry:namespaces()],
+    [bondy_db_core_registry:unregister(NS, primary, 0)
+     || NS <- bondy_db_core_registry:namespaces()],
     ok.
 
 wiring_test_() ->
@@ -54,21 +54,21 @@ publish_default_is_noop() ->
     %% append an event, and assert no delivery happens.
     Id = mk_id(),
     NS = ns_of(Id),
-    {ok, SubRef} = bondy_mst_db:subscribe(NS, all),
+    {ok, SubRef} = bondy_db_core:subscribe(NS, all),
     {ok, _} = bondy_oplog:start_instance(Id, #{
         fold_module => lww_register
     }),
     _ = bondy_oplog:append(Id, {set, 1, <<"v">>}),
     {ok, {set, <<"v">>, 1}} = bondy_oplog:projection(Id),
     ?assertEqual(no_message, recv_one(50)),
-    ok = bondy_mst_db:unsubscribe(SubRef),
+    ok = bondy_db_core:unsubscribe(SubRef),
     ok = bondy_oplog:stop_instance(Id).
 
 
 publish_forwards_events_to_subscribers() ->
     Id = mk_id(),
     NS = ns_of(Id),
-    {ok, SubRef} = bondy_mst_db:subscribe(NS, all),
+    {ok, SubRef} = bondy_db_core:subscribe(NS, all),
     Fun = fun(E) ->
         Op = bondy_oplog_event:op(E),
         {derived_key_of(Op), Op}
@@ -93,14 +93,14 @@ publish_forwards_events_to_subscribers() ->
     ?assertEqual(<<"key:2">>, K_B),
     ?assertEqual({set, 1, <<"alpha">>}, Op_A),
     ?assertEqual({set, 2, <<"beta">>}, Op_B),
-    ok = bondy_mst_db:unsubscribe(SubRef),
+    ok = bondy_db_core:unsubscribe(SubRef),
     ok = bondy_oplog:stop_instance(Id).
 
 
 publish_skip_suppresses_delivery() ->
     Id = mk_id(),
     NS = ns_of(Id),
-    {ok, SubRef} = bondy_mst_db:subscribe(NS, all),
+    {ok, SubRef} = bondy_db_core:subscribe(NS, all),
     %% Only set-events publish; clear-events skip.
     Fun = fun(E) ->
         case bondy_oplog_event:op(E) of
@@ -123,14 +123,14 @@ publish_skip_suppresses_delivery() ->
     Ops = [Op || {_NS, _K, _H, Op} <- Msgs],
     ?assertEqual([{set, 1, <<"a">>}, {set, 3, <<"b">>}], Ops),
     ?assertEqual(no_message, recv_one(50)),
-    ok = bondy_mst_db:unsubscribe(SubRef),
+    ok = bondy_db_core:unsubscribe(SubRef),
     ok = bondy_oplog:stop_instance(Id).
 
 
 publish_fun_raise_is_tolerated() ->
     Id = mk_id(),
     NS = ns_of(Id),
-    {ok, SubRef} = bondy_mst_db:subscribe(NS, all),
+    {ok, SubRef} = bondy_db_core:subscribe(NS, all),
     Fun = fun(E) ->
         case bondy_oplog_event:op(E) of
             {set, 2, _} -> error(boom);
@@ -152,7 +152,7 @@ publish_fun_raise_is_tolerated() ->
     Msgs = collect_messages(2, 1000),
     Ops = [Op || {_NS, _K, _H, Op} <- Msgs],
     ?assertEqual([{set, 1, <<"a">>}, {set, 3, <<"c">>}], Ops),
-    ok = bondy_mst_db:unsubscribe(SubRef),
+    ok = bondy_db_core:unsubscribe(SubRef),
     ok = bondy_oplog:stop_instance(Id).
 
 
@@ -184,7 +184,7 @@ ae_default_is_noop() ->
     Id = mk_id(),
     NS = ns_of(Id),
     ok = register_shard(NS, 0),
-    Before = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    Before = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     {ok, _} = bondy_oplog:start_instance(Id, #{
         fold_module => lww_register
     }),
@@ -194,16 +194,16 @@ ae_default_is_noop() ->
     %% single append doesn't auto-commit, but `stop_instance` drains
     %% via `end_of_log` → `commit_now`.
     ok = bondy_oplog:stop_instance(Id),
-    After = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    After = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assertEqual(Before, After),
-    ok = bondy_mst_db_registry:unregister(NS, primary, 0).
+    ok = bondy_db_core_registry:unregister(NS, primary, 0).
 
 
 ae_targets_bump_after_commit() ->
     Id = mk_id(),
     NS = ns_of(Id),
     ok = register_shard(NS, 0),
-    Before = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    Before = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     {ok, _} = bondy_oplog:start_instance(Id, #{
         fold_module => lww_register,
         applier => #{
@@ -218,7 +218,7 @@ ae_targets_bump_after_commit() ->
     After = wait_for_ae_advance(NS, primary, 0, Before, 1000),
     ?assert(After > Before),
     ok = bondy_oplog:stop_instance(Id),
-    ok = bondy_mst_db_registry:unregister(NS, primary, 0).
+    ok = bondy_db_core_registry:unregister(NS, primary, 0).
 
 
 ae_targets_share_now_across_one_commit() ->
@@ -238,14 +238,14 @@ ae_targets_share_now_across_one_commit() ->
     _ = bondy_oplog:append(Id, {set, 1, <<"v">>}),
     {ok, _} = bondy_oplog:projection(Id),
     _ = wait_for_ae_advance(NS, primary, 0, sentinel(), 1000),
-    A = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
-    B = bondy_mst_db_registry:last_ae_at(NS, by_name, 0),
+    A = bondy_db_core_registry:last_ae_at(NS, primary, 0),
+    B = bondy_db_core_registry:last_ae_at(NS, by_name, 0),
     %% Both bumps share the same `Now` argument inside `bump_ae_targets/1`,
     %% so the atomics reads must be identical.
     ?assertEqual(A, B),
     ok = bondy_oplog:stop_instance(Id),
-    ok = bondy_mst_db_registry:unregister(NS, primary, 0),
-    ok = bondy_mst_db_registry:unregister(NS, by_name, 0).
+    ok = bondy_db_core_registry:unregister(NS, primary, 0),
+    ok = bondy_db_core_registry:unregister(NS, by_name, 0).
 
 
 ae_targets_not_found_is_tolerated() ->
@@ -267,13 +267,13 @@ ae_targets_not_found_is_tolerated() ->
     _ = bondy_oplog:append(Id, {set, 1, <<"v">>}),
     {ok, _} = bondy_oplog:projection(Id),
     _ = wait_for_ae_advance(NS, primary, 0, sentinel(), 1000),
-    ?assert(bondy_mst_db_registry:last_ae_at(NS, primary, 0) > sentinel()),
+    ?assert(bondy_db_core_registry:last_ae_at(NS, primary, 0) > sentinel()),
     ?assertEqual(
         not_found,
-        bondy_mst_db_registry:last_ae_at(missing_ns, primary, 0)
+        bondy_db_core_registry:last_ae_at(missing_ns, primary, 0)
     ),
     ok = bondy_oplog:stop_instance(Id),
-    ok = bondy_mst_db_registry:unregister(NS, primary, 0).
+    ok = bondy_db_core_registry:unregister(NS, primary, 0).
 
 
 %% =============================================================================
@@ -295,7 +295,7 @@ register_shard(NS, Shard) ->
     register_shard(NS, primary, Shard).
 
 register_shard(NS, Index, Shard) ->
-    bondy_mst_db_registry:register(NS, Index, Shard, #{
+    bondy_db_core_registry:register(NS, Index, Shard, #{
         shard_count        => 1,
         cache_adapter      => bondy_oplog_cache_ets,
         cache_handle       => undefined,
@@ -306,7 +306,7 @@ register_shard(NS, Index, Shard) ->
 
 
 sentinel() ->
-    %% Matches `bondy_mst_db_registry`'s "infinitely stale" sentinel.
+    %% Matches `bondy_db_core_registry`'s "infinitely stale" sentinel.
     -(1 bsl 62).
 
 
@@ -315,7 +315,7 @@ wait_for_ae_advance(NS, Index, Shard, Baseline, TimeoutMs) ->
     wait_for_ae_advance_loop(NS, Index, Shard, Baseline, Deadline).
 
 wait_for_ae_advance_loop(NS, Index, Shard, Baseline, Deadline) ->
-    case bondy_mst_db_registry:last_ae_at(NS, Index, Shard) of
+    case bondy_db_core_registry:last_ae_at(NS, Index, Shard) of
         V when V > Baseline -> V;
         _ ->
             case erlang:monotonic_time(millisecond) >= Deadline of
@@ -342,7 +342,7 @@ collect_messages(0, _Timeout, Acc) ->
     lists:reverse(Acc);
 collect_messages(N, Timeout, Acc) ->
     receive
-        {bondy_mst_db_event, NS, K, H, Op} ->
+        {bondy_db_core_event, NS, K, H, Op} ->
             collect_messages(N - 1, Timeout, [{NS, K, H, Op} | Acc])
     after Timeout ->
         lists:reverse(Acc)
@@ -351,7 +351,7 @@ collect_messages(N, Timeout, Acc) ->
 
 recv_one(Timeout) ->
     receive
-        {bondy_mst_db_event, _, _, _, _} = M -> M
+        {bondy_db_core_event, _, _, _, _} = M -> M
     after Timeout ->
         no_message
     end.

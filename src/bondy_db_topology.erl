@@ -60,7 +60,7 @@ inside `open_table/4` and is handing back ready-to-use handles.
 ## What the behaviour does NOT cover
 
 - WAL, replication, applier, overlay, or cache wiring — those are
-  substrate concerns (`bondy_mst_db`, `bondy_oplog_*`). PR9's facade
+  substrate concerns (`bondy_db_core`, `bondy_oplog_*`). PR9's facade
   uses the projection adapter directly; substrate integration lands
   in a later PR.
 - Realm lifecycle (creation, retirement, migration). Topology routes

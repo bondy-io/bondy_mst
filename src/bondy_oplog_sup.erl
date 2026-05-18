@@ -19,10 +19,10 @@ Children, in start order:
 |---|---|
 | `bondy_oplog_registry`           | `gen_server`; node-shared per-instance read-snapshot ETS |
 | `bondy_metrics`                  | `gen_server`; counters/atomics registry (Name+Label → counters ref) |
-| `bondy_mst_db_events`            | `gen_server`; intra-node pub/sub for substrate restart-recovery |
-| `bondy_mst_db_registry`          | `gen_server`; node-shared per-(NS,Index,Shard) read-handle ETS |
-| `bondy_mst_db_dispatcher`        | `gen_server`; local-only `subscribe/2` ref dispatcher |
-| `bondy_mst_db_metrics`           | `gen_server`; periodic per-namespace gauge emitter |
+| `bondy_db_core_events`            | `gen_server`; intra-node pub/sub for substrate restart-recovery |
+| `bondy_db_core_registry`          | `gen_server`; node-shared per-(NS,Index,Shard) read-handle ETS |
+| `bondy_db_core_dispatcher`        | `gen_server`; local-only `subscribe/2` ref dispatcher |
+| `bondy_db_core_metrics`           | `gen_server`; periodic per-namespace gauge emitter |
 | `bondy_oplog_peer_state`         | `gen_server`; node-shared peer ETS |
 | `bondy_oplog_origin_bans`        | `gen_server`; node-shared origin ban ETS |
 | `bondy_oplog_quarantine`         | `gen_server`; node-shared equivocation quarantine ETS |
@@ -59,10 +59,10 @@ init([]) ->
     ChildSpecs = [
         bondy_oplog_registry:child_spec(),
         bondy_metrics:child_spec(),
-        bondy_mst_db_events:child_spec(),
-        bondy_mst_db_registry:child_spec(),
-        bondy_mst_db_dispatcher:child_spec(),
-        bondy_mst_db_metrics:child_spec(),
+        bondy_db_core_events:child_spec(),
+        bondy_db_core_registry:child_spec(),
+        bondy_db_core_dispatcher:child_spec(),
+        bondy_db_core_metrics:child_spec(),
         bondy_oplog_peer_state:child_spec(#{}),
         bondy_oplog_origin_bans:child_spec(),
         bondy_oplog_quarantine:child_spec(),

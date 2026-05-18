@@ -38,7 +38,7 @@ to translate.
 - `put_batch/2` — batched write. Called by the applier; the substrate
   itself never single-writes the projection.
 - `range/4` — single-shot range scan; returns up to `limit` rows.
-  `bondy_mst_db` wraps it with overlay merging. Consumers that need
+  `bondy_db_core` wraps it with overlay merging. Consumers that need
   more than one page must call again with a higher `limit` or scatter
   via `shard => N`. Multi-batch streaming was considered and rejected
   for the substrate: overlay merging interacts poorly with stateful
@@ -56,7 +56,7 @@ single-writer (the substrate guarantees one applier per shard).
 
 `close/1` is called on instance shutdown and on explicit shard
 unregister. It is **not** called by the substrate when the registering
-process dies — see `bondy_mst_db_registry`'s "Owner DOWN cleanup"
+process dies — see `bondy_db_core_registry`'s "Owner DOWN cleanup"
 section. Adapters that own external resources (file handles, durable
 KV connections, sub-processes) MUST monitor their owning process
 internally and release resources on owner death. The substrate does

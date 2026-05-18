@@ -3,7 +3,7 @@
 %% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
 
--module(bondy_mst_db_events).
+-module(bondy_db_core_events).
 
 -behaviour(gen_server).
 
@@ -14,7 +14,7 @@
 Lightweight intra-node pub/sub for substrate lifecycle events
 (`MST_DB_DESIGN.md` §11.1, §12.3, §18 item 11).
 
-The substrate's `bondy_mst_db_registry` and `bondy_mst_db_dispatcher`
+The substrate's `bondy_db_core_registry` and `bondy_db_core_dispatcher`
 gen_servers each own an in-memory ETS table whose lifetime is tied to
 the process. If they crash and the supervisor restarts them, the table
 is wiped and any prior `register/4` or `subscribe/2` calls are lost.
@@ -22,7 +22,7 @@ Without a signal, owners (registered shard-managing processes) and
 subscribers (event consumers) have no way to detect the loss.
 
 This module is the missing signal. Each substrate gen_server `notify/2`s
-on its own `init/1`, sending a `{bondy_mst_db_event, Topic, Payload}`
+on its own `init/1`, sending a `{bondy_db_core_event, Topic, Payload}`
 message to every process subscribed to the topic. Consumers register
 once at startup, receive the message after every (re)start, and re-arm
 their state (re-register, re-subscribe, refresh cached `epoch`s).
@@ -31,8 +31,8 @@ their state (re-register, re-subscribe, refresh cached `epoch`s).
 
 | Topic                            | Payload                | When emitted                       |
 |---|---|---|
-| `bondy_mst_db_registry_started`  | `Epoch :: reference()` | `bondy_mst_db_registry` init       |
-| `bondy_mst_db_dispatcher_started`| `Epoch :: reference()` | `bondy_mst_db_dispatcher` init     |
+| `bondy_db_core_registry_started`  | `Epoch :: reference()` | `bondy_db_core_registry` init       |
+| `bondy_db_core_dispatcher_started`| `Epoch :: reference()` | `bondy_db_core_dispatcher` init     |
 
 The `Epoch` is a fresh `make_ref/0` each time the originating gen_server
 starts. It is monotonic (a later epoch is never `=:=` an earlier one).
@@ -43,34 +43,34 @@ epoch as a discontinuity.
 
 ```erlang
 owner_init(NS, Idx, Shard, Config) ->
-    ok = bondy_mst_db_events:subscribe(bondy_mst_db_registry_started),
+    ok = bondy_db_core_events:subscribe(bondy_db_core_registry_started),
     ok = re_register(NS, Idx, Shard, Config),
     {NS, Idx, Shard, Config}.
 
 owner_loop(State = {NS, Idx, Shard, Config}) ->
     receive
-        {bondy_mst_db_event, bondy_mst_db_registry_started, _Epoch} ->
+        {bondy_db_core_event, bondy_db_core_registry_started, _Epoch} ->
             ok = re_register(NS, Idx, Shard, Config),
             owner_loop(State);
         ...
     end.
 
 re_register(NS, Idx, Shard, Config) ->
-    bondy_mst_db_registry:register(NS, Idx, Shard, Config).
+    bondy_db_core_registry:register(NS, Idx, Shard, Config).
 ```
 
 ## Subscriber pattern (dispatcher)
 
 ```erlang
 subscriber_init(NS, Pattern) ->
-    ok = bondy_mst_db_events:subscribe(bondy_mst_db_dispatcher_started),
-    {ok, Ref} = bondy_mst_db:subscribe(NS, Pattern),
+    ok = bondy_db_core_events:subscribe(bondy_db_core_dispatcher_started),
+    {ok, Ref} = bondy_db_core:subscribe(NS, Pattern),
     {NS, Pattern, Ref}.
 
 subscriber_loop({NS, Pattern, _OldRef} = State) ->
     receive
-        {bondy_mst_db_event, bondy_mst_db_dispatcher_started, _Epoch} ->
-            {ok, NewRef} = bondy_mst_db:subscribe(NS, Pattern),
+        {bondy_db_core_event, bondy_db_core_dispatcher_started, _Epoch} ->
+            {ok, NewRef} = bondy_db_core:subscribe(NS, Pattern),
             subscriber_loop({NS, Pattern, NewRef});
         ...
     end.
@@ -85,13 +85,13 @@ restart. Operators should set the supervisor's `intensity` so this
 module effectively never restarts; it is small and has no side-effects,
 so the operational cost is minimal.
 
-The events module starts before `bondy_mst_db_registry` and
-`bondy_mst_db_dispatcher` in `bondy_oplog_sup` so the substrate
+The events module starts before `bondy_db_core_registry` and
+`bondy_db_core_dispatcher` in `bondy_oplog_sup` so the substrate
 modules can notify on their first init.
 """).
 
 -define(SERVER, ?MODULE).
--define(TAB, bondy_mst_db_events_tab).
+-define(TAB, bondy_db_core_events_tab).
 
 -record(state, {}).
 
@@ -161,7 +161,7 @@ unsubscribe(Topic) when is_atom(Topic) ->
 
 ?DOC("""
 Broadcast `Payload` to every process subscribed to `Topic`. Each
-subscriber receives `{bondy_mst_db_event, Topic, Payload}` via the
+subscriber receives `{bondy_db_core_event, Topic, Payload}` via the
 bare send operator. Returns `ok` whether or not any subscriber matched.
 
 The walk runs in the caller's process — no gen_server round-trip — so
@@ -170,7 +170,7 @@ the notify path stays out of the events module's own mailbox.
 -spec notify(topic(), payload()) -> ok.
 
 notify(Topic, Payload) when is_atom(Topic) ->
-    Msg = {bondy_mst_db_event, Topic, Payload},
+    Msg = {bondy_db_core_event, Topic, Payload},
     Subs = ets:select(
         ?TAB,
         [{#sub{key = {Topic, '$1'}, _ = '_'}, [], ['$1']}]

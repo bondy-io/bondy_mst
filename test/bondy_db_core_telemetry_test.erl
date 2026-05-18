@@ -1,22 +1,22 @@
 %% =============================================================================
-%% Tests for `bondy_mst_db` telemetry instrumentation (`MST_DB_DESIGN.md`
+%% Tests for `bondy_db_core` telemetry instrumentation (`MST_DB_DESIGN.md`
 %% §16). Each event is exercised by triggering a path that fires it and
 %% asserting on the captured measurements + metadata maps. A telemetry
 %% handler routes every event into the test process mailbox; the test
 %% drains and decodes by event name.
 %% =============================================================================
 
--module(bondy_mst_db_telemetry_test).
+-module(bondy_db_core_telemetry_test).
 
 -include_lib("eunit/include/eunit.hrl").
 
 -define(EVENTS, [
-    [bondy_mst_db, read],
-    [bondy_mst_db, read_batch],
-    [bondy_mst_db, ensure_fresh],
-    [bondy_mst_db, range],
-    [bondy_mst_db, read_at_hlc],
-    [bondy_mst_db, subscribe]
+    [bondy_db_core, read],
+    [bondy_db_core, read_batch],
+    [bondy_db_core, ensure_fresh],
+    [bondy_db_core, range],
+    [bondy_db_core, read_at_hlc],
+    [bondy_db_core, subscribe]
 ]).
 
 setup() ->
@@ -49,9 +49,9 @@ read_cache_hit_emits_source_cache() ->
     {Setup, #{cache_handle := CH}} = setup_shard(NS, primary, 0),
     ok = bondy_oplog_cache_ets:put(CH, <<"k">>, {{set, <<"v">>, 99}, 99}),
     with_handler(?EVENTS, fun() ->
-        {{set, <<"v">>, 99}, 99} = bondy_mst_db:read(NS, primary, <<"k">>)
+        {{set, <<"v">>, 99}, 99} = bondy_db_core:read(NS, primary, <<"k">>)
     end),
-    {Meas, Meta} = expect_event([bondy_mst_db, read]),
+    {Meas, Meta} = expect_event([bondy_db_core, read]),
     ?assertEqual(true, maps:get(hit, Meas)),
     ?assert(maps:get(duration_us, Meas) >= 0),
     ?assert(maps:get(value_bytes, Meas) > 0),
@@ -67,9 +67,9 @@ read_projection_only_emits_source_projection() ->
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0),
     seed_projection(PH, <<"k">>, 42, {set, <<"v">>, 42}),
     with_handler(?EVENTS, fun() ->
-        {{set, <<"v">>, 42}, 42} = bondy_mst_db:read(NS, primary, <<"k">>)
+        {{set, <<"v">>, 42}, 42} = bondy_db_core:read(NS, primary, <<"k">>)
     end),
-    {_Meas, Meta} = expect_event([bondy_mst_db, read]),
+    {_Meas, Meta} = expect_event([bondy_db_core, read]),
     ?assertEqual(projection, maps:get(source, Meta)),
     teardown_shard(Setup).
 
@@ -82,9 +82,9 @@ read_with_overlay_emits_projection_with_overlay() ->
     ok = bondy_oplog_db_overlay:insert(OV, <<"k">>, Event),
     with_handler(?EVENTS, fun() ->
         {{set, <<"new">>, 20}, 20} =
-            bondy_mst_db:read(NS, primary, <<"k">>)
+            bondy_db_core:read(NS, primary, <<"k">>)
     end),
-    {_Meas, Meta} = expect_event([bondy_mst_db, read]),
+    {_Meas, Meta} = expect_event([bondy_db_core, read]),
     ?assertEqual(projection_with_overlay, maps:get(source, Meta)),
     teardown_shard(Setup).
 
@@ -97,9 +97,9 @@ read_overlay_only_emits_source_overlay_only() ->
     ok = bondy_oplog_db_overlay:insert(OV, <<"k">>, Event),
     with_handler(?EVENTS, fun() ->
         {{set, <<"v">>, 15}, 15} =
-            bondy_mst_db:read(NS, primary, <<"k">>)
+            bondy_db_core:read(NS, primary, <<"k">>)
     end),
-    {_Meas, Meta} = expect_event([bondy_mst_db, read]),
+    {_Meas, Meta} = expect_event([bondy_db_core, read]),
     ?assertEqual(overlay_only, maps:get(source, Meta)),
     teardown_shard(Setup).
 
@@ -113,9 +113,9 @@ read_batch_event_carries_namespaces_and_fence() ->
     seed_projection(PB, <<"b">>, 22, {set, <<"bv">>, 22}),
     Reads = [{NSA, primary, <<"a">>}, {NSB, primary, <<"b">>}],
     with_handler(?EVENTS, fun() ->
-        {ok, _, _} = bondy_mst_db:read_batch(Reads, #{fence => 100})
+        {ok, _, _} = bondy_db_core:read_batch(Reads, #{fence => 100})
     end),
-    {Meas, Meta} = expect_event([bondy_mst_db, read_batch]),
+    {Meas, Meta} = expect_event([bondy_db_core, read_batch]),
     ?assertEqual(2, maps:get(read_count, Meas)),
     ?assert(maps:get(total_bytes, Meas) > 0),
     ?assertEqual(lists:usort([NSA, NSB]), maps:get(namespaces, Meta)),
@@ -131,10 +131,10 @@ range_event_counts_entries() ->
     seed_projection(PH, <<"k2">>, 2, {set, <<"v2">>, 2}),
     with_handler(?EVENTS, fun() ->
         {ok, Rows} =
-            bondy_mst_db:range(NS, primary, {<<"k">>, <<"l">>}, #{shard => 0}),
+            bondy_db_core:range(NS, primary, {<<"k">>, <<"l">>}, #{shard => 0}),
         2 = length(Rows)
     end),
-    {Meas, Meta} = expect_event([bondy_mst_db, range]),
+    {Meas, Meta} = expect_event([bondy_db_core, range]),
     ?assertEqual(2, maps:get(entries_returned, Meas)),
     ?assert(maps:get(scanned_bytes, Meas) > 0),
     ?assertEqual(NS, maps:get(namespace, Meta)),
@@ -148,9 +148,9 @@ read_at_hlc_success_not_refused() ->
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0),
     seed_projection(PH, <<"k">>, 5, {set, <<"v">>, 5}),
     with_handler(?EVENTS, fun() ->
-        {ok, _, _} = bondy_mst_db:read_at_hlc(NS, <<"k">>, 100)
+        {ok, _, _} = bondy_db_core:read_at_hlc(NS, <<"k">>, 100)
     end),
-    {Meas, Meta} = expect_event([bondy_mst_db, read_at_hlc]),
+    {Meas, Meta} = expect_event([bondy_db_core, read_at_hlc]),
     ?assertEqual(false, maps:get(refused, Meas)),
     ?assertEqual(undefined, maps:get(refusal_reason, Meta)),
     ?assertEqual(NS, maps:get(namespace, Meta)),
@@ -164,9 +164,9 @@ read_at_hlc_refusal_carries_reason() ->
     seed_projection(PH, <<"k">>, 100, {set, <<"v">>, 100}),
     with_handler(?EVENTS, fun() ->
         {error, {historical_read_unavailable, 100, 10}} =
-            bondy_mst_db:read_at_hlc(NS, <<"k">>, 10)
+            bondy_db_core:read_at_hlc(NS, <<"k">>, 10)
     end),
-    {Meas, Meta} = expect_event([bondy_mst_db, read_at_hlc]),
+    {Meas, Meta} = expect_event([bondy_db_core, read_at_hlc]),
     ?assertEqual(true, maps:get(refused, Meas)),
     ?assertEqual(historical_read_unavailable, maps:get(refusal_reason, Meta)),
     teardown_shard(Setup).
@@ -178,9 +178,9 @@ ensure_fresh_event_counts_namespaces_and_stale() ->
     with_handler(?EVENTS, fun() ->
         %% Force a stale return: the shard has never been bumped so its
         %% lag is effectively infinite; a tiny `MaxLag` will catch it.
-        {stale, _} = bondy_mst_db:ensure_fresh([NS], 1)
+        {stale, _} = bondy_db_core:ensure_fresh([NS], 1)
     end),
-    {Meas, _Meta} = expect_event([bondy_mst_db, ensure_fresh]),
+    {Meas, _Meta} = expect_event([bondy_db_core, ensure_fresh]),
     ?assertEqual(1, maps:get(namespaces_checked, Meas)),
     ?assertEqual(1, maps:get(stale_count, Meas)),
     teardown_shard(Setup).
@@ -189,16 +189,16 @@ ensure_fresh_event_counts_namespaces_and_stale() ->
 subscribe_event_carries_pattern_type_and_count() ->
     NS = mk_ns(),
     with_handler(?EVENTS, fun() ->
-        {ok, R1} = bondy_mst_db:subscribe(NS, all),
-        {ok, R2} = bondy_mst_db:subscribe(NS, {prefix, <<"a">>}),
-        ok = bondy_mst_db:unsubscribe(R1),
-        ok = bondy_mst_db:unsubscribe(R2)
+        {ok, R1} = bondy_db_core:subscribe(NS, all),
+        {ok, R2} = bondy_db_core:subscribe(NS, {prefix, <<"a">>}),
+        ok = bondy_db_core:unsubscribe(R1),
+        ok = bondy_db_core:unsubscribe(R2)
     end),
-    {_Meas1, Meta1} = expect_event([bondy_mst_db, subscribe]),
+    {_Meas1, Meta1} = expect_event([bondy_db_core, subscribe]),
     ?assertEqual(all, maps:get(pattern_type, Meta1)),
     ?assertEqual(NS, maps:get(namespace, Meta1)),
     ?assert(maps:get(current_subscribers, Meta1) >= 1),
-    {_Meas2, Meta2} = expect_event([bondy_mst_db, subscribe]),
+    {_Meas2, Meta2} = expect_event([bondy_db_core, subscribe]),
     ?assertEqual(prefix, maps:get(pattern_type, Meta2)),
     ?assert(maps:get(current_subscribers, Meta2) >= 2).
 
@@ -221,7 +221,7 @@ setup_shard(NS, Index, Shard) ->
     {ok, CH} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
     {ok, PH} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     OV = bondy_oplog_db_overlay:new(),
-    ok = bondy_mst_db_registry:register(NS, Index, Shard, #{
+    ok = bondy_db_core_registry:register(NS, Index, Shard, #{
         shard_count => 1,
         cache_adapter => bondy_oplog_cache_ets,
         cache_handle => CH,
@@ -237,7 +237,7 @@ setup_shard(NS, Index, Shard) ->
 
 teardown_shard(#{ns := NS, index := Index, shard := Shard,
                  cache_handle := CH, projection := PH, overlay := OV}) ->
-    ok = bondy_mst_db_registry:unregister(NS, Index, Shard),
+    ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),
     ok = bondy_oplog_db_overlay:delete(OV).

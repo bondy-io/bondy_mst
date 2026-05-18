@@ -25,7 +25,7 @@ representations (HLC vectors, version vectors) without a frame-format
 migration.
 
 The body is opaque to this module; it is the output of the namespace's
-`bondy_oplog_fold:encode_state/2`. `bondy_mst_db` strips the frame on
+`bondy_oplog_fold:encode_state/2`. `bondy_db_core` strips the frame on
 read and calls `decode_state/2` on the body.
 
 ## Invariants

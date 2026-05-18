@@ -32,7 +32,7 @@ ets:new(?MODULE, [
 
 This module returns the `tid()` from `new/0`; ownership and lifecycle
 (publish-to-registry, teardown on shard restart) belong to the owning
-process (`bondy_mst_db` in D3). The table is not named — naming would
+process (`bondy_db_core` in D3). The table is not named — naming would
 require atom construction from `(NS, Shard)` and risks atom-table
 exhaustion.
 
@@ -177,7 +177,7 @@ Range scan bounded above by `MaxHlc` (inclusive). All overlay rows whose
 `CellKey` is in `[KeyLow, KeyHigh)` and whose HLC is `=< MaxHlc` are
 returned. `MaxHlc = infinity` removes the upper bound.
 
-Used by `bondy_mst_db:range/4` (`MST_DB_DESIGN.md` §9) for fence-aware
+Used by `bondy_db_core:range/4` (`MST_DB_DESIGN.md` §9) for fence-aware
 range scans where the per-cell `> ProjHlc` filter is applied at the
 merge step.
 """).

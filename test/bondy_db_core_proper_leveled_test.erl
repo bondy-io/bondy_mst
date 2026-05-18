@@ -1,5 +1,5 @@
 %% =============================================================================
-%% D9 empirical verification — runs `bondy_mst_db_proper_test`'s flagship
+%% D9 empirical verification — runs `bondy_db_core_proper_test`'s flagship
 %% properties against the leveled-backed projection adapter, with the
 %% ETS cache held constant. Three properties are exercised:
 %%
@@ -29,7 +29,7 @@
 %% slower; the goal is D9 *empirical* verification, not stress.
 %% =============================================================================
 
--module(bondy_mst_db_proper_leveled_test).
+-module(bondy_db_core_proper_leveled_test).
 
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
@@ -89,7 +89,7 @@ prop_read_returns_latest_fold_leveled() ->
     ?FORALL({Key, Events}, {key_gen(), events_gen()},
         with_shard(fun(NS) ->
             populate_overlay(NS, Key, Events),
-            Got = bondy_mst_db:read(NS, primary, Key),
+            Got = bondy_db_core:read(NS, primary, Key),
             Expected = expected_read(Events),
             equal_read_result(Got, Expected)
         end)).
@@ -109,7 +109,7 @@ prop_overlay_projection_merge_leveled() ->
                     clear -> {clear, OverlayHlc}
                 end,
                 insert_overlay(NS, Key, OverlayEvent),
-                Got = bondy_mst_db:read(NS, primary, Key),
+                Got = bondy_db_core:read(NS, primary, Key),
                 Expected = expected_read(Events ++ [OverlayEvent]),
                 equal_read_result(Got, Expected)
             end))).
@@ -127,7 +127,7 @@ prop_range_monotonicity_leveled() ->
                 end,
                 lists:zip(UniqueKeys, lists:seq(1, length(UniqueKeys)))
             ),
-            {ok, Rows} = bondy_mst_db:range(NS, primary,
+            {ok, Rows} = bondy_db_core:range(NS, primary,
                                             {Low, High}, #{}),
             ResultKeys = [K || {K, _, _} <- Rows],
             Sorted = ResultKeys =:= lists:sort(ResultKeys),
@@ -157,7 +157,7 @@ start_shard(NS, Index, Shard, ShardCount) ->
     {ok, PH} = ?PROJ_MOD:open(NS, Index, Shard,
                               #{bookie => Bookie, bucket => ?BUCKET}),
     OV = bondy_oplog_db_overlay:new(),
-    ok = bondy_mst_db_registry:register(NS, Index, Shard, #{
+    ok = bondy_db_core_registry:register(NS, Index, Shard, #{
         shard_count => ShardCount,
         cache_adapter => ?CACHE_MOD,
         cache_handle => CH,
@@ -174,7 +174,7 @@ start_shard(NS, Index, Shard, ShardCount) ->
 stop_shard(#{ns := NS, index := Index, shard := Shard,
              cache_handle := CH, projection := PH, overlay := OV,
              bookie := Bookie, dir := Dir}) ->
-    ok = bondy_mst_db_registry:unregister(NS, Index, Shard),
+    ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = ?CACHE_MOD:invalidate_all(CH),
     ok = ?PROJ_MOD:close(PH),
     ok = bondy_oplog_db_overlay:delete(OV),
@@ -210,8 +210,8 @@ rmrf(Dir) ->
 %% =============================================================================
 
 populate_overlay(NS, Key, Events) ->
-    {ok, Entry} = bondy_mst_db_registry:lookup(NS, primary, 0),
-    OV = bondy_mst_db_registry:entry_overlay(Entry),
+    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
+    OV = bondy_db_core_registry:entry_overlay(Entry),
     lists:foreach(
         fun(E) ->
             Hlc = hlc_of_event(E),
@@ -222,23 +222,23 @@ populate_overlay(NS, Key, Events) ->
     ).
 
 insert_overlay(NS, Key, E) ->
-    {ok, Entry} = bondy_mst_db_registry:lookup(NS, primary, 0),
-    OV = bondy_mst_db_registry:entry_overlay(Entry),
+    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
+    OV = bondy_db_core_registry:entry_overlay(Entry),
     Hlc = hlc_of_event(E),
     Event = mk_event(Hlc, E),
     ok = bondy_oplog_db_overlay:insert(OV, Key, Event).
 
 materialise(NS, Key, {set, _, _} = State) ->
-    {ok, Entry} = bondy_mst_db_registry:lookup(NS, primary, 0),
-    PH = bondy_mst_db_registry:entry_projection_handle(Entry),
+    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
+    PH = bondy_db_core_registry:entry_projection_handle(Entry),
     Frame = bondy_oplog_cell_frame:encode(
         hlc_of(State),
         bondy_oplog_fold:encode_state(?STRATEGY, State)
     ),
     ok = ?PROJ_MOD:put_batch(PH, [{Key, Frame}]);
 materialise(NS, Key, {cleared, _} = State) ->
-    {ok, Entry} = bondy_mst_db_registry:lookup(NS, primary, 0),
-    PH = bondy_mst_db_registry:entry_projection_handle(Entry),
+    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
+    PH = bondy_db_core_registry:entry_projection_handle(Entry),
     Frame = bondy_oplog_cell_frame:encode(
         hlc_of(State),
         bondy_oplog_fold:encode_state(?STRATEGY, State)

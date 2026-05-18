@@ -28,9 +28,9 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_mst_db_registry:unregister(NS, Index, 0)
+    [bondy_db_core_registry:unregister(NS, Index, 0)
      || #{key := {NS, Index, _}} <-
-            [entry_to_map(E) || E <- bondy_mst_db_registry:list()]],
+            [entry_to_map(E) || E <- bondy_db_core_registry:list()]],
     ok.
 
 ae_bump_test_() ->
@@ -57,9 +57,9 @@ no_ae_targets_does_not_bump() ->
     {ok, _} = bondy_oplog:start_instance(A, opts_for(NS, [])),
     {ok, _} = bondy_oplog:start_instance(B, opts_for(NS, [])),
     [bondy_oplog:append(B, {b, N}) || N <- lists:seq(1, 5)],
-    Before = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    Before = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     {ok, _} = bondy_oplog:sync(A, B),
-    After = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    After = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assertEqual(Before, After),
     cleanup_ns(NS).
 
@@ -77,10 +77,10 @@ successful_sync_bumps_targets() ->
     {ok, _} = bondy_oplog:start_instance(A, opts_for(NS, Targets)),
     {ok, _} = bondy_oplog:start_instance(B, opts_for(NS, [])),
     [bondy_oplog:append(B, {b, N}) || N <- lists:seq(1, 5)],
-    Before = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    Before = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assertEqual(sentinel(), Before),
     {ok, _} = bondy_oplog:sync(A, B),
-    After = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    After = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assert(After > Before),
     cleanup_ns(NS).
 
@@ -96,8 +96,8 @@ bump_shares_now_across_targets() ->
     {ok, _} = bondy_oplog:start_instance(B, opts_for(NS, Targets)),
     [bondy_oplog:append(B, {b, N}) || N <- lists:seq(1, 3)],
     {ok, _} = bondy_oplog:sync(A, B),
-    P = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
-    Q = bondy_mst_db_registry:last_ae_at(NS, by_name, 0),
+    P = bondy_db_core_registry:last_ae_at(NS, primary, 0),
+    Q = bondy_db_core_registry:last_ae_at(NS, by_name, 0),
     ?assertEqual(P, Q),
     ?assert(P > sentinel()),
     cleanup_ns(NS).
@@ -117,11 +117,11 @@ no_op_sync_against_empty_peer_still_bumps() ->
     {ok, _} = bondy_oplog:start_instance(B, opts_for(NS, Targets)),
     [bondy_oplog:append(A, X) || X <- [a, b, c]],
     ok = bondy_oplog:await_apply(A),
-    Before = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    Before = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     %% A pulls from B which is empty — no events to apply but the round
     %% completes successfully.
     {ok, _} = bondy_oplog:sync(A, B),
-    After = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    After = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assert(After > Before),
     cleanup_ns(NS).
 
@@ -134,12 +134,12 @@ failed_sync_does_not_bump() ->
     Targets = [{NS, primary, 0}],
     A = mk_inst(),
     {ok, _} = bondy_oplog:start_instance(A, opts_for(NS, Targets)),
-    Before = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    Before = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     %% Use an unstarted peer id so the inline transport raises.
     BogusPeer = <<"never_started_peer">>,
     Result = bondy_oplog:sync(A, BogusPeer),
     ?assertMatch({error, _}, Result),
-    After = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    After = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assertEqual(Before, After),
     cleanup_ns(NS).
 
@@ -155,10 +155,10 @@ missing_target_is_tolerated() ->
     {ok, _} = bondy_oplog:start_instance(B, opts_for(NS, Targets)),
     [bondy_oplog:append(B, {b, N}) || N <- lists:seq(1, 3)],
     {ok, _} = bondy_oplog:sync(A, B),
-    ?assert(bondy_mst_db_registry:last_ae_at(NS, primary, 0) > sentinel()),
+    ?assert(bondy_db_core_registry:last_ae_at(NS, primary, 0) > sentinel()),
     ?assertEqual(
         not_found,
-        bondy_mst_db_registry:last_ae_at(missing_ns, primary, 0)
+        bondy_db_core_registry:last_ae_at(missing_ns, primary, 0)
     ),
     cleanup_ns(NS).
 
@@ -179,16 +179,16 @@ top_level_ae_targets_wires_applier_and_ae() ->
     }),
     {ok, _} = bondy_oplog:start_instance(B, opts_for(NS, Targets)),
     ?assertEqual(sentinel(),
-                 bondy_mst_db_registry:last_ae_at(NS, primary, 0)),
+                 bondy_db_core_registry:last_ae_at(NS, primary, 0)),
     %% Applier-side bump on first commit.
     _ = bondy_oplog:append(A, hello),
     _ = wait_for_ae_advance(NS, primary, 0, sentinel()),
-    Mid = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    Mid = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assert(Mid > sentinel()),
     %% AE-side bump on sync (B is empty so this is a fast roundtrip).
     timer:sleep(2),
     {ok, _} = bondy_oplog:sync(A, B),
-    After = bondy_mst_db_registry:last_ae_at(NS, primary, 0),
+    After = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assert(After >= Mid),
     cleanup_ns(NS).
 
@@ -225,7 +225,7 @@ originated_opts() ->
 
 
 register_shard(NS, Index, Shard) ->
-    bondy_mst_db_registry:register(NS, Index, Shard, #{
+    bondy_db_core_registry:register(NS, Index, Shard, #{
         shard_count        => 1,
         cache_adapter      => bondy_oplog_cache_ets,
         cache_handle       => undefined,
@@ -236,11 +236,11 @@ register_shard(NS, Index, Shard) ->
 
 
 cleanup_ns(NS) ->
-    Entries = [E || E <- bondy_mst_db_registry:list(),
-                    element(1, bondy_mst_db_registry:entry_key(E)) =:= NS],
-    [bondy_mst_db_registry:unregister(N, I, S)
+    Entries = [E || E <- bondy_db_core_registry:list(),
+                    element(1, bondy_db_core_registry:entry_key(E)) =:= NS],
+    [bondy_db_core_registry:unregister(N, I, S)
      || E <- Entries,
-        {N, I, S} <- [bondy_mst_db_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
     ok.
 
 
@@ -256,7 +256,7 @@ wait_for_ae_advance(NS, Index, Shard, Baseline, TimeoutMs) ->
     wait_for_ae_advance_loop(NS, Index, Shard, Baseline, Deadline).
 
 wait_for_ae_advance_loop(NS, Index, Shard, Baseline, Deadline) ->
-    case bondy_mst_db_registry:last_ae_at(NS, Index, Shard) of
+    case bondy_db_core_registry:last_ae_at(NS, Index, Shard) of
         V when V > Baseline -> V;
         _ ->
             case erlang:monotonic_time(millisecond) >= Deadline of
@@ -270,4 +270,4 @@ wait_for_ae_advance_loop(NS, Index, Shard, Baseline, Deadline) ->
 
 
 entry_to_map(E) ->
-    #{key => bondy_mst_db_registry:entry_key(E)}.
+    #{key => bondy_db_core_registry:entry_key(E)}.

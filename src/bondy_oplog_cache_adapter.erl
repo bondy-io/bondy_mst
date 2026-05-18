@@ -59,7 +59,7 @@ the divergence case (`{conflict, _}` from the applier).
 
 `close/1` is called on instance shutdown and on explicit shard
 unregister. It is **not** called by the substrate when the registering
-process dies — see `bondy_mst_db_registry`'s "Owner DOWN cleanup"
+process dies — see `bondy_db_core_registry`'s "Owner DOWN cleanup"
 section. ETS-based adapters can rely on Erlang's ETS GC for cleanup;
 adapters that own external resources (file handles, sub-processes,
 connection pools) MUST monitor their owning process internally and

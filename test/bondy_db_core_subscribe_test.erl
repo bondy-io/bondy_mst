@@ -1,5 +1,5 @@
 %% =============================================================================
-%% Tests for `bondy_mst_db:subscribe/2` + the reference dispatcher
+%% Tests for `bondy_db_core:subscribe/2` + the reference dispatcher
 %% (`MST_DB_DESIGN.md` §12, wired in D8).
 %%
 %% Pins: monitor-based cleanup, NS isolation, pattern matching
@@ -7,7 +7,7 @@
 %% and the public `publish/4` facade.
 %% =============================================================================
 
--module(bondy_mst_db_subscribe_test).
+-module(bondy_db_core_subscribe_test).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -40,117 +40,117 @@ subscribe_test_() ->
 %% =============================================================================
 
 subscribe_returns_a_reference() ->
-    {ok, Ref} = bondy_mst_db:subscribe(some_ns(), all),
+    {ok, Ref} = bondy_db_core:subscribe(some_ns(), all),
     ?assert(is_reference(Ref)),
-    ok = bondy_mst_db:unsubscribe(Ref).
+    ok = bondy_db_core:unsubscribe(Ref).
 
 all_pattern_receives_every_event() ->
     NS = some_ns(),
-    {ok, Ref} = bondy_mst_db:subscribe(NS, all),
-    ok = bondy_mst_db:publish(NS, <<"a">>, 1, op_a),
-    ok = bondy_mst_db:publish(NS, <<"b">>, 2, op_b),
+    {ok, Ref} = bondy_db_core:subscribe(NS, all),
+    ok = bondy_db_core:publish(NS, <<"a">>, 1, op_a),
+    ok = bondy_db_core:publish(NS, <<"b">>, 2, op_b),
     Msgs = drain(),
     ?assertEqual(
         [
-            {bondy_mst_db_event, NS, <<"a">>, 1, op_a},
-            {bondy_mst_db_event, NS, <<"b">>, 2, op_b}
+            {bondy_db_core_event, NS, <<"a">>, 1, op_a},
+            {bondy_db_core_event, NS, <<"b">>, 2, op_b}
         ],
         Msgs
     ),
-    ok = bondy_mst_db:unsubscribe(Ref).
+    ok = bondy_db_core:unsubscribe(Ref).
 
 exact_pattern_receives_only_matching_key() ->
     NS = some_ns(),
-    {ok, Ref} = bondy_mst_db:subscribe(NS, {exact, <<"want">>}),
-    ok = bondy_mst_db:publish(NS, <<"nope">>, 1, x),
-    ok = bondy_mst_db:publish(NS, <<"want">>, 2, y),
-    ok = bondy_mst_db:publish(NS, <<"also-nope">>, 3, z),
+    {ok, Ref} = bondy_db_core:subscribe(NS, {exact, <<"want">>}),
+    ok = bondy_db_core:publish(NS, <<"nope">>, 1, x),
+    ok = bondy_db_core:publish(NS, <<"want">>, 2, y),
+    ok = bondy_db_core:publish(NS, <<"also-nope">>, 3, z),
     ?assertEqual(
-        [{bondy_mst_db_event, NS, <<"want">>, 2, y}],
+        [{bondy_db_core_event, NS, <<"want">>, 2, y}],
         drain()
     ),
-    ok = bondy_mst_db:unsubscribe(Ref).
+    ok = bondy_db_core:unsubscribe(Ref).
 
 prefix_binary_pattern_matches_by_prefix() ->
     NS = some_ns(),
-    {ok, Ref} = bondy_mst_db:subscribe(NS, {prefix, <<"user:">>}),
-    ok = bondy_mst_db:publish(NS, <<"user:42">>, 1, hit1),
-    ok = bondy_mst_db:publish(NS, <<"other:7">>, 2, miss),
-    ok = bondy_mst_db:publish(NS, <<"user:99">>, 3, hit2),
+    {ok, Ref} = bondy_db_core:subscribe(NS, {prefix, <<"user:">>}),
+    ok = bondy_db_core:publish(NS, <<"user:42">>, 1, hit1),
+    ok = bondy_db_core:publish(NS, <<"other:7">>, 2, miss),
+    ok = bondy_db_core:publish(NS, <<"user:99">>, 3, hit2),
     %% A key shorter than the prefix never matches.
-    ok = bondy_mst_db:publish(NS, <<"us">>, 4, miss2),
+    ok = bondy_db_core:publish(NS, <<"us">>, 4, miss2),
     ?assertEqual(
         [
-            {bondy_mst_db_event, NS, <<"user:42">>, 1, hit1},
-            {bondy_mst_db_event, NS, <<"user:99">>, 3, hit2}
+            {bondy_db_core_event, NS, <<"user:42">>, 1, hit1},
+            {bondy_db_core_event, NS, <<"user:99">>, 3, hit2}
         ],
         drain()
     ),
-    ok = bondy_mst_db:unsubscribe(Ref).
+    ok = bondy_db_core:unsubscribe(Ref).
 
 prefix_list_pattern_matches_by_prefix() ->
     NS = some_ns(),
-    {ok, Ref} = bondy_mst_db:subscribe(NS, {prefix, [a, b]}),
-    ok = bondy_mst_db:publish(NS, [a, b, c], 1, hit),
-    ok = bondy_mst_db:publish(NS, [a, x],    2, miss),
-    ok = bondy_mst_db:publish(NS, [a, b],    3, hit2),
+    {ok, Ref} = bondy_db_core:subscribe(NS, {prefix, [a, b]}),
+    ok = bondy_db_core:publish(NS, [a, b, c], 1, hit),
+    ok = bondy_db_core:publish(NS, [a, x],    2, miss),
+    ok = bondy_db_core:publish(NS, [a, b],    3, hit2),
     ?assertEqual(
         [
-            {bondy_mst_db_event, NS, [a, b, c], 1, hit},
-            {bondy_mst_db_event, NS, [a, b], 3, hit2}
+            {bondy_db_core_event, NS, [a, b, c], 1, hit},
+            {bondy_db_core_event, NS, [a, b], 3, hit2}
         ],
         drain()
     ),
-    ok = bondy_mst_db:unsubscribe(Ref).
+    ok = bondy_db_core:unsubscribe(Ref).
 
 prefix_pattern_with_type_mismatch_does_not_match() ->
     %% A binary prefix against a list key is a no-match, not a crash.
     NS = some_ns(),
-    {ok, Ref} = bondy_mst_db:subscribe(NS, {prefix, <<"p">>}),
-    ok = bondy_mst_db:publish(NS, [a, b], 1, _Op = z),
+    {ok, Ref} = bondy_db_core:subscribe(NS, {prefix, <<"p">>}),
+    ok = bondy_db_core:publish(NS, [a, b], 1, _Op = z),
     ?assertEqual([], drain()),
-    ok = bondy_mst_db:unsubscribe(Ref).
+    ok = bondy_db_core:unsubscribe(Ref).
 
 match_fun_pattern_filters_events() ->
     NS = some_ns(),
     Pred = fun(K) when is_binary(K) -> byte_size(K) > 3;
              (_) -> false
           end,
-    {ok, Ref} = bondy_mst_db:subscribe(NS, {match, Pred}),
-    ok = bondy_mst_db:publish(NS, <<"ab">>,    1, miss),
-    ok = bondy_mst_db:publish(NS, <<"abcd">>,  2, hit),
-    ok = bondy_mst_db:publish(NS, <<"abcde">>, 3, hit2),
+    {ok, Ref} = bondy_db_core:subscribe(NS, {match, Pred}),
+    ok = bondy_db_core:publish(NS, <<"ab">>,    1, miss),
+    ok = bondy_db_core:publish(NS, <<"abcd">>,  2, hit),
+    ok = bondy_db_core:publish(NS, <<"abcde">>, 3, hit2),
     ?assertEqual(
         [
-            {bondy_mst_db_event, NS, <<"abcd">>, 2, hit},
-            {bondy_mst_db_event, NS, <<"abcde">>, 3, hit2}
+            {bondy_db_core_event, NS, <<"abcd">>, 2, hit},
+            {bondy_db_core_event, NS, <<"abcde">>, 3, hit2}
         ],
         drain()
     ),
-    ok = bondy_mst_db:unsubscribe(Ref).
+    ok = bondy_db_core:unsubscribe(Ref).
 
 match_fun_throwing_is_treated_as_false() ->
     %% A predicate that throws on some inputs must not propagate; the
     %% dispatcher silently treats it as a non-match.
     NS = some_ns(),
     Pred = fun(K) when is_binary(K) -> byte_size(K) > 3 end,
-    {ok, Ref} = bondy_mst_db:subscribe(NS, {match, Pred}),
-    ok = bondy_mst_db:publish(NS, not_a_binary, 1, miss),
-    ok = bondy_mst_db:publish(NS, <<"abcd">>,    2, hit),
+    {ok, Ref} = bondy_db_core:subscribe(NS, {match, Pred}),
+    ok = bondy_db_core:publish(NS, not_a_binary, 1, miss),
+    ok = bondy_db_core:publish(NS, <<"abcd">>,    2, hit),
     ?assertEqual(
-        [{bondy_mst_db_event, NS, <<"abcd">>, 2, hit}],
+        [{bondy_db_core_event, NS, <<"abcd">>, 2, hit}],
         drain()
     ),
-    ok = bondy_mst_db:unsubscribe(Ref).
+    ok = bondy_db_core:unsubscribe(Ref).
 
 unsubscribe_stops_delivery() ->
     NS = some_ns(),
-    {ok, Ref} = bondy_mst_db:subscribe(NS, all),
-    ok = bondy_mst_db:publish(NS, <<"k">>, 1, before),
-    ok = bondy_mst_db:unsubscribe(Ref),
-    ok = bondy_mst_db:publish(NS, <<"k">>, 2, ignored),
+    {ok, Ref} = bondy_db_core:subscribe(NS, all),
+    ok = bondy_db_core:publish(NS, <<"k">>, 1, before),
+    ok = bondy_db_core:unsubscribe(Ref),
+    ok = bondy_db_core:publish(NS, <<"k">>, 2, ignored),
     ?assertEqual(
-        [{bondy_mst_db_event, NS, <<"k">>, 1, before}],
+        [{bondy_db_core_event, NS, <<"k">>, 1, before}],
         drain()
     ).
 
@@ -158,32 +158,32 @@ subscriber_down_cleans_up_subscription() ->
     NS = some_ns(),
     Parent = self(),
     Pid = spawn(fun() ->
-        {ok, _Ref} = bondy_mst_db:subscribe(NS, all),
+        {ok, _Ref} = bondy_db_core:subscribe(NS, all),
         Parent ! ready,
         receive go_down -> ok end
     end),
     Mon = erlang:monitor(process, Pid),
     receive ready -> ok end,
-    Before = bondy_mst_db_dispatcher:subscription_count(),
+    Before = bondy_db_core_dispatcher:subscription_count(),
     ?assert(Before >= 1),
     Pid ! go_down,
     receive {'DOWN', Mon, process, Pid, _} -> ok end,
     %% Give the dispatcher a brief moment to process the DOWN.
     ok = sync_with_dispatcher(),
-    After = bondy_mst_db_dispatcher:subscription_count(),
+    After = bondy_db_core_dispatcher:subscription_count(),
     ?assertEqual(Before - 1, After).
 
 ns_isolation_other_ns_events_not_delivered() ->
     NS1 = some_ns(),
     NS2 = some_ns(),
-    {ok, Ref} = bondy_mst_db:subscribe(NS1, all),
-    ok = bondy_mst_db:publish(NS2, <<"k">>, 1, irrelevant),
-    ok = bondy_mst_db:publish(NS1, <<"k">>, 2, mine),
+    {ok, Ref} = bondy_db_core:subscribe(NS1, all),
+    ok = bondy_db_core:publish(NS2, <<"k">>, 1, irrelevant),
+    ok = bondy_db_core:publish(NS1, <<"k">>, 2, mine),
     ?assertEqual(
-        [{bondy_mst_db_event, NS1, <<"k">>, 2, mine}],
+        [{bondy_db_core_event, NS1, <<"k">>, 2, mine}],
         drain()
     ),
-    ok = bondy_mst_db:unsubscribe(Ref).
+    ok = bondy_db_core:unsubscribe(Ref).
 
 multiple_subscribers_all_receive_matching() ->
     %% Two subscribers, both `all` on the same NS — both must receive.
@@ -191,31 +191,31 @@ multiple_subscribers_all_receive_matching() ->
     NS = some_ns(),
     Parent = self(),
     Sub1 = spawn(fun() ->
-        {ok, _R} = bondy_mst_db:subscribe(NS, all),
+        {ok, _R} = bondy_db_core:subscribe(NS, all),
         Parent ! {ready, 1},
         Msgs = drain(50),
         Parent ! {msgs, 1, Msgs}
     end),
     Sub2 = spawn(fun() ->
-        {ok, _R} = bondy_mst_db:subscribe(NS, all),
+        {ok, _R} = bondy_db_core:subscribe(NS, all),
         Parent ! {ready, 2},
         Msgs = drain(50),
         Parent ! {msgs, 2, Msgs}
     end),
     receive {ready, 1} -> ok end,
     receive {ready, 2} -> ok end,
-    ok = bondy_mst_db:publish(NS, <<"k">>, 1, op),
+    ok = bondy_db_core:publish(NS, <<"k">>, 1, op),
     Msgs1 = receive {msgs, 1, M1} -> M1 after 200 -> [] end,
     Msgs2 = receive {msgs, 2, M2} -> M2 after 200 -> [] end,
-    ?assertEqual([{bondy_mst_db_event, NS, <<"k">>, 1, op}], Msgs1),
-    ?assertEqual([{bondy_mst_db_event, NS, <<"k">>, 1, op}], Msgs2),
+    ?assertEqual([{bondy_db_core_event, NS, <<"k">>, 1, op}], Msgs1),
+    ?assertEqual([{bondy_db_core_event, NS, <<"k">>, 1, op}], Msgs2),
     %% Subscribers exit on their own; DOWN cleans up.
     _ = Sub1, _ = Sub2,
     ok.
 
 unsubscribe_unknown_ref_is_idempotent() ->
     %% Unsubscribing a ref that was never registered is a no-op.
-    ?assertEqual(ok, bondy_mst_db:unsubscribe(erlang:make_ref())).
+    ?assertEqual(ok, bondy_db_core:unsubscribe(erlang:make_ref())).
 
 %% =============================================================================
 %% Helpers
@@ -233,7 +233,7 @@ drain(TimeoutMs) ->
 
 drain(TimeoutMs, Acc) ->
     receive
-        {bondy_mst_db_event, _, _, _, _} = M -> drain(TimeoutMs, [M | Acc])
+        {bondy_db_core_event, _, _, _, _} = M -> drain(TimeoutMs, [M | Acc])
     after TimeoutMs ->
         lists:reverse(Acc)
     end.
@@ -242,8 +242,8 @@ drain(TimeoutMs, Acc) ->
 %% via a synchronous call. Returns when the dispatcher mailbox has
 %% drained past whatever was queued before this call.
 sync_with_dispatcher() ->
-    _ = bondy_mst_db_dispatcher:subscription_count(),
+    _ = bondy_db_core_dispatcher:subscription_count(),
     %% subscription_count() is a plain ets:info — it does not flush.
     %% Use a real gen_server roundtrip:
-    _ = sys:get_state(bondy_mst_db_dispatcher),
+    _ = sys:get_state(bondy_db_core_dispatcher),
     ok.

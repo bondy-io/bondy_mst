@@ -287,7 +287,7 @@ maybe_record(_, _, _, _) ->
 %% registered for this instance so long-quiet shards (no writer
 %% activity) do not trip `{stale, _}` purely on inactivity.
 %%
-%% Uses `bondy_mst_db_registry:bump_ae_targets/2` so the AE-side bump
+%% Uses `bondy_db_core_registry:bump_ae_targets/2` so the AE-side bump
 %% shares a primitive — and timing semantics — with the applier-side
 %% bump in `bondy_oplog_applier:bump_ae_targets/1`. Empty target list
 %% is a strict no-op.
@@ -300,7 +300,7 @@ bump_ae_on_sync(Instance, Peer) ->
         Targets ->
             Now = erlang:monotonic_time(millisecond),
             {Bumped, NotFound} =
-                bondy_mst_db_registry:bump_ae_targets(Targets, Now),
+                bondy_db_core_registry:bump_ae_targets(Targets, Now),
             telemetry:execute(
                 [bondy_oplog, sync, ae_bumped],
                 #{count => Bumped, not_found => NotFound},

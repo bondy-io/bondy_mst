@@ -1,11 +1,11 @@
 %% =============================================================================
-%% Tests for `bondy_mst_db_metrics` — the periodic per-namespace gauge
+%% Tests for `bondy_db_core_metrics` — the periodic per-namespace gauge
 %% emitter for §16 of `MST_DB_DESIGN.md`.
 %%
 %% Verifies:
 %%   - read / range telemetry events increment the underlying counters
 %%     through `bondy_metrics`
-%%   - `snapshot_now/0` emits a `[bondy_mst_db, metrics, refresh]` event
+%%   - `snapshot_now/0` emits a `[bondy_db_core, metrics, refresh]` event
 %%     per known namespace with the §16 measurements + metadata
 %%   - cache_hit_rate computes from delta of hits / (hits + misses)
 %%   - read_rps / range_rps reflect the elapsed window since the last tick
@@ -14,7 +14,7 @@
 %%   - independent namespaces produce independent gauges
 %% =============================================================================
 
--module(bondy_mst_db_metrics_test).
+-module(bondy_db_core_metrics_test).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -24,14 +24,14 @@ setup() ->
     %% exclusively via `snapshot_now/0`. A background tick landing in
     %% the middle of a test's capture window produced an extra event
     %% per namespace and made assertions on event counts unstable.
-    ok = bondy_mst_db_metrics:set_enabled(false),
+    ok = bondy_db_core_metrics:set_enabled(false),
     ok.
 
 cleanup(_) ->
     %% Re-enable so any subsequent test module that depends on a running
     %% tick is not penalised. Tests in this module never block on the
     %% timer firing — they always force via `snapshot_now/0`.
-    ok = bondy_mst_db_metrics:set_enabled(true),
+    ok = bondy_db_core_metrics:set_enabled(true),
     ok.
 
 metrics_test_() ->
@@ -56,16 +56,16 @@ read_event_increments_counters() ->
     fire_read(NS, true),
     fire_read(NS, false),
     Label = #{namespace => NS},
-    ?assertEqual(3, counter_value(bondy_mst_db_reads_total, Label)),
-    ?assertEqual(2, counter_value(bondy_mst_db_cache_hits_total, Label)),
-    ?assertEqual(1, counter_value(bondy_mst_db_cache_misses_total, Label)).
+    ?assertEqual(3, counter_value(bondy_db_core_reads_total, Label)),
+    ?assertEqual(2, counter_value(bondy_db_core_cache_hits_total, Label)),
+    ?assertEqual(1, counter_value(bondy_db_core_cache_misses_total, Label)).
 
 
 range_event_increments_counter() ->
     NS = mk_ns(),
     fire_range(NS),
     fire_range(NS),
-    ?assertEqual(2, counter_value(bondy_mst_db_ranges_total,
+    ?assertEqual(2, counter_value(bondy_db_core_ranges_total,
                                   #{namespace => NS})).
 
 
@@ -75,7 +75,7 @@ snapshot_emits_refresh_event_per_namespace() ->
     fire_read(NS, false),
     fire_range(NS),
     Events = capture_refresh_events(fun() ->
-        ok = bondy_mst_db_metrics:snapshot_now()
+        ok = bondy_db_core_metrics:snapshot_now()
     end),
     %% At least one event for our NS — there may be others from prior
     %% tests in the same VM, so filter.
@@ -95,14 +95,14 @@ cache_hit_rate_is_delta_based() ->
     NS = mk_ns(),
     %% First tick establishes a baseline.
     fire_read(NS, true),
-    ok = bondy_mst_db_metrics:snapshot_now(),
+    ok = bondy_db_core_metrics:snapshot_now(),
     %% Now produce 3 hits + 1 miss between this and the next snapshot.
     fire_read(NS, true),
     fire_read(NS, true),
     fire_read(NS, true),
     fire_read(NS, false),
     Events = capture_refresh_events(fun() ->
-        ok = bondy_mst_db_metrics:snapshot_now()
+        ok = bondy_db_core_metrics:snapshot_now()
     end),
     [{Meas, _}] = [E || E = {_M, #{namespace := N}} <- Events, N =:= NS],
     %% 3 hits out of 4 reads → 0.75. Floating point compare with epsilon.
@@ -113,14 +113,14 @@ cache_hit_rate_is_delta_based() ->
 
 rates_scale_with_window() ->
     NS = mk_ns(),
-    ok = bondy_mst_db_metrics:snapshot_now(),
+    ok = bondy_db_core_metrics:snapshot_now(),
     %% Two reads in a short window.
     fire_read(NS, true),
     fire_read(NS, false),
     %% Wait a known amount so the window is observable.
     timer:sleep(50),
     Events = capture_refresh_events(fun() ->
-        ok = bondy_mst_db_metrics:snapshot_now()
+        ok = bondy_db_core_metrics:snapshot_now()
     end),
     [{Meas, Meta}] = [E || E = {_M, #{namespace := N}} <- Events, N =:= NS],
     %% RPS must be positive and the window ≥ the sleep.
@@ -135,7 +135,7 @@ multiple_namespaces_are_independent() ->
     fire_read(NSA, true),
     fire_read(NSB, false),
     Events = capture_refresh_events(fun() ->
-        ok = bondy_mst_db_metrics:snapshot_now()
+        ok = bondy_db_core_metrics:snapshot_now()
     end),
     OursA = [E || E = {_M, #{namespace := N}} <- Events, N =:= NSA],
     OursB = [E || E = {_M, #{namespace := N}} <- Events, N =:= NSB],
@@ -155,7 +155,7 @@ freshness_lag_is_reported() ->
     %% No `bump_ae` ever — the shard's `last_ae_at` is at the sentinel,
     %% so `Now - sentinel` is a very large positive integer.
     Events = capture_refresh_events(fun() ->
-        ok = bondy_mst_db_metrics:snapshot_now()
+        ok = bondy_db_core_metrics:snapshot_now()
     end),
     [{Meas, _}] = [E || E = {_M, #{namespace := N}} <- Events, N =:= NS],
     ?assert(maps:get(current_freshness_lag_max_ms, Meas) > 1_000_000_000),
@@ -163,7 +163,7 @@ freshness_lag_is_reported() ->
 
 
 info_reports_running_state() ->
-    Info = bondy_mst_db_metrics:info(),
+    Info = bondy_db_core_metrics:info(),
     ?assert(maps:is_key(enabled, Info)),
     ?assert(maps:is_key(interval_ms, Info)),
     ?assert(maps:is_key(namespaces, Info)).
@@ -179,8 +179,8 @@ mk_ns() ->
 
 
 fire_read(NS, Hit) ->
-    bondy_mst_db_metrics:handle_event(
-        [bondy_mst_db, read],
+    bondy_db_core_metrics:handle_event(
+        [bondy_db_core, read],
         #{duration_us => 1, hit => Hit, value_bytes => 1},
         #{namespace => NS, index => primary, shard => 0, source => cache},
         undefined
@@ -188,8 +188,8 @@ fire_read(NS, Hit) ->
 
 
 fire_range(NS) ->
-    bondy_mst_db_metrics:handle_event(
-        [bondy_mst_db, range],
+    bondy_db_core_metrics:handle_event(
+        [bondy_db_core, range],
         #{duration_us => 1, entries_returned => 1, scanned_bytes => 1},
         #{namespace => NS, index => primary, shard => 0},
         undefined
@@ -208,7 +208,7 @@ capture_refresh_events(Fun) ->
     HandlerId = {?MODULE, erlang:unique_integer()},
     ok = telemetry:attach(
         HandlerId,
-        [bondy_mst_db, metrics, refresh],
+        [bondy_db_core, metrics, refresh],
         fun(_E, M, Md, _C) -> Self ! {refresh, M, Md} end,
         []
     ),
@@ -232,7 +232,7 @@ register_shard(NS) ->
     {ok, CH} = bondy_oplog_cache_ets:init(NS, primary, 0, #{}),
     {ok, PH} = bondy_oplog_projection_ets:open(NS, primary, 0, #{}),
     OV = bondy_oplog_db_overlay:new(),
-    ok = bondy_mst_db_registry:register(NS, primary, 0, #{
+    ok = bondy_db_core_registry:register(NS, primary, 0, #{
         shard_count => 1,
         cache_adapter => bondy_oplog_cache_ets,
         cache_handle => CH,
@@ -242,7 +242,7 @@ register_shard(NS) ->
         fold_module => lww_register
     }),
     Cleanup = fun() ->
-        ok = bondy_mst_db_registry:unregister(NS, primary, 0),
+        ok = bondy_db_core_registry:unregister(NS, primary, 0),
         ok = bondy_oplog_cache_ets:close(CH),
         ok = bondy_oplog_projection_ets:close(PH),
         ok = bondy_oplog_db_overlay:delete(OV)

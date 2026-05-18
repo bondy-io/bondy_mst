@@ -3,7 +3,7 @@
 %% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
 
--module(bondy_mst_db).
+-module(bondy_db_core).
 
 -include("bondy_mst.hrl").
 
@@ -29,7 +29,7 @@ and reach the projection via the applier. Writers can call
 `write_through/4` after appending an event to keep the hot cache
 coherent.
 
-See `bondy_mst_db_registry` for how shard handles are published. The
+See `bondy_db_core_registry` for how shard handles are published. The
 substrate does not own shard lifecycles — owners (writers, applier,
 test setups) register the four-tuple
 `{cache_handle, projection_handle, overlay, fold_module}` for each
@@ -109,7 +109,7 @@ read(NS, Index, Key) ->
 read(NS, Index, Key, _Opts) ->
     case resolve_shard(NS, Index, Key) of
         {ok, Entry} ->
-            {_NS, _Idx, Shard} = bondy_mst_db_registry:entry_key(Entry),
+            {_NS, _Idx, Shard} = bondy_db_core_registry:entry_key(Entry),
             T0 = erlang:monotonic_time(microsecond),
             {Result, Source} = do_read_traced(Entry, Key),
             DurUs = erlang:monotonic_time(microsecond) - T0,
@@ -225,7 +225,7 @@ shards are registered for `(NS, Index)`.
     {ok, non_neg_integer()} | {error, no_shards}.
 
 shard_for(NS, Index, Key) ->
-    case bondy_mst_db_registry:shard_count(NS, Index) of
+    case bondy_db_core_registry:shard_count(NS, Index) of
         {ok, Count} -> {ok, erlang:phash2(Key, Count)};
         not_found   -> {error, no_shards}
     end.
@@ -271,7 +271,7 @@ raise `limit` or scatter via `shard => N` and merge themselves.
 range(NS, Index, {Low, High}, Opts) when is_map(Opts) ->
     case resolve_shard_for_range(NS, Index, Low, Opts) of
         {ok, Entry} ->
-            {_NS, _Idx, Shard} = bondy_mst_db_registry:entry_key(Entry),
+            {_NS, _Idx, Shard} = bondy_db_core_registry:entry_key(Entry),
             T0 = erlang:monotonic_time(microsecond),
             Result = do_range(Entry, Low, High, Opts),
             DurUs = erlang:monotonic_time(microsecond) - T0,
@@ -335,7 +335,7 @@ deduplicated.
 Namespaces with no registered shards are treated as vacuously fresh —
 there are no shards to fail the check. Callers that need
 "unknown namespace = stale" semantics should consult
-`bondy_mst_db_registry:namespaces/0` before calling.
+`bondy_db_core_registry:namespaces/0` before calling.
 """).
 -spec ensure_fresh([atom()], non_neg_integer() | infinity) ->
     ok | {stale, [atom()]}.
@@ -349,9 +349,9 @@ ensure_fresh(NSs, MaxLag)
     Stale = lists:usort(
         [NS
          || NS <- NSs,
-            Entry <- bondy_mst_db_registry:shards_for(NS),
+            Entry <- bondy_db_core_registry:shards_for(NS),
             (Now - atomics:get(
-                bondy_mst_db_registry:entry_ae_atomics(Entry), 1)) > MaxLag]),
+                bondy_db_core_registry:entry_ae_atomics(Entry), 1)) > MaxLag]),
     DurUs = erlang:monotonic_time(microsecond) - T0,
     emit_ensure_fresh_event(length(NSs), length(Stale), DurUs),
     case Stale of
@@ -412,11 +412,11 @@ freshness(NS) when is_atom(NS) ->
     Now = erlang:monotonic_time(millisecond),
     maps:from_list(
         [begin
-             {_NS, Index, Shard} = bondy_mst_db_registry:entry_key(Entry),
-             Ae = bondy_mst_db_registry:entry_ae_atomics(Entry),
+             {_NS, Index, Shard} = bondy_db_core_registry:entry_key(Entry),
+             Ae = bondy_db_core_registry:entry_ae_atomics(Entry),
              {{Index, Shard}, Now - atomics:get(Ae, 1)}
          end
-         || Entry <- bondy_mst_db_registry:shards_for(NS)]
+         || Entry <- bondy_db_core_registry:shards_for(NS)]
     ).
 
 
@@ -428,28 +428,28 @@ Subscribe the caller to events on `Namespace` matching `Pattern`
 Subscribers receive
 
 ```erlang
-{bondy_mst_db_event, Namespace, Key, Hlc, Operation}
+{bondy_db_core_event, Namespace, Key, Hlc, Operation}
 ```
 
 messages whenever `publish/4` is invoked with a matching `(NS, Key)`
 pair. Patterns: `all`, `{prefix, P}`, `{match, F}`, or `{exact, T}`.
 The pattern type is closed — bare terms are not accepted. See
-`bondy_mst_db_dispatcher` for the reference implementation.
+`bondy_db_core_dispatcher` for the reference implementation.
 
 If the subscriber process exits, its subscription is dropped
 automatically via a monitor held by the dispatcher.
 """).
--spec subscribe(atom(), bondy_mst_db_dispatcher:pattern()) ->
+-spec subscribe(atom(), bondy_db_core_dispatcher:pattern()) ->
     {ok, reference()}.
 
 subscribe(NS, Pattern) ->
-    bondy_mst_db_dispatcher:subscribe(NS, Pattern).
+    bondy_db_core_dispatcher:subscribe(NS, Pattern).
 
 
 -spec unsubscribe(reference()) -> ok.
 
 unsubscribe(SubRef) ->
-    bondy_mst_db_dispatcher:unsubscribe(SubRef).
+    bondy_db_core_dispatcher:unsubscribe(SubRef).
 
 
 -doc("""
@@ -465,7 +465,7 @@ process (no gen_server round-trip).
 -spec publish(atom(), term(), bondy_oplog_hlc:hlc(), term()) -> ok.
 
 publish(NS, Key, Hlc, Op) ->
-    bondy_mst_db_dispatcher:publish(NS, Key, Hlc, Op).
+    bondy_db_core_dispatcher:publish(NS, Key, Hlc, Op).
 
 
 %% =============================================================================
@@ -475,7 +475,7 @@ publish(NS, Key, Hlc, Op) ->
 resolve_shard(NS, Index, Key) ->
     case shard_for(NS, Index, Key) of
         {ok, Shard} ->
-            case bondy_mst_db_registry:lookup(NS, Index, Shard) of
+            case bondy_db_core_registry:lookup(NS, Index, Shard) of
                 {ok, Entry} -> {ok, Entry};
                 not_found   -> {error, shard_not_registered}
             end;
@@ -485,8 +485,8 @@ resolve_shard(NS, Index, Key) ->
 
 
 do_read_traced(Entry, Key) ->
-    CA = bondy_mst_db_registry:entry_cache_adapter(Entry),
-    CH = bondy_mst_db_registry:entry_cache_handle(Entry),
+    CA = bondy_db_core_registry:entry_cache_adapter(Entry),
+    CH = bondy_db_core_registry:entry_cache_handle(Entry),
     case CA:get(CH, Key) of
         {ok, {Value, Hlc}} ->
             {{Value, Hlc}, cache};
@@ -496,7 +496,7 @@ do_read_traced(Entry, Key) ->
 
 
 slow_read_traced(Entry, Key) ->
-    Strategy = bondy_mst_db_registry:entry_fold_module(Entry),
+    Strategy = bondy_db_core_registry:entry_fold_module(Entry),
     {ProjValue, ProjHlc, ProjHadFrame} = read_projection(Entry, Key, Strategy),
     OverlayEvents = read_overlay(Entry, Key, ProjHlc),
     OverlayApplied = OverlayEvents =/= [],
@@ -506,8 +506,8 @@ slow_read_traced(Entry, Key) ->
         undefined ->
             {undefined, Source};
         _ ->
-            CA = bondy_mst_db_registry:entry_cache_adapter(Entry),
-            CH = bondy_mst_db_registry:entry_cache_handle(Entry),
+            CA = bondy_db_core_registry:entry_cache_adapter(Entry),
+            CH = bondy_db_core_registry:entry_cache_handle(Entry),
             ok = CA:put(CH, Key, {Value, Hlc}),
             {{Value, Hlc}, Source}
     end.
@@ -523,8 +523,8 @@ source_for(false, false) -> projection.
 
 
 read_projection(Entry, Key, Strategy) ->
-    PA = bondy_mst_db_registry:entry_projection_adapter(Entry),
-    PH = bondy_mst_db_registry:entry_projection_handle(Entry),
+    PA = bondy_db_core_registry:entry_projection_adapter(Entry),
+    PH = bondy_db_core_registry:entry_projection_handle(Entry),
     case PA:get(PH, Key) of
         not_found ->
             {bondy_oplog_fold:initial_value(Strategy), 0, false};
@@ -535,7 +535,7 @@ read_projection(Entry, Key, Strategy) ->
 
 
 read_overlay(Entry, Key, AfterHlc) ->
-    case bondy_mst_db_registry:entry_overlay(Entry) of
+    case bondy_db_core_registry:entry_overlay(Entry) of
         undefined -> [];
         Tab -> bondy_oplog_db_overlay:events_for(Tab, Key, AfterHlc)
     end.
@@ -610,9 +610,9 @@ touched_shards(Reads) ->
     ),
     lists:foldl(
         fun({NS, Index, Shard}, Acc) ->
-            case bondy_mst_db_registry:lookup(NS, Index, Shard) of
+            case bondy_db_core_registry:lookup(NS, Index, Shard) of
                 {ok, Entry} ->
-                    Ae = bondy_mst_db_registry:entry_ae_atomics(Entry),
+                    Ae = bondy_db_core_registry:entry_ae_atomics(Entry),
                     [{NS, Ae} | Acc];
                 not_found ->
                     Acc
@@ -642,7 +642,7 @@ read_at_fence(NS, Index, Key, Fence) ->
 fenced_read(Entry, Key, Fence) ->
     %% Fenced reads bypass the cache: the cache holds the "now" value,
     %% not the as-of-fence value. The slow path always runs.
-    Strategy = bondy_mst_db_registry:entry_fold_module(Entry),
+    Strategy = bondy_db_core_registry:entry_fold_module(Entry),
     {ProjValue, ProjHlc, _ProjHadFrame} = read_projection(Entry, Key, Strategy),
     OverlayEvents = fenced_overlay(Entry, Key, ProjHlc, Fence),
     {Value, Hlc} = fold_events(Strategy, ProjValue, ProjHlc, OverlayEvents),
@@ -656,7 +656,7 @@ fenced_overlay(Entry, Key, AfterHlc, infinity) ->
     %% No fence: behave like a regular slow read.
     read_overlay(Entry, Key, AfterHlc);
 fenced_overlay(Entry, Key, AfterHlc, Fence) ->
-    case bondy_mst_db_registry:entry_overlay(Entry) of
+    case bondy_db_core_registry:entry_overlay(Entry) of
         undefined -> [];
         Tab -> bondy_oplog_db_overlay:events_for_window(Tab, Key, AfterHlc, Fence)
     end.
@@ -714,7 +714,7 @@ resolve_shard_for_range(NS, Index, Low, Opts) ->
 
 
 registry_lookup(NS, Index, Shard) ->
-    case bondy_mst_db_registry:lookup(NS, Index, Shard) of
+    case bondy_db_core_registry:lookup(NS, Index, Shard) of
         {ok, Entry} -> {ok, Entry};
         not_found -> {error, shard_not_registered}
     end.
@@ -725,9 +725,9 @@ do_range(Entry, Low, High, Opts) ->
     Direction      = maps:get(direction, Opts, asc),
     IncludeOverlay = maps:get(include_overlay, Opts, true),
     Fence          = maps:get(fence, Opts, infinity),
-    Strategy       = bondy_mst_db_registry:entry_fold_module(Entry),
-    PA             = bondy_mst_db_registry:entry_projection_adapter(Entry),
-    PH             = bondy_mst_db_registry:entry_projection_handle(Entry),
+    Strategy       = bondy_db_core_registry:entry_fold_module(Entry),
+    PA             = bondy_db_core_registry:entry_projection_adapter(Entry),
+    PH             = bondy_db_core_registry:entry_projection_handle(Entry),
 
     case PA:range(PH, Low, High, Opts) of
         {ok, ProjEntries} ->
@@ -747,7 +747,7 @@ do_range(Entry, Low, High, Opts) ->
 overlay_for_range(_Entry, _Low, _High, _Fence, false) ->
     [];
 overlay_for_range(Entry, Low, High, Fence, true) ->
-    case bondy_mst_db_registry:entry_overlay(Entry) of
+    case bondy_db_core_registry:entry_overlay(Entry) of
         undefined -> [];
         Tab       -> bondy_oplog_db_overlay:range_window(Tab, Low, High, Fence)
     end.
@@ -803,7 +803,7 @@ emit_range_cell(Strategy, Frame, Events) ->
 %% =============================================================================
 
 do_read_at_hlc(Entry, Key, T) ->
-    Strategy = bondy_mst_db_registry:entry_fold_module(Entry),
+    Strategy = bondy_db_core_registry:entry_fold_module(Entry),
     {ProjValue, ProjHlc, _ProjHadFrame} = read_projection(Entry, Key, Strategy),
     case ProjHlc > T of
         true ->
@@ -834,7 +834,7 @@ check_consistency_class(_Reads, Consistency)
 check_consistency_class(Reads, eventual) ->
     NSs = lists:usort([NS || {NS, _Idx, _K} <- Reads]),
     case lists:dropwhile(
-        fun(NS) -> bondy_mst_db_registry:consistency_class(NS) =/= cp end,
+        fun(NS) -> bondy_db_core_registry:consistency_class(NS) =/= cp end,
         NSs
     ) of
         [] -> ok;
@@ -855,7 +855,7 @@ emit_read_event(NS, Index, Shard, Source, DurUs, Result) ->
             {false, 0}
     end,
     telemetry:execute(
-        [bondy_mst_db, read],
+        [bondy_db_core, read],
         #{duration_us => DurUs, hit => Hit, value_bytes => ValueBytes},
         #{namespace => NS, index => Index, shard => Shard, source => Source}
     ).
@@ -865,7 +865,7 @@ emit_read_batch_event(Reads, Fence, Result, DurUs) ->
     NSs = lists:usort([NS || {NS, _Idx, _K} <- Reads]),
     {ReadCount, TotalBytes, SkewMs} = batch_summary(Result),
     telemetry:execute(
-        [bondy_mst_db, read_batch],
+        [bondy_db_core, read_batch],
         #{duration_us => DurUs,
           read_count => ReadCount,
           total_bytes => TotalBytes,
@@ -912,7 +912,7 @@ emit_range_event(NS, Index, Shard, Result, DurUs) ->
             {0, 0}
     end,
     telemetry:execute(
-        [bondy_mst_db, range],
+        [bondy_db_core, range],
         #{duration_us => DurUs,
           entries_returned => Entries,
           scanned_bytes => Bytes},
@@ -932,7 +932,7 @@ emit_read_at_hlc_event(NS, Result, DurUs) ->
         _                                          -> {true, unknown}
     end,
     telemetry:execute(
-        [bondy_mst_db, read_at_hlc],
+        [bondy_db_core, read_at_hlc],
         #{duration_us => DurUs, refused => Refused},
         #{namespace => NS, refusal_reason => Reason}
     ).
@@ -940,7 +940,7 @@ emit_read_at_hlc_event(NS, Result, DurUs) ->
 
 emit_ensure_fresh_event(NSsChecked, StaleCount, DurUs) ->
     telemetry:execute(
-        [bondy_mst_db, ensure_fresh],
+        [bondy_db_core, ensure_fresh],
         #{duration_us => DurUs,
           namespaces_checked => NSsChecked,
           stale_count => StaleCount},
@@ -949,13 +949,13 @@ emit_ensure_fresh_event(NSsChecked, StaleCount, DurUs) ->
 
 
 do_write_through(Entry, Key, Event) ->
-    CA = bondy_mst_db_registry:entry_cache_adapter(Entry),
-    CH = bondy_mst_db_registry:entry_cache_handle(Entry),
+    CA = bondy_db_core_registry:entry_cache_adapter(Entry),
+    CH = bondy_db_core_registry:entry_cache_handle(Entry),
     case CA:get(CH, Key) of
         not_found ->
             ok;
         {ok, {OldValue, _OldHlc}} ->
-            Strategy = bondy_mst_db_registry:entry_fold_module(Entry),
+            Strategy = bondy_db_core_registry:entry_fold_module(Entry),
             Op = bondy_oplog_event:op(Event),
             case bondy_oplog_fold:apply_event(Strategy, OldValue, Op) of
                 undefined ->

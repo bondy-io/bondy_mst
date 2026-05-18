@@ -14,7 +14,7 @@ Reference `bondy_oplog_cache_adapter` implementation backed by a single
 (`MST_DB_DESIGN.md` §5).
 
 This adapter is bundled with the substrate primarily as a **contract
-validator**: the PropEr suite for `bondy_mst_db` runs against this
+validator**: the PropEr suite for `bondy_db_core` runs against this
 implementation and any consumer-supplied adapter, and both must produce
 identical results.
 

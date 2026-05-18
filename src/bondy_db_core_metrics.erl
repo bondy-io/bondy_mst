@@ -3,7 +3,7 @@
 %% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
 
--module(bondy_mst_db_metrics).
+-module(bondy_db_core_metrics).
 
 -behaviour(gen_server).
 
@@ -11,14 +11,14 @@
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-Per-namespace gauge emitter for the `bondy_mst_db` substrate
+Per-namespace gauge emitter for the `bondy_db_core` substrate
 (`MST_DB_DESIGN.md` §16).
 
-Subscribes to the substrate's one-shot events (`[bondy_mst_db, read]`,
-`[bondy_mst_db, range]`) and accumulates per-namespace counters through
+Subscribes to the substrate's one-shot events (`[bondy_db_core, read]`,
+`[bondy_db_core, range]`) and accumulates per-namespace counters through
 `bondy_metrics` (atomics-backed, wait-free). On a periodic tick the
 gen_server reads the running totals, computes deltas against the
-previous tick, and emits a single `[bondy_mst_db, metrics, refresh]`
+previous tick, and emits a single `[bondy_db_core, metrics, refresh]`
 event per known namespace with the gauges spelled out in §16:
 
 ```
@@ -39,10 +39,10 @@ through the public counter API:
 
 | Metric name                         | Label             |
 |---|---|
-| `bondy_mst_db_reads_total`          | `#{namespace}`    |
-| `bondy_mst_db_ranges_total`         | `#{namespace}`    |
-| `bondy_mst_db_cache_hits_total`     | `#{namespace}`    |
-| `bondy_mst_db_cache_misses_total`   | `#{namespace}`    |
+| `bondy_db_core_reads_total`          | `#{namespace}`    |
+| `bondy_db_core_ranges_total`         | `#{namespace}`    |
+| `bondy_db_core_cache_hits_total`     | `#{namespace}`    |
+| `bondy_db_core_cache_misses_total`   | `#{namespace}`    |
 
 No ETS write contention on the hot path: each event is a single
 `counters:add/3` against the namespace's atomics array.
@@ -71,10 +71,10 @@ the restart. A restart of `bondy_metrics` wipes the counters.
 -define(SERVER, ?MODULE).
 -define(HANDLER_ID, ?MODULE).
 
--define(M_READS,         bondy_mst_db_reads_total).
--define(M_RANGES,        bondy_mst_db_ranges_total).
--define(M_CACHE_HITS,    bondy_mst_db_cache_hits_total).
--define(M_CACHE_MISSES,  bondy_mst_db_cache_misses_total).
+-define(M_READS,         bondy_db_core_reads_total).
+-define(M_RANGES,        bondy_db_core_ranges_total).
+-define(M_CACHE_HITS,    bondy_db_core_cache_hits_total).
+-define(M_CACHE_MISSES,  bondy_db_core_cache_misses_total).
 
 -record(state, {
     enabled       :: boolean(),
@@ -172,7 +172,7 @@ set_enabled(Enabled) when is_boolean(Enabled) ->
 %% Telemetry handler
 %% =============================================================================
 
-handle_event([bondy_mst_db, read], #{hit := Hit}, #{namespace := NS}, _Cfg) ->
+handle_event([bondy_db_core, read], #{hit := Hit}, #{namespace := NS}, _Cfg) ->
     Label = #{namespace => NS},
     ok = bondy_metrics:counter(#{name => ?M_READS, label => Label}),
     case Hit of
@@ -182,7 +182,7 @@ handle_event([bondy_mst_db, read], #{hit := Hit}, #{namespace := NS}, _Cfg) ->
             bondy_metrics:counter(#{name => ?M_CACHE_MISSES, label => Label})
     end,
     ok;
-handle_event([bondy_mst_db, range], _Meas, #{namespace := NS}, _Cfg) ->
+handle_event([bondy_db_core, range], _Meas, #{namespace := NS}, _Cfg) ->
     ok = bondy_metrics:counter(#{
         name => ?M_RANGES,
         label => #{namespace => NS}
@@ -204,7 +204,7 @@ init(Opts) ->
     end,
     ok = telemetry:attach_many(
         ?HANDLER_ID,
-        [[bondy_mst_db, read], [bondy_mst_db, range]],
+        [[bondy_db_core, read], [bondy_db_core, range]],
         fun ?MODULE:handle_event/4,
         undefined
     ),
@@ -332,7 +332,7 @@ emit_namespace_gauges(NS, Now, #state{snapshot = Prev, last_tick_ts = Tick0},
     SubCount = subscriber_count(NS),
     LagMaxMs = freshness_lag_max_ms(NS, Now),
     telemetry:execute(
-        [bondy_mst_db, metrics, refresh],
+        [bondy_db_core, metrics, refresh],
         #{cache_hit_rate => CacheHitRate,
           read_rps => ReadRps,
           range_rps => RangeRps,
@@ -361,7 +361,7 @@ counter_namespaces() ->
 
 safe_namespaces() ->
     try
-        bondy_mst_db_registry:namespaces()
+        bondy_db_core_registry:namespaces()
     catch
         _:_ -> []
     end.
@@ -369,20 +369,20 @@ safe_namespaces() ->
 
 subscriber_count(NS) ->
     try
-        bondy_mst_db_dispatcher:subscription_count(NS)
+        bondy_db_core_dispatcher:subscription_count(NS)
     catch
         _:_ -> 0
     end.
 
 
 freshness_lag_max_ms(NS, NowMs) ->
-    try bondy_mst_db_registry:shards_for(NS) of
+    try bondy_db_core_registry:shards_for(NS) of
         [] ->
             0;
         Entries ->
             lists:max(
                 [NowMs - atomics:get(
-                    bondy_mst_db_registry:entry_ae_atomics(E), 1)
+                    bondy_db_core_registry:entry_ae_atomics(E), 1)
                  || E <- Entries]
             )
     catch

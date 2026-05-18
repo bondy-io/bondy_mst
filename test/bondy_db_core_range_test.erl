@@ -1,5 +1,5 @@
 %% =============================================================================
-%% Tests for `bondy_mst_db:range/4` (`MST_DB_DESIGN.md` §9, wired in D5).
+%% Tests for `bondy_db_core:range/4` (`MST_DB_DESIGN.md` §9, wired in D5).
 %%
 %% Pins: projection-only ranges, overlay-only ranges, projection+overlay
 %% merge per key, limit, direction, include_overlay flag, fence on
@@ -7,7 +7,7 @@
 %% (overlay-only with no terminal value) suppressed from results.
 %% =============================================================================
 
--module(bondy_mst_db_range_test).
+-module(bondy_db_core_range_test).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -40,7 +40,7 @@ range_test_() ->
 empty_range_returns_empty_list() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
-    {ok, []} = bondy_mst_db:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
+    {ok, []} = bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
     teardown_shard(Setup).
 
 projection_only_range_returns_in_order() ->
@@ -50,7 +50,7 @@ projection_only_range_returns_in_order() ->
     materialise(PH, <<"a">>, {set, <<"va">>, 1}, 1),
     materialise(PH, <<"b">>, {set, <<"vb">>, 2}, 2),
     materialise(PH, <<"c">>, {set, <<"vc">>, 3}, 3),
-    {ok, Rows} = bondy_mst_db:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
+    {ok, Rows} = bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
     ?assertEqual(
         [
             {<<"a">>, {set, <<"va">>, 1}, 1},
@@ -70,7 +70,7 @@ overlay_only_range_returns_in_order() ->
     overlay_insert(OV, <<"a">>, 10, {set, 10, <<"va">>}),
     overlay_insert(OV, <<"b">>, 20, {set, 20, <<"vb">>}),
     overlay_insert(OV, <<"c">>, 30, {set, 30, <<"vc">>}),
-    {ok, Rows} = bondy_mst_db:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
+    {ok, Rows} = bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
     ?assertEqual(
         [
             {<<"a">>, {set, <<"va">>, 10}, 10},
@@ -91,7 +91,7 @@ projection_and_overlay_merge_per_key() ->
     materialise(PH, <<"c">>, {set, <<"old-c">>, 15}, 15),
     overlay_insert(OV, <<"a">>, 30, {set, 30, <<"new-a">>}),
     overlay_insert(OV, <<"b">>, 20, {set, 20, <<"new-b">>}),
-    {ok, Rows} = bondy_mst_db:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
+    {ok, Rows} = bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
     ?assertEqual(
         [
             {<<"a">>, {set, <<"new-a">>, 30}, 30},
@@ -109,7 +109,7 @@ half_open_interval_excludes_high_key() ->
     materialise(PH, <<"a">>, {set, <<"va">>, 1}, 1),
     materialise(PH, <<"b">>, {set, <<"vb">>, 2}, 2),
     materialise(PH, <<"c">>, {set, <<"vc">>, 3}, 3),
-    {ok, Rows} = bondy_mst_db:range(NS, primary, {<<"a">>, <<"c">>}, #{}),
+    {ok, Rows} = bondy_db_core:range(NS, primary, {<<"a">>, <<"c">>}, #{}),
     %% `c` is excluded by the half-open upper bound.
     ?assertEqual(
         [
@@ -126,7 +126,7 @@ limit_caps_the_result() ->
         setup_shard(NS, primary, 0, 1, lww_register),
     [materialise(PH, <<"k", N>>, {set, <<N>>, N}, N) || N <- lists:seq($a, $e)],
     {ok, Rows} =
-        bondy_mst_db:range(NS, primary, {<<"k">>, <<"z">>}, #{limit => 2}),
+        bondy_db_core:range(NS, primary, {<<"k">>, <<"z">>}, #{limit => 2}),
     ?assertEqual(2, length(Rows)),
     teardown_shard(Setup).
 
@@ -138,7 +138,7 @@ direction_desc_reverses_result() ->
     materialise(PH, <<"b">>, {set, <<"vb">>, 2}, 2),
     materialise(PH, <<"c">>, {set, <<"vc">>, 3}, 3),
     {ok, Rows} =
-        bondy_mst_db:range(NS, primary, {<<"a">>, <<"z">>}, #{direction => desc}),
+        bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{direction => desc}),
     ?assertEqual(
         [
             {<<"c">>, {set, <<"vc">>, 3}, 3},
@@ -156,7 +156,7 @@ include_overlay_false_drops_overlay_events() ->
     materialise(PH, <<"a">>, {set, <<"old">>, 1}, 1),
     overlay_insert(OV, <<"a">>, 10, {set, 10, <<"new">>}),
     {ok, Rows} =
-        bondy_mst_db:range(NS, primary, {<<"a">>, <<"z">>},
+        bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>},
                            #{include_overlay => false}),
     ?assertEqual([{<<"a">>, {set, <<"old">>, 1}, 1}], Rows),
     teardown_shard(Setup).
@@ -170,7 +170,7 @@ fence_excludes_overlay_events_past_it() ->
     overlay_insert(OV, <<"a">>, 30, {set, 30, <<"new">>}),
     %% Fence at 20 → only the HLC=10 overlay event applies.
     {ok, Rows} =
-        bondy_mst_db:range(NS, primary, {<<"a">>, <<"z">>}, #{fence => 20}),
+        bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{fence => 20}),
     ?assertEqual([{<<"a">>, {set, <<"mid">>, 10}, 10}], Rows),
     teardown_shard(Setup).
 
@@ -186,7 +186,7 @@ overlay_only_undefined_terminal_is_filtered() ->
         setup_shard(NS, primary, 0, 1, lww_register),
     overlay_insert(OV, <<"k">>, 10, {clear, 10}),
     {ok, Rows} =
-        bondy_mst_db:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
+        bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{}),
     ?assertEqual([{<<"k">>, {cleared, 10}, 10}], Rows),
     teardown_shard(Setup).
 
@@ -194,7 +194,7 @@ unknown_namespace_returns_no_shards() ->
     NS = mk_ns(),
     ?assertEqual(
         {error, no_shards},
-        bondy_mst_db:range(NS, primary, {<<"a">>, <<"z">>}, #{})
+        bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{})
     ).
 
 %% =============================================================================
@@ -224,7 +224,7 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
     {ok, CH} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
     {ok, PH} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     OV = bondy_oplog_db_overlay:new(),
-    ok = bondy_mst_db_registry:register(NS, Index, Shard, #{
+    ok = bondy_db_core_registry:register(NS, Index, Shard, #{
         shard_count => ShardCount,
         cache_adapter => bondy_oplog_cache_ets,
         cache_handle => CH,
@@ -239,7 +239,7 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
 
 teardown_shard(#{ns := NS, index := Index, shard := Shard,
                  cache_handle := CH, projection := PH, overlay := OV}) ->
-    ok = bondy_mst_db_registry:unregister(NS, Index, Shard),
+    ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),
     ok = bondy_oplog_db_overlay:delete(OV).

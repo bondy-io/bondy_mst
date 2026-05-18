@@ -4,7 +4,7 @@
 %% `bump_ae/3` / `last_ae_at/3` registry primitives the family rests on.
 %% =============================================================================
 
--module(bondy_mst_db_freshness_test).
+-module(bondy_db_core_freshness_test).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -46,32 +46,32 @@ freshness_test_() ->
 ensure_fresh_infinity_skips_check() ->
     %% No registrations; `infinity` is the cheapest path and returns
     %% `ok` without ever touching the registry.
-    ?assertEqual(ok, bondy_mst_db:ensure_fresh([nonexistent], infinity)).
+    ?assertEqual(ok, bondy_db_core:ensure_fresh([nonexistent], infinity)).
 
 ensure_fresh_empty_namespaces_is_ok() ->
-    ?assertEqual(ok, bondy_mst_db:ensure_fresh([], 100)).
+    ?assertEqual(ok, bondy_db_core:ensure_fresh([], 100)).
 
 ensure_fresh_unknown_namespace_is_vacuously_fresh() ->
     %% A namespace with zero registered shards is "vacuously fresh"
     %% per the design's quantifier semantics — no shard can be stale
     %% if there are no shards. Documented gap; flagged for D10.
     NS = mk_ns(),
-    ?assertEqual(ok, bondy_mst_db:ensure_fresh([NS], 100)).
+    ?assertEqual(ok, bondy_db_core:ensure_fresh([NS], 100)).
 
 ensure_fresh_unbumped_shard_is_stale() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
     ?assertEqual(
         {stale, [NS]},
-        bondy_mst_db:ensure_fresh([NS], 100)
+        bondy_db_core:ensure_fresh([NS], 100)
     ),
     teardown_shard(Setup).
 
 ensure_fresh_freshly_bumped_shard_is_ok() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
-    ok = bondy_mst_db_registry:bump_ae(NS, primary, 0),
-    ?assertEqual(ok, bondy_mst_db:ensure_fresh([NS], 1_000_000)),
+    ok = bondy_db_core_registry:bump_ae(NS, primary, 0),
+    ?assertEqual(ok, bondy_db_core:ensure_fresh([NS], 1_000_000)),
     teardown_shard(Setup).
 
 ensure_fresh_reports_all_stale_namespaces() ->
@@ -82,7 +82,7 @@ ensure_fresh_reports_all_stale_namespaces() ->
     %% Neither bumped. Both should appear in the stale list, sorted.
     ?assertEqual(
         {stale, lists:sort([NS1, NS2])},
-        bondy_mst_db:ensure_fresh([NS1, NS2], 100)
+        bondy_db_core:ensure_fresh([NS1, NS2], 100)
     ),
     teardown_shard(S1),
     teardown_shard(S2).
@@ -92,10 +92,10 @@ ensure_fresh_partial_stale_only_lists_failing_ns() ->
     NS_stale = mk_ns(),
     {SF, _} = setup_shard(NS_fresh, primary, 0, 1, lww_register),
     {SS, _} = setup_shard(NS_stale, primary, 0, 1, lww_register),
-    ok = bondy_mst_db_registry:bump_ae(NS_fresh, primary, 0),
+    ok = bondy_db_core_registry:bump_ae(NS_fresh, primary, 0),
     ?assertEqual(
         {stale, [NS_stale]},
-        bondy_mst_db:ensure_fresh([NS_fresh, NS_stale], 1_000_000)
+        bondy_db_core:ensure_fresh([NS_fresh, NS_stale], 1_000_000)
     ),
     teardown_shard(SF),
     teardown_shard(SS).
@@ -109,14 +109,14 @@ ensure_fresh_for_keys_only_checks_touched_shards() ->
     NS = mk_ns(),
     {S0, _} = setup_shard(NS, primary, 0, 2, lww_register),
     {S1, _} = setup_shard(NS, primary, 1, 2, lww_register),
-    ok = bondy_mst_db_registry:bump_ae(NS, primary, 0),
+    ok = bondy_db_core_registry:bump_ae(NS, primary, 0),
     %% Find one key per shard.
     K0 = find_key_for_shard(NS, primary, 0),
     K1 = find_key_for_shard(NS, primary, 1),
     %% Keys hitting only shard 0 are fresh.
     ?assertEqual(
         ok,
-        bondy_mst_db:ensure_fresh_for_keys(
+        bondy_db_core:ensure_fresh_for_keys(
             [{NS, primary, K0}],
             1_000_000
         )
@@ -124,7 +124,7 @@ ensure_fresh_for_keys_only_checks_touched_shards() ->
     %% Keys hitting shard 1 surface NS as stale.
     ?assertEqual(
         {stale, [NS]},
-        bondy_mst_db:ensure_fresh_for_keys(
+        bondy_db_core:ensure_fresh_for_keys(
             [{NS, primary, K1}],
             1_000_000
         )
@@ -137,7 +137,7 @@ ensure_fresh_for_keys_infinity_skips() ->
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
     ?assertEqual(
         ok,
-        bondy_mst_db:ensure_fresh_for_keys(
+        bondy_db_core:ensure_fresh_for_keys(
             [{NS, primary, <<"k">>}],
             infinity
         )
@@ -148,9 +148,9 @@ freshness_returns_per_shard_lag_map() ->
     NS = mk_ns(),
     {S0, _} = setup_shard(NS, primary, 0, 2, lww_register),
     {S1, _} = setup_shard(NS, primary, 1, 2, lww_register),
-    ok = bondy_mst_db_registry:bump_ae(NS, primary, 0),
-    ok = bondy_mst_db_registry:bump_ae(NS, primary, 1),
-    Map = bondy_mst_db:freshness(NS),
+    ok = bondy_db_core_registry:bump_ae(NS, primary, 0),
+    ok = bondy_db_core_registry:bump_ae(NS, primary, 1),
+    Map = bondy_db_core:freshness(NS),
     ?assertEqual(2, map_size(Map)),
     ?assert(maps:is_key({primary, 0}, Map)),
     ?assert(maps:is_key({primary, 1}, Map)),
@@ -162,11 +162,11 @@ freshness_returns_per_shard_lag_map() ->
 
 freshness_unknown_namespace_is_empty_map() ->
     NS = mk_ns(),
-    ?assertEqual(#{}, bondy_mst_db:freshness(NS)).
+    ?assertEqual(#{}, bondy_db_core:freshness(NS)).
 
 bump_ae_unknown_shard_returns_not_found() ->
     NS = mk_ns(),
-    ?assertEqual(not_found, bondy_mst_db_registry:bump_ae(NS, primary, 0)).
+    ?assertEqual(not_found, bondy_db_core_registry:bump_ae(NS, primary, 0)).
 
 bump_ae_with_explicit_now_writes_supplied_timestamp() ->
     %% `bump_ae/4` lets the applier reuse one monotonic timestamp across
@@ -174,13 +174,13 @@ bump_ae_with_explicit_now_writes_supplied_timestamp() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
     Now = erlang:monotonic_time(millisecond) - 5_000,
-    ok = bondy_mst_db_registry:bump_ae(NS, primary, 0, Now),
-    ?assertEqual(Now, bondy_mst_db_registry:last_ae_at(NS, primary, 0)),
+    ok = bondy_db_core_registry:bump_ae(NS, primary, 0, Now),
+    ?assertEqual(Now, bondy_db_core_registry:last_ae_at(NS, primary, 0)),
     teardown_shard(Setup).
 
 last_ae_at_unknown_shard_returns_not_found() ->
     NS = mk_ns(),
-    ?assertEqual(not_found, bondy_mst_db_registry:last_ae_at(NS, primary, 0)).
+    ?assertEqual(not_found, bondy_db_core_registry:last_ae_at(NS, primary, 0)).
 
 owner_down_removes_registration() ->
     %% A shard registered by a process that subsequently exits must be
@@ -192,7 +192,7 @@ owner_down_removes_registration() ->
         {ok, CH} = bondy_oplog_cache_ets:init(NS, primary, 0, #{}),
         {ok, PH} = bondy_oplog_projection_ets:open(NS, primary, 0, #{}),
         OV = bondy_oplog_db_overlay:new(),
-        ok = bondy_mst_db_registry:register(NS, primary, 0, #{
+        ok = bondy_db_core_registry:register(NS, primary, 0, #{
             shard_count => 1,
             cache_adapter => bondy_oplog_cache_ets,
             cache_handle => CH,
@@ -206,12 +206,12 @@ owner_down_removes_registration() ->
     end),
     Mon = erlang:monitor(process, Owner),
     receive registered -> ok end,
-    ?assertMatch({ok, _}, bondy_mst_db_registry:lookup(NS, primary, 0)),
+    ?assertMatch({ok, _}, bondy_db_core_registry:lookup(NS, primary, 0)),
     Owner ! go_down,
     receive {'DOWN', Mon, process, Owner, _} -> ok end,
     %% Sync with the registry to let it process the DOWN.
-    _ = sys:get_state(bondy_mst_db_registry),
-    ?assertEqual(not_found, bondy_mst_db_registry:lookup(NS, primary, 0)).
+    _ = sys:get_state(bondy_db_core_registry),
+    ?assertEqual(not_found, bondy_db_core_registry:lookup(NS, primary, 0)).
 
 explicit_owner_decouples_from_caller() ->
     %% Register on behalf of a different process: the row's lifetime is
@@ -229,7 +229,7 @@ explicit_owner_decouples_from_caller() ->
     {ok, CH} = bondy_oplog_cache_ets:init(NS, primary, 0, #{}),
     {ok, PH} = bondy_oplog_projection_ets:open(NS, primary, 0, #{}),
     OV = bondy_oplog_db_overlay:new(),
-    ok = bondy_mst_db_registry:register(NS, primary, 0, #{
+    ok = bondy_db_core_registry:register(NS, primary, 0, #{
         shard_count => 1,
         cache_adapter => bondy_oplog_cache_ets,
         cache_handle => CH,
@@ -240,12 +240,12 @@ explicit_owner_decouples_from_caller() ->
         owner => Owner
     }),
     %% Test process is still alive; row exists.
-    ?assertMatch({ok, _}, bondy_mst_db_registry:lookup(NS, primary, 0)),
+    ?assertMatch({ok, _}, bondy_db_core_registry:lookup(NS, primary, 0)),
     %% Kill Owner — the registry must tear the row down.
     Owner ! go_down,
     receive {'DOWN', OwnerMon, process, Owner, _} -> ok end,
-    _ = sys:get_state(bondy_mst_db_registry),
-    ?assertEqual(not_found, bondy_mst_db_registry:lookup(NS, primary, 0)),
+    _ = sys:get_state(bondy_db_core_registry),
+    ?assertEqual(not_found, bondy_db_core_registry:lookup(NS, primary, 0)),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),
     ok = bondy_oplog_db_overlay:delete(OV).
@@ -261,10 +261,10 @@ register_missing_required_field_returns_error() ->
     },
     ?assertMatch(
         {error, {missing_required_field, _}},
-        bondy_mst_db_registry:register(NS, primary, 0, Config)
+        bondy_db_core_registry:register(NS, primary, 0, Config)
     ),
     %% Registry is still alive and serving.
-    ?assert(is_pid(whereis(bondy_mst_db_registry))).
+    ?assert(is_pid(whereis(bondy_db_core_registry))).
 
 registry_crash_loses_all_registrations() ->
     %% Pin the documented operational gap: a registry crash wipes all
@@ -272,17 +272,17 @@ registry_crash_loses_all_registrations() ->
     %% recover automatically.
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
-    ?assertMatch({ok, _}, bondy_mst_db_registry:lookup(NS, primary, 0)),
-    OldPid = whereis(bondy_mst_db_registry),
+    ?assertMatch({ok, _}, bondy_db_core_registry:lookup(NS, primary, 0)),
+    OldPid = whereis(bondy_db_core_registry),
     OldMon = erlang:monitor(process, OldPid),
     exit(OldPid, kill),
     receive {'DOWN', OldMon, process, OldPid, killed} -> ok end,
     %% Wait for the supervisor to restart the registry.
     ok = wait_for_registry_restart(OldPid, 50),
     %% Previously registered shard is gone — no recovery.
-    ?assertEqual(not_found, bondy_mst_db_registry:lookup(NS, primary, 0)),
+    ?assertEqual(not_found, bondy_db_core_registry:lookup(NS, primary, 0)),
     %% Re-registering succeeds against the fresh table.
-    ok = bondy_mst_db_registry:register(NS, primary, 0, #{
+    ok = bondy_db_core_registry:register(NS, primary, 0, #{
         shard_count => 1,
         cache_adapter => maps:get(cache_adapter, Setup, bondy_oplog_cache_ets),
         cache_handle => maps:get(cache_handle, Setup),
@@ -291,7 +291,7 @@ registry_crash_loses_all_registrations() ->
         overlay => maps:get(overlay, Setup),
         fold_module => lww_register
     }),
-    ?assertMatch({ok, _}, bondy_mst_db_registry:lookup(NS, primary, 0)),
+    ?assertMatch({ok, _}, bondy_db_core_registry:lookup(NS, primary, 0)),
     teardown_shard(Setup).
 
 owner_down_does_not_call_adapter_close() ->
@@ -307,7 +307,7 @@ owner_down_does_not_call_adapter_close() ->
                                                     #{counter => Counter}),
         {ok, PH} = bondy_oplog_projection_ets:open(NS, primary, 0, #{}),
         OV = bondy_oplog_db_overlay:new(),
-        ok = bondy_mst_db_registry:register(NS, primary, 0, #{
+        ok = bondy_db_core_registry:register(NS, primary, 0, #{
             shard_count => 1,
             cache_adapter => bondy_oplog_cache_counting,
             cache_handle => CH,
@@ -324,9 +324,9 @@ owner_down_does_not_call_adapter_close() ->
     ?assertEqual(0, bondy_oplog_cache_counting:close_count(Counter)),
     Owner ! go_down,
     receive {'DOWN', Mon, process, Owner, _} -> ok end,
-    _ = sys:get_state(bondy_mst_db_registry),
+    _ = sys:get_state(bondy_db_core_registry),
     %% Row removed by the registry on DOWN.
-    ?assertEqual(not_found, bondy_mst_db_registry:lookup(NS, primary, 0)),
+    ?assertEqual(not_found, bondy_db_core_registry:lookup(NS, primary, 0)),
     %% BUT close was NOT called — the substrate does not invoke close
     %% on adapters when owners die. ETS adapters self-clean via Erlang
     %% GC; other adapters must monitor internally.
@@ -334,12 +334,12 @@ owner_down_does_not_call_adapter_close() ->
     ok = bondy_oplog_cache_counting:delete_counter(Counter).
 
 wait_for_registry_restart(OldPid, 0) ->
-    case whereis(bondy_mst_db_registry) of
+    case whereis(bondy_db_core_registry) of
         New when is_pid(New), New =/= OldPid -> ok;
         _ -> {error, timeout}
     end;
 wait_for_registry_restart(OldPid, N) ->
-    case whereis(bondy_mst_db_registry) of
+    case whereis(bondy_db_core_registry) of
         New when is_pid(New), New =/= OldPid ->
             ok;
         _ ->
@@ -356,7 +356,7 @@ re_register_demonitors_previous_owner() ->
         {ok, CH} = bondy_oplog_cache_ets:init(NS, primary, 0, #{}),
         {ok, PH} = bondy_oplog_projection_ets:open(NS, primary, 0, #{}),
         OV = bondy_oplog_db_overlay:new(),
-        ok = bondy_mst_db_registry:register(NS, primary, 0, #{
+        ok = bondy_db_core_registry:register(NS, primary, 0, #{
             shard_count => 1,
             cache_adapter => bondy_oplog_cache_ets,
             cache_handle => CH,
@@ -376,7 +376,7 @@ re_register_demonitors_previous_owner() ->
     {ok, CH2} = bondy_oplog_cache_ets:init(NS, primary, 0, #{}),
     {ok, PH2} = bondy_oplog_projection_ets:open(NS, primary, 0, #{}),
     OV2 = bondy_oplog_db_overlay:new(),
-    ok = bondy_mst_db_registry:register(NS, primary, 0, #{
+    ok = bondy_db_core_registry:register(NS, primary, 0, #{
         shard_count => 1,
         cache_adapter => bondy_oplog_cache_ets,
         cache_handle => CH2,
@@ -387,10 +387,10 @@ re_register_demonitors_previous_owner() ->
     }),
     Owner1 ! go_down,
     receive {'DOWN', Mon1, process, Owner1, _} -> ok end,
-    _ = sys:get_state(bondy_mst_db_registry),
+    _ = sys:get_state(bondy_db_core_registry),
     %% Registration must still exist, owned by us.
-    ?assertMatch({ok, _}, bondy_mst_db_registry:lookup(NS, primary, 0)),
-    ok = bondy_mst_db_registry:unregister(NS, primary, 0),
+    ?assertMatch({ok, _}, bondy_db_core_registry:lookup(NS, primary, 0)),
+    ok = bondy_db_core_registry:unregister(NS, primary, 0),
     ok = bondy_oplog_cache_ets:close(CH2),
     ok = bondy_oplog_projection_ets:close(PH2),
     ok = bondy_oplog_db_overlay:delete(OV2).
@@ -409,7 +409,7 @@ find_key_for_shard(NS, Index, WantedShard) ->
 
 find_key_for_shard(NS, Index, WantedShard, N) when N < 10_000 ->
     K = integer_to_binary(N),
-    case bondy_mst_db:shard_for(NS, Index, K) of
+    case bondy_db_core:shard_for(NS, Index, K) of
         {ok, WantedShard} -> K;
         _ -> find_key_for_shard(NS, Index, WantedShard, N + 1)
     end;
@@ -420,7 +420,7 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
     {ok, CH} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
     {ok, PH} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     OV = bondy_oplog_db_overlay:new(),
-    ok = bondy_mst_db_registry:register(NS, Index, Shard, #{
+    ok = bondy_db_core_registry:register(NS, Index, Shard, #{
         shard_count => ShardCount,
         cache_adapter => bondy_oplog_cache_ets,
         cache_handle => CH,
@@ -435,7 +435,7 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
 
 teardown_shard(#{ns := NS, index := Index, shard := Shard,
                  cache_handle := CH, projection := PH, overlay := OV}) ->
-    ok = bondy_mst_db_registry:unregister(NS, Index, Shard),
+    ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),
     ok = bondy_oplog_db_overlay:delete(OV).

@@ -13,7 +13,7 @@
 %%     rejected because at least one namespace is `cp`
 %% =============================================================================
 
--module(bondy_mst_db_consistency_class_test).
+-module(bondy_db_core_consistency_class_test).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -45,29 +45,29 @@ class_test_() ->
 default_class_is_ap() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{}),
-    ?assertEqual(ap, bondy_mst_db_registry:consistency_class(NS)),
-    {ok, Entry} = bondy_mst_db_registry:lookup(NS, primary, 0),
-    ?assertEqual(ap, bondy_mst_db_registry:entry_consistency_class(Entry)),
+    ?assertEqual(ap, bondy_db_core_registry:consistency_class(NS)),
+    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
+    ?assertEqual(ap, bondy_db_core_registry:entry_consistency_class(Entry)),
     teardown_shard(Setup).
 
 
 explicit_cp_is_stored() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => cp}),
-    ?assertEqual(cp, bondy_mst_db_registry:consistency_class(NS)),
+    ?assertEqual(cp, bondy_db_core_registry:consistency_class(NS)),
     teardown_shard(Setup).
 
 
 explicit_ap_is_stored() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => ap}),
-    ?assertEqual(ap, bondy_mst_db_registry:consistency_class(NS)),
+    ?assertEqual(ap, bondy_db_core_registry:consistency_class(NS)),
     teardown_shard(Setup).
 
 
 invalid_class_is_rejected() ->
     NS = mk_ns(),
-    Result = bondy_mst_db_registry:register(NS, primary, 0, (base_config())#{
+    Result = bondy_db_core_registry:register(NS, primary, 0, (base_config())#{
         consistency_class => not_a_real_class
     }),
     ?assertEqual({error, {invalid_consistency_class, not_a_real_class}},
@@ -75,7 +75,7 @@ invalid_class_is_rejected() ->
 
 
 unknown_namespace_returns_ap() ->
-    ?assertEqual(ap, bondy_mst_db_registry:consistency_class(no_such_ns_x)).
+    ?assertEqual(ap, bondy_db_core_registry:consistency_class(no_such_ns_x)).
 
 
 %% =============================================================================
@@ -86,7 +86,7 @@ eventual_on_cp_is_rejected() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => cp}),
     Reads = [{NS, primary, <<"k">>}],
-    Result = bondy_mst_db:read_batch(Reads, #{consistency => eventual}),
+    Result = bondy_db_core:read_batch(Reads, #{consistency => eventual}),
     ?assertMatch({error, {consistency_class_violation, NS, cp, eventual}},
                  Result),
     teardown_shard(Setup).
@@ -97,7 +97,7 @@ causal_on_cp_passes() ->
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => cp}),
     Reads = [{NS, primary, <<"k">>}],
     %% causal + infinity max_lag = always passes the freshness check.
-    Result = bondy_mst_db:read_batch(Reads, #{
+    Result = bondy_db_core:read_batch(Reads, #{
         consistency => causal, max_lag => infinity
     }),
     ?assertMatch({ok, _, _}, Result),
@@ -108,7 +108,7 @@ snapshot_on_cp_passes() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => cp}),
     Reads = [{NS, primary, <<"k">>}],
-    Result = bondy_mst_db:read_batch(Reads, #{
+    Result = bondy_db_core:read_batch(Reads, #{
         consistency => snapshot, max_lag => infinity
     }),
     ?assertMatch({ok, _, _}, Result),
@@ -119,7 +119,7 @@ eventual_on_ap_passes() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, #{consistency_class => ap}),
     Reads = [{NS, primary, <<"k">>}],
-    Result = bondy_mst_db:read_batch(Reads, #{consistency => eventual}),
+    Result = bondy_db_core:read_batch(Reads, #{consistency => eventual}),
     ?assertMatch({ok, _, _}, Result),
     teardown_shard(Setup).
 
@@ -130,7 +130,7 @@ mixed_batch_with_cp_member_is_rejected() ->
     {SetupA, _} = setup_shard(NSA, primary, 0, #{consistency_class => ap}),
     {SetupB, _} = setup_shard(NSB, primary, 0, #{consistency_class => cp}),
     Reads = [{NSA, primary, <<"a">>}, {NSB, primary, <<"b">>}],
-    Result = bondy_mst_db:read_batch(Reads, #{consistency => eventual}),
+    Result = bondy_db_core:read_batch(Reads, #{consistency => eventual}),
     ?assertMatch({error, {consistency_class_violation, NSB, cp, eventual}},
                  Result),
     teardown_shard(SetupA),
@@ -178,7 +178,7 @@ setup_shard(NS, Index, Shard, ExtraConfig) ->
         },
         ExtraConfig
     ),
-    ok = bondy_mst_db_registry:register(NS, Index, Shard, Config),
+    ok = bondy_db_core_registry:register(NS, Index, Shard, Config),
     Setup = #{ns => NS, index => Index, shard => Shard,
               cache_handle => CH, projection => PH, overlay => OV},
     {Setup, Setup}.
@@ -186,7 +186,7 @@ setup_shard(NS, Index, Shard, ExtraConfig) ->
 
 teardown_shard(#{ns := NS, index := Index, shard := Shard,
                  cache_handle := CH, projection := PH, overlay := OV}) ->
-    ok = bondy_mst_db_registry:unregister(NS, Index, Shard),
+    ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),
     ok = bondy_oplog_db_overlay:delete(OV).

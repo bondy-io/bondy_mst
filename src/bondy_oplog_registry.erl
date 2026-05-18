@@ -111,7 +111,7 @@ table's lifecycle tied to a supervisor child.
     %% items 6 & 8). The list of `{Namespace, Index, Shard}` tuples
     %% that the applier (on every successful commit) and AE rounds
     %% (on every successful sync) bump via
-    %% `bondy_mst_db_registry:bump_ae_targets/1,2`. Published once at
+    %% `bondy_db_core_registry:bump_ae_targets/1,2`. Published once at
     %% instance init via `set_ae_targets/2`; unchanged for the
     %% instance's lifetime. Empty list = wiring disabled.
     ae_targets = [] :: [{atom(), atom(), non_neg_integer()}]
@@ -381,7 +381,7 @@ row exists but the consumer has not configured targets, or
 `undefined` when no row exists. Used by `bondy_oplog_applier` (commit
 boundary) and `bondy_oplog_sync_session` (round completion) to know
 which substrate shards to bump via
-`bondy_mst_db_registry:bump_ae_targets/2`.
+`bondy_db_core_registry:bump_ae_targets/2`.
 """).
 -spec ae_targets(instance_id()) ->
     [{atom(), atom(), non_neg_integer()}] | undefined.
