@@ -21,7 +21,10 @@ make_ctx = fn prefix, n ->
   {:ok, _pid} = :bondy_oplog.start_instance(id)
 
   keys = for i <- 1..n, do: :bondy_oplog.append(id, {:warmup, i})
-  :ok = :bondy_oplog.await_apply(id)
+  # 30s ceiling, not because warm-up should take that long but because
+  # we may be queued behind disk fsync from the prior scenario's WAL.
+  # The default 5s ceiling tripped under sustained back-to-back runs.
+  :ok = :bondy_oplog.await_apply(id, 30_000)
 
   %{id: id, keys: List.to_tuple(keys), n: n,
     cursor: :atomics.new(1, [{:signed, false}])}
@@ -72,3 +75,31 @@ run.("oplog_mixed_8w_8r", %{
   writers: %{count: 8, op: append_op},
   readers: %{count: 8, op: read_op}
 })
+
+# ----- append_many: batch fast path, sustained -----
+#
+# A worker that builds a batch of N events, calls append_many, and
+# every K batches drains via await_apply so the overlay does not run
+# away and turn the bench into a backpressure-error meter.
+
+batch_op = fn batch_size ->
+  per_worker_state = :atomics.new(1, [{:signed, false}])
+  fn %{id: id} ->
+    batch = for i <- 1..batch_size, do: {{:am, i}, :undefined}
+    result = :bondy_oplog.append_many(id, batch)
+    n = :atomics.add_get(per_worker_state, 1, 1)
+    # Drain every 32 batches to keep the overlay below its 10k cap.
+    # The await_apply call is itself a synchronisation point with the
+    # applier — it is included in the worker's latency budget on
+    # those iterations, which is the honest cost of sustained writes.
+    if rem(n, 32) == 0, do: :ok = :bondy_oplog.await_apply(id)
+    result
+  end
+end
+
+run.("oplog_append_many_1w_bs10",  %{writers: %{count: 1, op: batch_op.(10)}})
+run.("oplog_append_many_1w_bs100", %{writers: %{count: 1, op: batch_op.(100)}})
+run.("oplog_append_many_4w_bs10",  %{writers: %{count: 4, op: batch_op.(10)}})
+run.("oplog_append_many_4w_bs100", %{writers: %{count: 4, op: batch_op.(100)}})
+run.("oplog_append_many_8w_bs10",  %{writers: %{count: 8, op: batch_op.(10)}})
+run.("oplog_append_many_8w_bs100", %{writers: %{count: 8, op: batch_op.(100)}})

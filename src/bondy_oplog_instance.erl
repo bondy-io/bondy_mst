@@ -137,7 +137,15 @@ without protocol changes.
     %% equivalent `ets:info/2` calls aggregate across all schedulers
     %% and grow expensive under concurrent appenders — these atomic
     %% mirrors keep the admit check purely lock-free and constant-time.
-    overlay_counters :: atomics:atomics_ref()
+    overlay_counters :: atomics:atomics_ref(),
+    %% Highest local-origin `seq` already installed into the MST.
+    %% Used by `install_local_batch/2` to skip the
+    %% O(log N) `bondy_mst:get/2` safety probe for events whose seq is
+    %% strictly greater than this value — for the local origin the seq
+    %% atomic monotonically increases, so any event with a higher seq
+    %% cannot already be in the tree. Resume-overlap events (seq ≤ max)
+    %% still take the safe path that probes the tree.
+    max_local_installed_seq :: non_neg_integer()
 }).
 
 -type backend() :: map | ets | module().
@@ -479,23 +487,36 @@ do_append_many_fast(InstanceId, FastPath, Items) ->
     end.
 
 %% @private
-%% Mints `{Event, Key}` pairs for every item: one HLC tick + seq
-%% bump + sign per item, in input order. The validator state is
-%% immutable (stateless validators by contract), so we pass the
-%% same `ValState` for every call and discard the returned state.
+%% Mints `{Event, Key}` pairs for every item.
+%%
+%% - One HLC tick per item: the WAL's `do_append_batch/2` rejects
+%%   a batch whose HLCs are not strictly increasing (so receivers
+%%   can rely on per-batch monotonicity for cheap merge-by-HLC).
+%%   Each `bondy_oplog_hlc:now/1` is a lock-free CAS that already
+%%   guarantees strict monotonicity at the per-replica level.
+%% - **One** `atomics:add_get/3` to reserve a contiguous seq range,
+%%   then assign each event `Start+i`. N - 1 fewer atomic
+%%   read-modify-writes on the shared seq atomics per batch.
+%%
+%% The validator state is immutable (stateless validators by
+%% contract), so we pass the same `ValState` for every call and
+%% discard the returned state.
 build_events_fast(HLC, SeqRef, Origin, Mod, ValState, Items) ->
-    Pairs = lists:map(
-        fun({Op, Meta}) ->
+    N = length(Items),
+    EndSeq = atomics:add_get(SeqRef, 1, N),
+    StartSeq = EndSeq - N + 1,
+    {EventsRev, KeysRev, _} = lists:foldl(
+        fun({Op, Meta}, {EvAcc, KAcc, Seq}) ->
             Hlc = bondy_oplog_hlc:now(HLC),
-            Seq = atomics:add_get(SeqRef, 1, 1),
             Key = bondy_oplog_event:key(Hlc, Origin, Seq),
             Event0 = bondy_oplog_event:new(Key, Op, Meta),
             {Event, _} = Mod:sign_event(Event0, ValState),
-            {Event, Key}
+            {[Event | EvAcc], [Key | KAcc], Seq + 1}
         end,
+        {[], [], StartSeq},
         Items
     ),
-    {[E || {E, _} <- Pairs], [K || {_, K} <- Pairs]}.
+    {lists:reverse(EventsRev), lists:reverse(KeysRev)}.
 
 %% @private
 %% Lock-free analogue of `admit/2` for the fast path. The atomics
@@ -717,21 +738,22 @@ lookup_instance_id(Pid) when is_pid(Pid) ->
     {ok, bondy_oplog_event:t()} | not_found.
 
 get(Target, Key) when is_binary(Target) ->
-    %% Overlay-first, then registry MST. The overlay holds events
-    %% that landed in the WAL but have not yet been promoted by the
-    %% applier. Reading the overlay before the MST handle closes the
-    %% race where the applier publishes a new handle and then evicts
-    %% the overlay row: if we miss the overlay, the new handle is
-    %% already in the registry (MST publish strictly precedes overlay
-    %% evict).
-    case overlay_lookup(Target, Key) of
-        {ok, _} = Hit ->
-            Hit;
-        not_found ->
-            case bondy_oplog_registry:mst(Target) of
-                undefined ->
-                    error({noproc, {?MODULE, Target}});
-                MST ->
+    %% Overlay-first, then MST. One registry lookup pulls both
+    %% handles — the old two-`lookup_element` pattern serialised on
+    %% the same per-key slot lock and dominated the cost of cold
+    %% reads. The overlay holds events that landed in the WAL but
+    %% have not yet been promoted by the applier; reading the overlay
+    %% before the MST handle closes the race where the applier
+    %% publishes a new handle and then evicts the overlay row (MST
+    %% publish strictly precedes overlay evict).
+    case bondy_oplog_registry:read_overlay_and_mst(Target) of
+        undefined ->
+            error({noproc, {?MODULE, Target}});
+        {Tab, MST} ->
+            case overlay_lookup_tab(Tab, Key) of
+                {ok, _} = Hit ->
+                    Hit;
+                not_found ->
                     case bondy_mst:get(MST, Key) of
                         undefined -> not_found;
                         Value -> {ok, event_from_value(Key, Value)}
@@ -762,11 +784,11 @@ root_hash(Target) ->
 fold_range(Target, From, To, Fun, Acc0) when
     is_binary(Target), is_function(Fun, 2)
 ->
-    case bondy_oplog_registry:mst(Target) of
+    case bondy_oplog_registry:read_overlay_and_mst(Target) of
         undefined ->
             error({noproc, {?MODULE, Target}});
-        MST ->
-            OverlayQueue = overlay_range(Target, From, To),
+        {Tab, MST} ->
+            OverlayQueue = overlay_range_tab(Tab, From, To),
             fold_range_merged(MST, From, To, OverlayQueue, Fun, Acc0)
     end;
 fold_range(Target, From, To, Fun, Acc0) when is_function(Fun, 2) ->
@@ -798,11 +820,11 @@ size(Target) when is_binary(Target) ->
     %% new MST handle and evicts the matching overlay rows in the
     %% same callback, so the two sets are disjoint at every observable
     %% state — no double-count.
-    case bondy_oplog_registry:live_size(Target) of
+    case bondy_oplog_registry:read_overlay_and_live_size(Target) of
         undefined ->
             error({noproc, {?MODULE, Target}});
-        MstSize ->
-            MstSize + overlay_size(Target)
+        {Tab, MstSize} ->
+            MstSize + overlay_size_tab(Tab)
     end;
 size(Target) ->
     gen_server:call(target(Target), instance_size).
@@ -811,11 +833,11 @@ size(Target) ->
     {ok, bondy_oplog_event:event_key()} | empty.
 
 first_key(Target) when is_binary(Target) ->
-    case bondy_oplog_registry:mst(Target) of
+    case bondy_oplog_registry:read_overlay_and_mst(Target) of
         undefined ->
             error({noproc, {?MODULE, Target}});
-        MST ->
-            merge_first_key(Target, MST)
+        {Tab, MST} ->
+            merge_first_key_tab(Tab, MST)
     end;
 first_key(Target) ->
     gen_server:call(target(Target), first_key).
@@ -824,11 +846,11 @@ first_key(Target) ->
     {ok, bondy_oplog_event:event_key()} | empty.
 
 latest_key(Target) when is_binary(Target) ->
-    case bondy_oplog_registry:mst(Target) of
+    case bondy_oplog_registry:read_overlay_and_mst(Target) of
         undefined ->
             error({noproc, {?MODULE, Target}});
-        MST ->
-            merge_latest_key(Target, MST)
+        {Tab, MST} ->
+            merge_latest_key_tab(Tab, MST)
     end;
 latest_key(Target) ->
     gen_server:call(target(Target), latest_key).
@@ -1259,10 +1281,14 @@ init({InstanceId, Opts}) ->
     end,
     %% Seed Seq similarly: if the MST has local-origin events, advance
     %% the Seq counter to dominate the highest seen.
-    case max_local_seq(MST, Origin) of
-        undefined -> ok;
-        MaxSeq -> ok = atomics:put(SeqRef, 1, MaxSeq)
-    end,
+    MaxLocalInstalledSeq =
+        case max_local_seq(MST, Origin) of
+            undefined ->
+                0;
+            MaxSeq ->
+                ok = atomics:put(SeqRef, 1, MaxSeq),
+                MaxSeq
+        end,
     %% Per-instance overlay (`ordered_set`, public, owned by this
     %% gen_server). Rows are `{Key, Value, Hlc, Origin}`.
     %% `ordered_set` so range reads (`fold_range/5`, `first_key/1`,
@@ -1306,7 +1332,8 @@ init({InstanceId, Opts}) ->
         max_overlay_events = maps:get(max_overlay_events, Opts, 10_000),
         max_overlay_bytes = maps:get(max_overlay_bytes, Opts, 5 * 1024 * 1024),
         overlay_throttle = maps:get(overlay_throttle, Opts, drop),
-        overlay_counters = atomics:new(2, [{signed, false}])
+        overlay_counters = atomics:new(2, [{signed, false}]),
+        max_local_installed_seq = MaxLocalInstalledSeq
     },
     ok = publish(State),
     %% Publish the overlay tid via a dedicated setter so a stale tid
@@ -1852,44 +1879,151 @@ build_events(State0, Items) ->
 %% Sole MST-install path for local-origin events. Driven by the
 %% `install_local_batch` cast from the per-instance applier. The
 %% applier has already re-verified every event's signature in its
-%% own process before dispatching, so this fold trusts the input
-%% and runs:
+%% own process before dispatching, so this fold trusts the input.
 %%
-%% 1. `bondy_mst:get` to decide between fresh insert, idempotent
-%%    re-apply (same value), and collision-with-existing (different
-%%    value at the same key, recorded as equivocation, MST left
-%%    unchanged so the subtree survives bad input).
-%% 2. `install_event` to mutate the MST and refresh state.
+%% The batch is split by `max_local_installed_seq`:
 %%
-%% Folding the whole batch before publishing avoids N registry
-%% writes per batch.
+%% 1. **Fast suffix** — events with local origin and `Seq` strictly
+%%    greater than the cached max. The seq atomic is monotonic per
+%%    origin so these keys cannot yet be in the tree. We collect
+%%    them into a list of `{Key, Value}` pairs and install them via
+%%    `bondy_mst:put_batch/2`, which builds a small in-process MST
+%%    from the batch and merges it into the live tree in a single
+%%    traversal — one spine rebuild for the whole batch instead of
+%%    one per event.
+%% 2. **Slow prefix** — events whose seq has already been observed
+%%    (resume-overlap) or that carry a non-local origin. These fall
+%%    back to the per-event safety path that probes the tree with
+%%    `bondy_mst:get` and either re-applies idempotently, ignores a
+%%    matching value, or records an equivocation.
+%%
+%% Within a single WAL frame the local-origin seqs are contiguous and
+%% strictly increasing (one batch from one writer), so the partition
+%% is a single `lists:splitwith/2`. The merger configured on the live
+%% tree is never invoked from the fast suffix because every key is
+%% guaranteed new — the only callers of put_batch here are batches
+%% that the seq filter has already promised contain no collisions.
 -spec install_local_batch(#state{}, [bondy_oplog_event:t()]) -> #state{}.
 
 install_local_batch(State, []) ->
     State;
-install_local_batch(#state{mst = MST0} = State0, [Event | Rest]) ->
-    Key = bondy_oplog_event:key(Event),
-    NewValue = value_from_event(Event),
-    State1 =
-        case bondy_mst:get(MST0, Key) of
-            undefined ->
-                install_event(State0, Key, NewValue, apply_event, true);
-            NewValue ->
-                install_event(State0, Key, NewValue, apply_event, false);
-            ExistingValue ->
-                record_equivocation(State0, Key, ExistingValue, Event),
-                State0
-        end,
-    install_local_batch(State1, Rest).
+install_local_batch(#state{} = State0, Events) ->
+    Origin = State0#state.origin,
+    MaxSeq = State0#state.max_local_installed_seq,
+    {Slow, Fast} =
+        lists:splitwith(
+            fun(E) -> not is_fast_install(E, Origin, MaxSeq) end,
+            Events
+        ),
+    State1 = install_slow_events(State0, Slow),
+    install_fast_events(State1, Fast).
 
 %% @private
-%% Evicts every overlay row for a freshly-installed batch via a single
-%% `ets:select_delete/2`. The HLC-conditional guard preserves any
-%% newer row (Hlc > the maximum event HLC in the batch) that a
-%% concurrent `append` may have staged for an already-installed key.
-%% Such a "newer" row is by construction a *different* event with a
-%% later HLC, so leaving it in the overlay is exactly the
-%% read-your-writes contract.
+is_fast_install(Event, Origin, MaxSeq) ->
+    Key = bondy_oplog_event:key(Event),
+    bondy_oplog_event:key_origin(Key) =:= Origin
+        andalso bondy_oplog_event:key_seq(Key) > MaxSeq.
+
+%% @private
+install_slow_events(State, []) ->
+    State;
+install_slow_events(State0, [Event | Rest]) ->
+    Key = bondy_oplog_event:key(Event),
+    NewValue = value_from_event(Event),
+    State1 = install_local_safe(State0, Event, Key, NewValue),
+    install_slow_events(State1, Rest).
+
+%% @private
+%% Bulk-install a list of known-new local-origin events. Builds a
+%% `{Key, Value}` list, drives `bondy_mst:put_batch/2`, then updates
+%% the cached aggregates (`max_local_installed_seq`, `last_event_key`,
+%% `live_size`) and bumps the HLC once for the maximum HLC seen.
+%% Emits a single batch-level telemetry event with `count => N`.
+install_fast_events(State, []) ->
+    State;
+install_fast_events(#state{} = State0, Events) ->
+    {Pairs, MaxSeq, MaxKey, MaxHlc, Count} = scan_fast_events(Events, State0),
+    MST1 = bondy_mst:put_batch(State0#state.mst, Pairs),
+    _ = bondy_oplog_hlc:update(State0#state.hlc, MaxHlc),
+    telemetry:execute(
+        [bondy_oplog, instance, apply_event, ok],
+        #{count => Count},
+        #{instance_id => State0#state.instance_id, new => true}
+    ),
+    State0#state{
+        mst = MST1,
+        max_local_installed_seq = MaxSeq,
+        last_event_key = greater_key(State0#state.last_event_key, MaxKey),
+        live_size = State0#state.live_size + Count
+    }.
+
+%% @private
+%% Single pass over the fast-suffix events: builds the `{Key, Value}`
+%% list (in batch order), tracks the maximum seq / key / HLC, and
+%% counts the events. `lists:foldl/3` accumulates the pair list in
+%% reverse, so the result is flipped before return — preserving the
+%% per-event path's observable ordering for any telemetry handlers
+%% downstream.
+scan_fast_events(Events, #state{max_local_installed_seq = StartSeq}) ->
+    {PairsRev, MaxSeq, MaxKey, MaxHlc, Count} =
+        lists:foldl(
+            fun(Event, {PairsAcc, SeqAcc, KeyAcc, HlcAcc, N}) ->
+                Key = bondy_oplog_event:key(Event),
+                Value = value_from_event(Event),
+                Seq = bondy_oplog_event:key_seq(Key),
+                Hlc = bondy_oplog_event:key_hlc(Key),
+                {
+                    [{Key, Value} | PairsAcc],
+                    erlang:max(SeqAcc, Seq),
+                    greater_key(KeyAcc, Key),
+                    erlang:max(HlcAcc, Hlc),
+                    N + 1
+                }
+            end,
+            {[], StartSeq, undefined, 0, 0},
+            Events
+        ),
+    {lists:reverse(PairsRev), MaxSeq, MaxKey, MaxHlc, Count}.
+
+%% @private
+%% Returns the greater of two event keys, treating `undefined` as
+%% absent. Distinct from `max_key/2` further down (which uses the
+%% `{ok, _} | empty` envelope expected by readers).
+greater_key(undefined, K) -> K;
+greater_key(K, undefined) -> K;
+greater_key(A, B) when A > B -> A;
+greater_key(_A, B) -> B.
+
+%% @private
+%% Safety path used for resume-overlap and any non-local seq event.
+%% Probes the MST so an existing entry is detected as either an
+%% idempotent re-apply (same value) or an equivocation (different
+%% value at the same key).
+install_local_safe(State, Event, Key, NewValue) ->
+    case bondy_mst:get(State#state.mst, Key) of
+        undefined ->
+            install_event(State, Key, NewValue, apply_event, true);
+        NewValue ->
+            install_event(State, Key, NewValue, apply_event, false);
+        ExistingValue ->
+            record_equivocation(State, Key, ExistingValue, Event),
+            State
+    end.
+
+%% @private
+%% Evicts every overlay row for a freshly-installed batch via N
+%% O(log N) `ets:delete/2` point deletes — the overlay is an
+%% `ordered_set` so a deletion keyed by the row's primary key uses
+%% the index. The earlier approach built an N-way OR guard for a
+%% single `ets:select_delete/2`, but the resulting match spec did not
+%% pin the key in the head and so triggered a full table scan; on a
+%% 10k-row overlay with batches of 100 events that pattern cost
+%% ~1M comparisons per call. Point deletes drop that to ~1.3k.
+%%
+%% No HLC guard is needed: an event key `{Hlc, Origin, Seq}` is
+%% globally unique by construction (HLC and Seq are atomics; Origin
+%% is per-instance), so an overlay row at that key corresponds to
+%% exactly this event and no other.
 -spec evict_overlay_batch(#state{}, [bondy_oplog_event:t()]) -> #state{}.
 
 evict_overlay_batch(#state{overlay = undefined} = State, _Events) ->
@@ -1897,31 +2031,18 @@ evict_overlay_batch(#state{overlay = undefined} = State, _Events) ->
 evict_overlay_batch(State, []) ->
     State;
 evict_overlay_batch(#state{overlay = Tab, overlay_counters = Ctrs} = State, Events) ->
-    MaxHlc = lists:foldl(
-        fun(E, Acc) ->
-            H = bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)),
-            case H > Acc of true -> H; false -> Acc end
-        end,
-        0,
-        Events
-    ),
-    Keys = [bondy_oplog_event:key(E) || E <- Events],
-    KeyGuard = build_key_or_guard(Keys),
-    Deleted = try
-        ets:select_delete(Tab, [{
-            {'$1', '_', '$2', '_'},
-            [KeyGuard, {'=<', '$2', MaxHlc}],
-            [true]
-        }])
+    Count = try
+        lists:foreach(
+            fun(E) ->
+                ets:delete(Tab, bondy_oplog_event:key(E))
+            end,
+            Events
+        ),
+        length(Events)
     catch
         error:badarg -> 0
     end,
-    %% Approximate the byte delta: scale the running byte estimate by
-    %% the fraction of rows deleted. Self-corrects on the next batch
-    %% because both counters drift together. CAS-style update so we
-    %% race-free reconcile with concurrent `append_fast/2,3` increments
-    %% on the same atomics.
-    overlay_counters_sub(Ctrs, Deleted),
+    overlay_counters_sub(Ctrs, Count),
     State.
 
 %% @private
@@ -1947,18 +2068,6 @@ overlay_counters_sub(Ctrs, Deleted) ->
     ok = atomics:put(Ctrs, 1, NewCount),
     ok = atomics:put(Ctrs, 2, NewBytes),
     ok.
-
-%% @private
-%% Builds a `{'orelse', {'=:=', '$1', Key1}, {'=:=', '$1', Key2}, ...}`
-%% match-spec guard listing every batch key. ETS `select_delete` then
-%% deletes only rows whose key matches one of these AND whose Hlc is
-%% `=< MaxHlc`. We construct the guard explicitly (rather than per-
-%% event in a separate match-spec body) so the whole batch is
-%% deleted in one ETS call.
-build_key_or_guard([Key]) ->
-    {'=:=', '$1', {const, Key}};
-build_key_or_guard([Key | Rest]) ->
-    {'orelse', {'=:=', '$1', {const, Key}}, build_key_or_guard(Rest)}.
 
 %% @private
 %% Returns `{ok, WalPid, State1}` with `State1` carrying a monitored
@@ -2607,18 +2716,10 @@ ets_member(InstanceId) ->
     bondy_oplog_registry:instance_pid(InstanceId) =/= undefined.
 
 %% @private
-%% Lock-free overlay lookup by InstanceId. Resolves the overlay tid
-%% from the registry then delegates to `overlay_lookup_tab/2`.
-%% Returns `not_found` if the registry has no overlay tid yet (subtree
-%% mid-restart) so the caller falls through to the MST.
-overlay_lookup(InstanceId, Key) when is_binary(InstanceId) ->
-    case bondy_oplog_registry:overlay_tab(InstanceId) of
-        undefined -> not_found;
-        Tab -> overlay_lookup_tab(Tab, Key)
-    end.
-
-%% @private
 %% Shape: `{Key, Value, Hlc, Origin}` per ?OVERLAY_KEY_POS macros.
+%% Tolerates `Tab = undefined` (subtree mid-restart) — `ets:lookup`
+%% on `undefined` raises `badarg`, which we treat as a clean miss
+%% and let the caller fall through to the MST.
 overlay_lookup_tab(Tab, Key) ->
     try ets:lookup(Tab, Key) of
         [{Key, Value, _Hlc, _Origin}] -> {ok, event_from_value(Key, Value)};
@@ -2633,13 +2734,6 @@ overlay_lookup_tab(Tab, Key) ->
 %% `{Key, Event}` tuples. `ets:select/2` on `ordered_set` yields rows
 %% in key order, so the result list is already sorted. Returns `[]`
 %% when the overlay tid is missing (subtree mid-restart).
-overlay_range(InstanceId, From, To) when is_binary(InstanceId) ->
-    case bondy_oplog_registry:overlay_tab(InstanceId) of
-        undefined -> [];
-        Tab -> overlay_range_tab(Tab, From, To)
-    end.
-
-%% @private
 overlay_range_tab(undefined, _From, _To) ->
     [];
 overlay_range_tab(Tab, From, To) ->
@@ -2696,15 +2790,6 @@ drain_overlay_queue([{_K, Event} | Rest], Fun, Acc) ->
 
 %% @private
 %% Min over (overlay.first, MST.first). Either can be empty.
-merge_first_key(InstanceId, MST) ->
-    OverlayFirst = overlay_first_key(InstanceId),
-    MstFirst = case bondy_mst:first(MST) of
-        undefined -> undefined;
-        {K, _V} -> K
-    end,
-    min_key(OverlayFirst, MstFirst).
-
-%% @private
 merge_first_key_tab(Tab, MST) ->
     OverlayFirst = overlay_first_key_tab(Tab),
     MstFirst = case bondy_mst:first(MST) of
@@ -2715,15 +2800,6 @@ merge_first_key_tab(Tab, MST) ->
 
 %% @private
 %% Max over (overlay.last, MST.last). Either can be empty.
-merge_latest_key(InstanceId, MST) ->
-    OverlayLast = overlay_last_key(InstanceId),
-    MstLast = case bondy_mst:last(MST) of
-        undefined -> undefined;
-        {K, _V} -> K
-    end,
-    max_key(OverlayLast, MstLast).
-
-%% @private
 merge_latest_key_tab(Tab, MST) ->
     OverlayLast = overlay_last_key_tab(Tab),
     MstLast = case bondy_mst:last(MST) of
@@ -2731,13 +2807,6 @@ merge_latest_key_tab(Tab, MST) ->
         {K, _V} -> K
     end,
     max_key(OverlayLast, MstLast).
-
-%% @private
-overlay_first_key(InstanceId) ->
-    case bondy_oplog_registry:overlay_tab(InstanceId) of
-        undefined -> undefined;
-        Tab -> overlay_first_key_tab(Tab)
-    end.
 
 %% @private
 overlay_first_key_tab(undefined) ->
@@ -2748,13 +2817,6 @@ overlay_first_key_tab(Tab) ->
         K -> K
     catch
         error:badarg -> undefined
-    end.
-
-%% @private
-overlay_last_key(InstanceId) ->
-    case bondy_oplog_registry:overlay_tab(InstanceId) of
-        undefined -> undefined;
-        Tab -> overlay_last_key_tab(Tab)
     end.
 
 %% @private

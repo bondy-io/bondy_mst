@@ -32,6 +32,7 @@ defmodule Bench.Concurrency.Report do
           to_string(label),
           fmt_num(s.ops_per_sec),
           fmt_num(s.count),
+          fmt_errors(Map.get(s, :errors, 0), Map.get(s, :error_rate, 0.0)),
           fmt_us(p[50]),
           fmt_us(p[90]),
           fmt_us(p[95]),
@@ -40,7 +41,7 @@ defmodule Bench.Concurrency.Report do
         ]
       end)
 
-    header = ~w(workload ops/sec total p50 p90 p95 p99 p99.9)
+    header = ~w(workload ops/sec total errors p50 p90 p95 p99 p99.9)
 
     cols =
       [header | rows]
@@ -60,6 +61,14 @@ defmodule Bench.Concurrency.Report do
   defp fmt_num(n) when is_number(n), do: format_thousands(round(n))
   defp fmt_us(us) when is_number(us), do: :erlang.float_to_binary(us / 1, decimals: 2) <> "µs"
   defp fmt_us(_), do: "-"
+
+  # "5 (1.2%)" when any errors fired, "—" when clean. Highlights cases
+  # where the bench is measuring fast-fail churn rather than real work.
+  defp fmt_errors(0, _), do: "—"
+  defp fmt_errors(n, rate) when is_number(n) and is_number(rate) do
+    pct = :erlang.float_to_binary(rate * 100, decimals: 1)
+    "#{format_thousands(n)} (#{pct}%)"
+  end
 
   defp format_thousands(n) do
     n
@@ -88,6 +97,7 @@ defmodule Bench.Concurrency.Report do
           <td>#{workers}</td>
           <td>#{format_thousands(round(s.ops_per_sec))}</td>
           <td>#{format_thousands(s.count)}</td>
+          <td>#{fmt_errors(Map.get(s, :errors, 0), Map.get(s, :error_rate, 0.0))}</td>
           <td>#{fmt_us(p[50])}</td>
           <td>#{fmt_us(p[90])}</td>
           <td>#{fmt_us(p[95])}</td>
@@ -135,6 +145,7 @@ defmodule Bench.Concurrency.Report do
             <th>workers</th>
             <th>ops/sec</th>
             <th>total</th>
+            <th>errors</th>
             <th>p50</th>
             <th>p90</th>
             <th>p95</th>

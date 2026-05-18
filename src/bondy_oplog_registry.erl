@@ -171,6 +171,11 @@ table's lifecycle tied to a supervisor child.
 -export([overlay_tab/1]).
 -export([fast_path/1]).
 -export([instance_id_by_sup_pid/1]).
+%% Composite reads — pull several fields in one ETS lookup. Used by
+%% hot lock-free reader paths in `bondy_oplog_instance` that would
+%% otherwise issue two `ets:lookup_element/3` calls back-to-back.
+-export([read_overlay_and_mst/1]).
+-export([read_overlay_and_live_size/1]).
 
 %% Sibling pid management
 -export([set_wal_pid/2]).
@@ -358,6 +363,40 @@ gen_server).
 
 fast_path(InstanceId) ->
     field(InstanceId, #entry.fast_path).
+
+?DOC("""
+Returns `{OverlayTab, MST}` for an instance in **one** ETS lookup,
+or `undefined` when the row is absent. Used by the hot lock-free
+read paths (`get/2`, `fold_range/5`, `first_key/1`,
+`latest_key/1`) which would otherwise issue two consecutive
+`lookup_element/3` calls — each one a separate ETS access serialised
+on the per-key slot lock.
+""").
+-spec read_overlay_and_mst(instance_id()) ->
+    undefined | {ets:tid() | undefined, bondy_mst:t()}.
+
+read_overlay_and_mst(InstanceId) when is_binary(InstanceId) ->
+    try ets:lookup(?TABLE, InstanceId) of
+        [#entry{overlay_tab = T, mst = M}] -> {T, M};
+        [] -> undefined
+    catch
+        error:badarg -> undefined
+    end.
+
+?DOC("""
+Returns `{OverlayTab, LiveSize}` for an instance in one ETS lookup,
+or `undefined`. Used by `size/1`.
+""").
+-spec read_overlay_and_live_size(instance_id()) ->
+    undefined | {ets:tid() | undefined, non_neg_integer()}.
+
+read_overlay_and_live_size(InstanceId) when is_binary(InstanceId) ->
+    try ets:lookup(?TABLE, InstanceId) of
+        [#entry{overlay_tab = T, live_size = L}] -> {T, L};
+        [] -> undefined
+    catch
+        error:badarg -> undefined
+    end.
 
 ?DOC("""
 Reverse lookup: returns the `instance_id()` whose registry row has

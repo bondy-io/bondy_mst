@@ -127,6 +127,14 @@ defmodule Bench.Concurrency do
 
     ctx = setup_fun.()
     histograms = Map.new(workloads, fn {label, _} -> {label, Hist.new()} end)
+    # Slot 1: error count. Counted separately from the latency histogram
+    # so an op that fast-fails on backpressure does not skew p50/p99 —
+    # error returns are usually orders of magnitude cheaper than a real
+    # call and would otherwise drag the latency distribution down while
+    # inflating the ops/sec metric.
+    error_counters = Map.new(workloads, fn {label, _} ->
+      {label, :counters.new(1, [:write_concurrency])}
+    end)
 
     parent = self()
     Process.flag(:trap_exit, true)
@@ -139,10 +147,11 @@ defmodule Bench.Concurrency do
     workers =
       for {label, %{count: n, op: op}} <- workloads, _ <- 1..n do
         hist = histograms[label]
+        errors = error_counters[label]
 
         pid =
           spawn_link(fn ->
-            worker_loop(op, ctx, hist, record_after, deadline_ms, parent)
+            worker_loop(op, ctx, hist, errors, record_after, deadline_ms, parent)
           end)
 
         {pid, label}
@@ -156,12 +165,17 @@ defmodule Bench.Concurrency do
     stats =
       Map.new(workloads, fn {label, _} ->
         h = histograms[label]
+        errs = :counters.get(error_counters[label], 1)
         count = Hist.total(h)
         pcts = Hist.percentiles(h, [50, 90, 95, 99, 99.9])
+        total_attempts = count + errs
 
         {label,
          %{
            count: count,
+           errors: errs,
+           error_rate:
+             if(total_attempts > 0, do: errs / total_attempts, else: 0.0),
            ops_per_sec: count / duration_s,
            percentiles_us: Map.new(pcts, fn {p, ns} -> {p, ns / 1_000} end),
            histogram: Hist.bins(h)
@@ -186,7 +200,7 @@ defmodule Bench.Concurrency do
     stats
   end
 
-  defp worker_loop(op, ctx, hist, record_after, deadline_ms, parent) do
+  defp worker_loop(op, ctx, hist, errors, record_after, deadline_ms, parent) do
     now = :erlang.monotonic_time(:millisecond)
 
     cond do
@@ -197,15 +211,26 @@ defmodule Bench.Concurrency do
       now < record_after ->
         # Warmup: do work, do not record.
         _ = op.(ctx)
-        worker_loop(op, ctx, hist, record_after, deadline_ms, parent)
+        worker_loop(op, ctx, hist, errors, record_after, deadline_ms, parent)
 
       true ->
         t0 = :erlang.monotonic_time(:nanosecond)
-        _ = op.(ctx)
+        result = op.(ctx)
         t1 = :erlang.monotonic_time(:nanosecond)
-        Hist.record(hist, t1 - t0)
-        worker_loop(op, ctx, hist, record_after, deadline_ms, parent)
+        record_result(result, hist, errors, t1 - t0)
+        worker_loop(op, ctx, hist, errors, record_after, deadline_ms, parent)
     end
+  end
+
+  # Classify the op's return value: anything matching `{:error, _}` is
+  # treated as a fast-fail (counted as an error, latency discarded);
+  # everything else is success (latency recorded).
+  defp record_result({:error, _}, _hist, errors, _ns) do
+    :counters.add(errors, 1, 1)
+  end
+
+  defp record_result(_other, hist, _errors, ns) do
+    Hist.record(hist, ns)
   end
 
   defp wait_for_workers(workers) do

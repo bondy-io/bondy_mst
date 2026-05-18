@@ -147,6 +147,7 @@ hash.
 -export([new/1]).
 -export([put/2]).
 -export([put/3]).
+-export([put_batch/2]).
 -export([put_page/2]).
 -export([root/1]).
 -export([store/1]).
@@ -516,6 +517,40 @@ put(#?MODULE{store = Store0} = T, Key, Value) ->
         T#?MODULE{store = Store}
     end,
     bondy_mst_store:transaction(Store0, Fun).
+
+?DOC("""
+Inserts each `{Key, Value}` pair in `Items` into the tree.
+
+For batches of more than one entry the implementation builds a small
+volatile in-process MST from `Items` and merges it into the receiver
+in a single tree traversal, amortising the per-event spine rebuild
+that successive `put/3` calls would do. The receiver's `comparator`,
+`merger`, and `hash_algorithm` are used; the temporary tree uses a
+map-backed store that is discarded once the merge completes.
+
+Collisions between an entry's key and a key already in the receiver
+invoke the receiver's `merger` exactly as `put/3` would.
+""").
+-spec put_batch(Tree1 :: t(), Items :: [{key(), value()}]) -> Tree2 :: t().
+
+put_batch(#?MODULE{} = T, []) ->
+    T;
+put_batch(#?MODULE{} = T, [{K, V}]) ->
+    put(T, K, V);
+put_batch(#?MODULE{} = T, Items) when is_list(Items) ->
+    B0 = new(#{
+        store => bondy_mst_map_store,
+        store_opts => #{},
+        comparator => T#?MODULE.comparator,
+        merger => T#?MODULE.merger,
+        hash_algorithm => T#?MODULE.hash_algorithm
+    }),
+    B = lists:foldl(
+        fun({K, V}, Acc) -> put(Acc, K, V) end,
+        B0,
+        Items
+    ),
+    merge(T, B).
 
 ?DOC("""
 Structurally deletes a key from the MST.
