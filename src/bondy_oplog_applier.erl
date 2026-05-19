@@ -654,26 +654,65 @@ drain_loop(#state{iter = Iter} = State0) ->
 %% does not perpetually observe a row whose event the system has
 %% rejected. Subsequent applier passes do not retry rejected events
 %% (replay-from-beginning would just re-fire the same failure).
-apply_batch(#state{instance_id = Id} = State, Batch) ->
+apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch) ->
     {Verified, Rejected} = verify_batch(State, Batch, [], []),
+    RejectedCount = length(Rejected),
     case Rejected of
         [] -> ok;
-        _ -> ok = evict_rejected_overlay(Id, Rejected)
-    end,
-    case Verified of
-        [] ->
-            State;
         _ ->
-            gen_server:cast(
-                State#state.instance_pid,
-                {install_local_batch, Verified}
-            ),
-            {CellEvents, FoldEvents} = partition_by_op(Verified),
-            State1 = apply_fold_batch(State, FoldEvents),
-            State2 = apply_cell_batch(State1, CellEvents),
-            ok = publish_batch(State2, Verified),
-            State2
-    end.
+            ok = evict_rejected_overlay(Id, Rejected),
+            %% No `install_local_batch` cast will be issued for these
+            %% events, but the overlay just shrank — hint the instance
+            %% so any caller blocked in `await_apply/1,2` can be
+            %% signalled instead of waiting for the next install batch.
+            gen_server:cast(InstancePid, check_drain_waiters)
+    end,
+    VerifiedCount = length(Verified),
+    State1 =
+        case Verified of
+            [] ->
+                State;
+            _ ->
+                %% Order matters for `await_apply/1,2`'s contract:
+                %% applier-side projection writes (fold, cell_apply,
+                %% publish) run BEFORE the `install_local_batch` cast
+                %% is dispatched to the instance. The instance's
+                %% handler is the place that signals
+                %% `drain_waiters` — by enqueuing the cast last we
+                %% guarantee that, by the time a caller's
+                %% `await_apply` sees the overlay empty, the
+                %% projection adapter, fold state, and `publish_fun`
+                %% have all observed the events. The earlier ordering
+                %% (cast first, then process in the applier) was a
+                %% concurrency micro-optimisation: it overlapped the
+                %% applier's projection write with the instance's MST
+                %% install. The pipeline still overlaps across
+                %% batches (the applier's NEXT batch starts while the
+                %% instance is processing this batch's cast), so the
+                %% reorder only costs the within-batch overlap, which
+                %% is dominated by the projection write anyway.
+                {CellEvents, FoldEvents} = partition_by_op(Verified),
+                S1 = apply_fold_batch(State, FoldEvents),
+                S2 = apply_cell_batch(S1, CellEvents),
+                ok = publish_batch(S2, Verified),
+                gen_server:cast(
+                    InstancePid,
+                    {install_local_batch, Verified}
+                ),
+                S2
+        end,
+    %% One telemetry event per applier batch, regardless of which
+    %% sub-path the events take (fold, cell_apply, publish). This is
+    %% the single source of truth for "events the applier has fully
+    %% processed end-to-end" — the path-specific
+    %% `[bondy_oplog, applier, published]` event only fires for the
+    %% `publish_fun`/db_core mirror path.
+    telemetry:execute(
+        [bondy_oplog, applier, applied],
+        #{count => VerifiedCount, rejected => RejectedCount},
+        #{instance_id => Id}
+    ),
+    State1.
 
 %% @private
 %% Partitions a verified batch into `{CellApplyEvents, FoldEvents}`.

@@ -27,6 +27,9 @@ just bench-concurrency-oplog 10  # oplog only
 just bench-concurrency-db 10     # mst_db only
 just bench-concurrency-wal 8     # WAL only
 
+# End-to-end pipeline (multi-shard substrate + ECharts dashboard)
+just bench-e2e 10                # write_only / read_only / mixed_70r_30w
+
 just bench-open         # open the most recent HTML report
 just bench-clean        # wipe _output / _build / deps
 ```
@@ -61,6 +64,38 @@ project under `bench/` reuses the rebar3-built beams from
 | `benchmarks/mst_db.exs`      | `bondy_mst_db` `read/3`, `read_batch/2`, `range/4`, `ensure_fresh/2` across cache hit-rate sweep (cold 0%, warm 50%, hot 99%) |
 | `benchmarks/oplog.exs`       | `bondy_oplog` `append`, `append_many`, `append + await_apply`, `get`, `size`, `root_hash`, `fold_range` |
 | `benchmarks/wal.exs`         | `bondy_oplog_wal` `append`, `append_batch`, `sync`, `info`, `durable_position` — per-write vs batched fsync |
+
+### End-to-end pipeline (ECharts dashboard, not Benchee)
+
+The `Bench.E2E` harness provisions a multi-shard `bondy_db_core`
+substrate (per-shard projection + cache + overlay) and starts one
+`bondy_oplog` instance per shard with the substrate wired as the
+applier's `cell_apply_target`. Writes flow through the full pipeline
+(`append → WAL → applier → projection`); reads go through
+`bondy_db_core.read/4` (cache-fast, projection on miss).
+
+Per-stage telemetry is collected via handlers on
+`[bondy_oplog, wal, append|fsync]`, `[bondy_oplog, applier, *]` and
+`[bondy_db_core, read|range|range_all]`. Each scenario emits JSON +
+a self-contained ECharts dashboard with:
+
+- **Pipeline Sankey** — event flow between substrate sinks.
+- **Latency sundial** — sunburst over (pipeline → stage → percentile).
+- **Per-shard heatmap** — distribution by (stage × shard).
+- **Latency rose** — polar bars of p99 per stage (log radial axis).
+- **Throughput** — workload ops/sec and per-stage event count.
+- **Histograms** — log-bucketed latency distribution per stage and
+  workload.
+
+Reports land under `bench/_output/e2e_pipeline/<name>/index.html`
+with a top-level `index.html` linking every scenario.
+
+| Script                              | What it measures                            |
+|-------------------------------------|---------------------------------------------|
+| `benchmarks/e2e_pipeline.exs`       | `write_only_w<W>`, `read_only_w<R>` and `mixed_70r_30w_w<W+R>` over a 4-shard substrate with N pre-populated keys |
+
+Set `DURATION_S`, `WARMUP_MS`, `SHARDS`, `PREPOPULATE`, `WRITERS`,
+`READERS` to tune the run.
 
 ### Concurrency (sustained-load harness, not Benchee)
 

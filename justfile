@@ -101,6 +101,37 @@ bench-concurrency-wal duration="8":
     cd {{bench_dir}} && mix deps.get
     DURATION_S={{duration}} cd {{bench_dir}} && mix run benchmarks/concurrency_wal.exs
 
+# End-to-end pipeline benchmark with ECharts dashboard. Drives the
+# full bondy_db substrate (WAL → applier → MST → projection → cache
+# → reads) under three scenarios and writes a dashboard per scenario
+# to bench/_output/e2e_pipeline/<name>/index.html with a top-level
+# index linking them.
+#
+# Knobs (all optional, see e2e_pipeline.exs for defaults):
+#   duration  : DURATION_S (seconds per scenario)
+#   shards    : SHARDS (number of independent WAL+applier shards)
+#   fsync     : WAL_FSYNC (per_write | batched)
+#   batch     : BATCH_SIZE (writer batch size; 1 = single append/2)
+#   cache     : BYPASS_CACHE (true | false; bypass the substrate cache)
+#   backends  : BACKENDS (ets,leveled — pass one or both)
+#
+# `+SDio <shards>` pins one dirty-I/O scheduler per shard so the WAL
+# fsyncs run in parallel rather than time-slicing on the default 10
+# dirty-I/O threads. Matching count keeps the disk-bound work
+# scheduler-pinned.
+bench-e2e duration="10" shards="4" fsync="per_write" batch="1" cache="false" backends="ets,leveled":
+    rebar3 compile
+    cd {{bench_dir}} && mix deps.get
+    cd {{bench_dir}} && \
+      ELIXIR_ERL_OPTIONS="+SDio {{shards}}" \
+      DURATION_S={{duration}} \
+      SHARDS={{shards}} \
+      WAL_FSYNC={{fsync}} \
+      BATCH_SIZE={{batch}} \
+      BYPASS_CACHE={{cache}} \
+      BACKENDS={{backends}} \
+      mix run benchmarks/e2e_pipeline.exs
+
 # Open the most recently generated HTML report (macOS / Linux).
 bench-open:
     @latest=$(ls -1t {{output_dir}}/*/index.html 2>/dev/null | head -1); \

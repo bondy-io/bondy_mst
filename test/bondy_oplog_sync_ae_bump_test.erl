@@ -118,6 +118,12 @@ no_op_sync_against_empty_peer_still_bumps() ->
     [bondy_oplog:append(A, X) || X <- [a, b, c]],
     ok = bondy_oplog:await_apply(A),
     Before = bondy_db_core_registry:last_ae_at(NS, primary, 0),
+    %% AE timestamps are `monotonic_time(millisecond)`. The applier's
+    %% commit_now bump (fired on `end_of_log` after the appends above)
+    %% can land in the same ms as the sync bump that follows — the
+    %% test would then observe `After == Before` even though the bump
+    %% did happen. Sleep until the clock has guaranteed to advance.
+    timer:sleep(2),
     %% A pulls from B which is empty — no events to apply but the round
     %% completes successfully.
     {ok, _} = bondy_oplog:sync(A, B),

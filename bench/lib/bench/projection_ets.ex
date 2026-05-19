@@ -1,8 +1,12 @@
 defmodule Bench.ProjectionEts do
   @moduledoc """
   In-memory `bondy_oplog_projection_adapter` for benchmarks. Mirrors
-  `test/bondy_oplog_projection_ets.erl` but lives in the bench project
-  so we don't need the test profile beams on the code path.
+  `test/bondy_oplog_projection_ets.erl`: rows are keyed by
+  `{Bucket, Key}` so an `ordered_set` scan over a single bucket stays
+  in `(Bucket, Key)` lexicographic order.
+
+  Lives in the bench project so we don't need to add `_build/test/lib`
+  to the code path.
   """
 
   # The Erlang behaviour module is loaded at runtime via Code.prepend_path,
@@ -24,26 +28,30 @@ defmodule Bench.ProjectionEts do
     :ok
   end
 
-  def get(tab, key) do
-    case :ets.lookup(tab, key) do
+  def get(tab, bucket, key) do
+    case :ets.lookup(tab, {bucket, key}) do
       [{_, frame}] -> {:ok, frame}
       [] -> :not_found
     end
   end
 
   def put_batch(tab, entries) do
-    true = :ets.insert(tab, entries)
+    rows = for {b, k, f} <- entries, do: {{b, k}, f}
+    true = :ets.insert(tab, rows)
     :ok
   end
 
-  def range(tab, low, high, opts) do
+  def range(tab, bucket, low, high, opts) do
     limit = Map.get(opts, :limit, 1000)
     direction = Map.get(opts, :direction, :asc)
 
     ms = [
-      {{:"$1", :"$2"},
-       [{:>=, :"$1", {:const, low}}, {:<, :"$1", {:const, high}}],
-       [{{:"$1", :"$2"}}]}
+      {{{:"$1", :"$2"}, :"$3"},
+       [
+         {:"=:=", :"$1", {:const, bucket}},
+         {:>=, :"$2", {:const, low}},
+         {:<, :"$2", {:const, high}}
+       ], [{{:"$2", :"$3"}}]}
     ]
 
     result =
@@ -61,8 +69,8 @@ defmodule Bench.ProjectionEts do
     {:ok, ordered}
   end
 
-  def delete(tab, key) do
-    true = :ets.delete(tab, key)
+  def delete(tab, bucket, key) do
+    true = :ets.delete(tab, {bucket, key})
     :ok
   end
 

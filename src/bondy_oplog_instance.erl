@@ -145,7 +145,14 @@ without protocol changes.
     %% atomic monotonically increases, so any event with a higher seq
     %% cannot already be in the tree. Resume-overlap events (seq ≤ max)
     %% still take the safe path that probes the tree.
-    max_local_installed_seq :: non_neg_integer()
+    max_local_installed_seq :: non_neg_integer(),
+    %% Callers blocked in `await_apply/1,2` while the overlay is
+    %% non-empty. Each install path that may shrink the overlay
+    %% (`install_local_batch` cast, `install_remote` call, and the
+    %% applier's `check_drain_waiters` rejection hint) calls
+    %% `maybe_signal_drain_waiters/1` which `gen_server:reply`-s every
+    %% queued From the moment the overlay reaches 0.
+    drain_waiters = [] :: [gen_server:from()]
 }).
 
 -type backend() :: map | ets | module().
@@ -704,44 +711,47 @@ await_apply(Target) ->
 await_apply(Target, Timeout) when
     is_binary(Target) orelse is_pid(Target)
 ->
-    Deadline = case Timeout of
-        infinity -> infinity;
-        Ms when is_integer(Ms), Ms >= 0 ->
-            erlang:monotonic_time(millisecond) + Ms
-    end,
-    do_await_apply(Target, Deadline).
-
-%% @private
-do_await_apply(Target, Deadline) ->
-    case overlay_drained(Target) of
-        true -> ok;
-        false ->
-            case past_deadline(Deadline) of
-                true -> {error, timeout};
-                false ->
-                    timer:sleep(5),
-                    do_await_apply(Target, Deadline)
-            end
+    %% Event-driven barrier: resolve the instance pid and issue a
+    %% `await_overlay_drained` gen_server:call. If the overlay is
+    %% non-empty the instance queues the caller in `drain_waiters`
+    %% and replies the moment its install handlers shrink the overlay
+    %% to 0. Replaces the prior 5 ms-poll loop, which floored every
+    %% wait at the timer resolution regardless of how fast the
+    %% applier actually drained.
+    case resolve_instance_pid(Target) of
+        undefined ->
+            %% No registered instance — nothing to drain. Mirrors the
+            %% old polling behaviour for pid lookups that miss.
+            ok;
+        Pid ->
+            call_await_overlay_drained(Pid, Timeout)
     end.
 
 %% @private
-overlay_drained(Target) when is_binary(Target) ->
-    overlay_size(Target) =:= 0;
-overlay_drained(Target) when is_pid(Target) ->
-    case lookup_instance_id(Target) of
-        undefined -> true;
-        Id -> overlay_size(Id) =:= 0
+resolve_instance_pid(Pid) when is_pid(Pid) ->
+    Pid;
+resolve_instance_pid(InstanceId) when is_binary(InstanceId) ->
+    bondy_oplog_registry:instance_pid(InstanceId).
+
+%% @private
+call_await_overlay_drained(Pid, Timeout) ->
+    try gen_server:call(Pid, await_overlay_drained, Timeout) of
+        ok -> ok
+    catch
+        exit:{timeout, _} -> {error, timeout};
+        %% Subtree restart: treat as drained — the new instance starts
+        %% with an empty overlay so the prior overlay contents (if any)
+        %% are no longer observable.
+        exit:{noproc, _} -> ok;
+        exit:noproc -> ok;
+        exit:{normal, _} -> ok;
+        exit:{shutdown, _} -> ok
     end.
 
 %% @private
-past_deadline(infinity) -> false;
-past_deadline(Deadline) ->
-    erlang:monotonic_time(millisecond) >= Deadline.
-
-%% @private
-%% Best-effort reverse lookup from gen_server pid to instance_id.
-%% Returns `undefined` when the pid is not registered, in which case
-%% the overlay is treated as drained.
+%% Best-effort reverse lookup from gen_server pid to instance_id. Used
+%% by `applier_pid_for/1` when the caller targets the instance by pid.
+%% Returns `undefined` when the pid is not registered.
 lookup_instance_id(Pid) when is_pid(Pid) ->
     try gen_server:call(Pid, instance_id, 1000) of
         Id when is_binary(Id) -> Id;
@@ -1503,6 +1513,21 @@ do_handle_call(drain_install_queue, _From, State) ->
     %% this call is processed, every prior `install_local_batch`
     %% cast has been handled. The reply itself carries no payload.
     {reply, ok, State};
+do_handle_call(await_overlay_drained, From, State) ->
+    %% Event-driven `await_apply/1,2`. Reply inline when the overlay
+    %% is already empty; otherwise queue the caller and let
+    %% `maybe_signal_drain_waiters/1` reply when an install handler
+    %% next observes overlay_size == 0. The call has already jumped
+    %% past pending `install_local_batch` casts (gen_server mailbox
+    %% order), so the visible overlay size here reflects every event
+    %% the applier has already dispatched to this instance.
+    case overlay_size_tab(State#state.overlay) of
+        0 ->
+            {reply, ok, State};
+        _ ->
+            Waiters = State#state.drain_waiters,
+            {noreply, State#state{drain_waiters = [From | Waiters]}}
+    end;
 do_handle_call({install_remote, Event}, _From, State0) ->
     %% Sole install path for peer-received events. Signature
     %% verification ran in the applier process (see
@@ -1748,7 +1773,16 @@ handle_cast({install_local_batch, Events}, State0) ->
     State1 = install_local_batch(State0, Events),
     ok = publish(State1),
     State2 = evict_overlay_batch(State1, Events),
-    {noreply, State2};
+    State3 = maybe_signal_drain_waiters(State2),
+    {noreply, State3};
+handle_cast(check_drain_waiters, State) ->
+    %% Sent by the applier after `evict_rejected_overlay/2` evicts
+    %% events for which no `install_local_batch` cast will be issued
+    %% (the verify step rejected the whole batch). Without this hint a
+    %% caller blocked in `await_overlay_drained` would wait until the
+    %% next install batch shrank the overlay, even though the overlay
+    %% is already empty.
+    {noreply, maybe_signal_drain_waiters(State)};
 handle_cast(
     {compaction_done, Pid, Result},
     #state{compaction = #{pid := Pid}} = State0
@@ -2912,10 +2946,20 @@ overlay_last_key_tab(Tab) ->
     end.
 
 %% @private
-overlay_size(InstanceId) when is_binary(InstanceId) ->
-    case bondy_oplog_registry:overlay_tab(InstanceId) of
-        undefined -> 0;
-        Tab -> overlay_size_tab(Tab)
+%% Replies `ok` to every caller queued in `drain_waiters` once the
+%% overlay has reached size 0. Idempotent — re-running with an empty
+%% waiter list or a non-empty overlay is a no-op. Called from every
+%% handler that can shrink the overlay (`install_local_batch`,
+%% `check_drain_waiters`).
+maybe_signal_drain_waiters(#state{drain_waiters = []} = State) ->
+    State;
+maybe_signal_drain_waiters(#state{drain_waiters = Waiters, overlay = Tab} = State) ->
+    case overlay_size_tab(Tab) of
+        0 ->
+            lists:foreach(fun(From) -> gen_server:reply(From, ok) end, Waiters),
+            State#state{drain_waiters = []};
+        _ ->
+            State
     end.
 
 %% @private

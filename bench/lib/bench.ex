@@ -14,12 +14,17 @@ defmodule Bench do
   @root_app :bondy_mst
   # __DIR__ is bench/lib, so the bondy_mst project root is two up.
   @project_root Path.expand("../..", __DIR__)
-  @rebar_lib Path.join([@project_root, "_build", "default", "lib"])
+  @rebar_default_lib Path.join([@project_root, "_build", "default", "lib"])
+  # `rebar3 as bench compile` materialises here. Contains everything
+  # the `default` profile builds plus the extra bench-only deps
+  # (leveled today). Scanned in addition to the default lib so a
+  # plain `rebar3 compile` is still enough for ETS-only scenarios.
+  @rebar_bench_lib Path.join([@project_root, "_build", "bench", "lib"])
   @output_dir Path.join([@project_root, "bench", "_output"])
 
   @doc """
-  Ensures the rebar3 default profile is compiled, prepends every
-  beam directory to the code path, and starts `:bondy_mst`.
+  Ensures the rebar3 default + bench profiles are compiled, prepends
+  every beam directory to the code path, and starts `:bondy_mst`.
 
   Safe to call multiple times in one VM.
   """
@@ -29,6 +34,16 @@ defmodule Bench do
     start_app!()
     File.mkdir_p!(@output_dir)
     :ok
+  end
+
+  @doc """
+  Returns `true` when the bench profile materialised the leveled
+  beams. Benchmark scripts can use this to skip leveled scenarios on
+  a checkout that hasn't run `rebar3 as bench compile` yet.
+  """
+  def leveled_available? do
+    File.dir?(Path.join([@rebar_bench_lib, "leveled", "ebin"])) and
+      Code.ensure_loaded?(:leveled_bookie)
   end
 
   @doc "Absolute path to the bench HTML/JSON output directory."
@@ -107,27 +122,39 @@ defmodule Bench do
   end
 
   defp ensure_compiled! do
-    case File.dir?(@rebar_lib) do
-      true ->
-        :ok
+    unless File.dir?(@rebar_default_lib) do
+      compile!(["compile"], "default")
+    end
 
-      false ->
-        IO.puts("[bench] compiling bondy_mst with rebar3...")
-        {out, status} = System.cmd("rebar3", ["compile"], cd: @project_root)
+    unless File.dir?(@rebar_bench_lib) do
+      compile!(["as", "bench", "compile"], "bench")
+    end
+  end
 
-        if status != 0 do
-          IO.puts(out)
-          raise "rebar3 compile failed (status #{status})"
-        end
+  defp compile!(args, profile) do
+    IO.puts("[bench] compiling bondy_mst (rebar3 profile: #{profile})...")
+    {out, status} = System.cmd("rebar3", args, cd: @project_root)
+
+    if status != 0 do
+      IO.puts(out)
+      raise "rebar3 compile (profile #{profile}) failed (status #{status})"
     end
   end
 
   defp prepend_beam_paths! do
-    @rebar_lib
-    |> File.ls!()
-    |> Enum.each(fn dep ->
-      ebin = Path.join([@rebar_lib, dep, "ebin"])
-      if File.dir?(ebin), do: Code.prepend_path(ebin)
+    # Default first so production deps win on dup; bench second so
+    # leveled (only in bench profile) is reachable.
+    Enum.each([@rebar_default_lib, @rebar_bench_lib], fn root ->
+      case File.ls(root) do
+        {:ok, deps} ->
+          Enum.each(deps, fn dep ->
+            ebin = Path.join([root, dep, "ebin"])
+            if File.dir?(ebin), do: Code.prepend_path(ebin)
+          end)
+
+        _ ->
+          :ok
+      end
     end)
   end
 
