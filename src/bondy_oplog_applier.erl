@@ -195,7 +195,24 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% differ from the per-instance `fold_module`) drives the
     %% decode/apply/encode cycle. `undefined` disables the path —
     %% existing instances are unaffected.
-    cell_apply_ctx :: cell_apply_ctx() | undefined
+    cell_apply_ctx :: cell_apply_ctx() | undefined,
+    %% Demand-based flow control toward the instance gen_server. The
+    %% applier increments slot 1 of `install_in_flight` before each
+    %% `gen_server:cast({install_local_batch, …})`; the instance
+    %% decrements it after handling the cast. When the value would
+    %% reach `max_install_in_flight`, the applier defers reading the
+    %% next WAL batch and waits for the instance to send a
+    %% `drain_resume` cast. Bounds the instance's mailbox; without
+    %% it, sustained write throughput overruns the install path and
+    %% builds an unbounded backlog (observable as an 8 GB+ RES set
+    %% under stress, and ultimately a `gen_server:call` timeout on
+    %% `drain_install_queue` during commit).
+    install_in_flight :: atomics:atomics_ref() | undefined,
+    max_install_in_flight :: pos_integer() | undefined,
+    %% Set when the applier deferred a drain because the cap was
+    %% reached. The next `drain_resume` cast (or, defensively, the
+    %% backstop poll timer) re-arms `self() ! drain`.
+    drain_deferred = false :: boolean()
 }).
 
 -type shard_key()   :: {atom(), atom(), non_neg_integer()}.
@@ -232,6 +249,7 @@ configured; defaults are no-ops so existing instances are unaffected.
 -export([enqueue_remote/2]).
 -export([refresh_validator/2]).
 -export([projection/1]).
+-export([notify_drain_resume/1]).
 
 -export([init/1]).
 -export([handle_call/3]).
@@ -308,6 +326,16 @@ enqueue_remote(ApplierPid, Event) when is_pid(ApplierPid) ->
 refresh_validator(ApplierPid, Reason) when is_pid(ApplierPid) ->
     gen_server:cast(ApplierPid, {refresh_validator, Reason}).
 
+-spec notify_drain_resume(pid()) -> ok.
+
+%% @doc Called by the instance after it processes an
+%% `install_local_batch` cast and the in-flight counter drops below
+%% the cap. Lets the applier resume reading the WAL if it had
+%% deferred its drain. Idempotent: extra resumes during normal
+%% operation are absorbed by the `drain_deferred` flag.
+notify_drain_resume(ApplierPid) when is_pid(ApplierPid) ->
+    gen_server:cast(ApplierPid, drain_resume).
+
 -spec projection(pid()) ->
     {ok, term()} | {error, no_fold_configured}.
 
@@ -371,6 +399,16 @@ do_init_2(InstanceId, WalDir, CommitEvery, PollMs, _Opts,
                     {ValidatorMod, ValidatorState} =
                         bondy_oplog_instance:get_validator(InstP),
                     {FoldMod, FoldState0} = init_fold(InstanceId),
+                    %% Snapshot the demand-based flow-control handle
+                    %% published by the instance's `init/1`. `undefined`
+                    %% means the entry hasn't caught up yet — the
+                    %% applier treats that as "no cap" and falls back
+                    %% to the previous unbounded behaviour until the
+                    %% next drain pass picks the ref up.
+                    InFlightRef =
+                        bondy_oplog_registry:install_in_flight(InstanceId),
+                    InFlightCap =
+                        bondy_oplog_registry:max_install_in_flight(InstanceId),
                     State = #state{
                         instance_id = InstanceId,
                         instance_pid = InstP,
@@ -388,7 +426,9 @@ do_init_2(InstanceId, WalDir, CommitEvery, PollMs, _Opts,
                         ae_targets = AeTargets,
                         publish_ns = PublishNs,
                         publish_fun = PublishFun,
-                        cell_apply_ctx = CellCtx
+                        cell_apply_ctx = CellCtx,
+                        install_in_flight = InFlightRef,
+                        max_install_in_flight = InFlightCap
                     },
                     ok = bondy_oplog_registry:set_applier_pid(
                         InstanceId, self()
@@ -484,6 +524,14 @@ handle_call(_Req, _From, State) ->
 
 handle_cast({refresh_validator, Reason}, State) ->
     {noreply, do_refresh_validator(Reason, State)};
+handle_cast(drain_resume, #state{drain_deferred = false} = State) ->
+    %% Already draining (or about to); the next `self() ! drain` will
+    %% pick up the freed slot anyway. Drop the redundant signal.
+    {noreply, State};
+handle_cast(drain_resume, #state{drain_deferred = true} = State) ->
+    %% Capacity has freed up; resume the drain loop immediately.
+    self() ! drain,
+    {noreply, State#state{drain_deferred = false}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -493,9 +541,27 @@ handle_info(drain, State0) ->
             ok = await_or_idle(State1),
             self() ! drain,
             {noreply, State1};
+        {paused, State1} ->
+            %% Hit the demand cap. Stay parked — the instance will
+            %% send `drain_resume` once it processes a batch. The
+            %% backstop timer is a defensive belt-and-braces in case
+            %% the signal is ever lost (e.g. instance restart between
+            %% increment and decrement); it costs ~one wake per
+            %% second when fully gated and nothing when not.
+            _ = erlang:send_after(1_000, self(), drain_backstop),
+            {noreply, State1#state{drain_deferred = true}};
         {stop, Reason, State1} ->
             {stop, Reason, State1}
     end;
+handle_info(drain_backstop, #state{drain_deferred = true} = State) ->
+    %% Defensive re-arm in case `drain_resume` was missed. If the cap
+    %% is still saturated, `drain_loop` returns `{paused, _}` again
+    %% and another backstop is scheduled.
+    self() ! drain,
+    {noreply, State#state{drain_deferred = false}};
+handle_info(drain_backstop, State) ->
+    %% Backstop fired while we were already draining — ignore.
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -602,6 +668,34 @@ watermark_hlc(Key) ->
     bondy_oplog_event:key_hlc(Key).
 
 %% @private
+%% Demand-based dispatch gate. Returns `true` while the in-flight
+%% counter is below the cap (or the instance hasn't published a cap
+%% yet, in which case the legacy unbounded behaviour applies).
+install_dispatch_allowed(#state{
+    install_in_flight = undefined
+}) ->
+    true;
+install_dispatch_allowed(#state{
+    max_install_in_flight = undefined
+}) ->
+    true;
+install_dispatch_allowed(#state{
+    install_in_flight = Ref,
+    max_install_in_flight = Cap
+}) ->
+    atomics:get(Ref, 1) < Cap.
+
+%% @private
+%% Increment the in-flight counter just before dispatching a
+%% `install_local_batch` cast to the instance. Idempotent for the
+%% `undefined` fallback so callers don't have to branch.
+reserve_install_slot(#state{install_in_flight = undefined}) ->
+    ok;
+reserve_install_slot(#state{install_in_flight = Ref}) ->
+    _ = atomics:add(Ref, 1, 1),
+    ok.
+
+%% @private
 %% Reads the on-disk `consumer.offset`. Used to seed the in-memory
 %% commit accumulator so a brand-new applier doesn't overwrite a
 %% live consumer.offset with a fresh `{0, 48}`. The resume position
@@ -618,7 +712,21 @@ read_consumer_offset(WalDir) ->
 %% On every batch it applies the events and bumps the in-memory
 %% consumer offset; consumer.offset and `set_committed_segment` are
 %% persisted at `commit_every` events or on `end_of_log`.
-drain_loop(#state{iter = Iter} = State0) ->
+%%
+%% Before each next-batch read the loop checks the demand-based
+%% in-flight counter against `max_install_in_flight`. When the cap is
+%% reached the loop returns `{paused, State}` and `handle_info(drain,
+%% _)` marks `drain_deferred = true`; the loop is rearmed by the
+%% instance's `drain_resume` cast.
+drain_loop(#state{} = State0) ->
+    case install_dispatch_allowed(State0) of
+        false ->
+            {paused, State0};
+        true ->
+            drain_loop_step(State0)
+    end.
+
+drain_loop_step(#state{iter = Iter} = State0) ->
     case bondy_oplog_wal_reader:next(Iter) of
         {ok, Batch, _Hlcs, {NextSeg, NextOff}, NewIter} ->
             StateA = apply_batch(State0, Batch),
@@ -695,6 +803,15 @@ apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch)
                 S1 = apply_fold_batch(State, FoldEvents),
                 S2 = apply_cell_batch(S1, CellEvents),
                 ok = publish_batch(S2, Verified),
+                %% Demand-based dispatch: bump the shared atomic
+                %% BEFORE casting. The instance decrements after it
+                %% handles the cast, and `drain_loop/1` checks this
+                %% counter on its next iteration. The cap is checked
+                %% by the loop, not here — `apply_batch/2` always
+                %% dispatches the batch it just verified, because
+                %% the verification already happened. The next
+                %% iteration's check is what gates further reads.
+                ok = reserve_install_slot(State),
                 gen_server:cast(
                     InstancePid,
                     {install_local_batch, Verified}

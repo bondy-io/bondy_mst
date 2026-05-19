@@ -114,7 +114,20 @@ table's lifecycle tied to a supervisor child.
     %% `bondy_db_core_registry:bump_ae_targets/1,2`. Published once at
     %% instance init via `set_ae_targets/2`; unchanged for the
     %% instance's lifetime. Empty list = wiring disabled.
-    ae_targets = [] :: [{atom(), atom(), non_neg_integer()}]
+    ae_targets = [] :: [{atom(), atom(), non_neg_integer()}],
+    %% Demand-based applier→instance flow control. Single-slot atomic
+    %% counter shared between the applier (increments before
+    %% dispatching an `install_local_batch` cast) and the instance
+    %% (decrements after handling). When the value reaches
+    %% `max_install_in_flight`, the applier defers reading the next
+    %% WAL batch and waits for the instance to send a `drain_resume`
+    %% cast. Bounds the instance's mailbox at `cap × batch_size`
+    %% events regardless of write throughput. Published once at
+    %% instance init; `undefined` between the entry's creation and
+    %% the instance's `init/1` finishing (a brief race the applier
+    %% tolerates by treating it as "no cap" until visible).
+    install_in_flight :: atomics:atomics_ref() | undefined,
+    max_install_in_flight :: pos_integer() | undefined
 }).
 
 -record(state, {}).
@@ -180,6 +193,8 @@ table's lifecycle tied to a supervisor child.
 -export([overlay_tab/1]).
 -export([fast_path/1]).
 -export([ae_targets/1]).
+-export([install_in_flight/1]).
+-export([max_install_in_flight/1]).
 -export([instance_id_by_sup_pid/1]).
 %% Composite reads — pull several fields in one ETS lookup. Used by
 %% hot lock-free reader paths in `bondy_oplog_instance` that would
@@ -194,6 +209,7 @@ table's lifecycle tied to a supervisor child.
 -export([set_overlay_tab/2]).
 -export([set_fast_path/2]).
 -export([set_ae_targets/2]).
+-export([set_install_in_flight/3]).
 
 %% gen_server callbacks
 -export([init/1]).
@@ -366,6 +382,30 @@ overlay_tab(InstanceId) ->
     field(InstanceId, #entry.overlay_tab).
 
 ?DOC("""
+Returns the demand-based flow-control counter for the applier→instance
+`install_local_batch` channel, or `undefined` when the entry has not
+yet been published. The applier reads this once at `init/1` and caches
+the ref; both processes update it via `atomics:add_get/3` and
+`atomics:sub/3`.
+""").
+-spec install_in_flight(instance_id()) ->
+    atomics:atomics_ref() | undefined.
+
+install_in_flight(InstanceId) ->
+    field(InstanceId, #entry.install_in_flight).
+
+?DOC("""
+Returns the configured cap on the applier's in-flight
+`install_local_batch` casts to the instance, or `undefined` when the
+entry has not yet been published. Read by the applier when computing
+its dispatch budget.
+""").
+-spec max_install_in_flight(instance_id()) -> pos_integer() | undefined.
+
+max_install_in_flight(InstanceId) ->
+    field(InstanceId, #entry.max_install_in_flight).
+
+?DOC("""
 Returns the cached fast-path bundle for an instance, or `undefined`
 when none is published (callers must route through the instance
 gen_server).
@@ -516,6 +556,29 @@ set_ae_targets(InstanceId, Targets) when is_binary(InstanceId),
                                           is_list(Targets) ->
     _ = update_field(InstanceId, #entry.ae_targets, Targets),
     ok.
+
+?DOC("""
+Publishes the per-instance flow-control handle used by the applier to
+gate its `install_local_batch` dispatch. Set once by the instance's
+`init/1`; both fields are read by the applier and updated by both
+sides via the same atomic ref.
+""").
+-spec set_install_in_flight(
+    instance_id(), atomics:atomics_ref(), pos_integer()
+) -> ok.
+
+set_install_in_flight(InstanceId, Ref, Cap)
+        when is_binary(InstanceId), is_integer(Cap), Cap >= 1 ->
+    case ets:lookup(?TABLE, InstanceId) of
+        [#entry{} = E] ->
+            true = ets:insert(
+                ?TABLE,
+                E#entry{install_in_flight = Ref, max_install_in_flight = Cap}
+            ),
+            ok;
+        [] ->
+            ok
+    end.
 
 %% =============================================================================
 %% gen_server CALLBACKS

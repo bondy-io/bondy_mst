@@ -1009,10 +1009,69 @@ put_sub_after_first(T, Key, Value, Store0, Level, [First, Second | Rest0]) ->
     end.
 
 %% @private
+%% Dangling-page recovery
+%% ----------------------
+%%
+%% `merge_aux/5` and `split/4` look pages up by content hash. In the
+%% steady state every hash they're handed resolves in either Store0
+%% (the merge accumulator), A's store, or B's store. Under sustained
+%% high write throughput against a `bondy_oplog_instance` (observed
+%% in the e2e benchmark at ≥8 shards × ≥16-event batches with batched
+%% fsync) we have occasionally hit a state where a referenced hash
+%% resolves in NEITHER store. The pre-existing behaviour was to crash
+%% the gen_server (`FunctionClauseError` on `bondy_mst_page:level/1`
+%% with `undefined`), which in turn killed the supervisor subtree.
+%%
+%% The handlers below recover from this by treating the dangling
+%% subtree as empty: log once with diagnostic context and continue.
+%% The result is a tree that has lost some content, not a crashed
+%% subtree. This is a stop-gap — the root cause (some path that
+%% references a hash without inserting its page) is still under
+%% investigation. A focused, fully-deterministic repro has not yet
+%% been isolated despite multi-million-event stress runs against
+%% `put_batch` and the live oplog instance pipeline.
+log_dangling_page(Tag, T, Store0, Hash, Key) ->
+    ?LOG_WARNING(#{
+        description => Tag,
+        hash => Hash,
+        key => Key,
+        store0_has => bondy_mst_store:has(Store0, Hash),
+        t_store_has => bondy_mst_store:has(T#?MODULE.store, Hash)
+    }).
+
+log_dangling_root(Tag, A, B, Store0, ARoot, BRoot) ->
+    ?LOG_WARNING(#{
+        description => Tag,
+        a_root => ARoot,
+        b_root => BRoot,
+        store0_has_a => bondy_mst_store:has(Store0, ARoot),
+        store0_has_b => bondy_mst_store:has(Store0, BRoot),
+        a_store_has_a => bondy_mst_store:has(A#?MODULE.store, ARoot),
+        b_store_has_b => bondy_mst_store:has(B#?MODULE.store, BRoot),
+        b_store_has_a => bondy_mst_store:has(B#?MODULE.store, ARoot),
+        a_store_has_b => bondy_mst_store:has(A#?MODULE.store, BRoot)
+    }).
+
 split(_, Store, undefined, _) ->
     {undefined, undefined, Store};
 split(T, Store0, Hash, Key) ->
     Page = get_page(T, Store0, Hash),
+    case Page of
+        undefined ->
+            %% Dangling Hash: a parent page referenced a child by hash
+            %% but the child is in no store we can see. Treat the
+            %% subtree as empty rather than crashing the gen_server.
+            %% This shouldn't happen in steady-state — see the
+            %% "Dangling-page recovery" note at the top of merge_aux
+            %% for the open root-cause investigation.
+            log_dangling_page("split: page missing", T, Store0, Hash, Key),
+            {undefined, undefined, Store0};
+        _ ->
+            split_page(T, Store0, Hash, Key, Page)
+    end.
+
+%% @private
+split_page(T, Store0, Hash, Key, Page) ->
     Level = bondy_mst_page:level(Page),
     Low = bondy_mst_page:low(Page),
     [{K0, _, _} | _] = List0 = bondy_mst_page:list(Page),
@@ -1088,11 +1147,40 @@ merge_aux(_, B, Store0, undefined, BRoot) ->
     {BRoot, Store};
 merge_aux(A, B, Store0, ARoot, BRoot) ->
     APage = bondy_mst_store:get(Store0, ARoot),
+    BPage = get_page(B, Store0, BRoot),
+    case {APage, BPage} of
+        {undefined, undefined} ->
+            %% Both sides are dangling — pathologically corrupt
+            %% input. Reset to empty.
+            log_dangling_root("merge_aux: both A and B roots dangling",
+                              A, B, Store0, ARoot, BRoot),
+            {undefined, Store0};
+        {undefined, _} ->
+            %% A's root hash doesn't resolve in any store. Treat A as
+            %% empty for this subtree — fall back to clause 3's
+            %% "copy B over" behaviour.
+            log_dangling_root("merge_aux: A root dangling, falling back to B",
+                              A, B, Store0, ARoot, BRoot),
+            Store = bondy_mst_store:copy(Store0, B#?MODULE.store, BRoot),
+            {BRoot, Store};
+        {_, undefined} ->
+            %% B's root hash doesn't resolve. Keep A as-is.
+            log_dangling_root("merge_aux: B root dangling, keeping A",
+                              A, B, Store0, ARoot, BRoot),
+            {ARoot, Store0};
+        _ ->
+            merge_aux_pages(A, B, Store0, ARoot, BRoot, APage, BPage)
+    end.
+
+%% @private
+%% Pulled out so the head of `merge_aux/5` stays focused on the
+%% dangling-page guards. Reached only when both APage and BPage are
+%% real page records.
+merge_aux_pages(A, B, Store0, ARoot, BRoot, APage, BPage) ->
     ALevel = bondy_mst_page:level(APage),
     ALow = bondy_mst_page:low(APage),
     AEntries = bondy_mst_page:list(APage),
 
-    BPage = get_page(B, Store0, BRoot),
     BLevel = bondy_mst_page:level(BPage),
     BLow = bondy_mst_page:low(BPage),
     BEntries = bondy_mst_page:list(BPage),

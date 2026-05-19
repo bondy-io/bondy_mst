@@ -152,7 +152,17 @@ without protocol changes.
     %% applier's `check_drain_waiters` rejection hint) calls
     %% `maybe_signal_drain_waiters/1` which `gen_server:reply`-s every
     %% queued From the moment the overlay reaches 0.
-    drain_waiters = [] :: [gen_server:from()]
+    drain_waiters = [] :: [gen_server:from()],
+    %% Demand-based applier→instance flow control. The applier
+    %% increments slot 1 of `install_in_flight` before dispatching an
+    %% `install_local_batch` cast; this handler decrements it after
+    %% the cast is processed. When the post-decrement value is
+    %% `max_install_in_flight - 1` (i.e. just freed a slot from a
+    %% saturated counter), the instance sends a `drain_resume` cast
+    %% to the applier so it can read the next WAL batch. Bounds the
+    %% instance's mailbox at `cap × batch_size` events.
+    install_in_flight :: atomics:atomics_ref() | undefined,
+    max_install_in_flight :: pos_integer()
 }).
 
 -type backend() :: map | ets | module().
@@ -1343,7 +1353,9 @@ init({InstanceId, Opts}) ->
         max_overlay_bytes = maps:get(max_overlay_bytes, Opts, 5 * 1024 * 1024),
         overlay_throttle = maps:get(overlay_throttle, Opts, drop),
         overlay_counters = atomics:new(2, [{signed, false}]),
-        max_local_installed_seq = MaxLocalInstalledSeq
+        max_local_installed_seq = MaxLocalInstalledSeq,
+        install_in_flight = atomics:new(1, [{signed, false}]),
+        max_install_in_flight = maps:get(max_install_in_flight, Opts, 16)
     },
     ok = publish(State),
     %% Publish the overlay tid via a dedicated setter so a stale tid
@@ -1363,6 +1375,15 @@ init({InstanceId, Opts}) ->
     %% to the overlay without routing through this gen_server.
     ok = bondy_oplog_registry:set_fast_path(
         InstanceId, build_fast_path(State)
+    ),
+    %% Publish the flow-control handle. The applier reads this once
+    %% at its own `init/1` (or lazily on first drain) and gates its
+    %% `install_local_batch` dispatch on the cap. The instance owns
+    %% the atomic — applier just shares the ref.
+    ok = bondy_oplog_registry:set_install_in_flight(
+        InstanceId,
+        State#state.install_in_flight,
+        State#state.max_install_in_flight
     ),
     {ok, State}.
 
@@ -1774,6 +1795,7 @@ handle_cast({install_local_batch, Events}, State0) ->
     ok = publish(State1),
     State2 = evict_overlay_batch(State1, Events),
     State3 = maybe_signal_drain_waiters(State2),
+    ok = release_install_slot(State3),
     {noreply, State3};
 handle_cast(check_drain_waiters, State) ->
     %% Sent by the applier after `evict_rejected_overlay/2` evicts
@@ -2944,6 +2966,38 @@ overlay_last_key_tab(Tab) ->
     catch
         error:badarg -> undefined
     end.
+
+%% @private
+%% Decrement the applier→instance in-flight counter after an
+%% `install_local_batch` cast has been fully processed. If we just
+%% freed the saturated slot (post-decrement value equals `cap - 1`),
+%% wake the applier so it can resume reading the WAL. Cheaper than a
+%% timer-based poll on the applier side; the cast is a noop if the
+%% applier is already draining.
+release_install_slot(#state{
+    install_in_flight = undefined
+}) ->
+    ok;
+release_install_slot(#state{
+    instance_id = InstanceId,
+    install_in_flight = Ref,
+    max_install_in_flight = Cap
+}) ->
+    %% atomics is unsigned so add_get with -1 wraps if we underflow.
+    %% Use sub_get for a signed-safe decrement.
+    Now = atomics:sub_get(Ref, 1, 1),
+    case Now =:= Cap - 1 of
+        true ->
+            %% Just below the cap; the applier was (or may have been)
+            %% gated. Resume it.
+            case bondy_oplog_registry:applier_pid(InstanceId) of
+                undefined -> ok;
+                ApplierPid -> bondy_oplog_applier:notify_drain_resume(ApplierPid)
+            end;
+        false ->
+            ok
+    end,
+    ok.
 
 %% @private
 %% Replies `ok` to every caller queued in `drain_waiters` once the

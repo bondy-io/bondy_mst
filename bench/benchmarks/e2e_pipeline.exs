@@ -44,6 +44,12 @@ wal_fsync_mode =
 # approach the `wal_batched_batch16_8` 1.2M events/s number.
 batch_size = String.to_integer(System.get_env("BATCH_SIZE", "1"))
 
+# Applier→instance demand cap. Default 16. Set to 2 to demonstrate
+# the gate firing aggressively (writer should backpressure quickly);
+# set to a very large value to disable the cap and reproduce the
+# pre-flow-control behaviour.
+max_in_flight = String.to_integer(System.get_env("MAX_IN_FLIGHT", "16"))
+
 IO.puts(
   "[e2e] config: shards=#{shard_count} writers=#{writers} readers=#{readers} " <>
     "fsync=#{wal_fsync_mode} batch_size=#{batch_size} " <>
@@ -175,6 +181,7 @@ make_ctx = fn prefix, backend ->
         :bondy_oplog.start_instance(instance_id, %{
           fold_module: fold,
           fsync_mode: wal_fsync_mode,
+          max_install_in_flight: max_in_flight,
           applier: %{
             cell_apply_target: {ns, :primary, shard}
           }
