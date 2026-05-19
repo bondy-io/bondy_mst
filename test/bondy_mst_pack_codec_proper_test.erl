@@ -233,7 +233,7 @@ collapse_first(Entries) ->
 
 collapse_first_loop([], Acc) ->
     lists:reverse(Acc);
-collapse_first_loop([{H, O} | Rest], [{H, _} | _] = Acc) ->
+collapse_first_loop([{H, _} | Rest], [{H, _} | _] = Acc) ->
     %% Same hash as the last kept entry — skip.
     collapse_first_loop(skip_same_hash(H, Rest), Acc);
 collapse_first_loop([{H, O} | Rest], Acc) ->

@@ -51,3 +51,19 @@
 
 -define(BONDY_MST_PACK_BLOOM_HEADER_BYTES, 16).
 -define(BONDY_MST_PACK_BLOOM_DEFAULT_P,    0.01).
+
+%% -----------------------------------------------------------------------------
+%% Manifest (`manifest`)
+%% -----------------------------------------------------------------------------
+
+-define(BONDY_MST_PACK_MANIFEST_VERSION,  1).
+-define(BONDY_MST_PACK_MANIFEST_FILENAME, "manifest").
+-define(BONDY_MST_PACK_MANIFEST_TMP_FILENAME, "manifest.tmp").
+
+%% -----------------------------------------------------------------------------
+%% Per-instance directory layout filenames (§2 of MST_PAGE_STORE_DESIGN.md)
+%% -----------------------------------------------------------------------------
+
+-define(BONDY_MST_PACK_INCOMING_PACK_FILENAME, "incoming.pack").
+-define(BONDY_MST_PACK_INCOMING_IDX_FILENAME,  "incoming.idx").
+-define(BONDY_MST_PACK_ROOT_FILENAME,          "root").
