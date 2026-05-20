@@ -41,8 +41,8 @@ line, for human debuggability:
 The format mirrors the WAL manifest (`bondy_oplog_wal_manifest`).
 Forward-compat: unknown fields parsed from disk are tolerated
 and dropped; missing required fields produce a typed parse
-error. The fault-injection seam (`bondy_oplog_wal_io:rename/2`,
-`bondy_oplog_wal_io:fsync_dir/1`) is reused so crash tests can
+error. The fault-injection seam (`bondy_mst_io:rename/2`,
+`bondy_mst_io:fsync_dir/1`) is reused so crash tests can
 inject failure at the rename / dir-sync steps without re-mocking
 `prim_file`.
 
@@ -52,9 +52,9 @@ Identical to the WAL manifest:
 
 1. Encode the manifest to a binary.
 2. Write to `manifest.tmp`, then `prim_file:datasync` the fd.
-3. `bondy_oplog_wal_io:rename(\"manifest.tmp\", \"manifest\")` —
+3. `bondy_mst_io:rename(\"manifest.tmp\", \"manifest\")` —
    atomic on POSIX same-filesystem.
-4. `bondy_oplog_wal_io:fsync_dir/1` so the dirent change
+4. `bondy_mst_io:fsync_dir/1` so the dirent change
    survives a power loss on ext4 / xfs.
 
 A failure at any step leaves the prior manifest intact; the
@@ -213,9 +213,9 @@ write(Dir, #?MODULE{} = Manifest) ->
     Bin = encode(Manifest),
     case write_and_sync(TmpPath, Bin) of
         ok ->
-            case bondy_oplog_wal_io:rename(TmpPath, FinalPath) of
+            case bondy_mst_io:rename(TmpPath, FinalPath) of
                 ok ->
-                    bondy_oplog_wal_io:fsync_dir(Dir);
+                    bondy_mst_io:fsync_dir(Dir);
                 {error, _} = E ->
                     _ = prim_file:delete(TmpPath),
                     E
@@ -506,7 +506,7 @@ write_and_sync(TmpPath, Bin) ->
             try
                 case prim_file:write(Fd, Bin) of
                     ok ->
-                        bondy_oplog_wal_io:datasync(Fd);
+                        bondy_mst_io:datasync(Fd);
                     {error, _} = E ->
                         E
                 end

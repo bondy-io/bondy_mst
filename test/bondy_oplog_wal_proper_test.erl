@@ -56,7 +56,7 @@
 %%   Concurrency:
 %%     - prop_concurrent_reader_safety/0 (P11)
 %%
-%%   Fault injection (via `bondy_oplog_wal_io` meck seam):
+%%   Fault injection (via `bondy_mst_io` meck seam):
 %%     - prop_failed_fsync/0             (P14 — per_write + reopen invariant)
 %%     - prop_failed_fsync_batched/0     (P14 — batched-mode variant)
 %%     - prop_rename_failure/0           (P15)
@@ -1591,7 +1591,7 @@ is_prefix(Read, Events) ->
 %%   (c) Leave the writer process alive and serving subsequent calls
 %%       (info/1, close/1, etc.).
 %%
-%% Implementation: mock `bondy_oplog_wal_io:datasync/1` to return
+%% Implementation: mock `bondy_mst_io:datasync/1` to return
 %% `{error, eio}` after a configurable number of successful calls. The
 %% generator chooses how many appends to perform before flipping the
 %% switch, so each trial exercises both the "fsync still ok" path and
@@ -1627,13 +1627,13 @@ prop_failed_fsync() ->
                 #{durable_offset := DurableBefore,
                   durable_segment := DurSegBefore} = InfoBefore,
                 %% Install meck under the wal_io fault lock — the lock
-                %% serialises any test that mocks `bondy_oplog_wal_io`,
+                %% serialises any test that mocks `bondy_mst_io`,
                 %% which is necessary because `meck:new/2` swaps the
                 %% module in the VM-wide code server.
                 {FaultResults, Alive, Info2} = with_io_fault_lock(
                     fun() ->
                         ok = meck:expect(
-                            bondy_oplog_wal_io, datasync,
+                            bondy_mst_io, datasync,
                             fun(_Fd) -> {error, eio} end
                         ),
                         FaultRs = [
@@ -1748,7 +1748,7 @@ prop_failed_fsync_batched() ->
                 {BatchResults, Alive, Info2} = with_io_fault_lock(
                     fun() ->
                         ok = meck:expect(
-                            bondy_oplog_wal_io, datasync,
+                            bondy_mst_io, datasync,
                             fun(_Fd) -> {error, eio} end
                         ),
                         BR = [
@@ -1806,7 +1806,7 @@ prop_failed_fsync_batched() ->
 %%       old segment.
 %%   (d) Leave the writer alive.
 %%
-%% Implementation: mock `bondy_oplog_wal_io:rename/2` to return
+%% Implementation: mock `bondy_mst_io:rename/2` to return
 %% `{error, eacces}` after the writer is up. Append events with a tight
 %% `max_segment_bytes` so the next append rotates and trips the fault.
 prop_rename_failure() ->
@@ -1845,7 +1845,7 @@ prop_rename_failure() ->
                 {Results, Alive, ManifestAfter, SegAfter} =
                     with_io_fault_lock(fun() ->
                         ok = meck:expect(
-                            bondy_oplog_wal_io, rename,
+                            bondy_mst_io, rename,
                             fun(_From, _To) -> {error, eacces} end
                         ),
                         %% Use safe_append/2: after C1's fix, the
@@ -2132,7 +2132,7 @@ is_strictly_increasing(_) -> false.
 
 %% --- meck fault-injection lock + reopen helpers -------------------------
 
-%% Serialises any property that mocks `bondy_oplog_wal_io`. `meck:new/2`
+%% Serialises any property that mocks `bondy_mst_io`. `meck:new/2`
 %% swaps the module in the VM-wide code server, so two test modules
 %% mocking the same module concurrently would clobber each other's
 %% expectations. `global:trans/4` acquires a node-scoped lock; release
@@ -2141,13 +2141,13 @@ is_strictly_increasing(_) -> false.
 %% lifetime, so it does not serialise property runs that do not fault-
 %% inject.
 with_io_fault_lock(Body) ->
-    Lock = {bondy_oplog_wal_io_fault, ?MODULE},
+    Lock = {bondy_mst_io_fault, ?MODULE},
     global:trans(
         {Lock, self()},
         fun() ->
-            ok = meck:new(bondy_oplog_wal_io, [passthrough]),
+            ok = meck:new(bondy_mst_io, [passthrough]),
             try Body()
-            after _ = meck:unload(bondy_oplog_wal_io)
+            after _ = meck:unload(bondy_mst_io)
             end
         end,
         [node()],

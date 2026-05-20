@@ -3,19 +3,36 @@
 %% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
 
--module(bondy_oplog_wal_io).
+-module(bondy_mst_io).
 
 -include("bondy_mst.hrl").
 -include_lib("kernel/include/logger.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-Low-level I/O primitives shared by the `bondy_oplog_wal` modules.
+Project-wide low-level file durability primitives.
 
-This is a private helper. It exists so platform-specific tightening
-(e.g. macOS `F_FULLFSYNC` via a NIF, Linux `O_TMPFILE`-based tmp writes)
-can be done in one place rather than duplicated across the segment and
-manifest implementations.
+Shared by every subsystem in this project that writes to disk —
+the WAL (segment, sparse index, manifest, consumer offset,
+snapshot watermark, recovery truncate) and the MST pack store
+(pack writer, manifest, tombstones). The wrappers are
+intentionally thin — production behaviour is byte-identical to
+the `prim_file` operations they wrap.
+
+This module exists so that:
+
+1. Platform-specific tightening (macOS `F_FULLFSYNC` via a NIF,
+   Linux `io_uring`-based sync, `O_TMPFILE`-based tmp writes,
+   etc.) can land in one place rather than being duplicated
+   across every persistence layer.
+2. Each operation is a single named meck seam so the test suite
+   can fault-inject I/O failures at well-defined points. Mocking
+   `prim_file` itself is unsafe because `file:write_file/2`,
+   `file:open/2`, and the emulator's own I/O flow through it.
+
+Tests that fault-inject these functions must hold the
+`?MODULE` global lock (see `with_io_fault_lock/1` in the test
+suites) so concurrent test modules don't see each other's mocks.
 """).
 
 -export([fsync_dir/1]).
@@ -70,22 +87,15 @@ fsync_dir(Dir) ->
     end.
 
 ?DOC("""
-WAL datasync seam. Every disk-durability point in the WAL — the head
-segment, sealed segments, the sparse index, the manifest, the consumer
-offset, the snapshot watermark, and the recovery truncate — funnels
-through here so:
-
-1. Platform-specific tightening (macOS `F_FULLFSYNC` via a NIF, Linux
-   `io_uring`-based sync, etc.) lands in one place.
-2. The test suite has a single named callsite to `meck:expect/3` for
-   fault injection (P14 — `prop_failed_fsync/0`). Mocking `prim_file`
-   itself is unsafe because `file:write_file/2`, `file:open/2`, and the
-   emulator's own I/O flow through it.
+Datasync seam. Every disk-durability point in the project funnels
+through here so platform-specific tightening (macOS `F_FULLFSYNC`,
+Linux `io_uring`-based sync, etc.) lands in one place and the test
+suite has a single named callsite for fault injection.
 
 The wrapper is intentionally thin — production behaviour is
 byte-identical to `prim_file:datasync/1`. Test code that fault-injects
 this function must hold the `?MODULE` global lock (see
-`with_io_fault_lock/1` in the test suite) so concurrent test modules
+`with_io_fault_lock/1` in the test suites) so concurrent test modules
 don't see another suite's mock.
 """).
 -spec datasync(file:fd()) -> ok | {error, term()}.
@@ -94,9 +104,10 @@ datasync(Fd) ->
     prim_file:datasync(Fd).
 
 ?DOC("""
-WAL rename seam — same rationale as `datasync/1`. Every atomic
-rename-into-place in the WAL (manifest, sparse index, consumer offset,
-snapshot watermark) funnels through here.
+Rename seam — same rationale as `datasync/1`. Every atomic
+rename-into-place in the project (WAL manifest, sparse index,
+consumer offset, snapshot watermark; pack manifest, sealed pack
++ idx, tombstones) funnels through here.
 """).
 -spec rename(file:filename_all(), file:filename_all()) ->
     ok | {error, term()}.
@@ -118,7 +129,7 @@ warn_once(Tag, Dir, Reason) ->
             ok = persistent_term:put(Key, true),
             ?LOG_WARNING(#{
                 description =>
-                    "bondy_oplog_wal_io:fsync_dir/1 returned an unrecognised "
+                    "bondy_mst_io:fsync_dir/1 returned an unrecognised "
                     "error; durability of dirent operations may be weaker "
                     "than designed on this platform",
                 tag => Tag,

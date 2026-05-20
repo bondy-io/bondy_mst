@@ -118,6 +118,8 @@ handle for the lifetime of the open pack.
 
 -type open_error() ::
     truncated_header
+    | truncated_trailer
+    | integrity_mismatch
     | bad_magic
     | {bad_version, non_neg_integer()}
     | {bad_hash_len, non_neg_integer()}
@@ -127,9 +129,14 @@ handle for the lifetime of the open pack.
     | {fanout_inconsistent, term()}
     | {bloom, term()}.
 
+-type build_error() ::
+    {bad_hash_size, Expected :: pos_integer(), Got :: non_neg_integer()}
+    | {bad_hash_len, non_neg_integer()}.
+
 -export_type([t/0]).
 -export_type([entry/0]).
 -export_type([build_opts/0]).
+-export_type([build_error/0]).
 -export_type([open_error/0]).
 
 %% Constants
@@ -163,6 +170,7 @@ handle for the lifetime of the open pack.
 -define(FANOUT_BYTES, ?BONDY_MST_PACK_IDX_FANOUT_BYTES).
 -define(FANOUT_ENTRIES, ?BONDY_MST_PACK_IDX_FANOUT_ENTRIES).
 -define(OFFSET_BYTES, ?BONDY_MST_PACK_IDX_OFFSET_BYTES).
+-define(TRAILER_BYTES, ?BONDY_MST_PACK_IDX_TRAILER_BYTES).
 -define(FLAG_BLOOM, ?BONDY_MST_PACK_IDX_FLAG_BLOOM).
 -define(DEFAULT_HASH_LEN, ?BONDY_MST_PACK_HASH_BYTES).
 
@@ -193,7 +201,7 @@ offset_bytes() -> ?OFFSET_BYTES.
 Builds an `.idx` binary from `Entries` with default options
 (`hash_len = 32`, bloom enabled at `p = 0.01`).
 """).
--spec build([entry()]) -> iodata().
+-spec build([entry()]) -> {ok, iodata()} | {error, build_error()}.
 
 build(Entries) ->
     build(Entries, #{}).
@@ -212,15 +220,28 @@ Options:
 - `bloom_p` — target false-positive rate for the bloom filter
   (default `0.01`).
 
-Returns iodata suitable for `prim_file:write/2`.
+Returns `{ok, IoData}` with iodata suitable for `prim_file:write/2`,
+or `{error, build_error()}` on contract violations (hash size or
+`hash_len` option out of range). The tagged shape lets the seal
+writer roll back the in-progress sealed pack instead of crashing.
 """).
--spec build([entry()], build_opts()) -> iodata().
+-spec build([entry()], build_opts()) ->
+    {ok, iodata()} | {error, build_error()}.
 
 build(Entries, Opts) when is_list(Entries), is_map(Opts) ->
+    try
+        {ok, do_build(Entries, Opts)}
+    catch
+        throw:{?MODULE, build_error, Reason} ->
+            {error, Reason}
+    end.
+
+%% @private
+do_build(Entries, Opts) ->
     HashLen = maps:get(hash_len, Opts, ?DEFAULT_HASH_LEN),
     EmitBloom = maps:get(bloom, Opts, true),
     BloomP = maps:get(bloom_p, Opts, 0.01),
-    ok = validate_hash_len(HashLen),
+    ok = ensure_hash_len(HashLen),
     Sorted = dedup_sorted(lists:keysort(1, Entries), HashLen),
     RecordCount = length(Sorted),
     Hashes = << <<H/binary>> || {H, _} <- Sorted >>,
@@ -238,7 +259,9 @@ build(Entries, Opts) when is_list(Entries), is_map(Opts) ->
                 {0, <<>>}
         end,
     Header = encode_header(?VERSION, Flags, RecordCount, HashLen),
-    [Header, BloomBin, Fanout, Hashes, Offsets].
+    Body = [Header, BloomBin, Fanout, Hashes, Offsets],
+    Trailer = crypto:hash(sha256, Body),
+    [Body, Trailer].
 
 %% =============================================================================
 %% API — open
@@ -251,18 +274,38 @@ Parses an `.idx` binary. Returns `{ok, Handle}` or a typed
 The handle holds sub-binaries of the input; callers should keep
 the original binary alive (or use a `binary:copy/1` if memory
 pressure from large reference binaries is a concern).
+
+The trailing 32 bytes are an sha256 over the rest of the file
+(symmetric to `.pack`'s trailer). The trailer is verified before
+the body is parsed; a mismatch surfaces as
+`{error, integrity_mismatch}` so a silent bit-flip in the fanout
+or offset array cannot route lookups to the wrong record.
 """).
 -spec open(binary()) -> {ok, t()} | {error, open_error()}.
 
-open(Bin) when byte_size(Bin) < ?HEADER_BYTES ->
-    {error, truncated_header};
-open(<<?MAGIC:32/big-unsigned,
-       Version:8,
-       Flags:8,
-       _Reserved:16,
-       RecordCount:32/big-unsigned,
-       HashLen:32/big-unsigned,
-       Rest/binary>>) ->
+open(Bin) when byte_size(Bin) < ?HEADER_BYTES + ?TRAILER_BYTES ->
+    case byte_size(Bin) < ?HEADER_BYTES of
+        true  -> {error, truncated_header};
+        false -> {error, truncated_trailer}
+    end;
+open(Bin) ->
+    BodySize = byte_size(Bin) - ?TRAILER_BYTES,
+    <<Body:BodySize/binary, Trailer:?TRAILER_BYTES/binary>> = Bin,
+    case crypto:hash(sha256, Body) of
+        Trailer ->
+            open_verified_body(Body);
+        _ ->
+            {error, integrity_mismatch}
+    end.
+
+%% @private
+open_verified_body(<<?MAGIC:32/big-unsigned,
+                     Version:8,
+                     Flags:8,
+                     _Reserved:16,
+                     RecordCount:32/big-unsigned,
+                     HashLen:32/big-unsigned,
+                     Rest/binary>>) ->
     case Version =:= ?VERSION of
         false ->
             {error, {bad_version, Version}};
@@ -274,7 +317,7 @@ open(<<?MAGIC:32/big-unsigned,
                     E
             end
     end;
-open(_Bin) ->
+open_verified_body(_Bin) ->
     {error, bad_magic}.
 
 %% =============================================================================
@@ -384,8 +427,18 @@ entries(#?MODULE{record_count = N} = T) ->
 %% =============================================================================
 
 %% @private
+%% `open/1` path: tagged return — corrupt-file errors propagate to
+%% callers that decide whether to surface or recover.
 validate_hash_len(L) when is_integer(L), L > 0, L =< 64 -> ok;
 validate_hash_len(L) -> {error, {bad_hash_len, L}}.
+
+%% @private
+%% `build/2` path: throws a `{?MODULE, build_error, Reason}` tagged
+%% throw caught at the top of `build/2`, which maps it to
+%% `{error, Reason}`. Throw rather than `error/1` so the writer can
+%% roll back the in-progress sealed pack on a contract violation.
+ensure_hash_len(L) when is_integer(L), L > 0, L =< 64 -> ok;
+ensure_hash_len(L) -> throw({?MODULE, build_error, {bad_hash_len, L}}).
 
 %% @private
 %% `lists:keysort/2` is stable, so duplicates retain insertion
@@ -394,22 +447,25 @@ validate_hash_len(L) -> {error, {bad_hash_len, L}}.
 %% should not happen by construction, but the codec stays robust.
 dedup_sorted([], _) -> [];
 dedup_sorted([{H, _} = E | Rest], HashLen) ->
-    assert_hash_size(H, HashLen),
+    ensure_hash_size(H, HashLen),
     dedup_sorted_loop(Rest, E, HashLen, []).
 
 dedup_sorted_loop([], Last, _, Acc) ->
     lists:reverse([Last | Acc]);
 dedup_sorted_loop([{H, _} | Rest], {H, _} = Last, HashLen, Acc) ->
     %% Duplicate hash — keep the first (Last), skip the new pair.
-    assert_hash_size(H, HashLen),
+    ensure_hash_size(H, HashLen),
     dedup_sorted_loop(Rest, Last, HashLen, Acc);
 dedup_sorted_loop([{H, _} = E | Rest], Last, HashLen, Acc) ->
-    assert_hash_size(H, HashLen),
+    ensure_hash_size(H, HashLen),
     dedup_sorted_loop(Rest, E, HashLen, [Last | Acc]).
 
 %% @private
-assert_hash_size(H, HashLen) when byte_size(H) =:= HashLen -> ok;
-assert_hash_size(H, _HashLen) -> error({bad_hash_size, byte_size(H)}).
+ensure_hash_size(H, HashLen) when byte_size(H) =:= HashLen ->
+    ok;
+ensure_hash_size(H, HashLen) ->
+    throw({?MODULE, build_error,
+           {bad_hash_size, HashLen, byte_size(H)}}).
 
 %% @private
 %% Cumulative count of records whose first hash byte is ≤ i, for

@@ -77,12 +77,12 @@ hash.
 -type opts() :: [opt()] | opts_map().
 -type opt() ::
     {hash_algorithm, hash_algorithm()}
-    | {store_mod, module()}
+    | {store, module()}
     | {store_opts, key_value:t()}
     | {merger, merger()}
     | {comparator, comparator()}.
 -type opts_map() :: #{
-    store => bondy_mst_store:t(),
+    store => module(),
     hash_algorithm => hash_algorithm(),
     store_opts => key_value:t(),
     merger => merger(),
@@ -151,6 +151,7 @@ hash.
 -export([put_page/2]).
 -export([root/1]).
 -export([store/1]).
+-export([set_store/2]).
 -export([to_list/1]).
 -export([to_list/2]).
 
@@ -329,6 +330,22 @@ Returns the tree's store.
 
 store(#?MODULE{store = Val}) ->
     Val.
+
+?DOC("""
+Returns the tree with its store reference replaced by `Store`.
+
+This is the setter counterpart to `store/1`. It exists for tests
+and tooling that perform an out-of-band operation on the store
+(e.g. forcing a seal, rotating an fd) and need to thread the
+returned store back into the tree wrapper without rebuilding it.
+Callers must guarantee that `Store` is a valid store of the same
+backend module as the tree was opened with — no validation is
+done here.
+""").
+-spec set_store(t(), bondy_mst_store:t()) -> t().
+
+set_store(#?MODULE{} = T, Store) ->
+    T#?MODULE{store = Store}.
 
 ?DOC("""
 Returns the value associated with key `Key`.

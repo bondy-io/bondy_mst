@@ -44,7 +44,7 @@ offset_bytes_is_8_test() ->
 %% =============================================================================
 
 empty_index_round_trip_test() ->
-    Bin = iolist_to_binary(bondy_mst_pack_index:build([])),
+    Bin = iolist_to_binary(build_idx([])),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     ?assertEqual(0, bondy_mst_pack_index:record_count(T)),
     %% Empty pack: lookup of any hash must return not_found
@@ -55,7 +55,7 @@ empty_index_round_trip_test() ->
 
 single_entry_round_trip_test() ->
     H = crypto:hash(sha256, <<"only">>),
-    Bin = iolist_to_binary(bondy_mst_pack_index:build([{H, 4242}])),
+    Bin = iolist_to_binary(build_idx([{H, 4242}])),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     ?assertEqual(1, bondy_mst_pack_index:record_count(T)),
     ?assertEqual({ok, 4242}, bondy_mst_pack_index:lookup(T, H)),
@@ -65,7 +65,7 @@ single_entry_round_trip_test() ->
 
 many_entries_round_trip_test() ->
     Entries = make_entries(500),
-    Bin = iolist_to_binary(bondy_mst_pack_index:build(Entries)),
+    Bin = iolist_to_binary(build_idx(Entries)),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     ?assertEqual(500, bondy_mst_pack_index:record_count(T)),
     %% Every inserted entry must come back exactly.
@@ -81,8 +81,8 @@ unsorted_input_is_sorted_test() ->
     %% input and verify the index still answers correctly.
     Entries = make_entries(64),
     Reversed = lists:reverse(Entries),
-    Bin1 = iolist_to_binary(bondy_mst_pack_index:build(Entries)),
-    Bin2 = iolist_to_binary(bondy_mst_pack_index:build(Reversed)),
+    Bin1 = iolist_to_binary(build_idx(Entries)),
+    Bin2 = iolist_to_binary(build_idx(Reversed)),
     ?assertEqual(Bin1, Bin2),
     {ok, T} = bondy_mst_pack_index:open(Bin2),
     lists:foreach(
@@ -95,7 +95,7 @@ unsorted_input_is_sorted_test() ->
 duplicate_hash_keeps_first_test() ->
     H = crypto:hash(sha256, <<"dup">>),
     Bin = iolist_to_binary(
-        bondy_mst_pack_index:build([{H, 100}, {H, 200}])
+        build_idx([{H, 100}, {H, 200}])
     ),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     ?assertEqual(1, bondy_mst_pack_index:record_count(T)),
@@ -108,7 +108,7 @@ duplicate_hash_keeps_first_test() ->
 fanout_search_matches_linear_test() ->
     Entries = make_entries(257),
     Sorted = lists:keysort(1, Entries),
-    Bin = iolist_to_binary(bondy_mst_pack_index:build(Entries)),
+    Bin = iolist_to_binary(build_idx(Entries)),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     %% Each present hash returns its offset.
     lists:foreach(
@@ -199,14 +199,14 @@ bloom_round_trip_via_to_from_binary_test() ->
 
 bloom_section_present_when_built_default_test() ->
     Entries = make_entries(32),
-    Bin = iolist_to_binary(bondy_mst_pack_index:build(Entries)),
+    Bin = iolist_to_binary(build_idx(Entries)),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     ?assertEqual(true, bondy_mst_pack_index:has_bloom(T)).
 
 bloom_section_absent_when_opted_out_test() ->
     Entries = make_entries(32),
     Bin = iolist_to_binary(
-        bondy_mst_pack_index:build(Entries, #{bloom => false})
+        build_idx(Entries, #{bloom => false})
     ),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     ?assertEqual(false, bondy_mst_pack_index:has_bloom(T)),
@@ -220,27 +220,27 @@ bloom_section_absent_when_opted_out_test() ->
 
 open_truncated_header_test() ->
     Bin = iolist_to_binary(
-        bondy_mst_pack_index:build(make_entries(8))
+        build_idx(make_entries(8))
     ),
     Short = binary:part(Bin, 0, 8),
     ?assertEqual({error, truncated_header},
                  bondy_mst_pack_index:open(Short)).
 
 open_bad_magic_test() ->
-    %% Replace 4-byte magic with garbage.
+    %% Replace 4-byte magic with garbage. The trailer must be
+    %% re-computed so the structural error surfaces instead of
+    %% being masked by the integrity check.
     Bin0 = iolist_to_binary(
-        bondy_mst_pack_index:build(make_entries(8))
+        build_idx(make_entries(8))
     ),
-    <<_:32, Tail/binary>> = Bin0,
-    Bad = <<16#DEADBEEF:32, Tail/binary>>,
+    Bad = reseal(swap_magic(strip_trailer(Bin0), 16#DEADBEEF)),
     ?assertEqual({error, bad_magic}, bondy_mst_pack_index:open(Bad)).
 
 open_bad_version_test() ->
     Bin0 = iolist_to_binary(
-        bondy_mst_pack_index:build(make_entries(8))
+        build_idx(make_entries(8))
     ),
-    <<Magic:32, _V:8, Rest/binary>> = Bin0,
-    Bad = <<Magic:32, 99:8, Rest/binary>>,
+    Bad = reseal(swap_version(strip_trailer(Bin0), 99)),
     ?assertEqual({error, {bad_version, 99}},
                  bondy_mst_pack_index:open(Bad)).
 
@@ -250,13 +250,13 @@ open_bad_version_test() ->
 
 fanout_handles_first_byte_zero_test() ->
     Zero = <<0:8, 0:248>>,
-    Bin = iolist_to_binary(bondy_mst_pack_index:build([{Zero, 11}])),
+    Bin = iolist_to_binary(build_idx([{Zero, 11}])),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     ?assertEqual({ok, 11}, bondy_mst_pack_index:lookup(T, Zero)).
 
 fanout_handles_first_byte_max_test() ->
     Max = <<16#FF:8, 0:248>>,
-    Bin = iolist_to_binary(bondy_mst_pack_index:build([{Max, 99}])),
+    Bin = iolist_to_binary(build_idx([{Max, 99}])),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     ?assertEqual({ok, 99}, bondy_mst_pack_index:lookup(T, Max)).
 
@@ -268,7 +268,7 @@ fanout_spans_all_buckets_test() ->
         {<<I:8, (binary:part(crypto:hash(sha256, <<I:32>>), 0, 31))/binary>>, I}
         || I <- lists:seq(0, 255)
     ],
-    Bin = iolist_to_binary(bondy_mst_pack_index:build(Entries)),
+    Bin = iolist_to_binary(build_idx(Entries)),
     {ok, T} = bondy_mst_pack_index:open(Bin),
     ?assertEqual(256, bondy_mst_pack_index:record_count(T)),
     lists:foreach(
@@ -279,8 +279,141 @@ fanout_spans_all_buckets_test() ->
     ).
 
 %% =============================================================================
+%% Trailer integrity
+%% =============================================================================
+
+open_truncated_trailer_test() ->
+    %% A 20-byte binary has a parseable header but cannot hold the
+    %% 32-byte trailer. Open must short-circuit with the dedicated
+    %% truncated_trailer error.
+    ?assertEqual({error, truncated_trailer},
+                 bondy_mst_pack_index:open(<<0:160>>)).
+
+trailer_round_trip_test() ->
+    Bin = iolist_to_binary(
+        build_idx(make_entries(16))
+    ),
+    {ok, T} = bondy_mst_pack_index:open(Bin),
+    ?assertEqual(16, bondy_mst_pack_index:record_count(T)).
+
+trailer_detects_header_flip_test() ->
+    %% Flip the high bit of the Flags byte (byte 5) — keeps magic,
+    %% version, hash_len intact but invalidates the sha256 trailer.
+    Bin = iolist_to_binary(
+        build_idx(make_entries(8))
+    ),
+    Bad = flip_byte(Bin, 5),
+    ?assertEqual({error, integrity_mismatch},
+                 bondy_mst_pack_index:open(Bad)).
+
+trailer_detects_fanout_flip_test() ->
+    %% Fanout starts after header + (bloom section size). Flipping a
+    %% byte inside the fanout must surface as integrity_mismatch.
+    Bin = iolist_to_binary(
+        build_idx(make_entries(8))
+    ),
+    %% The exact offset depends on bloom size — pick a byte in the
+    %% middle of the body, anywhere outside the trailer.
+    BodyLen = byte_size(Bin) - 32,
+    MidBody = BodyLen div 2,
+    Bad = flip_byte(Bin, MidBody),
+    ?assertEqual({error, integrity_mismatch},
+                 bondy_mst_pack_index:open(Bad)).
+
+trailer_detects_trailer_flip_test() ->
+    %% Flip the last byte of the file — trailer itself differs from
+    %% sha256(body) and integrity_mismatch surfaces.
+    Bin = iolist_to_binary(
+        build_idx(make_entries(8))
+    ),
+    Bad = flip_byte(Bin, byte_size(Bin) - 1),
+    ?assertEqual({error, integrity_mismatch},
+                 bondy_mst_pack_index:open(Bad)).
+
+trailer_detects_bloom_off_flip_test() ->
+    %% Same body shape but with bloom disabled — the fanout-region
+    %% offset shifts left, so a flip somewhere reasonable in the
+    %% body still has to surface as integrity_mismatch.
+    Bin = iolist_to_binary(
+        build_idx(make_entries(8), #{bloom => false})
+    ),
+    Bad = flip_byte(Bin, byte_size(Bin) div 2),
+    ?assertEqual({error, integrity_mismatch},
+                 bondy_mst_pack_index:open(Bad)).
+
+%% =============================================================================
+%% Build error contract
+%% =============================================================================
+
+build_rejects_short_hash_test() ->
+    %% 1-byte hash where `hash_len` default expects 32 — tagged error,
+    %% not a raise.
+    ?assertEqual(
+        {error, {bad_hash_size, 32, 1}},
+        bondy_mst_pack_index:build([{<<0:8>>, 0}])
+    ).
+
+build_rejects_oversize_hash_test() ->
+    %% 33-byte hash against the default 32.
+    ?assertEqual(
+        {error, {bad_hash_size, 32, 33}},
+        bondy_mst_pack_index:build([{<<0:264>>, 0}])
+    ).
+
+build_rejects_zero_hash_len_opt_test() ->
+    ?assertEqual(
+        {error, {bad_hash_len, 0}},
+        bondy_mst_pack_index:build([], #{hash_len => 0})
+    ).
+
+build_rejects_oversize_hash_len_opt_test() ->
+    %% Implementation cap is 64 bytes.
+    ?assertEqual(
+        {error, {bad_hash_len, 65}},
+        bondy_mst_pack_index:build([], #{hash_len => 65})
+    ).
+
+build_first_entry_short_hash_test() ->
+    %% Even the very first dedup pass surfaces the size error.
+    Good = crypto:hash(sha256, <<"k">>),
+    ?assertEqual(
+        {error, {bad_hash_size, 32, 4}},
+        bondy_mst_pack_index:build([{<<1, 2, 3, 4>>, 0}, {Good, 1}])
+    ).
+
+%% =============================================================================
 %% Helpers
 %% =============================================================================
 
 make_entries(N) ->
     [{crypto:hash(sha256, <<"k-", I:32>>), I * 17 + 13} || I <- lists:seq(1, N)].
+
+%% Strip the 32-byte sha256 trailer; callers mutate the resulting body
+%% then `reseal/1` to put a valid trailer back on.
+strip_trailer(Bin) ->
+    BodyLen = byte_size(Bin) - 32,
+    binary:part(Bin, 0, BodyLen).
+
+reseal(Body) ->
+    <<Body/binary, (crypto:hash(sha256, Body))/binary>>.
+
+swap_magic(<<_:32, Rest/binary>>, NewMagic) ->
+    <<NewMagic:32, Rest/binary>>.
+
+swap_version(<<Magic:32, _:8, Rest/binary>>, NewVersion) ->
+    <<Magic:32, NewVersion:8, Rest/binary>>.
+
+flip_byte(Bin, Index) ->
+    <<Pre:Index/binary, B:8, Post/binary>> = Bin,
+    <<Pre/binary, (B bxor 16#FF):8, Post/binary>>.
+
+%% Test-side shim — unwraps the tagged `{ok, IoData}` so existing
+%% round-trip tests keep their pre-tagged shape. Tests use known-good
+%% input; an `{error, _}` here is a real bug and should crash the test.
+build_idx(Entries) ->
+    {ok, IO} = bondy_mst_pack_index:build(Entries),
+    IO.
+
+build_idx(Entries, Opts) ->
+    {ok, IO} = bondy_mst_pack_index:build(Entries, Opts),
+    IO.

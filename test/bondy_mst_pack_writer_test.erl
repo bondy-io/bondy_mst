@@ -293,6 +293,185 @@ seal_then_append_advances_to_next_pack_id_test() ->
     end).
 
 %% =============================================================================
+%% Orphan cleanup on open (design doc §10.1, step 2)
+%% =============================================================================
+
+orphan_pack_without_manifest_entry_deleted_on_reopen_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        bondy_mst_pack_writer:close(W0),
+        %% Inject an orphan pack id that the manifest never recorded.
+        OrphanPack = bondy_mst_pack_paths:sealed_pack_path(Dir, 9999),
+        ok = file:write_file(OrphanPack, <<"orphan body">>),
+        ?assert(filelib:is_regular(OrphanPack)),
+        {ok, W1} = open_writer(Dir),
+        try
+            ?assertNot(filelib:is_regular(OrphanPack))
+        after
+            bondy_mst_pack_writer:close(W1)
+        end
+    end).
+
+orphan_idx_without_manifest_entry_deleted_on_reopen_test() ->
+    %% A half-renamed seal can leave just `pack-NNNN.idx`. Same orphan
+    %% rule applies.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        bondy_mst_pack_writer:close(W0),
+        OrphanIdx = bondy_mst_pack_paths:sealed_idx_path(Dir, 9999),
+        ok = file:write_file(OrphanIdx, <<"orphan idx">>),
+        ?assert(filelib:is_regular(OrphanIdx)),
+        {ok, W1} = open_writer(Dir),
+        try
+            ?assertNot(filelib:is_regular(OrphanIdx))
+        after
+            bondy_mst_pack_writer:close(W1)
+        end
+    end).
+
+orphan_pack_and_idx_both_deleted_on_reopen_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        bondy_mst_pack_writer:close(W0),
+        OrphanPack = bondy_mst_pack_paths:sealed_pack_path(Dir, 9999),
+        OrphanIdx  = bondy_mst_pack_paths:sealed_idx_path(Dir, 9999),
+        ok = file:write_file(OrphanPack, <<>>),
+        ok = file:write_file(OrphanIdx,  <<>>),
+        {ok, W1} = open_writer(Dir),
+        try
+            ?assertNot(filelib:is_regular(OrphanPack)),
+            ?assertNot(filelib:is_regular(OrphanIdx))
+        after
+            bondy_mst_pack_writer:close(W1)
+        end
+    end).
+
+valid_sealed_pack_preserved_alongside_orphan_test() ->
+    %% Seal a real pack, then inject an orphan id. Reopen and verify
+    %% the manifest-referenced pack is untouched and the orphan is gone.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"real">>),
+        {ok, 1, W2} = bondy_mst_pack_writer:seal(W1),
+        bondy_mst_pack_writer:close(W2),
+        RealPack = bondy_mst_pack_paths:sealed_pack_path(Dir, 1),
+        RealIdx  = bondy_mst_pack_paths:sealed_idx_path(Dir, 1),
+        OrphanPack = bondy_mst_pack_paths:sealed_pack_path(Dir, 7),
+        OrphanIdx  = bondy_mst_pack_paths:sealed_idx_path(Dir, 7),
+        ok = file:write_file(OrphanPack, <<"junk">>),
+        ok = file:write_file(OrphanIdx,  <<"junk">>),
+        {ok, W3} = open_writer(Dir),
+        try
+            ?assert(filelib:is_regular(RealPack)),
+            ?assert(filelib:is_regular(RealIdx)),
+            ?assertNot(filelib:is_regular(OrphanPack)),
+            ?assertNot(filelib:is_regular(OrphanIdx)),
+            %% Manifest still records the valid pack.
+            {ok, M} = bondy_mst_pack_manifest:read(Dir),
+            ?assertEqual([1], bondy_mst_pack_manifest:sealed_packs(M))
+        after
+            bondy_mst_pack_writer:close(W3)
+        end
+    end).
+
+tmp_pack_artefact_deleted_on_reopen_test() ->
+    %% `.pack.tmp` from an interrupted rename — always orphan.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        bondy_mst_pack_writer:close(W0),
+        TmpPack = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, 1),
+        ok = file:write_file(TmpPack, <<"tmp">>),
+        {ok, W1} = open_writer(Dir),
+        try
+            ?assertNot(filelib:is_regular(TmpPack))
+        after
+            bondy_mst_pack_writer:close(W1)
+        end
+    end).
+
+tmp_idx_artefact_deleted_on_reopen_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        bondy_mst_pack_writer:close(W0),
+        TmpIdx = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
+        ok = file:write_file(TmpIdx, <<"tmp">>),
+        {ok, W1} = open_writer(Dir),
+        try
+            ?assertNot(filelib:is_regular(TmpIdx))
+        after
+            bondy_mst_pack_writer:close(W1)
+        end
+    end).
+
+tmp_artefact_deleted_even_when_id_is_in_manifest_test() ->
+    %% A `.tmp` sibling of a *valid* sealed pack is also deleted —
+    %% it's always a mid-rename artefact and cannot be the source
+    %% of truth after a crash.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
+        {ok, 1, W2} = bondy_mst_pack_writer:seal(W1),
+        bondy_mst_pack_writer:close(W2),
+        TmpPack = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, 1),
+        TmpIdx  = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
+        ok = file:write_file(TmpPack, <<"residue">>),
+        ok = file:write_file(TmpIdx,  <<"residue">>),
+        {ok, W3} = open_writer(Dir),
+        try
+            ?assertNot(filelib:is_regular(TmpPack)),
+            ?assertNot(filelib:is_regular(TmpIdx)),
+            %% Real files unchanged.
+            ?assert(filelib:is_regular(
+                bondy_mst_pack_paths:sealed_pack_path(Dir, 1))),
+            ?assert(filelib:is_regular(
+                bondy_mst_pack_paths:sealed_idx_path(Dir, 1)))
+        after
+            bondy_mst_pack_writer:close(W3)
+        end
+    end).
+
+non_pack_files_left_alone_test() ->
+    %% Anything not matching `pack-<digits>.(pack|idx)[.tmp]` is none
+    %% of the scanner's business — manifests, root file, future
+    %% filenames, stray notes from operators, etc.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        bondy_mst_pack_writer:close(W0),
+        Stray = filename:join(Dir, "operator-notes.txt"),
+        WeirdName = filename:join(Dir, "pack-without-digits.pack"),
+        ok = file:write_file(Stray,     <<"do not delete">>),
+        ok = file:write_file(WeirdName, <<"also keep">>),
+        {ok, W1} = open_writer(Dir),
+        try
+            ?assert(filelib:is_regular(Stray)),
+            ?assert(filelib:is_regular(WeirdName))
+        after
+            bondy_mst_pack_writer:close(W1)
+        end
+    end).
+
+orphan_cleanup_runs_before_incoming_resume_test() ->
+    %% Mixed scenario: real sealed pack #1, orphan #7, incoming.pack
+    %% with one record. Reopen must clean orphans AND resume the
+    %% pending map from the incoming pack.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"sealed">>),
+        {ok, 1, W2} = bondy_mst_pack_writer:seal(W1),
+        {ok, _, W3} = bondy_mst_pack_writer:append(W2, <<"pending">>),
+        bondy_mst_pack_writer:close(W3),
+        OrphanPack = bondy_mst_pack_paths:sealed_pack_path(Dir, 7),
+        ok = file:write_file(OrphanPack, <<"orphan">>),
+        {ok, W4} = open_writer(Dir),
+        try
+            ?assertNot(filelib:is_regular(OrphanPack)),
+            ?assertEqual(1, bondy_mst_pack_writer:pending_count(W4))
+        after
+            bondy_mst_pack_writer:close(W4)
+        end
+    end).
+
+%% =============================================================================
 %% Reader — basic
 %% =============================================================================
 
@@ -417,8 +596,362 @@ prop_seal_then_read() ->
     ).
 
 %% =============================================================================
+%% Batched datasync policy
+%% =============================================================================
+
+open_writer_k(Dir, K) ->
+    bondy_mst_pack_writer:open(
+        Dir,
+        #{instance_id => <<"writer-test">>, sync_every_records => K}
+    ).
+
+open_writer_t(Dir, TMs) ->
+    bondy_mst_pack_writer:open(
+        Dir,
+        #{instance_id => <<"writer-test">>, sync_every_ms => TMs}
+    ).
+
+default_policy_batches_appends_test() ->
+    %% Default `sync_every_records` (32, see bondy_mst_pack.hrl) means
+    %% the first few appends are buffered without datasync. Production
+    %% callers needing per-record durability set `sync_every_records=1`
+    %% explicitly (covered by k=1 tests below).
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        try
+            {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
+            ?assertEqual(1, bondy_mst_pack_writer:unsynced_count(W1)),
+            {ok, _, W2} = bondy_mst_pack_writer:append(W1, <<"b">>),
+            ?assertEqual(2, bondy_mst_pack_writer:unsynced_count(W2))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+k_batching_buffers_until_threshold_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_k(Dir, 4),
+        try
+            %% Three appends: still buffered.
+            {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
+            ?assertEqual(1, bondy_mst_pack_writer:unsynced_count(W1)),
+            {ok, _, W2} = bondy_mst_pack_writer:append(W1, <<"b">>),
+            ?assertEqual(2, bondy_mst_pack_writer:unsynced_count(W2)),
+            {ok, _, W3} = bondy_mst_pack_writer:append(W2, <<"c">>),
+            ?assertEqual(3, bondy_mst_pack_writer:unsynced_count(W3)),
+            %% Fourth append crosses K=4 and triggers a flush.
+            {ok, _, W4} = bondy_mst_pack_writer:append(W3, <<"d">>),
+            ?assertEqual(0, bondy_mst_pack_writer:unsynced_count(W4))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+flush_drains_unsynced_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_k(Dir, 1000),
+        try
+            W1 = lists:foldl(
+                fun(I, Acc) ->
+                    {ok, _, A} = bondy_mst_pack_writer:append(
+                        Acc, integer_to_binary(I)
+                    ),
+                    A
+                end,
+                W0,
+                lists:seq(1, 5)
+            ),
+            ?assertEqual(5, bondy_mst_pack_writer:unsynced_count(W1)),
+            {ok, W2} = bondy_mst_pack_writer:flush(W1),
+            ?assertEqual(0, bondy_mst_pack_writer:unsynced_count(W2)),
+            %% Calling flush again is a no-op.
+            {ok, W3} = bondy_mst_pack_writer:flush(W2),
+            ?assertEqual(0, bondy_mst_pack_writer:unsynced_count(W3))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+flush_no_op_before_first_append_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_k(Dir, 100),
+        try
+            %% incoming.pack hasn't been created yet — flush is a no-op.
+            {ok, W1} = bondy_mst_pack_writer:flush(W0),
+            ?assertEqual(0, bondy_mst_pack_writer:unsynced_count(W1)),
+            ?assertNot(filelib:is_regular(
+                bondy_mst_pack_paths:incoming_pack_path(Dir)))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+close_flushes_unsynced_records_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_k(Dir, 1000),
+        %% Append 5 records and close — close must flush so that
+        %% on reopen we still see them.
+        Pages = [<<I>> || I <- lists:seq(1, 5)],
+        Hashes = lists:foldl(
+            fun(P, {Hs, Acc}) ->
+                {ok, H, A} = bondy_mst_pack_writer:append(Acc, P),
+                {[H | Hs], A}
+            end,
+            {[], W0},
+            Pages
+        ),
+        {HashList, W1} = Hashes,
+        ?assertEqual(5, bondy_mst_pack_writer:unsynced_count(W1)),
+        ok = bondy_mst_pack_writer:close(W1),
+        {ok, W2} = open_writer_k(Dir, 1000),
+        try
+            ?assertEqual(5, bondy_mst_pack_writer:pending_count(W2)),
+            ?assertEqual(lists:sort(HashList),
+                         bondy_mst_pack_writer:pending_hashes(W2))
+        after
+            bondy_mst_pack_writer:close(W2)
+        end
+    end).
+
+seal_works_with_high_k_test() ->
+    %% With K well above the number of appends, no per-append sync
+    %% happens — seal still produces a correct sealed pack because
+    %% the OS page cache makes unsynced writes visible to preads on
+    %% the same fd, and the sealed pack is itself datasync'd.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_k(Dir, 1000),
+        Pages = [<<I>> || I <- lists:seq(1, 10)],
+        W1 = lists:foldl(
+            fun(P, Acc) ->
+                {ok, _, A} = bondy_mst_pack_writer:append(Acc, P),
+                A
+            end,
+            W0,
+            Pages
+        ),
+        ?assertEqual(10, bondy_mst_pack_writer:unsynced_count(W1)),
+        {ok, 1, W2} = bondy_mst_pack_writer:seal(W1),
+        try
+            %% Post-seal state is fresh — no pending, no unsynced.
+            ?assertEqual(0, bondy_mst_pack_writer:unsynced_count(W2)),
+            ?assertEqual(0, bondy_mst_pack_writer:pending_count(W2)),
+            %% Sealed pack on disk should resolve every hash via the
+            %% reader.
+            {ok, R} = bondy_mst_pack_reader:open(Dir),
+            try
+                ExpectedHashes = [sha256(P) || P <- Pages],
+                lists:foreach(
+                    fun({P, H}) ->
+                        ?assertEqual({ok, P}, bondy_mst_pack_reader:get(R, H))
+                    end,
+                    lists:zip(Pages, ExpectedHashes)
+                )
+            after
+                bondy_mst_pack_reader:close(R)
+            end
+        after
+            bondy_mst_pack_writer:close(W2)
+        end
+    end).
+
+t_threshold_fires_eventually_test() ->
+    %% T=1ms: any inter-append delay above 1ms will trigger a sync
+    %% on the next append.  We pace the second append behind a sleep
+    %% to make the trigger deterministic.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = bondy_mst_pack_writer:open(
+            Dir,
+            #{instance_id => <<"writer-test">>,
+              sync_every_records => 1000,
+              sync_every_ms => 1}
+        ),
+        try
+            {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
+            ?assertEqual(1, bondy_mst_pack_writer:unsynced_count(W1)),
+            timer:sleep(15),
+            {ok, _, W2} = bondy_mst_pack_writer:append(W1, <<"b">>),
+            ?assertEqual(0, bondy_mst_pack_writer:unsynced_count(W2))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+%% =============================================================================
+%% Rename-failure fault injection
+%%
+%% Inject `{error, eio}` at each rename point in the seal flow via
+%% the `bondy_mst_io:rename/2` seam and verify (a) the seal
+%% returns a typed error, (b) the on-disk state immediately after
+%% failure matches the expected partial state, and (c) reopening
+%% with the orphan scanner produces a clean directory and an
+%% intact manifest.
+%% =============================================================================
+
+pack_rename_failure_returns_seal_error_test() ->
+    %% Failure at step 3a (PackTmp → Pack). `create_sealed_pack/6`
+    %% runs `cleanup_tmp/2` so neither `.tmp` survives; the manifest
+    %% is unchanged.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
+        SealRes = with_rename_fault(".pack.tmp", eio,
+            fun() -> bondy_mst_pack_writer:seal(W1) end),
+        ?assertMatch({error, {seal, {rename_pack, eio}}}, SealRes),
+        bondy_mst_pack_writer:close(W1),
+        %% No artefacts left over by `create_sealed_pack`'s cleanup.
+        PackTmp = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, 1),
+        IdxTmp  = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
+        ?assertNot(filelib:is_regular(PackTmp)),
+        ?assertNot(filelib:is_regular(IdxTmp)),
+        %% Manifest unchanged: still no sealed packs, incoming present.
+        {ok, M} = bondy_mst_pack_manifest:read(Dir),
+        ?assertEqual([], bondy_mst_pack_manifest:sealed_packs(M)),
+        ?assertEqual(present, bondy_mst_pack_manifest:incoming_pack(M)),
+        %% Reopen: orphan scanner has nothing to do, pending map is
+        %% restored from incoming.pack.
+        {ok, W2} = open_writer(Dir),
+        try
+            ?assertEqual(1, bondy_mst_pack_writer:pending_count(W2))
+        after
+            bondy_mst_pack_writer:close(W2)
+        end
+    end).
+
+idx_rename_failure_returns_seal_error_test() ->
+    %% Failure at step 3b (IdxTmp → Idx) after the pack rename
+    %% succeeded. `rename_sealed_pair/2` deletes the now-renamed
+    %% `pack-NNNN.pack`, then `create_sealed_pack/6` runs
+    %% `cleanup_tmp/2`. Result: nothing on disk.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
+        SealRes = with_rename_fault(".idx.tmp", eio,
+            fun() -> bondy_mst_pack_writer:seal(W1) end),
+        ?assertMatch({error, {seal, {rename_idx, eio}}}, SealRes),
+        bondy_mst_pack_writer:close(W1),
+        Pack    = bondy_mst_pack_paths:sealed_pack_path(Dir, 1),
+        Idx     = bondy_mst_pack_paths:sealed_idx_path(Dir, 1),
+        PackTmp = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, 1),
+        IdxTmp  = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
+        ?assertNot(filelib:is_regular(Pack)),
+        ?assertNot(filelib:is_regular(Idx)),
+        ?assertNot(filelib:is_regular(PackTmp)),
+        ?assertNot(filelib:is_regular(IdxTmp)),
+        {ok, M} = bondy_mst_pack_manifest:read(Dir),
+        ?assertEqual([], bondy_mst_pack_manifest:sealed_packs(M)),
+        ?assertEqual(present, bondy_mst_pack_manifest:incoming_pack(M)),
+        {ok, W2} = open_writer(Dir),
+        try
+            ?assertEqual(1, bondy_mst_pack_writer:pending_count(W2))
+        after
+            bondy_mst_pack_writer:close(W2)
+        end
+    end).
+
+manifest_rename_failure_leaves_orphan_pack_and_idx_test() ->
+    %% Failure at step 4 (manifest swap) after both pack + idx
+    %% renames succeeded. `pack-0001.{pack,idx}` are on disk but the
+    %% manifest still says no sealed packs and incoming present —
+    %% they are orphans by the seal-step-3-vs-step-4 crash window.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
+        SealRes = with_rename_fault("manifest.tmp", eio,
+            fun() -> bondy_mst_pack_writer:seal(W1) end),
+        ?assertMatch({error, {manifest, eio}}, SealRes),
+        bondy_mst_pack_writer:close(W1),
+        Pack = bondy_mst_pack_paths:sealed_pack_path(Dir, 1),
+        Idx  = bondy_mst_pack_paths:sealed_idx_path(Dir, 1),
+        %% Orphan state on disk.
+        ?assert(filelib:is_regular(Pack)),
+        ?assert(filelib:is_regular(Idx)),
+        %% Manifest reverted by `manifest:write/2`'s own cleanup
+        %% (deletes manifest.tmp on rename failure); old manifest is
+        %% authoritative — no sealed packs.
+        {ok, M} = bondy_mst_pack_manifest:read(Dir),
+        ?assertEqual([], bondy_mst_pack_manifest:sealed_packs(M)),
+        ?assertEqual(present, bondy_mst_pack_manifest:incoming_pack(M)),
+        %% Reopen → orphan scanner deletes the half-committed pair.
+        {ok, W2} = open_writer(Dir),
+        try
+            ?assertNot(filelib:is_regular(Pack)),
+            ?assertNot(filelib:is_regular(Idx)),
+            ?assertEqual(1, bondy_mst_pack_writer:pending_count(W2)),
+            %% Retry seal works against a fresh slot.
+            {ok, 1, W3} = bondy_mst_pack_writer:seal(W2),
+            ?assert(filelib:is_regular(Pack)),
+            ?assert(filelib:is_regular(Idx)),
+            bondy_mst_pack_writer:close(W3)
+        catch
+            _:E:S ->
+                bondy_mst_pack_writer:close(W2),
+                erlang:raise(error, E, S)
+        end
+    end).
+
+manifest_rename_failure_at_present_flip_test() ->
+    %% Adjacent rename point: first-append manifest flip-to-`present`
+    %% (in `flip_manifest_to_present/3`). Failure leaves an
+    %% incoming.pack on disk that the manifest still declares
+    %% `absent`. The writer rolls back by deleting the just-created
+    %% file; reopen finds a clean fresh state.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        AppendRes = with_rename_fault("manifest.tmp", eio,
+            fun() -> bondy_mst_pack_writer:append(W0, <<"never lands">>) end),
+        ?assertMatch({error, {manifest, eio}}, AppendRes),
+        bondy_mst_pack_writer:close(W0),
+        IncomingPath =
+            bondy_mst_pack_paths:incoming_pack_path(Dir),
+        ?assertNot(filelib:is_regular(IncomingPath)),
+        {ok, M} = bondy_mst_pack_manifest:read(Dir),
+        ?assertEqual(absent, bondy_mst_pack_manifest:incoming_pack(M)),
+        {ok, W1} = open_writer(Dir),
+        try
+            ?assertEqual(0, bondy_mst_pack_writer:pending_count(W1)),
+            ?assertEqual(1, bondy_mst_pack_writer:next_pack_id(W1))
+        after
+            bondy_mst_pack_writer:close(W1)
+        end
+    end).
+
+%% =============================================================================
 %% Helpers
 %% =============================================================================
+
+%% @private Selectively fails `bondy_mst_io:rename/2` calls whose
+%% source path ends with `Suffix`. Other renames pass through. Holds the
+%% same global lock as the WAL fault tests so concurrent suites don't
+%% see each other's mocks.
+with_rename_fault(Suffix, Reason, Body) ->
+    with_io_fault_lock(fun() ->
+        meck:expect(bondy_mst_io, rename,
+            fun(From, To) ->
+                FromStr = unicode:characters_to_list(From),
+                case lists:suffix(Suffix, FromStr) of
+                    true  -> {error, Reason};
+                    false -> meck:passthrough([From, To])
+                end
+            end),
+        Body()
+    end).
+
+%% @private Same shape as `bondy_oplog_wal_proper_test:with_io_fault_lock/1`
+%% but local to this suite. Acquires a node-scoped global lock so two
+%% suites that fault-inject `bondy_mst_io` cannot collide.
+with_io_fault_lock(Body) ->
+    Lock = {bondy_mst_io_fault, ?MODULE},
+    global:trans(
+        {Lock, self()},
+        fun() ->
+            ok = meck:new(bondy_mst_io, [passthrough]),
+            try Body()
+            after _ = meck:unload(bondy_mst_io)
+            end
+        end,
+        [node()],
+        infinity
+    ).
 
 %% @private Open + append + seal in one shot; returns the hashes (in
 %% append order). Closes the writer.

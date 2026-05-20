@@ -168,9 +168,9 @@ write(Dir, #?MODULE{} = Manifest) ->
     Bin = format(Manifest),
     case write_and_sync(TmpPath, Bin) of
         ok ->
-            case bondy_oplog_wal_io:rename(TmpPath, FinalPath) of
+            case bondy_mst_io:rename(TmpPath, FinalPath) of
                 ok ->
-                    bondy_oplog_wal_io:fsync_dir(Dir);
+                    bondy_mst_io:fsync_dir(Dir);
                 {error, _} = E ->
                     %% Leave the old manifest intact; remove the tmp
                     %% file so retries don't see a stale dangling tmp.
@@ -435,7 +435,7 @@ write_and_sync(TmpPath, Bin) ->
             Res =
                 case prim_file:write(Fd, Bin) of
                     ok ->
-                        case bondy_oplog_wal_io:datasync(Fd) of
+                        case bondy_mst_io:datasync(Fd) of
                             ok -> ok;
                             {error, _} = E1 -> E1
                         end;

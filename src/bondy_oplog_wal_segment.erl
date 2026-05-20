@@ -314,9 +314,9 @@ encode_header(#?MODULE{
 write_and_sync(Fd, HeaderBin, Path) ->
     case prim_file:write(Fd, HeaderBin) of
         ok ->
-            case bondy_oplog_wal_io:datasync(Fd) of
+            case bondy_mst_io:datasync(Fd) of
                 ok ->
-                    bondy_oplog_wal_io:fsync_dir(filename:dirname(Path));
+                    bondy_mst_io:fsync_dir(filename:dirname(Path));
                 {error, _} = E ->
                     E
             end;

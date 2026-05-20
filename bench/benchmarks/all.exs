@@ -8,6 +8,10 @@ scripts = ~w(
   mst_fold.exs
   mst_merge.exs
   mst_bulk_put.exs
+  mst_pack_put.exs
+  mst_pack_seal.exs
+  mst_pack_get.exs
+  mst_store_get.exs
   primitives.exs
   folds.exs
   mst_db.exs

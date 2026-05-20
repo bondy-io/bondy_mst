@@ -917,7 +917,7 @@ terminate(_Reason, #state{head_fd = Fd,
                           segment_id = Seg,
                           current_offset = Off} = State0) ->
     _ = cancel_retention_timer(State0),
-    State = case bondy_oplog_wal_io:datasync(Fd) of
+    State = case bondy_mst_io:datasync(Fd) of
         ok ->
             %% The head fd is now durable up to `current_offset`.
             %% Advance the durable boundary so any waiter at or below
@@ -1590,7 +1590,7 @@ rotate(#state{
     head_fd = OldFd, segment_id = OldSegId, current_offset = OldOff
 } = State0) ->
     T0 = erlang:monotonic_time(microsecond),
-    case bondy_oplog_wal_io:datasync(OldFd) of
+    case bondy_mst_io:datasync(OldFd) of
         {error, _} = E ->
             %% Pre-close failure: old fd still valid, state unchanged.
             E;
@@ -2117,7 +2117,7 @@ do_fsync_head(
            pending_fsync_bytes = Pending} = State
 ) when Fd =/= undefined ->
     T0 = erlang:monotonic_time(microsecond),
-    case bondy_oplog_wal_io:datasync(Fd) of
+    case bondy_mst_io:datasync(Fd) of
         ok ->
             Duration = erlang:monotonic_time(microsecond) - T0,
             emit_fsync_telemetry(State, Pending, Duration),

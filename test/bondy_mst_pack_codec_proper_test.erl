@@ -143,7 +143,8 @@ prop_idx_roundtrip() ->
         Entries,
         entries_gen(),
         begin
-            Bin = iolist_to_binary(bondy_mst_pack_index:build(Entries)),
+            {ok, IO} = bondy_mst_pack_index:build(Entries),
+            Bin = iolist_to_binary(IO),
             {ok, T} = bondy_mst_pack_index:open(Bin),
             %% After dedup, every distinct hash in the input is
             %% retrievable; the offset matches the first occurrence

@@ -15,7 +15,7 @@ Per-instance persistent-state files for the WAL: the applier's
 `consumer.offset` and the WAL's `snapshot.watermark`.
 
 Both files share the tmp-then-rename atomic-write pattern documented
-in `_design/WAL_DESIGN.md` §6.1 and use the same `bondy_oplog_wal_io`
+in `_design/WAL_DESIGN.md` §6.1 and use the same `bondy_mst_io`
 primitives (`datasync/1`, `rename/2`, `fsync_dir/1`). Keeping them in
 one module avoids duplicating that boilerplate.
 
@@ -403,9 +403,9 @@ format_term(T) ->
 atomic_write(Dir, TmpPath, FinalPath, Bin) ->
     case write_and_sync(TmpPath, Bin) of
         ok ->
-            case bondy_oplog_wal_io:rename(TmpPath, FinalPath) of
+            case bondy_mst_io:rename(TmpPath, FinalPath) of
                 ok ->
-                    bondy_oplog_wal_io:fsync_dir(Dir);
+                    bondy_mst_io:fsync_dir(Dir);
                 {error, _} = E ->
                     _ = prim_file:delete(TmpPath),
                     E
@@ -422,7 +422,7 @@ write_and_sync(TmpPath, Bin) ->
             Res =
                 case prim_file:write(Fd, Bin) of
                     ok ->
-                        case bondy_oplog_wal_io:datasync(Fd) of
+                        case bondy_mst_io:datasync(Fd) of
                             ok -> ok;
                             {error, _} = E1 -> E1
                         end;

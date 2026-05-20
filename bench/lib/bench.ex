@@ -110,7 +110,7 @@ defmodule Bench do
   def build_tree(count, store_mod \\ :bondy_mst_map_store, store_opts \\ %{}) do
     tree =
       :bondy_mst.new(%{
-        store_mod: store_mod,
+        store: store_mod,
         store_opts: store_opts
       })
 

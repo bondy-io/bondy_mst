@@ -54,12 +54,6 @@ gets large.
 the surrounding state.
 """).
 
--record(sealed_view, {
-    pack_id  :: non_neg_integer(),
-    idx      :: bondy_mst_pack_index:t(),
-    pack_fd  :: file:fd()
-}).
-
 -record(?MODULE, {
     dir            :: file:filename_all(),
     manifest       :: bondy_mst_pack_manifest:t(),
@@ -75,10 +69,9 @@ the surrounding state.
     | {sealed_pack, non_neg_integer(), term()}
     | {sealed_idx, non_neg_integer(), term()}.
 
--type get_error() ::
-    {pack_io, non_neg_integer(), term()}
-    | {decode, non_neg_integer(), term()}
-    | {crc_mismatch, non_neg_integer(), binary()}.
+%% Lifted into `bondy_mst_pack_io:read_error/0` (the shape is shared
+%% between the reader and the store's sealed-pack lookup paths).
+-type get_error() :: bondy_mst_pack_io:read_error().
 
 -export_type([t/0]).
 -export_type([open_error/0]).
@@ -168,7 +161,7 @@ get_loop([V | Rest], Hash) ->
         not_found ->
             get_loop(Rest, Hash);
         {ok, Offset} ->
-            case read_record(V, Hash, Offset) of
+            case bondy_mst_pack_io:read_record(V, Hash, Offset) of
                 {ok, Page} ->
                     {ok, Page};
                 not_found ->
@@ -282,44 +275,3 @@ open_one_sealed(Dir, PackId) ->
             {error, {sealed_idx, PackId, R}}
     end.
 
-%% @private
-%% pread the record header at `Offset`, read the body, verify the CRC.
-read_record(#sealed_view{pack_id = PackId, pack_fd = Fd}, Hash, Offset) ->
-    HdrBytes = bondy_mst_pack_codec:record_header_bytes(),
-    case prim_file:pread(Fd, Offset, HdrBytes) of
-        {ok, HBin} when byte_size(HBin) =:= HdrBytes ->
-            case bondy_mst_pack_codec:decode_record_header(HBin) of
-                {ok, #{hash := H} = Header} when H =:= Hash ->
-                    PageLen = maps:get(page_len, Header),
-                    read_body(Fd, PackId, Offset + HdrBytes, PageLen, Header,
-                              Hash);
-                {ok, _} ->
-                    %% Hash at this offset doesn't match — bloom false
-                    %% positive that the binary-search also accepted.
-                    %% Should not happen if the .idx is well-formed.
-                    not_found;
-                {error, R} ->
-                    {error, {decode, PackId, R}}
-            end;
-        _ ->
-            {error, {pack_io, PackId, short_header}}
-    end.
-
-%% @private
-%% `prim_file:pread(_, _, 0)` returns `eof`, so a zero-length page is
-%% short-circuited rather than going through the read + size check.
-read_body(_Fd, PackId, _BodyOff, 0, Header, Hash) ->
-    case bondy_mst_pack_codec:verify_record(Header, <<>>) of
-        ok          -> {ok, <<>>};
-        {error, _}  -> {error, {crc_mismatch, PackId, Hash}}
-    end;
-read_body(Fd, PackId, BodyOff, PageLen, Header, Hash) ->
-    case prim_file:pread(Fd, BodyOff, PageLen) of
-        {ok, Body} when byte_size(Body) =:= PageLen ->
-            case bondy_mst_pack_codec:verify_record(Header, Body) of
-                ok          -> {ok, Body};
-                {error, _}  -> {error, {crc_mismatch, PackId, Hash}}
-            end;
-        _ ->
-            {error, {pack_io, PackId, short_body}}
-    end.

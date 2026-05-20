@@ -987,13 +987,13 @@ copy_loop(SrcFd, DstFd, Pos,
 %% datasync + atomic rename + dir-fsync + reopen R/W. Mirrors the
 %% safety pattern used by `bondy_oplog_wal_state:atomic_write/4`.
 finalize_compact_tmp(DstFd, TmpPath, FinalPath, Dir) ->
-    case bondy_oplog_wal_io:datasync(DstFd) of
+    case bondy_mst_io:datasync(DstFd) of
         ok ->
             _ = prim_file:close(DstFd),
             case prim_file:rename(TmpPath, FinalPath) of
                 ok ->
                     %% dir-fsync so the rename is durable.
-                    case bondy_oplog_wal_io:fsync_dir(Dir) of
+                    case bondy_mst_io:fsync_dir(Dir) of
                         ok -> reopen_compacted(FinalPath);
                         {error, _} = E -> E
                     end;
@@ -1037,7 +1037,7 @@ truncate_head_if_needed(Fd, LastValid) ->
             {ok, _} = prim_file:position(Fd, LastValid),
             case prim_file:truncate(Fd) of
                 ok ->
-                    case bondy_oplog_wal_io:datasync(Fd) of
+                    case bondy_mst_io:datasync(Fd) of
                         ok -> {ok, Size - LastValid};
                         {error, _} = E -> E
                     end;

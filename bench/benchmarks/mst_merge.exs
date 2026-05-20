@@ -11,7 +11,7 @@ inputs = %{
 
 build_disjoint = fn n, store_mod, store_opts_a, store_opts_b ->
   tree_a =
-    Enum.reduce(1..n, :bondy_mst.new(%{store_mod: store_mod, store_opts: store_opts_a}),
+    Enum.reduce(1..n, :bondy_mst.new(%{store: store_mod, store_opts: store_opts_a}),
       fn i, acc ->
         k = "a:" <> String.pad_leading(Integer.to_string(i), 8, "0")
         :bondy_mst.put(acc, k, k)
@@ -19,7 +19,7 @@ build_disjoint = fn n, store_mod, store_opts_a, store_opts_b ->
     )
 
   tree_b =
-    Enum.reduce(1..n, :bondy_mst.new(%{store_mod: store_mod, store_opts: store_opts_b}),
+    Enum.reduce(1..n, :bondy_mst.new(%{store: store_mod, store_opts: store_opts_b}),
       fn i, acc ->
         k = "b:" <> String.pad_leading(Integer.to_string(i), 8, "0")
         :bondy_mst.put(acc, k, k)

@@ -74,6 +74,22 @@ bench-wal:
     cd {{bench_dir}} && mix deps.get
     cd {{bench_dir}} && mix run benchmarks/wal.exs
 
+# Run the pack-store benchmarks (append throughput vs sync_every,
+# seal throughput). Disk-dependent — writes to /tmp/bondy_mst_bench_pack.
+bench-pack:
+    rebar3 compile
+    cd {{bench_dir}} && mix deps.get
+    cd {{bench_dir}} && mix run benchmarks/mst_pack_put.exs
+    cd {{bench_dir}} && mix run benchmarks/mst_pack_seal.exs
+    cd {{bench_dir}} && mix run benchmarks/mst_pack_get.exs
+
+# Cross-store lookup comparison (map | ets | pack with bloom on).
+# Disk-dependent — writes to /tmp/bondy_mst_bench_pack.
+bench-stores:
+    rebar3 compile
+    cd {{bench_dir}} && mix deps.get
+    cd {{bench_dir}} && mix run benchmarks/mst_store_get.exs
+
 # Concurrency: full suite. Pass DURATION_S=N to override per-scenario seconds.
 bench-concurrency duration="10":
     rebar3 compile
