@@ -229,11 +229,13 @@ open_table(#{topology := Topology, topology_state := State} = Db,
             ShardCount = maps:get(shard_count, Merged, ?DEFAULT_SHARD_COUNT),
             DbName = maps:get(name, Db),
             NS = namespace_atom(DbName, EntityType),
+            OplogOpts = maps:get(oplog_instance_opts, Merged, #{}),
             case Topology:open_table(EntityType, ShardCount, Merged, State) of
                 {ok, TableState, _NewState} ->
                     case provision_shards(
                             NS, DbName, EntityType, ShardCount,
-                            FoldModule, Topology, TableState) of
+                            FoldModule, OplogOpts,
+                            Topology, TableState) of
                         {ok, InstanceIds, CacheHandles} ->
                             {ok, #{
                                 db_name       => DbName,
@@ -485,22 +487,26 @@ namespace_atom(DbName, EntityType) ->
 %% @private
 %% Provision every shard of a newly opened table. On any failure, roll
 %% back partial provisioning so the caller does not inherit a half-built
-%% table.
-provision_shards(NS, DbName, EntityType, ShardCount, FoldModule,
+%% table. `OplogOpts` is a map of extra options forwarded verbatim to
+%% `bondy_oplog:start_instance/2` per shard — typically used to set
+%% `backend` (e.g. `bondy_mst_pack_store`), `storage_path`, or
+%% `fsync_mode`. Per-shard `fold_module`, `applier`, and `wal` opts
+%% take precedence over keys with the same name in `OplogOpts`.
+provision_shards(NS, DbName, EntityType, ShardCount, FoldModule, OplogOpts,
                  Topology, TableState) ->
-    provision_shards(NS, DbName, EntityType, ShardCount, FoldModule,
+    provision_shards(NS, DbName, EntityType, ShardCount, FoldModule, OplogOpts,
                      Topology, TableState, 0, #{}, #{}).
 
-provision_shards(_NS, _DbName, _EntityType, ShardCount, _FoldModule,
+provision_shards(_NS, _DbName, _EntityType, ShardCount, _FoldModule, _OplogOpts,
                  _Topology, _TableState, ShardCount, Ids, Caches) ->
     {ok, Ids, Caches};
-provision_shards(NS, DbName, EntityType, ShardCount, FoldModule,
+provision_shards(NS, DbName, EntityType, ShardCount, FoldModule, OplogOpts,
                  Topology, TableState, Shard, Ids, Caches) ->
     case provision_shard(NS, DbName, EntityType, ShardCount, FoldModule,
-                         Topology, TableState, Shard) of
+                         OplogOpts, Topology, TableState, Shard) of
         {ok, InstanceId, CacheHandle} ->
             provision_shards(NS, DbName, EntityType, ShardCount,
-                             FoldModule, Topology, TableState,
+                             FoldModule, OplogOpts, Topology, TableState,
                              Shard + 1,
                              Ids#{Shard => InstanceId},
                              Caches#{Shard => CacheHandle});
@@ -514,7 +520,7 @@ provision_shards(NS, DbName, EntityType, ShardCount, FoldModule,
 
 
 %% @private
-provision_shard(NS, DbName, EntityType, ShardCount, FoldModule,
+provision_shard(NS, DbName, EntityType, ShardCount, FoldModule, OplogOpts,
                 Topology, TableState, Shard) ->
     case Topology:route(Shard, TableState) of
         {ok, ProjAdapter, ProjHandle} ->
@@ -534,7 +540,7 @@ provision_shard(NS, DbName, EntityType, ShardCount, FoldModule,
                         ok ->
                             start_shard_instance(
                                 NS, DbName, EntityType, Shard,
-                                FoldModule, CacheHandle);
+                                FoldModule, OplogOpts, CacheHandle);
                         {error, _} = Err ->
                             ok = bondy_oplog_cache_ets:close(CacheHandle),
                             Err
@@ -548,14 +554,21 @@ provision_shard(NS, DbName, EntityType, ShardCount, FoldModule,
 
 
 %% @private
-start_shard_instance(NS, DbName, EntityType, Shard, FoldModule, CacheHandle) ->
+%% `OplogOpts` is merged into the per-shard instance opts. The pinned
+%% keys (`fold_module`, `applier`) override any caller-provided values
+%% — those carry per-shard routing the caller cannot meaningfully
+%% provide. Everything else (`backend`, `storage_path`, `fsync_mode`,
+%% `max_install_in_flight`, etc.) is forwarded verbatim.
+start_shard_instance(NS, DbName, EntityType, Shard, FoldModule, OplogOpts,
+                     CacheHandle) ->
     InstanceId = encode_instance_id(DbName, EntityType, Shard),
-    Opts = #{
+    Pinned = #{
         fold_module => FoldModule,
         applier => #{
             cell_apply_target => {NS, ?INDEX, Shard}
         }
     },
+    Opts = maps:merge(OplogOpts, Pinned),
     case bondy_oplog:start_instance(InstanceId, Opts) of
         {ok, _Sup} ->
             {ok, InstanceId, CacheHandle};

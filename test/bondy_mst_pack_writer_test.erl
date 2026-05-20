@@ -996,3 +996,172 @@ with_tmp_dir_prop(Fun) ->
     try Fun(Dir)
     after rmrf(Dir)
     end.
+
+%% =============================================================================
+%% Root-flush debounce (set_root)
+%% =============================================================================
+%%
+%% `set_root/2` rewrites the manifest. Each rewrite costs 4 fsyncs
+%% (tmp+datasync+rename+fsync_dir). The MST applier issues one
+%% set_root per drain batch, so without debouncing the per-call
+%% chain serialises the entire write path. These tests verify the
+%% debounce knobs (`root_flush_every_records` / `root_flush_every_ms`)
+%% so calls under threshold update the in-memory manifest but skip
+%% the disk write, while seal / explicit flush / close force-write
+%% any pending root.
+
+open_writer_root(Dir, RootEveryRecords, RootEveryMs) ->
+    bondy_mst_pack_writer:open(
+        Dir,
+        #{instance_id              => <<"writer-test">>,
+          %% Keep the data-path policy out of the way so we're
+          %% isolating manifest-write behaviour.
+          sync_every_records       => 1000,
+          sync_every_ms            => infinity,
+          root_flush_every_records => RootEveryRecords,
+          root_flush_every_ms      => RootEveryMs}
+    ).
+
+disk_root(Dir) ->
+    {ok, M} = bondy_mst_pack_manifest:read(Dir),
+    bondy_mst_pack_manifest:current_root(M).
+
+mem_root(W) ->
+    bondy_mst_pack_manifest:current_root(bondy_mst_pack_writer:manifest(W)).
+
+set_root_below_threshold_does_not_touch_manifest_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_root(Dir, 4, infinity),
+        try
+            R1 = sha256(<<"root-1">>),
+            R2 = sha256(<<"root-2">>),
+            R3 = sha256(<<"root-3">>),
+            {ok, W1} = bondy_mst_pack_writer:set_root(W0, R1),
+            {ok, W2} = bondy_mst_pack_writer:set_root(W1, R2),
+            {ok, W3} = bondy_mst_pack_writer:set_root(W2, R3),
+            ?assertEqual(R3, mem_root(W3)),
+            ?assertEqual(undefined, disk_root(Dir))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+set_root_threshold_flushes_to_manifest_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_root(Dir, 3, infinity),
+        try
+            R1 = sha256(<<"root-1">>),
+            R2 = sha256(<<"root-2">>),
+            R3 = sha256(<<"root-3">>),
+            {ok, W1} = bondy_mst_pack_writer:set_root(W0, R1),
+            {ok, W2} = bondy_mst_pack_writer:set_root(W1, R2),
+            ?assertEqual(undefined, disk_root(Dir)),
+            %% Third call crosses the records=3 threshold.
+            {ok, W3} = bondy_mst_pack_writer:set_root(W2, R3),
+            ?assertEqual(R3, mem_root(W3)),
+            ?assertEqual(R3, disk_root(Dir))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+set_root_ms_threshold_flushes_eventually_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_root(Dir, infinity, 30),
+        try
+            R1 = sha256(<<"root-1">>),
+            R2 = sha256(<<"root-2">>),
+            {ok, W1} = bondy_mst_pack_writer:set_root(W0, R1),
+            ?assertEqual(undefined, disk_root(Dir)),
+            timer:sleep(60),
+            %% Next set_root past the 30 ms wall-clock threshold flushes.
+            {ok, W2} = bondy_mst_pack_writer:set_root(W1, R2),
+            ?assertEqual(R2, disk_root(Dir)),
+            _ = W2,
+            ok
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+flush_persists_pending_root_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_root(Dir, infinity, infinity),
+        try
+            R = sha256(<<"root-X">>),
+            {ok, W1} = bondy_mst_pack_writer:set_root(W0, R),
+            ?assertEqual(undefined, disk_root(Dir)),
+            {ok, _W2} = bondy_mst_pack_writer:flush(W1),
+            ?assertEqual(R, disk_root(Dir))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+close_persists_pending_root_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_root(Dir, infinity, infinity),
+        R = sha256(<<"root-Y">>),
+        {ok, W1} = bondy_mst_pack_writer:set_root(W0, R),
+        ?assertEqual(undefined, disk_root(Dir)),
+        ok = bondy_mst_pack_writer:close(W1),
+        ?assertEqual(R, disk_root(Dir))
+    end).
+
+seal_carries_pending_root_test() ->
+    %% A pending root and a non-empty pending set: seal already
+    %% rewrites the manifest, so the staged root rides along for
+    %% free. Verify the on-disk root matches the staged value
+    %% after seal returns.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_root(Dir, infinity, infinity),
+        try
+            R = sha256(<<"root-Z">>),
+            {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"page-1">>),
+            {ok, W2} = bondy_mst_pack_writer:set_root(W1, R),
+            ?assertEqual(undefined, disk_root(Dir)),
+            {ok, _PackId, _W3} = bondy_mst_pack_writer:seal(W2),
+            ?assertEqual(R, disk_root(Dir))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+empty_seal_with_pending_root_flushes_test() ->
+    %% No pending records, manifest already absent: seal would
+    %% normally be a pure no-op, but a staged root must still be
+    %% flushed so callers can rely on `seal/1` as a durability
+    %% boundary.
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer_root(Dir, infinity, infinity),
+        try
+            R = sha256(<<"root-empty-seal">>),
+            {ok, W1} = bondy_mst_pack_writer:set_root(W0, R),
+            ?assertEqual(undefined, disk_root(Dir)),
+            {ok, no_op, _W2} = bondy_mst_pack_writer:seal(W1),
+            ?assertEqual(R, disk_root(Dir))
+        after
+            bondy_mst_pack_writer:close(W0)
+        end
+    end).
+
+reopen_with_unflushed_root_sees_prior_disk_root_test() ->
+    %% Simulates a crash: opening a writer, staging a root via
+    %% set_root, then *NOT* calling flush/close — instead closing
+    %% the incoming fd by hand and reopening. The reopen reads the
+    %% on-disk manifest, which still has the prior root. (Documents
+    %% the staleness window: WAL replay would advance it.)
+    with_tmp_dir(fun(Dir) ->
+        Persisted = sha256(<<"persisted">>),
+        Staged    = sha256(<<"staged">>),
+        {ok, W0} = open_writer_root(Dir, 1, infinity),
+        %% First call: records=1 threshold flushes immediately.
+        {ok, W1} = bondy_mst_pack_writer:set_root(W0, Persisted),
+        ?assertEqual(Persisted, disk_root(Dir)),
+        %% Now reopen with a high threshold to debounce.
+        ok = bondy_mst_pack_writer:close(W1),
+        {ok, W2} = open_writer_root(Dir, 1000, infinity),
+        {ok, _W3} = bondy_mst_pack_writer:set_root(W2, Staged),
+        %% Disk still shows the previously persisted root.
+        ?assertEqual(Persisted, disk_root(Dir))
+    end).

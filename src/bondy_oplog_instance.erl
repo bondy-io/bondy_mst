@@ -2817,6 +2817,26 @@ backend_module(Mod) when is_atom(Mod) -> Mod.
 backend_opts(ets, InstanceId, Opts) ->
     Defaults = #{name => InstanceId},
     maps:merge(Defaults, maps:get(backend_options, Opts, #{}));
+backend_opts(bondy_mst_pack_store, InstanceId, Opts) ->
+    %% The pack-store backend wants `dir` (instance directory) and
+    %% `instance_id` in its open opts. Mirror the ETS pattern: derive
+    %% the per-instance dir from `storage_path` via the same path
+    %% strategy that other persistent backends use, then inject the
+    %% required keys as defaults that `backend_options` may override.
+    Base = maps:get(backend_options, Opts, #{}),
+    Defaults0 = #{instance_id => InstanceId},
+    Defaults =
+        case maps:find(storage_path, Opts) of
+            {ok, BaseDir} ->
+                Strategy = maps:get(
+                    path_strategy, Opts, bondy_oplog_path_sharded
+                ),
+                Path = Strategy:storage_path(InstanceId, BaseDir),
+                Defaults0#{dir => unicode:characters_to_binary(Path)};
+            error ->
+                Defaults0
+        end,
+    maps:merge(Defaults, Base);
 backend_opts(_, InstanceId, Opts) ->
     Base = maps:get(backend_options, Opts, #{}),
     case maps:find(storage_path, Opts) of

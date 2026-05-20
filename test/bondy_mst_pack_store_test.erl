@@ -621,16 +621,13 @@ delete_of_unknown_hash_still_persists_test() ->
     end).
 
 re_tombstoning_same_hash_does_not_rewrite_test() ->
-    %% Same hash deleted twice — second delete must skip the write
-    %% (mtime check is fragile across filesystems, so check via the
-    %% file's content hash and bytes-written semantics: if a second
-    %% write happened, the trailer would still be the same because
-    %% the set is the same. So we instead use the fact that the
-    %% bytes are identical to confirm no semantic change, and rely
-    %% on the size-based skip in the impl to avoid the I/O).
+    %% Same hash deleted twice — second delete must skip the write.
+    %% Disables the tombstones-flush debounce so every change is
+    %% persisted immediately (so we can compare on-disk bytes
+    %% between the two calls).
     with_tmp_dir(fun(Dir) ->
         H = crypto:hash(sha256, <<"once">>),
-        S0 = open_store(Dir),
+        S0 = open_store_with(Dir, #{tombstones_flush_every_records => 1}),
         S1 = bondy_mst_store:delete(S0, H),
         Path = bondy_mst_pack_tombstones:path(Dir),
         {ok, Bin1} = file:read_file(Path),
@@ -1180,3 +1177,91 @@ install_index_open_expectation(N, Reason) when is_integer(N), N >= 1 ->
                     meck:passthrough([Bin])
             end
         end).
+
+%% =============================================================================
+%% Tombstones-flush debounce
+%% =============================================================================
+%%
+%% `delete/2` (and the MST's spine-revision `free/3` via `put/2`) used
+%% to fsync the `tombstones` file on every call — ~5 such writes per
+%% MST put under steady-state churn. The store now keeps the free_set
+%% in memory and flushes under the same debounce shape as `set_root/2`:
+%% threshold-on-records OR wall-clock, with seal / GC / close as
+%% forced-flush boundaries.
+
+ts_disk_set(Dir) ->
+    Path = bondy_mst_pack_tombstones:path(Dir),
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            case bondy_mst_pack_tombstones:decode(Bin) of
+                {ok, Set} -> Set;
+                {error, _} = E -> E
+            end;
+        {error, enoent} ->
+            sets:new();
+        {error, _} = E ->
+            E
+    end.
+
+tombstones_below_threshold_skips_disk_write_test() ->
+    with_tmp_dir(fun(Dir) ->
+        S0 = open_store_with(Dir, #{tombstones_flush_every_records => 4,
+                                     tombstones_flush_every_ms => infinity}),
+        H1 = crypto:hash(sha256, <<"h1">>),
+        H2 = crypto:hash(sha256, <<"h2">>),
+        H3 = crypto:hash(sha256, <<"h3">>),
+        S1 = bondy_mst_store:delete(S0, H1),
+        S2 = bondy_mst_store:delete(S1, H2),
+        S3 = bondy_mst_store:delete(S2, H3),
+        %% Three changes, threshold is 4 — file should NOT have these.
+        ?assert(sets:is_empty(ts_disk_set(Dir))),
+        _ = S3,
+        bondy_mst_store:close(S3)
+    end).
+
+tombstones_threshold_flushes_to_disk_test() ->
+    with_tmp_dir(fun(Dir) ->
+        S0 = open_store_with(Dir, #{tombstones_flush_every_records => 3,
+                                     tombstones_flush_every_ms => infinity}),
+        H1 = crypto:hash(sha256, <<"a">>),
+        H2 = crypto:hash(sha256, <<"b">>),
+        H3 = crypto:hash(sha256, <<"c">>),
+        S1 = bondy_mst_store:delete(S0, H1),
+        S2 = bondy_mst_store:delete(S1, H2),
+        ?assert(sets:is_empty(ts_disk_set(Dir))),
+        %% Third call crosses the threshold.
+        S3 = bondy_mst_store:delete(S2, H3),
+        DiskSet = ts_disk_set(Dir),
+        ?assert(sets:is_element(H1, DiskSet)),
+        ?assert(sets:is_element(H2, DiskSet)),
+        ?assert(sets:is_element(H3, DiskSet)),
+        _ = S3,
+        bondy_mst_store:close(S3)
+    end).
+
+tombstones_close_flushes_pending_test() ->
+    with_tmp_dir(fun(Dir) ->
+        S0 = open_store_with(Dir, #{tombstones_flush_every_records => infinity,
+                                     tombstones_flush_every_ms => infinity}),
+        H = crypto:hash(sha256, <<"close-flush">>),
+        S1 = bondy_mst_store:delete(S0, H),
+        %% Thresholds are infinity, so no in-flight flush yet.
+        ?assert(sets:is_empty(ts_disk_set(Dir))),
+        bondy_mst_store:close(S1),
+        %% close/1 must have force-flushed.
+        ?assert(sets:is_element(H, ts_disk_set(Dir)))
+    end).
+
+tombstones_seal_flushes_pending_test() ->
+    with_tmp_dir(fun(Dir) ->
+        S0 = open_store_with(Dir, #{tombstones_flush_every_records => infinity,
+                                     tombstones_flush_every_ms => infinity}),
+        H = crypto:hash(sha256, <<"seal-flush">>),
+        S1 = bondy_mst_store:delete(S0, H),
+        ?assert(sets:is_empty(ts_disk_set(Dir))),
+        %% seal/1 forces a tombstones flush even though no incoming pack.
+        {ok, S2} = bondy_mst_pack_store_seal(S1),
+        ?assert(sets:is_element(H, ts_disk_set(Dir))),
+        _ = S2,
+        bondy_mst_store:close(S2)
+    end).

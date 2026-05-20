@@ -97,10 +97,13 @@ unsynced pages on recovery. Callers that need stricter durability
     manifest         :: bondy_mst_pack_manifest:t(),
     incoming_fd      :: file:fd() | undefined,
     incoming_offset  :: non_neg_integer(),
-    %% Hash => {Offset, PageLen}. Offset is the byte offset of the
-    %% record header in incoming.pack; PageLen is the body length so
-    %% seal can pread the body without first re-parsing the header.
-    pending          :: #{binary() => {non_neg_integer(), non_neg_integer()}},
+    %% Hash => {Offset, PageLen, Body}. Offset is the byte offset of
+    %% the record header in incoming.pack; PageLen is the body length;
+    %% Body is the page bytes kept resident so the MST traversal
+    %% (which re-reads pages via `pending_read/2` immediately after
+    %% writing them) doesn't have to syscall back to disk. Caps memory
+    %% at the auto-seal threshold (~16 MB by default).
+    pending          :: #{binary() => {non_neg_integer(), non_neg_integer(), binary()}},
     next_pack_id      :: pos_integer(),
     %% Durability policy. After each successful append, the writer
     %% datasyncs when EITHER `unsynced_count >= sync_every_records`
@@ -111,7 +114,23 @@ unsynced pages on recovery. Callers that need stricter durability
     sync_every_records :: pos_integer(),
     sync_every_ms      :: pos_integer() | infinity,
     unsynced_count = 0 :: non_neg_integer(),
-    last_sync_ms       :: integer()
+    last_sync_ms       :: integer(),
+    %% Root-flush debounce. `set_root/2` rewrites the manifest, which
+    %% costs tmp+datasync+rename+fsync_dir (4 fsyncs) — ~40-200 ms per
+    %% call on macOS APFS. Without debouncing the MST applier (one
+    %% set_root per drain batch) serialises on this fsync chain.
+    %% Same shape as the append batching above: flush when EITHER
+    %% `root_unsynced_count >= root_flush_every_records` OR
+    %% `monotonic_ms - last_root_flush_ms >= root_flush_every_ms`,
+    %% checked on each `set_root/2` call. Seal paths reset these
+    %% counters because they already rewrite the manifest with the
+    %% current in-memory root. `close/1` and `flush/1` force a flush
+    %% so clean shutdown is lossless.
+    root_flush_every_records :: pos_integer() | infinity,
+    root_flush_every_ms      :: pos_integer() | infinity,
+    root_unsynced_count = 0  :: non_neg_integer(),
+    last_root_flush_ms       :: integer(),
+    root_dirty = false       :: boolean()
 }).
 
 -type t() :: #?MODULE{}.
@@ -120,7 +139,9 @@ unsynced pages on recovery. Callers that need stricter durability
     instance_id := binary(),
     hash_algo   => atom(),
     sync_every_records => pos_integer(),
-    sync_every_ms      => pos_integer() | infinity
+    sync_every_ms      => pos_integer() | infinity,
+    root_flush_every_records => pos_integer() | infinity,
+    root_flush_every_ms      => pos_integer() | infinity
 }.
 
 -type open_error() ::
@@ -209,7 +230,13 @@ open(Dir, Opts) when is_list(Dir) orelse is_binary(Dir), is_map(Opts) ->
                              ?BONDY_MST_PACK_DEFAULT_SYNC_EVERY_RECORDS),
                 sync_every_ms      =>
                     maps:get(sync_every_ms, Opts,
-                             ?BONDY_MST_PACK_DEFAULT_SYNC_EVERY_MS)
+                             ?BONDY_MST_PACK_DEFAULT_SYNC_EVERY_MS),
+                root_flush_every_records =>
+                    maps:get(root_flush_every_records, Opts,
+                             ?BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_RECORDS),
+                root_flush_every_ms =>
+                    maps:get(root_flush_every_ms, Opts,
+                             ?BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_MS)
             },
             do_open(Dir, InstanceId, HashAlgo, Policy);
         _ ->
@@ -223,7 +250,8 @@ closed writer is a no-op.
 """).
 -spec close(t()) -> ok.
 
-close(#?MODULE{incoming_fd = undefined}) ->
+close(#?MODULE{incoming_fd = undefined} = W) ->
+    _ = flush_pending_root(W),
     ok;
 close(#?MODULE{incoming_fd = Fd} = W) ->
     _ = flush(W),
@@ -276,9 +304,10 @@ append(#?MODULE{} = W, Page) when is_binary(Page) ->
 
 ?DOC("""
 Forces a `datasync` of the incoming pack fd if there are any unsynced
-records buffered. Idempotent: if the writer has no unsynced data (or
-the incoming pack hasn't been created yet), returns `{ok, W}` without
-touching the disk.
+records buffered, AND a manifest rewrite if a `set_root/2` is
+pending. Idempotent: returns `{ok, W}` without touching disk when
+both buffers are clean (or the incoming pack hasn't been created
+yet — in which case only the manifest flush runs).
 
 The batching policy normally takes care of durability automatically;
 this exists for callers that need an explicit boundary — e.g. before
@@ -287,12 +316,20 @@ request.
 """).
 -spec flush(t()) -> {ok, t()} | {error, term()}.
 
-flush(#?MODULE{unsynced_count = 0} = W) ->
-    {ok, W};
-flush(#?MODULE{incoming_fd = undefined} = W) ->
-    {ok, W};
 flush(#?MODULE{} = W) ->
-    do_sync(W).
+    case flush_incoming(W) of
+        {ok, W1}       -> flush_pending_root(W1);
+        {error, _} = E -> E
+    end.
+
+%% @private
+flush_incoming(#?MODULE{unsynced_count = 0} = W)    -> {ok, W};
+flush_incoming(#?MODULE{incoming_fd = undefined} = W) -> {ok, W};
+flush_incoming(#?MODULE{} = W)                      -> do_sync(W).
+
+%% @private
+flush_pending_root(#?MODULE{root_dirty = false} = W) -> {ok, W};
+flush_pending_root(#?MODULE{} = W)                   -> do_flush_root(W).
 
 ?DOC("""
 Seals the incoming pack into a numbered sealed pack.
@@ -324,14 +361,25 @@ the recovery scanner removes on next open.
 
 seal(#?MODULE{pending = P} = W) when map_size(P) =:= 0 ->
     case bondy_mst_pack_manifest:incoming_pack(W#?MODULE.manifest) of
+        absent when W#?MODULE.root_dirty ->
+            %% No pending records to seal, but a staged root is unflushed.
+            %% Piggy-back the root flush onto a no-op seal.
+            case do_flush_root(W) of
+                {ok, W1}       -> {ok, no_op, W1};
+                {error, R}     -> {error, {manifest, R}}
+            end;
         absent ->
             {ok, no_op, W};
         present ->
             %% Pending is empty but manifest says present — reconcile.
+            %% The in-memory manifest also carries any staged root, so the
+            %% write below covers both reconciliation and root debounce.
             M1 = bondy_mst_pack_manifest:with_incoming_pack(W#?MODULE.manifest, absent),
             case bondy_mst_pack_manifest:write(W#?MODULE.dir, M1) of
                 ok ->
-                    {ok, no_op, W#?MODULE{manifest = M1}};
+                    {ok, no_op, reset_root_flush_counters(
+                        W#?MODULE{manifest = M1}
+                    )};
                 {error, R} ->
                     {error, {manifest, R}}
             end
@@ -340,21 +388,46 @@ seal(#?MODULE{} = W) ->
     do_seal(W).
 
 ?DOC("""
-Persists `Root` as the manifest's `current_root`. Atomically rewrites
-the manifest via tmp + rename + fsync_dir. The change is visible in
-memory only after the rewrite succeeds; failure returns `{error, _}`
-and the writer's manifest is unchanged.
+Stages `Root` as the manifest's `current_root`. The in-memory
+manifest is always updated so subsequent `manifest/1` /
+`current_root/1` reads see the new root immediately.
+
+The on-disk manifest is rewritten only when the debounce policy
+fires — either `root_unsynced_count >= root_flush_every_records`
+or `monotonic_ms - last_root_flush_ms >= root_flush_every_ms`.
+Each rewrite costs tmp+datasync+rename+fsync_dir (4 fsyncs) so
+debouncing turns a per-batch hot spot into amortised cost.
+
+Crash semantics: the on-disk `current_root` may lag the in-memory
+root by up to the debounce window. The pack store sits beneath a
+WAL that is the authoritative source of truth, so on reopen the
+applier replays unapplied WAL records and the on-disk root
+catches up. Callers that need stricter durability either lower
+the thresholds, call `flush/1` after `set_root/2`, or open the
+writer with `root_flush_every_records = 1` (per-call fsync).
+
+`close/1` and `flush/1` always force a final manifest write if a
+root flush is pending so clean shutdown is lossless.
+
+Returns `{ok, W1}` (the manifest write either succeeded or was
+debounced) or `{error, _}` if the debounced write was due *and*
+failed — in the latter case the writer's in-memory root still
+reflects the new value and the dirty bit stays set so the next
+flush attempt will retry.
 """).
 -spec set_root(t(), Root :: binary() | undefined) ->
     {ok, t()} | {error, term()}.
 
 set_root(#?MODULE{} = W, Root) when is_binary(Root); Root =:= undefined ->
     M1 = bondy_mst_pack_manifest:with_current_root(W#?MODULE.manifest, Root),
-    case bondy_mst_pack_manifest:write(W#?MODULE.dir, M1) of
-        ok ->
-            {ok, W#?MODULE{manifest = M1}};
-        {error, _} = E ->
-            E
+    W1 = W#?MODULE{
+        manifest            = M1,
+        root_unsynced_count = W#?MODULE.root_unsynced_count + 1,
+        root_dirty          = true
+    },
+    case root_flush_due(W1) of
+        true  -> do_flush_root(W1);
+        false -> {ok, W1}
     end.
 
 ?DOC("""
@@ -367,10 +440,13 @@ just updates the in-memory copies.
 -spec set_manifest(t(), bondy_mst_pack_manifest:t()) -> t().
 
 set_manifest(#?MODULE{} = W, M) ->
-    W#?MODULE{
+    %% The caller persisted M to disk already; the new on-disk state
+    %% supersedes any staged set_root call, so the root-flush
+    %% bookkeeping resets.
+    reset_root_flush_counters(W#?MODULE{
         manifest = M,
         next_pack_id = next_pack_id_from(M)
-    }.
+    }).
 
 ?DOC("""
 Streams a new sealed `pack-NNNN.pack` + `.idx` pair from `Hashes` (sorted
@@ -471,8 +547,8 @@ to resolve a recent put without opening a separate reader.
 
 pending_lookup(#?MODULE{pending = P}, Hash) ->
     case maps:find(Hash, P) of
-        {ok, V} -> {ok, V};
-        error   -> not_found
+        {ok, {Offset, Len, _Body}} -> {ok, {Offset, Len}};
+        error -> not_found
     end.
 
 ?DOC("""
@@ -485,21 +561,10 @@ hash, or `{error, _}` on I/O.
 -spec pending_read(t(), binary()) ->
     {ok, binary()} | not_found | {error, term()}.
 
-pending_read(#?MODULE{pending = P, incoming_fd = Fd}, Hash) ->
+pending_read(#?MODULE{pending = P}, Hash) ->
     case maps:find(Hash, P) of
-        {ok, {_Offset, 0}} ->
-            {ok, <<>>};
-        {ok, {Offset, Len}} when Fd =/= undefined ->
-            BodyOff = Offset + bondy_mst_pack_codec:record_header_bytes(),
-            case prim_file:pread(Fd, BodyOff, Len) of
-                {ok, Body} when byte_size(Body) =:= Len -> {ok, Body};
-                {ok, _} -> {error, short_body};
-                eof     -> {error, short_body};
-                {error, _} = E -> E
-            end;
-        {ok, _} ->
-            %% Pending entry but fd not open — invariant break.
-            {error, fd_not_open};
+        {ok, {_Offset, _Len, Body}} ->
+            {ok, Body};
         error ->
             not_found
     end.
@@ -612,6 +677,7 @@ open_incoming(Dir, InstanceId, HashAlgo, Manifest, Policy) ->
 
 %% @private
 fresh_state(Dir, InstanceId, HashAlgo, InstanceHash, Manifest, Policy) ->
+    Now = erlang:monotonic_time(millisecond),
     #?MODULE{
         dir = Dir,
         instance_id = InstanceId,
@@ -625,7 +691,12 @@ fresh_state(Dir, InstanceId, HashAlgo, InstanceHash, Manifest, Policy) ->
         sync_every_records = maps:get(sync_every_records, Policy),
         sync_every_ms      = maps:get(sync_every_ms, Policy),
         unsynced_count     = 0,
-        last_sync_ms       = erlang:monotonic_time(millisecond)
+        last_sync_ms       = Now,
+        root_flush_every_records = maps:get(root_flush_every_records, Policy),
+        root_flush_every_ms      = maps:get(root_flush_every_ms, Policy),
+        root_unsynced_count      = 0,
+        last_root_flush_ms       = Now,
+        root_dirty               = false
     }.
 
 %% @private
@@ -676,12 +747,13 @@ flip_manifest_to_present(W, Fd, HeaderSize) ->
             %% rebase the T-timer so it counts from now rather than from
             %% `open/2` (which may have been many ms earlier and would
             %% spuriously trip a tight `sync_every_ms` on the first append).
-            {ok, W#?MODULE{
+            %% The manifest write above also covered any staged root.
+            {ok, reset_root_flush_counters(W#?MODULE{
                 manifest        = M,
                 incoming_fd     = Fd,
                 incoming_offset = HeaderSize,
                 last_sync_ms    = erlang:monotonic_time(millisecond)
-            }};
+            })};
         {error, R} ->
             _ = prim_file:close(Fd),
             _ = prim_file:delete(bondy_mst_pack_paths:incoming_pack_path(
@@ -697,6 +769,7 @@ resume_incoming(Dir, Path, InstanceId, HashAlgo, InstanceHash, Manifest,
         {ok, Fd} ->
             case scan_incoming(Fd, InstanceHash, HashAlgo) of
                 {ok, EndOffset, Pending} ->
+                    Now = erlang:monotonic_time(millisecond),
                     {ok, #?MODULE{
                         dir = Dir,
                         instance_id = InstanceId,
@@ -712,7 +785,14 @@ resume_incoming(Dir, Path, InstanceId, HashAlgo, InstanceHash, Manifest,
                         sync_every_ms =
                             maps:get(sync_every_ms, Policy),
                         unsynced_count = 0,
-                        last_sync_ms = erlang:monotonic_time(millisecond)
+                        last_sync_ms = Now,
+                        root_flush_every_records =
+                            maps:get(root_flush_every_records, Policy),
+                        root_flush_every_ms =
+                            maps:get(root_flush_every_ms, Policy),
+                        root_unsynced_count = 0,
+                        last_root_flush_ms = Now,
+                        root_dirty = false
                     }};
                 {error, R} ->
                     _ = prim_file:close(Fd),
@@ -762,11 +842,11 @@ scan_records(Fd, Offset, Pending) ->
                 {ok, #{hash := H, page_len := L} = Header} ->
                     BodyOffset = Offset + HdrBytes,
                     case verify_scanned_body(Fd, BodyOffset, L, Header, H) of
-                        ok ->
+                        {ok, Body} ->
                             scan_records(
                                 Fd,
                                 BodyOffset + L,
-                                Pending#{H => {Offset, L}}
+                                Pending#{H => {Offset, L, Body}}
                             );
                         {error, _} = E ->
                             E
@@ -793,7 +873,7 @@ verify_scanned_body(_Fd, _BodyOffset, 0, Header, Hash) ->
     case bondy_mst_pack_codec:verify_record(Header, <<>>) of
         ok ->
             case crypto:hash(sha256, <<>>) of
-                Hash -> ok;
+                Hash -> {ok, <<>>};
                 _    -> {error, needs_recovery}
             end;
         {error, _} ->
@@ -805,7 +885,7 @@ verify_scanned_body(Fd, BodyOffset, L, Header, Hash) ->
             case bondy_mst_pack_codec:verify_record(Header, Body) of
                 ok ->
                     case crypto:hash(sha256, Body) of
-                        Hash -> ok;
+                        Hash -> {ok, Body};
                         _    -> {error, needs_recovery}
                     end;
                 {error, _} ->
@@ -951,7 +1031,7 @@ do_append(#?MODULE{incoming_fd = Fd, incoming_offset = Off} = W, Hash, Page) ->
             HdrBytes = bondy_mst_pack_codec:record_header_bytes(),
             NewOff = Off + HdrBytes + byte_size(Page),
             Pending = (W#?MODULE.pending)#{
-                Hash => {Off, byte_size(Page)}
+                Hash => {Off, byte_size(Page), Page}
             },
             W1 = W#?MODULE{
                 incoming_offset = NewOff,
@@ -993,6 +1073,52 @@ do_sync(#?MODULE{incoming_fd = Fd} = W) ->
     end.
 
 %% =============================================================================
+%% PRIVATE — root flush debounce
+%% =============================================================================
+
+%% @private
+%% Decide whether the staged in-memory `current_root` needs to be
+%% rewritten to the on-disk manifest now. Mirrors
+%% `maybe_sync_after_append/1`: count-based threshold wins, then
+%% wall-clock threshold (opportunistically — only checked on
+%% `set_root/2` calls). Both `infinity` means "never flush via
+%% set_root" — the next seal / explicit `flush/1` / `close/1`
+%% carries it.
+root_flush_due(#?MODULE{root_dirty = false}) ->
+    false;
+root_flush_due(#?MODULE{root_unsynced_count = N,
+                        root_flush_every_records = K}) when
+        is_integer(K), N >= K ->
+    true;
+root_flush_due(#?MODULE{root_flush_every_ms = infinity}) ->
+    false;
+root_flush_due(#?MODULE{last_root_flush_ms = Last,
+                        root_flush_every_ms = T}) ->
+    erlang:monotonic_time(millisecond) - Last >= T.
+
+%% @private
+%% Atomic manifest rewrite + counter reset. The writer's `manifest`
+%% field already holds the staged root, so we just persist it.
+do_flush_root(#?MODULE{dir = Dir, manifest = M} = W) ->
+    case bondy_mst_pack_manifest:write(Dir, M) of
+        ok ->
+            {ok, reset_root_flush_counters(W)};
+        {error, _} = E ->
+            E
+    end.
+
+%% @private
+%% Called whenever the manifest has just been written to disk
+%% (set_root flush, seal, GC swap). Symmetric to `do_sync/1`'s
+%% counter reset.
+reset_root_flush_counters(#?MODULE{} = W) ->
+    W#?MODULE{
+        root_unsynced_count = 0,
+        last_root_flush_ms  = erlang:monotonic_time(millisecond),
+        root_dirty          = false
+    }.
+
+%% =============================================================================
 %% PRIVATE — seal
 %% =============================================================================
 
@@ -1020,20 +1146,13 @@ pending_reader(Fd, Pending) ->
     fun(Hash) -> read_pending_body(Fd, Pending, Hash) end.
 
 %% @private
-read_pending_body(Fd, Pending, Hash) ->
+%% Bodies are resident in the pending map so the seal stream can
+%% return them directly without pread'ing back from `incoming.pack`.
+%% Fd is kept in the signature for symmetry / future fallback.
+read_pending_body(_Fd, Pending, Hash) ->
     case maps:find(Hash, Pending) of
-        {ok, {_Offset, 0}} ->
-            %% Zero-length body — `prim_file:pread(_, _, 0)` returns
-            %% `eof`, not `{ok, <<>>}`; short-circuit.
-            {ok, <<>>};
-        {ok, {Offset, Len}} ->
-            BodyOff = Offset + bondy_mst_pack_codec:record_header_bytes(),
-            case prim_file:pread(Fd, BodyOff, Len) of
-                {ok, Body} when byte_size(Body) =:= Len ->
-                    {ok, Body};
-                Other ->
-                    {error, {body_read, Hash, Offset, Other}}
-            end;
+        {ok, {_Offset, _Len, Body}} ->
+            {ok, Body};
         error ->
             {error, {missing_pending, Hash}}
     end.
@@ -1196,8 +1315,10 @@ reopen_fresh_incoming(W, M1, PackId) ->
         W#?MODULE.hash_algo,
         W#?MODULE.instance_hash,
         M1,
-        #{sync_every_records => W#?MODULE.sync_every_records,
-          sync_every_ms      => W#?MODULE.sync_every_ms}
+        #{sync_every_records       => W#?MODULE.sync_every_records,
+          sync_every_ms             => W#?MODULE.sync_every_ms,
+          root_flush_every_records  => W#?MODULE.root_flush_every_records,
+          root_flush_every_ms       => W#?MODULE.root_flush_every_ms}
     ),
     {ok, PackId, Fresh#?MODULE{next_pack_id = PackId + 1}}.
 

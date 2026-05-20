@@ -127,7 +127,23 @@ volume.
     %% the put, since the page is already durable in incoming.pack
     %% and the next put will re-evaluate.
     auto_seal_records :: pos_integer() | infinity,
-    auto_seal_bytes   :: pos_integer() | infinity
+    auto_seal_bytes   :: pos_integer() | infinity,
+    %% Tombstones-flush debounce. The `tombstones` file uses the same
+    %% tmp+datasync+rename+fsync_dir pattern as the manifest (4 fsyncs
+    %% per write). `bondy_mst:put/3` issues one `free/3` per spine
+    %% modification — typically ~5 per put on a populated tree — so a
+    %% naive per-call write costs ~20 fsyncs per MST put. We keep the
+    %% in-memory `free_set` current and persist on the same shape as
+    %% the set_root debounce: when `tombstones_unsynced_count` reaches
+    %% the records threshold, or the wall-clock floor has elapsed, the
+    %% next mutation flushes. Seal / auto-seal / GC / close / explicit
+    %% `flush/1` force a flush so the on-disk tombstones never lag the
+    %% in-memory set for long.
+    tombstones_flush_every_records :: pos_integer() | infinity,
+    tombstones_flush_every_ms      :: pos_integer() | infinity,
+    tombstones_unsynced_count = 0  :: non_neg_integer(),
+    last_tombstones_flush_ms       :: integer(),
+    tombstones_dirty = false       :: boolean()
 }).
 
 -type t() :: #?MODULE{}.
@@ -181,9 +197,14 @@ open(sha256, Opts) when is_map(Opts) ->
     ok = ensure_dir(Dir),
     WriterOpts0 = #{instance_id => InstanceId, hash_algo => sha256},
     WriterOpts1 = forward_opt(sync_every_records, Opts, WriterOpts0),
-    WriterOpts  = forward_opt(sync_every_ms, Opts, WriterOpts1),
+    WriterOpts2 = forward_opt(sync_every_ms, Opts, WriterOpts1),
+    WriterOpts3 = forward_opt(root_flush_every_records, Opts, WriterOpts2),
+    WriterOpts  = forward_opt(root_flush_every_ms, Opts, WriterOpts3),
     AutoSealR = validated_auto_seal(auto_seal_records, Opts),
     AutoSealB = validated_auto_seal(auto_seal_bytes, Opts),
+    TsR = validated_tombstones_flush(tombstones_flush_every_records, Opts),
+    TsMs = validated_tombstones_flush(tombstones_flush_every_ms, Opts),
+    Now = erlang:monotonic_time(millisecond),
     case bondy_mst_pack_writer:open(Dir, WriterOpts) of
         {ok, W} ->
             Manifest = bondy_mst_pack_writer:manifest(W),
@@ -197,7 +218,12 @@ open(sha256, Opts) when is_map(Opts) ->
                         hashing_algorithm = sha256,
                         opts = Opts,
                         auto_seal_records = AutoSealR,
-                        auto_seal_bytes = AutoSealB
+                        auto_seal_bytes = AutoSealB,
+                        tombstones_flush_every_records = TsR,
+                        tombstones_flush_every_ms = TsMs,
+                        tombstones_unsynced_count = 0,
+                        last_tombstones_flush_ms = Now,
+                        tombstones_dirty = false
                     };
                 {error, R} ->
                     _ = bondy_mst_pack_writer:close(W),
@@ -211,12 +237,17 @@ open(Algo, _Opts) ->
 
 -spec close(t()) -> ok.
 
-close(#?MODULE{writer = W, sealed_views = Views}) ->
+close(#?MODULE{} = T) ->
+    %% Force a final tombstones flush so clean shutdown is lossless;
+    %% errors are swallowed because there is no caller to return them
+    %% to and the next reopen rebuilds the in-memory free_set from
+    %% disk anyway.
+    _ = do_flush_tombstones(T),
     lists:foreach(
         fun(#sealed_view{pack_fd = Fd}) -> _ = prim_file:close(Fd) end,
-        Views
+        T#?MODULE.sealed_views
     ),
-    bondy_mst_pack_writer:close(W),
+    bondy_mst_pack_writer:close(T#?MODULE.writer),
     ok.
 
 -spec capabilities(t()) -> map().
@@ -272,9 +303,9 @@ put(#?MODULE{writer = W, hashing_algorithm = Algo} = T, Page) ->
             %% addressed — verify in debug builds; in release builds
             %% the equivalence is by construction.
             Hash = bondy_mst_page:hash(Page, Algo),
-            FreeSet = maybe_persist_free_set(T,
+            T1 = maybe_persist_free_set(
+                T#?MODULE{writer = W1},
                 sets:del_element(Hash, T#?MODULE.free_set), put),
-            T1 = T#?MODULE{writer = W1, free_set = FreeSet},
             {Hash, maybe_auto_seal(T1)};
         {error, R} ->
             error({put, R})
@@ -283,9 +314,8 @@ put(#?MODULE{writer = W, hashing_algorithm = Algo} = T, Page) ->
 -spec delete(t(), binary()) -> t().
 
 delete(#?MODULE{} = T, Hash) when is_binary(Hash) ->
-    FreeSet = maybe_persist_free_set(T,
-        sets:add_element(Hash, T#?MODULE.free_set), delete),
-    T#?MODULE{free_set = FreeSet}.
+    maybe_persist_free_set(T,
+        sets:add_element(Hash, T#?MODULE.free_set), delete).
 
 -spec copy(t(), bondy_mst_store:t(), binary()) -> t().
 
@@ -321,9 +351,8 @@ list(#?MODULE{} = T) ->
 -spec free(t(), binary(), page()) -> t().
 
 free(#?MODULE{} = T, Hash, _Page) when is_binary(Hash) ->
-    FreeSet = maybe_persist_free_set(T,
-        sets:add_element(Hash, T#?MODULE.free_set), free),
-    T#?MODULE{free_set = FreeSet}.
+    maybe_persist_free_set(T,
+        sets:add_element(Hash, T#?MODULE.free_set), free).
 
 ?DOC("""
 Pack-rewrite compaction. Given a list of `KeepRoots`, computes the
@@ -390,15 +419,22 @@ or the call was a no-op against an empty incoming).
 -spec seal(t()) -> {ok, t()} | {error, term()}.
 
 seal(#?MODULE{writer = W} = T) ->
-    case bondy_mst_pack_writer:seal(W) of
-        {ok, no_op, W1} ->
-            {ok, T#?MODULE{writer = W1}};
-        {ok, PackId, W1} ->
-            Dir = bondy_mst_pack_writer:dir(W1),
-            case open_sealed_view(Dir, PackId) of
-                {ok, View} ->
-                    Views = newest_first([View | T#?MODULE.sealed_views]),
-                    {ok, T#?MODULE{writer = W1, sealed_views = Views}};
+    %% Seal is a write barrier — any staged tombstones are flushed
+    %% so the on-disk state after seal/1 is fully durable.
+    case do_flush_tombstones(T) of
+        {ok, T0} ->
+            case bondy_mst_pack_writer:seal(W) of
+                {ok, no_op, W1} ->
+                    {ok, T0#?MODULE{writer = W1}};
+                {ok, PackId, W1} ->
+                    Dir = bondy_mst_pack_writer:dir(W1),
+                    case open_sealed_view(Dir, PackId) of
+                        {ok, View} ->
+                            Views = newest_first([View | T0#?MODULE.sealed_views]),
+                            {ok, T0#?MODULE{writer = W1, sealed_views = Views}};
+                        {error, _} = E ->
+                            E
+                    end;
                 {error, _} = E ->
                     E
             end;
@@ -449,8 +485,24 @@ validated_auto_seal(K, Opts) ->
     end.
 
 %% @private
-default_for(auto_seal_records) -> ?BONDY_MST_PACK_DEFAULT_AUTO_SEAL_RECORDS;
-default_for(auto_seal_bytes)   -> ?BONDY_MST_PACK_DEFAULT_AUTO_SEAL_BYTES.
+%% Same shape as `validated_auto_seal/2` — `infinity` disables, a
+%% positive integer enables, any other value is rejected.
+validated_tombstones_flush(K, Opts) ->
+    case maps:get(K, Opts, default_for(K)) of
+        infinity -> infinity;
+        N when is_integer(N), N > 0 -> N;
+        Bad -> error({invalid_opt, K, Bad})
+    end.
+
+%% @private
+default_for(auto_seal_records) ->
+    ?BONDY_MST_PACK_DEFAULT_AUTO_SEAL_RECORDS;
+default_for(auto_seal_bytes) ->
+    ?BONDY_MST_PACK_DEFAULT_AUTO_SEAL_BYTES;
+default_for(tombstones_flush_every_records) ->
+    ?BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_RECORDS;
+default_for(tombstones_flush_every_ms) ->
+    ?BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_MS.
 
 %% @private
 ensure_dir(Dir) ->
@@ -525,27 +577,80 @@ threshold_crossed(_, infinity) -> false;
 threshold_crossed(V, Max)      -> V >= Max.
 
 %% @private
-%% Writes the new free set to `tombstones` iff it differs in size
-%% from the in-memory one (a structural-equality check would be
-%% O(N) in `sets:size/1` × set-iteration). For `delete`/`free` the
-%% no-change case (re-tombstoning an already-tombstoned hash) is
-%% common from the MST's page-revision loop; for `put` the
-%% no-change case (un-tombstoning a hash that was not tombstoned)
-%% is the steady-state path. Skipping the I/O in both cases keeps
-%% the per-call cost at zero for the common path.
+%% Updates the in-memory `free_set` and decides whether to persist
+%% the change to disk. Size equality with the prior set means a
+%% no-op (re-tombstoning an already-tombstoned hash, or
+%% un-tombstoning a hash that wasn't tombstoned — both common from
+%% the MST's page-revision loop). Otherwise the staged set replaces
+%% the in-memory one and the debounce policy
+%% (`tombstones_flush_every_records` / `tombstones_flush_every_ms`)
+%% decides whether to fsync the tombstones file now or piggy-back
+%% on the next seal / GC / explicit flush. Crash semantics match
+%% the set_root debounce: in-memory is authoritative; on reopen
+%% the WAL applier re-derives any unflushed tombstones from its
+%% own watermark.
 maybe_persist_free_set(#?MODULE{free_set = Old} = T, New, Op) ->
     case sets:size(New) =:= sets:size(Old) of
         true ->
-            Old;
+            T;
         false ->
-            Dir = bondy_mst_pack_writer:dir(T#?MODULE.writer),
-            case bondy_mst_pack_tombstones:write(Dir, New) of
-                ok ->
-                    New;
-                {error, Reason} ->
-                    error({Op, {tombstones, Reason}})
+            T1 = T#?MODULE{
+                free_set = New,
+                tombstones_unsynced_count =
+                    T#?MODULE.tombstones_unsynced_count + 1,
+                tombstones_dirty = true
+            },
+            case tombstones_flush_due(T1) of
+                true ->
+                    case do_flush_tombstones(T1) of
+                        {ok, T2}   -> T2;
+                        {error, R} -> error({Op, {tombstones, R}})
+                    end;
+                false ->
+                    T1
             end
     end.
+
+%% @private
+%% Mirrors `bondy_mst_pack_writer:root_flush_due/1`. Threshold-based
+%% (records first, wall-clock second); both `infinity` disables
+%% on-put flushing entirely — seal / GC / close / explicit flush
+%% are then the only persistence drivers.
+tombstones_flush_due(#?MODULE{tombstones_dirty = false}) ->
+    false;
+tombstones_flush_due(#?MODULE{
+        tombstones_unsynced_count = N,
+        tombstones_flush_every_records = K}) when
+        is_integer(K), N >= K ->
+    true;
+tombstones_flush_due(#?MODULE{tombstones_flush_every_ms = infinity}) ->
+    false;
+tombstones_flush_due(#?MODULE{
+        last_tombstones_flush_ms = Last,
+        tombstones_flush_every_ms = TMs}) ->
+    erlang:monotonic_time(millisecond) - Last >= TMs.
+
+%% @private
+%% Forces a tombstones file rewrite if there is a pending change.
+%% Idempotent — no-op if `tombstones_dirty = false`.
+do_flush_tombstones(#?MODULE{tombstones_dirty = false} = T) ->
+    {ok, T};
+do_flush_tombstones(#?MODULE{writer = W, free_set = FreeSet} = T) ->
+    Dir = bondy_mst_pack_writer:dir(W),
+    case bondy_mst_pack_tombstones:write(Dir, FreeSet) of
+        ok ->
+            {ok, reset_tombstones_flush_counters(T)};
+        {error, _} = E ->
+            E
+    end.
+
+%% @private
+reset_tombstones_flush_counters(#?MODULE{} = T) ->
+    T#?MODULE{
+        tombstones_unsynced_count = 0,
+        last_tombstones_flush_ms = erlang:monotonic_time(millisecond),
+        tombstones_dirty = false
+    }.
 
 %% @private
 open_sealed_views(_Dir, []) ->
@@ -906,13 +1011,23 @@ finalise_compaction(T, M, OldIds, NewPackId, KeptHashes, Dropped) ->
         fun(Id) -> bondy_mst_pack_writer:delete_sealed_pack_files(Dir, Id) end,
         OldIds
     ),
-    FreeSet1 = maybe_persist_free_set(T,
-        prune_applied_tombstones(W1, T#?MODULE.free_set), gc),
-    T1 = T#?MODULE{
+    %% GC just rewrote the manifest and the sealed packs; ride the
+    %% tombstones rewrite along so the on-disk state is internally
+    %% consistent post-compaction (matches the per-PR architectural
+    %% rule that GC commit yields fully durable state).
+    Pruned = prune_applied_tombstones(W1, T#?MODULE.free_set),
+    T0 = T#?MODULE{
         writer       = W1,
         sealed_views = NewViews,
-        free_set     = FreeSet1
+        free_set     = Pruned,
+        tombstones_dirty = true
     },
+    T1 = case do_flush_tombstones(T0) of
+        {ok, FlushedT} ->
+            FlushedT;
+        {error, Reason} ->
+            error({gc, {tombstones, Reason}})
+    end,
     Meta = #{
         compacted         => true,
         retired           => OldIds,

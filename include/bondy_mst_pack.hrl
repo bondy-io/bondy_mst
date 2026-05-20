@@ -128,6 +128,33 @@
 %% overridden (incl. to `infinity` for caller-driven seal only).
 -define(BONDY_MST_PACK_DEFAULT_AUTO_SEAL_RECORDS, 10_000).
 -define(BONDY_MST_PACK_DEFAULT_AUTO_SEAL_BYTES,   16_000_000).
+%%
+%% `root_flush_every_records` / `root_flush_every_ms` — debounce the
+%% manifest rewrite triggered by `set_root/2`. Each manifest rewrite
+%% costs tmp+datasync+rename+fsync_dir (4 fsyncs); on macOS APFS
+%% that's ~40-200 ms per call. The MST applier issues one set_root
+%% per drain batch, so without debouncing the per-call fsync chain
+%% serialises the entire write path. Because the pack store sits
+%% beneath a WAL that is the authoritative source of truth, a crash
+%% that loses the last few in-memory roots is recoverable: the
+%% applier replays unapplied WAL records on reopen and the on-disk
+%% current_root catches up. Defaults match the incoming-pack
+%% sync defaults so durability lag is symmetric.
+-define(BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_RECORDS, 32).
+-define(BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_MS,      200).
+%%
+%% `tombstones_flush_every_records` / `tombstones_flush_every_ms` —
+%% debounce the `tombstones` file rewrite triggered by `free/3` and
+%% by `put/2` un-tombstoning. The tombstones file uses the same
+%% tmp+datasync+rename+fsync_dir pattern as the manifest (4 fsyncs
+%% per call). `bondy_mst:put/3` issues one `free/3` per spine
+%% modification — typically 4-6 per put — so without debouncing this
+%% alone dominates per-put cost (~20 fsyncs/put on macOS APFS).
+%% Recovery story matches the set_root debounce: in-memory free_set
+%% is always authoritative; on crash the WAL applier re-derives
+%% missing tombstones by replaying puts forward from its watermark.
+-define(BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_RECORDS, 32).
+-define(BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_MS,      200).
 
 %% -----------------------------------------------------------------------------
 %% Shared in-memory records

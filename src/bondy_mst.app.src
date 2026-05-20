@@ -17,6 +17,7 @@
     memory,
     %% rocksdb,
     bloomfi,
+    leveled,
     telemetry
    ]},
   {env,[]},

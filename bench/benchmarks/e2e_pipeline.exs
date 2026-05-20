@@ -24,6 +24,19 @@ prepopulate = String.to_integer(System.get_env("PREPOPULATE", "10000"))
 writers = String.to_integer(System.get_env("WRITERS", "4"))
 readers = String.to_integer(System.get_env("READERS", "8"))
 
+# MST snapshot-store backend per oplog instance. Default `ets` matches
+# the in-memory shape the bench was originally written against. Set
+# `MST_BACKEND=pack` to route every shard's MST snapshot through the
+# durable `bondy_mst_pack_store` (rooted under `/tmp/bondy_mst_bench_pack_e2e/`)
+# — the production wiring when paired with the leveled projection.
+mst_backend =
+  case System.get_env("MST_BACKEND", "ets") do
+    "pack" -> :pack
+    _ -> :ets
+  end
+
+pack_root = "/tmp/bondy_mst_bench_pack_e2e/#{:os.getpid()}"
+
 # WAL durability mode for the oplog instances the bench starts. Each
 # shard's WAL is a separate gen_server with its own fsync cadence;
 # `per_write` fsyncs after every batch frame, `batched` lets the WAL
@@ -52,7 +65,7 @@ max_in_flight = String.to_integer(System.get_env("MAX_IN_FLIGHT", "16"))
 
 IO.puts(
   "[e2e] config: shards=#{shard_count} writers=#{writers} readers=#{readers} " <>
-    "fsync=#{wal_fsync_mode} batch_size=#{batch_size} " <>
+    "fsync=#{wal_fsync_mode} batch_size=#{batch_size} mst=#{mst_backend} " <>
     "dirty_io_schedulers=#{:erlang.system_info(:dirty_io_schedulers)}"
 )
 
@@ -177,15 +190,33 @@ make_ctx = fn prefix, backend ->
 
       instance_id = inst_prefix <> "-" <> Integer.to_string(shard)
 
+      # MST backend per oplog instance. For `pack`, every shard gets
+      # its own subdir under `pack_root` so a parallel scenario does
+      # not collide with another. The pack-store backend reads
+      # `storage_path` via the same path strategy other persistent
+      # backends use; `dir` is derived per-instance internally.
+      mst_opts =
+        case mst_backend do
+          :pack ->
+            File.mkdir_p!(pack_root)
+            %{backend: :bondy_mst_pack_store, storage_path: pack_root}
+
+          :ets ->
+            %{}
+        end
+
       {:ok, _sup} =
-        :bondy_oplog.start_instance(instance_id, %{
-          fold_module: fold,
-          fsync_mode: wal_fsync_mode,
-          max_install_in_flight: max_in_flight,
-          applier: %{
-            cell_apply_target: {ns, :primary, shard}
-          }
-        })
+        :bondy_oplog.start_instance(
+          instance_id,
+          Map.merge(mst_opts, %{
+            fold_module: fold,
+            fsync_mode: wal_fsync_mode,
+            max_install_in_flight: max_in_flight,
+            applier: %{
+              cell_apply_target: {ns, :primary, shard}
+            }
+          })
+        )
 
       {shard,
        %{
@@ -292,6 +323,14 @@ cleanup = fn ctx ->
       File.rm_rf(
         Path.join(leveled_root, Atom.to_string(ctx.ns))
       )
+  end
+
+  # Drop the pack-store dirs for this scenario. The bondy_mst app is
+  # still running, but every oplog instance using this NS has been
+  # stopped above; the on-disk manifests + sealed packs are safe to
+  # rm. Same /tmp budget concern as the leveled cleanup above.
+  if mst_backend == :pack do
+    _ = File.rm_rf(pack_root)
   end
 end
 

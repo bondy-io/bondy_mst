@@ -13,14 +13,13 @@
 `simple_one_for_one` supervisor for leveled Bookies under a `bondy_db`
 topology (`MST_DB_DESIGN.md` §18 — PR9).
 
-This module lives in `test/` because the leveled dependency is
-test-profile-only. A future PR that graduates leveled to the production
-profile will move this module to `src/` and wire it under
-`bondy_mst_sup`.
-
 The supervisor itself is a regular OTP supervisor; topology modules
-call `start_bookie/2` to provision Bookies and let the supervisor own
-their lifecycle.
+(`bondy_db_topology_single_bookie`, `bondy_db_topology_per_entity`)
+call `start_bookie/2` to provision Bookies and own their lifecycle
+inside their own state. The supervisor is started lazily by the
+topology's `init/2` rather than wired under `bondy_mst_sup` — the
+lifetime of leveled Bookies is bounded by the lifetime of the
+topology that owns them.
 
 ## Lifecycle
 
