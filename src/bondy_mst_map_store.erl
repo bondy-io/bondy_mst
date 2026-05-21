@@ -41,7 +41,7 @@ from the map.
 -export([close/1]).
 -export([capabilities/1]).
 -export([copy/3]).
--export([delete/1]).
+-export([destroy/1]).
 -export([delete/2]).
 -export([free/3]).
 -export([gc/2]).
@@ -185,10 +185,11 @@ missing_set(#?MODULE{pages = Pages} = T, Root) ->
 page_refs(Page) ->
     bondy_mst_page:refs(Page).
 
--spec delete(t()) -> ok.
+-spec destroy(t()) -> ok.
 
-delete(#?MODULE{}) ->
-    %% We cannot delete, this is an in-memory map, we do nothing.
+destroy(#?MODULE{}) ->
+    %% In-memory map: nothing to wipe. The map is GC'd with the store
+    %% record once the caller drops it.
     ok.
 
 %% =============================================================================

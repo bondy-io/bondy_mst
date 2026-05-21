@@ -50,7 +50,7 @@ and implement different synchronization or caching mechanisms.
 -export([close/1]).
 -export([capabilities/1]).
 -export([copy/3]).
--export([delete/1]).
+-export([destroy/1]).
 -export([delete/2]).
 -export([free/3]).
 -export([gc/2]).
@@ -100,7 +100,7 @@ and implement different synchronization or caching mechanisms.
 
 -callback page_refs(Page :: page()) -> Refs :: [binary()].
 
--callback delete(backend()) -> ok.
+-callback destroy(backend()) -> ok.
 
 -callback transaction(backend(), Fun :: fun(() -> any())) ->
     any() | no_return().
@@ -249,10 +249,15 @@ from the store.
 missing_set(#?MODULE{mod = Mod, state = State}, Root) ->
     Mod:missing_set(State, Root).
 
--spec delete(Store :: t()) -> ok.
+?DOC("""
+Destroys the backing store entirely (filesystem directory wipe / ETS
+table teardown / etc.). Irreversible. Distinct from `delete/2`, which
+tombstones a single page hash.
+""").
+-spec destroy(Store :: t()) -> ok.
 
-delete(#?MODULE{mod = Mod, state = State}) ->
-    Mod:delete(State).
+destroy(#?MODULE{mod = Mod, state = State}) ->
+    Mod:destroy(State).
 
 -spec transaction(Store :: t(), Fun :: fun(() -> any())) ->
     any() | {error, Reason :: any()}.

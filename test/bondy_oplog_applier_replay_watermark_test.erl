@@ -72,7 +72,7 @@ cold_replay_full_fold() ->
         %% At least one replay event fired and the projection holds
         %% the latest write.
         ?assertNotEqual([], Events),
-        {{set, <<"v3">>, 3}, 3} =
+        {<<"v3">>, 3} =
             bondy_db_core:read(NS, primary, <<"k">>)
     after
         detach_telemetry(SubRef),
@@ -167,7 +167,7 @@ incremental_replay_skips_already_folded_events() ->
         end,
         %% Final projection state is correct regardless of which
         %% replay path was taken.
-        {{set, <<"v5">>, 5}, 5} =
+        {<<"v5">>, 5} =
             bondy_db_core:read(NS, primary, <<"k">>)
     after
         detach_telemetry(SubRef),
@@ -188,7 +188,7 @@ sync_replay_blocks_until_projection_updated() ->
         ok = barrier(Id),
         ok = bondy_oplog_applier:replay_cell_events_sync(Applier),
         %% No `barrier/1` here — the sync call is the barrier.
-        {{set, <<"v4">>, 4}, 4} =
+        {<<"v4">>, 4} =
             bondy_db_core:read(NS, primary, <<"k">>)
     after
         teardown_instance(Id, NS, Cache, Proj)

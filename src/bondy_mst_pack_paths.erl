@@ -15,8 +15,9 @@ Filename conventions for the MST page-store pack backend.
 See `_design/latest/MST_PAGE_STORE_DESIGN.md` §2. Sealed packs are
 named `pack-NNNN.pack` (with `NNNN` a 4-digit zero-padded decimal
 pack id) and accompanied by `pack-NNNN.idx`. The incoming pack is
-`incoming.pack` / `incoming.idx`. Tmp-rename files share the
-`.tmp` suffix.
+`incoming.pack` (no separate on-disk index — the writer keeps an
+in-memory `pending` map and rebuilds it on resume by scanning the
+incoming-pack file). Tmp-rename files share the `.tmp` suffix.
 
 Pure path arithmetic; no I/O.
 """).
@@ -26,7 +27,6 @@ Pure path arithmetic; no I/O.
 -export([sealed_idx_path/2]).
 -export([sealed_idx_tmp_path/2]).
 -export([incoming_pack_path/1]).
--export([incoming_idx_path/1]).
 -export([sealed_pack_basename/1]).
 -export([sealed_idx_basename/1]).
 
@@ -71,11 +71,6 @@ sealed_idx_tmp_path(Dir, PackId) ->
 
 incoming_pack_path(Dir) ->
     filename:join(Dir, ?BONDY_MST_PACK_INCOMING_PACK_FILENAME).
-
--spec incoming_idx_path(file:filename_all()) -> file:filename_all().
-
-incoming_idx_path(Dir) ->
-    filename:join(Dir, ?BONDY_MST_PACK_INCOMING_IDX_FILENAME).
 
 ?DOC("""
 Returns the basename `pack-NNNN.pack` for a pack id.

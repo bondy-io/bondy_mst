@@ -54,7 +54,7 @@ single_cell_batch_returns_value() ->
     materialise(PH, <<"k">>, {set, <<"v">>, 42}, 42),
     {ok, Map, _Fence} =
         bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{}),
-    ?assertEqual(#{{NS, primary, ?B, <<"k">>} => {{set, <<"v">>, 42}, 42}}, Map),
+    ?assertEqual(#{{NS, primary, ?B, <<"k">>} => {<<"v">>, 42}}, Map),
     teardown_shard(Setup).
 
 multi_cell_batch_returns_all_values() ->
@@ -70,11 +70,11 @@ multi_cell_batch_returns_all_values() ->
     ],
     {ok, Map, _} = bondy_db_core:read_batch(Reads, #{}),
     ?assertEqual(3, map_size(Map)),
-    ?assertEqual({{set, <<"va">>, 10}, 10},
+    ?assertEqual({<<"va">>, 10},
                  maps:get({NS, primary, ?B, <<"a">>}, Map)),
-    ?assertEqual({{set, <<"vb">>, 20}, 20},
+    ?assertEqual({<<"vb">>, 20},
                  maps:get({NS, primary, ?B, <<"b">>}, Map)),
-    ?assertEqual({{set, <<"vc">>, 30}, 30},
+    ?assertEqual({<<"vc">>, 30},
                  maps:get({NS, primary, ?B, <<"c">>}, Map)),
     teardown_shard(Setup).
 
@@ -94,7 +94,7 @@ fence_excludes_overlay_events_past_it() ->
     overlay_insert(OV, <<"k">>, 20, {set, 20, <<"new">>}),
     {ok, Map, _Fence} =
         bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{fence => 15}),
-    ?assertEqual({{set, <<"mid">>, 10}, 10},
+    ?assertEqual({<<"mid">>, 10},
                  maps:get({NS, primary, ?B, <<"k">>}, Map)),
     teardown_shard(Setup).
 
@@ -106,7 +106,7 @@ fence_admits_overlay_events_at_or_below() ->
     overlay_insert(OV, <<"k">>, 10, {set, 10, <<"mid">>}),
     {ok, Map, _} =
         bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{fence => 10}),
-    ?assertEqual({{set, <<"mid">>, 10}, 10},
+    ?assertEqual({<<"mid">>, 10},
                  maps:get({NS, primary, ?B, <<"k">>}, Map)),
     teardown_shard(Setup).
 
@@ -117,7 +117,7 @@ fence_passes_through_projection_past_fence() ->
     materialise(PH, <<"k">>, {set, <<"v">>, 100}, 100),
     {ok, Map, _} =
         bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{fence => 50}),
-    ?assertEqual({{set, <<"v">>, 100}, 100},
+    ?assertEqual({<<"v">>, 100},
                  maps:get({NS, primary, ?B, <<"k">>}, Map)),
     teardown_shard(Setup).
 
@@ -246,10 +246,7 @@ mk_event(Hlc, Origin, Seq, Op) ->
     bondy_oplog_event:new(K, Op, undefined).
 
 materialise(PH, Key, State, Hlc) ->
-    Frame = bondy_oplog_cell_frame:encode(
-        Hlc,
-        bondy_oplog_fold:encode_state(lww_register, State)
-    ),
+    Frame = bondy_oplog_test_helpers:frame(lww_register, State, Hlc),
     ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, Key, Frame}]).
 
 overlay_insert(OV, Key, Hlc, Op) ->

@@ -47,15 +47,16 @@ telemetry_test_() ->
 read_cache_hit_emits_source_cache() ->
     NS = mk_ns(),
     {Setup, #{cache_handle := CH}} = setup_shard(NS, primary, 0),
-    ok = bondy_oplog_cache_ets:put(CH, <<>>, <<"k">>, {{set, <<"v">>, 99}, 99}),
+    ok = bondy_oplog_cache_ets:put(CH, <<>>, <<"k">>, {<<"v">>, 99}),
     with_handler(?EVENTS, fun() ->
-        {{set, <<"v">>, 99}, 99} = bondy_db_core:read(NS, primary, <<"k">>)
+        {<<"v">>, 99} = bondy_db_core:read(NS, primary, <<"k">>)
     end),
     {Meas, Meta} = expect_event([bondy_db_core, read]),
     ?assertEqual(true, maps:get(hit, Meas)),
     ?assert(maps:get(duration_us, Meas) >= 0),
     ?assert(maps:get(value_bytes, Meas) > 0),
     ?assertEqual(cache, maps:get(source, Meta)),
+    ?assertEqual(none, maps:get(path, Meta)),
     ?assertEqual(NS, maps:get(namespace, Meta)),
     ?assertEqual(primary, maps:get(index, Meta)),
     ?assertEqual(0, maps:get(shard, Meta)),
@@ -67,10 +68,14 @@ read_projection_only_emits_source_projection() ->
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0),
     seed_projection(PH, <<"k">>, 42, {set, <<"v">>, 42}),
     with_handler(?EVENTS, fun() ->
-        {{set, <<"v">>, 42}, 42} = bondy_db_core:read(NS, primary, <<"k">>)
+        {<<"v">>, 42} = bondy_db_core:read(NS, primary, <<"k">>)
     end),
     {_Meas, Meta} = expect_event([bondy_db_core, read]),
     ?assertEqual(projection, maps:get(source, Meta)),
+    ?assertEqual(head, maps:get(path, Meta)),
+    %% ETS test adapter does not export head/3 so the substrate falls
+    %% back to get/3 + extract_head/1.
+    ?assertEqual(fallback, maps:get(head_path, Meta)),
     teardown_shard(Setup).
 
 
@@ -81,11 +86,12 @@ read_with_overlay_emits_projection_with_overlay() ->
     Event = mk_event(20, <<"o">>, 0, {set, 20, <<"new">>}),
     ok = bondy_oplog_db_overlay:insert(OV, <<>>, <<"k">>, Event),
     with_handler(?EVENTS, fun() ->
-        {{set, <<"new">>, 20}, 20} =
+        {<<"new">>, 20} =
             bondy_db_core:read(NS, primary, <<"k">>)
     end),
     {_Meas, Meta} = expect_event([bondy_db_core, read]),
     ?assertEqual(projection_with_overlay, maps:get(source, Meta)),
+    ?assertEqual(slow, maps:get(path, Meta)),
     teardown_shard(Setup).
 
 
@@ -96,11 +102,12 @@ read_overlay_only_emits_source_overlay_only() ->
     Event = mk_event(15, <<"o">>, 0, {set, 15, <<"v">>}),
     ok = bondy_oplog_db_overlay:insert(OV, <<>>, <<"k">>, Event),
     with_handler(?EVENTS, fun() ->
-        {{set, <<"v">>, 15}, 15} =
+        {<<"v">>, 15} =
             bondy_db_core:read(NS, primary, <<"k">>)
     end),
     {_Meas, Meta} = expect_event([bondy_db_core, read]),
     ?assertEqual(overlay_only, maps:get(source, Meta)),
+    ?assertEqual(slow, maps:get(path, Meta)),
     teardown_shard(Setup).
 
 
@@ -244,10 +251,7 @@ teardown_shard(#{ns := NS, index := Index, shard := Shard,
 
 
 seed_projection(PH, Key, Hlc, State) ->
-    Frame = bondy_oplog_cell_frame:encode(
-        Hlc,
-        bondy_oplog_fold:encode_state(lww_register, State)
-    ),
+    Frame = bondy_oplog_test_helpers:frame(lww_register, State, Hlc),
     ok = bondy_oplog_projection_ets:put_batch(PH, [{<<>>, Key, Frame}]).
 
 

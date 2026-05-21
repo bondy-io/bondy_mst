@@ -42,6 +42,7 @@ topology_test_() ->
 
 setup() ->
     process_flag(trap_exit, true),
+    ok = bondy_oplog_leveled_tag:install(),
     Dir = make_tempdir(),
     {ok, Sup} = bondy_db_leveled_sup:start_link(),
     {Sup, Dir}.
@@ -166,8 +167,9 @@ end_to_end_put_get_through_topology({Sup, Dir}) ->
         {ok, T,  _} = ?MOD:open_table(users, 8, #{}, S0),
         {ok, Adapter, Handle} = ?MOD:route(0, T),
         Bucket = ?MOD:bucket_for(users, <<"realm-1">>, T),
-        ok = Adapter:put_batch(Handle, [{Bucket, <<"alice">>, <<"frame">>}]),
-        ?assertEqual({ok, <<"frame">>},
+        F = mk_frame(<<"frame">>),
+        ok = Adapter:put_batch(Handle, [{Bucket, <<"alice">>, F}]),
+        ?assertEqual({ok, F},
                      Adapter:get(Handle, Bucket, <<"alice">>))
     end.
 
@@ -183,13 +185,19 @@ bucket_isolation_across_realms_via_key({Sup, Dir}) ->
         B1 = ?MOD:bucket_for(users, <<"realm-1">>, T),
         B2 = ?MOD:bucket_for(users, <<"realm-2">>, T),
         ?assertNotEqual(B1, B2),
+        F1 = mk_frame(<<"v1">>),
+        F2 = mk_frame(<<"v2">>),
         ok = Adapter:put_batch(Handle, [
-            {B1, <<"alice">>, <<"v1">>},
-            {B2, <<"alice">>, <<"v2">>}
+            {B1, <<"alice">>, F1},
+            {B2, <<"alice">>, F2}
         ]),
-        ?assertEqual({ok, <<"v1">>}, Adapter:get(Handle, B1, <<"alice">>)),
-        ?assertEqual({ok, <<"v2">>}, Adapter:get(Handle, B2, <<"alice">>))
+        ?assertEqual({ok, F1}, Adapter:get(Handle, B1, <<"alice">>)),
+        ?assertEqual({ok, F2}, Adapter:get(Handle, B2, <<"alice">>))
     end.
+
+
+mk_frame(Bytes) when is_binary(Bytes) ->
+    bondy_oplog_cell_frame:encode(0, Bytes, Bytes, false).
 
 
 %% =============================================================================

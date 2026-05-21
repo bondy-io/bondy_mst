@@ -222,6 +222,65 @@ append_then_reopen_preserves_pending_test() ->
         end
     end).
 
+%% Regression: prior to the resume_incoming fix, `scan_incoming` used
+%% `pread` only — which does not move the fd's file pointer. The
+%% pointer therefore stayed at offset 0 after resume, and the next
+%% `prim_file:write` in `do_append` overwrote the 48-byte pack
+%% header, surfacing on the next reopen as `{pending_scan, bad_magic}`.
+%% Pin the fix: append after reopen must preserve the header and the
+%% existing records, and a second reopen must scan cleanly.
+append_after_reopen_preserves_header_and_existing_records_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"first">>),
+        {ok, _, W2} = bondy_mst_pack_writer:append(W1, <<"second">>),
+        OffBefore = bondy_mst_pack_writer:incoming_offset(W2),
+        HashesBefore = bondy_mst_pack_writer:pending_hashes(W2),
+        bondy_mst_pack_writer:close(W2),
+        {ok, W3} = open_writer(Dir),
+        {ok, _, W4} = bondy_mst_pack_writer:append(W3, <<"third">>),
+        bondy_mst_pack_writer:close(W4),
+        {ok, W5} = open_writer(Dir),
+        try
+            HashesAfter = bondy_mst_pack_writer:pending_hashes(W5),
+            OffAfter = bondy_mst_pack_writer:incoming_offset(W5),
+            %% All three appends survived the reopen — the post-reopen
+            %% write went at `OffBefore`, not at 0.
+            ?assertEqual(3, length(HashesAfter)),
+            ?assertEqual(OffBefore + 40 + byte_size(<<"third">>), OffAfter),
+            %% First two hashes from the original session are still
+            %% present (bag equality — order is map iteration order).
+            ?assertEqual(lists:sort(HashesBefore),
+                         lists:sort(HashesAfter -- [sha256(<<"third">>)]))
+        after
+            bondy_mst_pack_writer:close(W5)
+        end
+    end).
+
+%% Regression: prior to the scan_incoming normalisation, a 48-byte
+%% header with bad magic / bad version returned `{pending_scan, R}`,
+%% which the store's `open/2` raised as `{pack_store_open,
+%% {pending_scan, _}}` — not recoverable via `bondy_mst_pack_recovery`.
+%% Pin the fix: corrupted header bytes now surface as
+%% `needs_recovery` so the store-level recovery can reset the file.
+corrupt_header_surfaces_as_needs_recovery_test() ->
+    with_tmp_dir(fun(Dir) ->
+        {ok, W0} = open_writer(Dir),
+        {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"x">>),
+        bondy_mst_pack_writer:close(W1),
+        %% Zero out the 48-byte header — body remains intact but the
+        %% magic is gone.
+        Path = bondy_mst_pack_paths:incoming_pack_path(Dir),
+        {ok, Fd} = prim_file:open(Path, [read, write, raw, binary]),
+        {ok, 0} = prim_file:position(Fd, bof),
+        ok = prim_file:write(Fd, <<0:(?BONDY_MST_PACK_HEADER_BYTES * 8)>>),
+        ok = prim_file:close(Fd),
+        ?assertEqual({error, needs_recovery},
+                     bondy_mst_pack_writer:open(
+                         Dir, #{instance_id => <<"writer-test">>}))
+    end).
+
+
 %% =============================================================================
 %% Seal
 %% =============================================================================

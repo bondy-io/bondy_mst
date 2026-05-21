@@ -27,6 +27,7 @@ Children, in start order:
 | `bondy_oplog_origin_bans`        | `gen_server`; node-shared origin ban ETS |
 | `bondy_oplog_quarantine`         | `gen_server`; node-shared equivocation quarantine ETS |
 | `bondy_oplog_responder`          | `gen_server`; sync request demuxer |
+| `bondy_oplog_catalogue_cursor`   | `gen_server`; node-shared catalogue-bootstrap cursor ETS |
 | `bondy_oplog_sync_scheduler`     | `gen_server`; optional default scheduler |
 | `bondy_oplog_gc_scheduler`       | `gen_server`; optional default scheduler |
 | `bondy_oplog_instance_dyn_sup`   | `simple_one_for_one`; spawns per-instance workers |
@@ -67,6 +68,7 @@ init([]) ->
         bondy_oplog_origin_bans:child_spec(),
         bondy_oplog_quarantine:child_spec(),
         bondy_oplog_responder:child_spec(),
+        bondy_oplog_catalogue_cursor:child_spec(),
         bondy_oplog_sync_scheduler:child_spec(#{}),
         bondy_oplog_gc_scheduler:child_spec(#{}),
         #{

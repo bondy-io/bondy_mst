@@ -143,7 +143,17 @@ volume.
     tombstones_flush_every_ms      :: pos_integer() | infinity,
     tombstones_unsynced_count = 0  :: non_neg_integer(),
     last_tombstones_flush_ms       :: integer(),
-    tombstones_dirty = false       :: boolean()
+    tombstones_dirty = false       :: boolean(),
+    %% GC dead-fraction gate. The original policy was "rewrite on any
+    %% drop", which is correct but not granular — for very large stores
+    %% with sparse churn it rewrites the world on every GC. Setting
+    %% this to e.g. 0.5 lets operators accept up to that fraction of
+    %% dead pages in a single sealed pack before paying for a full
+    %% rewrite. Multi-pack coalescing is unaffected: when there are
+    %% 2+ sealed packs, GC always merges them into one (the threshold
+    %% only gates the dead-fraction case). Default `0.0` preserves the
+    %% pre-PR-PS-6 behaviour. See QA #9 / design §8.1.
+    gc_threshold_dead_fraction     :: float()
 }).
 
 -type t() :: #?MODULE{}.
@@ -164,7 +174,7 @@ volume.
 -export([close/1]).
 -export([capabilities/1]).
 -export([copy/3]).
--export([delete/1]).
+-export([destroy/1]).
 -export([delete/2]).
 -export([free/3]).
 -export([gc/2]).
@@ -182,6 +192,7 @@ volume.
 -export([dir/1]).
 -export([instance_id/1]).
 -export([sealed_pack_ids/1]).
+-export([info/1]).
 
 %% =============================================================================
 %% bondy_mst_store CALLBACKS
@@ -200,40 +211,88 @@ open(sha256, Opts) when is_map(Opts) ->
     WriterOpts2 = forward_opt(sync_every_ms, Opts, WriterOpts1),
     WriterOpts3 = forward_opt(root_flush_every_records, Opts, WriterOpts2),
     WriterOpts  = forward_opt(root_flush_every_ms, Opts, WriterOpts3),
-    AutoSealR = validated_auto_seal(auto_seal_records, Opts),
-    AutoSealB = validated_auto_seal(auto_seal_bytes, Opts),
-    TsR = validated_tombstones_flush(tombstones_flush_every_records, Opts),
-    TsMs = validated_tombstones_flush(tombstones_flush_every_ms, Opts),
-    Now = erlang:monotonic_time(millisecond),
-    case bondy_mst_pack_writer:open(Dir, WriterOpts) of
-        {ok, W} ->
-            Manifest = bondy_mst_pack_writer:manifest(W),
-            SealedIds = bondy_mst_pack_manifest:sealed_packs(Manifest),
-            case open_sealed_views(Dir, SealedIds) of
-                {ok, Views} ->
-                    #?MODULE{
-                        writer = W,
-                        sealed_views = newest_first(Views),
-                        free_set = load_tombstones(Dir),
-                        hashing_algorithm = sha256,
-                        opts = Opts,
-                        auto_seal_records = AutoSealR,
-                        auto_seal_bytes = AutoSealB,
-                        tombstones_flush_every_records = TsR,
-                        tombstones_flush_every_ms = TsMs,
-                        tombstones_unsynced_count = 0,
-                        last_tombstones_flush_ms = Now,
-                        tombstones_dirty = false
-                    };
-                {error, R} ->
-                    _ = bondy_mst_pack_writer:close(W),
-                    error({pack_store_open, R})
-            end;
-        {error, R} ->
-            error({pack_store_open, R})
-    end;
+    Cfg = #{
+        opts                           => Opts,
+        auto_seal_records              =>
+            validated_auto_seal(auto_seal_records, Opts),
+        auto_seal_bytes                =>
+            validated_auto_seal(auto_seal_bytes, Opts),
+        tombstones_flush_every_records =>
+            validated_tombstones_flush(tombstones_flush_every_records, Opts),
+        tombstones_flush_every_ms      =>
+            validated_tombstones_flush(tombstones_flush_every_ms, Opts),
+        gc_threshold_dead_fraction     =>
+            validated_gc_threshold(gc_threshold_dead_fraction, Opts),
+        now                            => erlang:monotonic_time(millisecond)
+    },
+    open_writer(Dir, InstanceId, WriterOpts, Cfg);
 open(Algo, _Opts) ->
     error({unsupported_hash_algorithm, Algo}).
+
+%% @private
+%% Attempts to open the writer; on `{error, needs_recovery}` runs the
+%% recovery pass once and retries. Any other error path raises
+%% `{pack_store_open, _}` directly. Telemetry for the recovery event
+%% (design §13) is emitted from here so it carries the caller's
+%% instance_id even when the writer was unable to materialise one.
+open_writer(Dir, InstanceId, WriterOpts, Cfg) ->
+    case bondy_mst_pack_writer:open(Dir, WriterOpts) of
+        {ok, W} ->
+            build_state(W, Dir, Cfg);
+        {error, needs_recovery} ->
+            recover_and_retry(Dir, InstanceId, WriterOpts, Cfg);
+        {error, R} ->
+            error({pack_store_open, R})
+    end.
+
+%% @private
+recover_and_retry(Dir, InstanceId, WriterOpts, Cfg) ->
+    StartTs = erlang:monotonic_time(microsecond),
+    case bondy_mst_pack_recovery:recover(Dir, InstanceId, sha256) of
+        {ok, Outcome} ->
+            DurationUs = erlang:monotonic_time(microsecond) - StartTs,
+            emit_recovery_ok(InstanceId, Outcome, DurationUs),
+            case bondy_mst_pack_writer:open(Dir, WriterOpts) of
+                {ok, W} ->
+                    build_state(W, Dir, Cfg);
+                {error, R} ->
+                    error({pack_store_open, {recovery_retry_failed, R}})
+            end;
+        {error, R} ->
+            DurationUs = erlang:monotonic_time(microsecond) - StartTs,
+            emit_recovery_failed(InstanceId, R, DurationUs),
+            error({pack_store_open, {recovery_failed, R}})
+    end.
+
+%% @private
+build_state(W, Dir, Cfg) ->
+    Manifest = bondy_mst_pack_writer:manifest(W),
+    SealedIds = bondy_mst_pack_manifest:sealed_packs(Manifest),
+    SealedCtx = bondy_mst_pack_sealed_view:open_ctx_from_writer(W),
+    case open_sealed_views(Dir, SealedCtx, SealedIds) of
+        {ok, Views} ->
+            #?MODULE{
+                writer = W,
+                sealed_views = newest_first(Views),
+                free_set = load_tombstones(Dir),
+                hashing_algorithm = sha256,
+                opts = maps:get(opts, Cfg),
+                auto_seal_records = maps:get(auto_seal_records, Cfg),
+                auto_seal_bytes = maps:get(auto_seal_bytes, Cfg),
+                tombstones_flush_every_records =
+                    maps:get(tombstones_flush_every_records, Cfg),
+                tombstones_flush_every_ms =
+                    maps:get(tombstones_flush_every_ms, Cfg),
+                tombstones_unsynced_count = 0,
+                last_tombstones_flush_ms = maps:get(now, Cfg),
+                tombstones_dirty = false,
+                gc_threshold_dead_fraction =
+                    maps:get(gc_threshold_dead_fraction, Cfg)
+            };
+        {error, R} ->
+            _ = bondy_mst_pack_writer:close(W),
+            error({pack_store_open, R})
+    end.
 
 -spec close(t()) -> ok.
 
@@ -277,12 +336,16 @@ set_root(#?MODULE{writer = W} = T, Root) ->
 -spec get(t(), binary()) -> page() | undefined.
 
 get(#?MODULE{} = T, Hash) when is_binary(Hash) ->
-    case sets:is_element(Hash, T#?MODULE.free_set) of
-        true ->
-            undefined;
-        false ->
-            do_get(T, Hash)
-    end.
+    StartTs = erlang:monotonic_time(microsecond),
+    {Page, Source, ByteSize} =
+        case sets:is_element(Hash, T#?MODULE.free_set) of
+            true  -> {undefined, cold_miss, 0};
+            false -> do_get(T, Hash)
+        end,
+    emit_get(T, ByteSize,
+             erlang:monotonic_time(microsecond) - StartTs,
+             Source),
+    Page.
 
 -spec has(t(), binary()) -> boolean().
 
@@ -296,6 +359,8 @@ has(#?MODULE{} = T, Hash) when is_binary(Hash) ->
 
 put(#?MODULE{writer = W, hashing_algorithm = Algo} = T, Page) ->
     Bytes = serialise(Page),
+    PendingBefore = bondy_mst_pack_writer:pending_count(W),
+    StartTs = erlang:monotonic_time(microsecond),
     case bondy_mst_pack_writer:append(W, Bytes) of
         {ok, Hash, W1} ->
             %% The canonical page hash must equal sha256 of the
@@ -306,7 +371,18 @@ put(#?MODULE{writer = W, hashing_algorithm = Algo} = T, Page) ->
             T1 = maybe_persist_free_set(
                 T#?MODULE{writer = W1},
                 sets:del_element(Hash, T#?MODULE.free_set), put),
-            {Hash, maybe_auto_seal(T1)};
+            T2 = maybe_auto_seal(T1),
+            %% ContentHit: the writer dedups against its `pending` map.
+            %% If pending_count didn't grow, the page was already in
+            %% pending and no new bytes touched incoming.pack. (Pages
+            %% already in a sealed pack are NOT a content hit here — the
+            %% writer still appends them to incoming.pack.)
+            ContentHit =
+                bondy_mst_pack_writer:pending_count(W1) =:= PendingBefore,
+            emit_put(T2, byte_size(Bytes),
+                     erlang:monotonic_time(microsecond) - StartTs,
+                     ContentHit),
+            {Hash, T2};
         {error, R} ->
             error({put, R})
     end.
@@ -341,8 +417,8 @@ list(#?MODULE{} = T) ->
     lists:filtermap(
         fun(H) ->
             case do_get(T, H) of
-                undefined -> false;
-                Page      -> {true, Page}
+                {undefined, _, _} -> false;
+                {Page, _, _}      -> {true, Page}
             end
         end,
         Hashes
@@ -368,6 +444,13 @@ new sealed pack containing only those entries.
   pack, the call is a no-op (coalescing multiple packs into one is
   still performed even with zero drops, since reducing fd count and
   improving lookup locality is the other point of GC).
+* If drops were found but the dead fraction
+  (`dropped / (kept + dropped)`) is below the configured
+  `gc_threshold_dead_fraction` option (default `0.0`, i.e. always
+  rewrite), the call returns `compacted => false, reason =>
+  below_threshold` with the actual `kept` / `dropped` counts. The
+  threshold only gates single-pack rewrites — when there are 2+
+  sealed packs the call always coalesces them.
 * Pending pages (still in `incoming.pack`) are not touched; the next
   `seal/1` deposits them. Tombstones whose target is still pending
   are preserved in `free_set`; tombstones whose target was applied
@@ -382,11 +465,36 @@ reopen recovers via the on-disk manifest.
 -spec gc(t(), [binary()] | epoch()) -> {t(), map()}.
 
 gc(#?MODULE{} = T, Epoch) when is_integer(Epoch) ->
-    {T, #{compacted => false, reason => epoch_unsupported}};
+    Meta = #{compacted => false, reason => epoch_unsupported},
+    emit_gc(T, Meta, 0),
+    {T, Meta};
 gc(#?MODULE{sealed_views = []} = T, KeepRoots) when is_list(KeepRoots) ->
-    {T, gc_noop_meta()};
+    Meta = gc_noop_meta(),
+    emit_gc(T, Meta, 0),
+    {T, Meta};
 gc(#?MODULE{} = T, KeepRoots) when is_list(KeepRoots) ->
-    do_gc(T, KeepRoots).
+    OldBytes = sealed_views_bytes(T),
+    Dir = bondy_mst_pack_writer:dir(T#?MODULE.writer),
+    StartTs = erlang:monotonic_time(microsecond),
+    {T1, Meta0} = do_gc(T, KeepRoots),
+    DurationUs = erlang:monotonic_time(microsecond) - StartTs,
+    %% bytes_freed = old sealed total - new sealed total. Computed
+    %% post-call by stat'ing the new pack (if any) and subtracting
+    %% from the pre-call sum. The new pack's bytes are still on disk
+    %% at this point (finalise_compaction has fsync'd everything).
+    NewBytes = case maps:get(new_pack, Meta0, undefined) of
+        undefined -> 0;
+        PackId    ->
+            try filelib:file_size(
+                    bondy_mst_pack_paths:sealed_pack_path(Dir, PackId)
+                )
+            catch _:_ -> 0
+            end
+    end,
+    BytesFreed = max(OldBytes - NewBytes, 0),
+    Meta = Meta0#{bytes_freed => BytesFreed},
+    emit_gc(T1, Meta, DurationUs),
+    {T1, Meta}.
 
 -spec missing_set(t(), binary()) -> sets:set(binary()).
 
@@ -398,9 +506,9 @@ missing_set(#?MODULE{} = T, Root) when is_binary(Root) ->
 page_refs(Page) ->
     bondy_mst_page:refs(Page).
 
--spec delete(t()) -> ok.
+-spec destroy(t()) -> ok.
 
-delete(#?MODULE{writer = W} = T) ->
+destroy(#?MODULE{writer = W} = T) ->
     Dir = bondy_mst_pack_writer:dir(W),
     ok = close(T),
     _ = file:del_dir_r(Dir),
@@ -423,15 +531,26 @@ seal(#?MODULE{writer = W} = T) ->
     %% so the on-disk state after seal/1 is fully durable.
     case do_flush_tombstones(T) of
         {ok, T0} ->
-            case bondy_mst_pack_writer:seal(W) of
+            RecordCount = bondy_mst_pack_writer:pending_count(W),
+            PackBytes = bondy_mst_pack_writer:incoming_offset(W),
+            StartTs = erlang:monotonic_time(microsecond),
+            Result = bondy_mst_pack_writer:seal(W),
+            DurationUs = erlang:monotonic_time(microsecond) - StartTs,
+            case Result of
                 {ok, no_op, W1} ->
+                    %% No-op seal: nothing to emit; the no_op return
+                    %% means there was nothing pending to roll over.
                     {ok, T0#?MODULE{writer = W1}};
                 {ok, PackId, W1} ->
                     Dir = bondy_mst_pack_writer:dir(W1),
-                    case open_sealed_view(Dir, PackId) of
+                    Ctx = bondy_mst_pack_sealed_view:open_ctx_from_writer(W1),
+                    case bondy_mst_pack_sealed_view:open(Dir, Ctx, PackId) of
                         {ok, View} ->
                             Views = newest_first([View | T0#?MODULE.sealed_views]),
-                            {ok, T0#?MODULE{writer = W1, sealed_views = Views}};
+                            T1 = T0#?MODULE{writer = W1, sealed_views = Views},
+                            emit_seal(T1, RecordCount, PackBytes,
+                                      DurationUs, PackId),
+                            {ok, T1};
                         {error, _} = E ->
                             E
                     end;
@@ -451,6 +570,40 @@ instance_id(#?MODULE{writer = W}) -> bondy_mst_pack_writer:instance_id(W).
 -spec sealed_pack_ids(t()) -> [non_neg_integer()].
 sealed_pack_ids(#?MODULE{sealed_views = Views}) ->
     [V#sealed_view.pack_id || V <- Views].
+
+?DOC("""
+Returns a snapshot of the per-instance gauges described in design
+§13. Synchronous and cheap (no I/O beyond the manifest cursor and
+`filelib:file_size/1` on each sealed pack). Intended to be plugged
+into `telemetry_poller` by operators who want gauges emitted on a
+schedule; the pack store itself does not emit gauges.
+
+Fields:
+- `instance_id`           — opaque identifier set at `open/2`
+- `live_pack_count`       — number of sealed packs currently mounted
+- `pending_record_count`  — pending pages in `incoming.pack`
+- `bytes_total`           — sum of sealed-pack file sizes (sealed
+                            packs only; `incoming.pack` excluded)
+- `current_root_hash`     — current MST root, or `undefined`
+""").
+-spec info(t()) -> map().
+info(#?MODULE{} = T) ->
+    #{
+        instance_id          => instance_id(T),
+        live_pack_count      => length(T#?MODULE.sealed_views),
+        pending_record_count =>
+            bondy_mst_pack_writer:pending_count(T#?MODULE.writer),
+        %% Total bytes resident in the writer's pending map (= the
+        %% on-disk `incoming.pack` byte size, since the pending map
+        %% mirrors the on-disk record layout including pack header,
+        %% per-record headers, CRC, and body). Used by operators
+        %% sizing per-instance memory budgets and by the QA #15
+        %% memory-audit bench.
+        pending_bytes        =>
+            bondy_mst_pack_writer:incoming_offset(T#?MODULE.writer),
+        bytes_total          => sealed_views_bytes(T),
+        current_root_hash    => get_root(T)
+    }.
 
 %% =============================================================================
 %% PRIVATE
@@ -495,6 +648,19 @@ validated_tombstones_flush(K, Opts) ->
     end.
 
 %% @private
+%% Validates the GC dead-fraction threshold. Accepts a float in
+%% `[0.0, 1.0]` (integer `0` and `1` are aliased to the float forms).
+%% Any other value is rejected with `{invalid_opt, K, V}` so a typo
+%% surfaces at open time rather than as silent GC-policy drift.
+validated_gc_threshold(K, Opts) ->
+    case maps:get(K, Opts, default_for(K)) of
+        0 -> 0.0;
+        1 -> 1.0;
+        F when is_float(F), F >= 0.0, F =< 1.0 -> F;
+        Bad -> error({invalid_opt, K, Bad})
+    end.
+
+%% @private
 default_for(auto_seal_records) ->
     ?BONDY_MST_PACK_DEFAULT_AUTO_SEAL_RECORDS;
 default_for(auto_seal_bytes) ->
@@ -502,7 +668,9 @@ default_for(auto_seal_bytes) ->
 default_for(tombstones_flush_every_records) ->
     ?BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_RECORDS;
 default_for(tombstones_flush_every_ms) ->
-    ?BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_MS.
+    ?BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_MS;
+default_for(gc_threshold_dead_fraction) ->
+    ?BONDY_MST_PACK_DEFAULT_GC_THRESHOLD_DEAD_FRACTION.
 
 %% @private
 ensure_dir(Dir) ->
@@ -653,12 +821,12 @@ reset_tombstones_flush_counters(#?MODULE{} = T) ->
     }.
 
 %% @private
-open_sealed_views(_Dir, []) ->
+open_sealed_views(_Dir, _Ctx, []) ->
     {ok, []};
-open_sealed_views(Dir, [Id | Rest]) ->
-    case open_sealed_view(Dir, Id) of
+open_sealed_views(Dir, Ctx, [Id | Rest]) ->
+    case bondy_mst_pack_sealed_view:open(Dir, Ctx, Id) of
         {ok, V} ->
-            case open_sealed_views(Dir, Rest) of
+            case open_sealed_views(Dir, Ctx, Rest) of
                 {ok, Vs} -> {ok, [V | Vs]};
                 {error, _} = E ->
                     _ = prim_file:close(V#sealed_view.pack_fd),
@@ -669,37 +837,18 @@ open_sealed_views(Dir, [Id | Rest]) ->
     end.
 
 %% @private
-open_sealed_view(Dir, PackId) ->
-    IdxPath = bondy_mst_pack_paths:sealed_idx_path(Dir, PackId),
-    PackPath = bondy_mst_pack_paths:sealed_pack_path(Dir, PackId),
-    case prim_file:read_file(IdxPath) of
-        {ok, IdxBin} ->
-            case bondy_mst_pack_index:open(IdxBin) of
-                {ok, Idx} ->
-                    case prim_file:open(PackPath, [read, raw, binary]) of
-                        {ok, Fd} ->
-                            {ok, #sealed_view{
-                                pack_id = PackId, idx = Idx, pack_fd = Fd
-                            }};
-                        {error, R} ->
-                            {error, {sealed_pack, PackId, R}}
-                    end;
-                {error, R} ->
-                    {error, {sealed_idx, PackId, R}}
-            end;
-        {error, R} ->
-            {error, {sealed_idx, PackId, R}}
-    end.
-
-%% @private
 newest_first(Views) ->
     lists:reverse(lists:keysort(#sealed_view.pack_id, Views)).
 
 %% @private
+%% Returns `{Page | undefined, Source, ByteSize}` so callers can both
+%% deserialise and emit telemetry from one walk. `Source` ∈ `pending |
+%% {sealed_pack, PackId} | cold_miss`; `ByteSize` is the wire size of
+%% the record that was read (0 on a miss).
 do_get(#?MODULE{writer = W, sealed_views = Views}, Hash) ->
     case bondy_mst_pack_writer:pending_read(W, Hash) of
         {ok, Bytes} ->
-            deserialise(Bytes);
+            {deserialise(Bytes), pending, byte_size(Bytes)};
         not_found ->
             get_from_sealed(Views, Hash);
         {error, R} ->
@@ -708,16 +857,20 @@ do_get(#?MODULE{writer = W, sealed_views = Views}, Hash) ->
 
 %% @private
 get_from_sealed([], _Hash) ->
-    undefined;
+    {undefined, cold_miss, 0};
 get_from_sealed([V | Rest], Hash) ->
     case bondy_mst_pack_index:lookup(V#sealed_view.idx, Hash) of
         not_found ->
             get_from_sealed(Rest, Hash);
         {ok, Offset} ->
             case bondy_mst_pack_io:read_record(V, Hash, Offset) of
-                {ok, Bytes} -> deserialise(Bytes);
-                not_found   -> get_from_sealed(Rest, Hash);
-                {error, R}  -> error({get, R})
+                {ok, Bytes} ->
+                    {deserialise(Bytes), {sealed_pack, V#sealed_view.pack_id},
+                     byte_size(Bytes)};
+                not_found ->
+                    get_from_sealed(Rest, Hash);
+                {error, R} ->
+                    error({get, R})
             end
     end.
 
@@ -810,10 +963,26 @@ gc_noop_meta() ->
       kept => 0, dropped => 0}.
 
 %% @private
+%% Meta for the threshold-skip path: GC found drops but decided not to
+%% rewrite because the dead fraction is below `gc_threshold_dead_fraction`.
+%% Reports the actual `Kept` / `Dropped` so operators can see the gap
+%% between the observed state and the configured threshold.
+gc_threshold_skip_meta(Kept, Dropped) ->
+    #{compacted => false, reason => below_threshold,
+      retired => [], new_pack => undefined,
+      kept => Kept, dropped => Dropped}.
+
+%% @private
 do_gc(#?MODULE{} = T, KeepRoots) ->
     Reachable = reachable_set(T, KeepRoots),
     {KeptHashes, Dropped} = partition_sealed(T, Reachable),
-    case should_compact(T, Dropped) of
+    Kept = length(KeptHashes),
+    case should_compact(T, Kept, Dropped) of
+        false when Dropped > 0 ->
+            %% Drops were found but the dead fraction is below the
+            %% configured threshold — surface that in the meta so
+            %% operators can see what GC observed without rewriting.
+            {T, gc_threshold_skip_meta(Kept, Dropped)};
         false ->
             {T, gc_noop_meta()};
         true ->
@@ -841,9 +1010,9 @@ walk_reachable(T, Hash, Acc) when is_binary(Hash) ->
             Acc;
         false ->
             case do_get(T, Hash) of
-                undefined ->
+                {undefined, _, _} ->
                     Acc;
-                Page ->
+                {Page, _, _} ->
                     Acc1 = sets:add_element(Hash, Acc),
                     lists:foldl(
                         fun(Ref, A) -> walk_reachable(T, Ref, A) end,
@@ -887,12 +1056,19 @@ partition_sealed(#?MODULE{sealed_views = Views, free_set = FreeSet},
     {lists:sort(Kept), Dropped}.
 
 %% @private
-%% Compact whenever something would actually change on disk: dropped
-%% entries to remove, OR multiple sealed packs to coalesce into one.
-should_compact(_, Dropped) when Dropped > 0 ->
-    true;
-should_compact(#?MODULE{sealed_views = Views}, 0) ->
-    length(Views) > 1.
+%% Decide whether to rewrite the sealed set.
+%%
+%% Multi-pack always wins: when there are 2+ sealed packs the call
+%% coalesces them into one regardless of the dead-fraction.
+%% Single-pack with zero drops is always a no-op.
+%% Single-pack with drops fires only when the dead fraction
+%% (`Dropped / (Kept + Dropped)`) meets `gc_threshold_dead_fraction`.
+should_compact(#?MODULE{sealed_views = Views}, _Kept, 0) ->
+    length(Views) > 1;
+should_compact(#?MODULE{sealed_views = Views,
+                        gc_threshold_dead_fraction = TR},
+               Kept, Dropped) ->
+    length(Views) > 1 orelse (Dropped / (Kept + Dropped)) >= TR.
 
 %% @private
 %% A reader closure that, given a hash, returns the bytes stored in
@@ -952,7 +1128,7 @@ write_compacted_pack(_Dir, _IH, _Algo, _NewPackId, [], _Reader) ->
     %% Empty kept set — no new pack to write, just retire the old ones.
     ok;
 write_compacted_pack(Dir, IH, Algo, NewPackId, Hashes, Reader) ->
-    bondy_mst_pack_writer:create_sealed_pack(
+    bondy_mst_pack_seal:create_sealed_pack(
         Dir, IH, Algo, NewPackId, Hashes, Reader
     ).
 
@@ -975,8 +1151,8 @@ commit_compaction(T, Dir, OldIds, NewPackId, KeptHashes, Dropped) ->
             %% Roll back: delete the just-written sealed pack (if any).
             case KeptHashes of
                 [] -> ok;
-                _  -> bondy_mst_pack_writer:delete_sealed_pack_files(Dir,
-                                                                     NewPackId)
+                _  -> bondy_mst_pack_seal:delete_sealed_pack_files(Dir,
+                                                                   NewPackId)
             end,
             ?LOG_ERROR(#{
                 event => mst_pack_store_gc_manifest_swap_failed,
@@ -1005,10 +1181,10 @@ finalise_compaction(T, M, OldIds, NewPackId, KeptHashes, Dropped) ->
         [] ->
             [];
         _ ->
-            open_new_view_or_raise(Dir, NewPackId)
+            open_new_view_or_raise(Dir, bondy_mst_pack_sealed_view:open_ctx_from_writer(W1), NewPackId)
     end,
     lists:foreach(
-        fun(Id) -> bondy_mst_pack_writer:delete_sealed_pack_files(Dir, Id) end,
+        fun(Id) -> bondy_mst_pack_seal:delete_sealed_pack_files(Dir, Id) end,
         OldIds
     ),
     %% GC just rewrote the manifest and the sealed packs; ride the
@@ -1046,8 +1222,8 @@ finalise_compaction(T, M, OldIds, NewPackId, KeptHashes, Dropped) ->
 %% process restarts and recovers from the manifest. We surface the
 %% second reason (not the first) in the raise so the caller's logs
 %% point at the persistent fault rather than the transient one.
-open_new_view_or_raise(Dir, PackId) ->
-    case open_sealed_view(Dir, PackId) of
+open_new_view_or_raise(Dir, Ctx, PackId) ->
+    case bondy_mst_pack_sealed_view:open(Dir, Ctx, PackId) of
         {ok, V} ->
             [V];
         {error, R1} ->
@@ -1056,7 +1232,7 @@ open_new_view_or_raise(Dir, PackId) ->
                 pack_id => PackId,
                 reason => R1
             }),
-            case open_sealed_view(Dir, PackId) of
+            case bondy_mst_pack_sealed_view:open(Dir, Ctx, PackId) of
                 {ok, V} ->
                     [V];
                 {error, R2} ->
@@ -1082,3 +1258,146 @@ prune_applied_tombstones(W, FreeSet) ->
         fun(H) -> sets:is_element(H, PendingSet) end,
         FreeSet
     ).
+
+%% =============================================================================
+%% PRIVATE — telemetry
+%% =============================================================================
+
+%% @private
+%% Sum of `filelib:file_size/1` over every sealed pack file. Used by
+%% `info/1` (`bytes_total` gauge) and by `gc/2` (pre-call snapshot for
+%% the `bytes_freed` measurement). Best-effort: a missing/locked file
+%% contributes 0 rather than aborting — these are observability
+%% measurements, not invariants.
+sealed_views_bytes(#?MODULE{writer = W, sealed_views = Views}) ->
+    Dir = bondy_mst_pack_writer:dir(W),
+    lists:foldl(
+        fun(#sealed_view{pack_id = Id}, Acc) ->
+            Path = bondy_mst_pack_paths:sealed_pack_path(Dir, Id),
+            Acc + safe_file_size(Path)
+        end,
+        0,
+        Views
+    ).
+
+%% @private
+safe_file_size(Path) ->
+    try filelib:file_size(Path) of
+        N when is_integer(N), N >= 0 -> N;
+        _ -> 0
+    catch
+        _:_ -> 0
+    end.
+
+%% @private
+emit_put(T, PageBytes, DurationUs, ContentHit) ->
+    telemetry:execute(
+        [bondy_mst, page_store, put],
+        #{
+            page_bytes  => PageBytes,
+            duration_us => DurationUs,
+            content_hit => ContentHit
+        },
+        #{instance_id => instance_id(T)}
+    ).
+
+%% @private
+emit_get(T, PageBytes, DurationUs, Source) ->
+    telemetry:execute(
+        [bondy_mst, page_store, get],
+        #{
+            page_bytes  => PageBytes,
+            duration_us => DurationUs,
+            source      => Source
+        },
+        #{instance_id => instance_id(T)}
+    ).
+
+%% @private
+emit_seal(T, RecordCount, PackBytes, DurationUs, NewPackId) ->
+    telemetry:execute(
+        [bondy_mst, page_store, seal_incoming],
+        #{
+            record_count => RecordCount,
+            pack_bytes   => PackBytes,
+            duration_us  => DurationUs
+        },
+        #{instance_id => instance_id(T), new_pack_id => NewPackId}
+    ).
+
+%% @private
+%% `Meta` is the compaction result map (`do_gc/2`'s second tuple
+%% element, post `bytes_freed` enrichment). Converts to telemetry
+%% measurements + metadata. The `reason` metadata carries the
+%% compaction outcome: `compacted` (rewrote packs), `noop` (nothing
+%% to do), or `epoch_unsupported` (integer epoch passed).
+emit_gc(T, Meta, DurationUs) ->
+    PacksRetired = length(maps:get(retired, Meta, [])),
+    PacksCreated = case maps:get(new_pack, Meta, undefined) of
+        undefined -> 0;
+        _         -> 1
+    end,
+    Reason = case Meta of
+        #{reason := R}                  -> R;
+        #{compacted := true}            -> compacted;
+        _                               -> noop
+    end,
+    telemetry:execute(
+        [bondy_mst, page_store, gc],
+        #{
+            pages_kept    => maps:get(kept, Meta, 0),
+            pages_dropped => maps:get(dropped, Meta, 0),
+            packs_retired => PacksRetired,
+            packs_created => PacksCreated,
+            bytes_freed   => maps:get(bytes_freed, Meta, 0),
+            duration_us   => DurationUs
+        },
+        #{instance_id => instance_id(T), reason => Reason}
+    ).
+
+%% @private
+%% Recovery succeeded. `Outcome` is the map returned by
+%% `bondy_mst_pack_recovery:recover/3`; we forward the count fields as
+%% measurements and the action / state fields as metadata. Emitted
+%% even when `actions` is empty (defensive no-op recoveries) so the
+%% subscriber can count "open invoked recovery" regardless of outcome.
+emit_recovery_ok(InstanceId, Outcome, DurationUs) ->
+    telemetry:execute(
+        [bondy_mst, page_store, recovery],
+        #{
+            duration_us       => DurationUs,
+            bytes_truncated   => maps:get(bytes_truncated, Outcome),
+            records_recovered => maps:get(records_recovered, Outcome)
+        },
+        #{
+            instance_id           => InstanceId,
+            result                => ok,
+            actions               => maps:get(actions, Outcome),
+            incoming_state_before =>
+                maps:get(incoming_state_before, Outcome),
+            incoming_state_after  =>
+                maps:get(incoming_state_after, Outcome)
+        }
+    ).
+
+%% @private
+%% Recovery failed. State_before/after are not known here (the failure
+%% may have been a manifest-read error before the reconciliation began);
+%% the subscriber gets `unknown` and the failing reason in `result`.
+emit_recovery_failed(InstanceId, Reason, DurationUs) ->
+    telemetry:execute(
+        [bondy_mst, page_store, recovery],
+        #{
+            duration_us       => DurationUs,
+            bytes_truncated   => 0,
+            records_recovered => 0
+        },
+        #{
+            instance_id           => InstanceId,
+            result                => {error, Reason},
+            actions               => [],
+            incoming_state_before => unknown,
+            incoming_state_after  => unknown
+        }
+    ).
+

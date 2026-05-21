@@ -47,6 +47,15 @@ passes a new Bucket value to `get/3`, `put_batch/2`, `range/5`, or
 - `delete/3` — single-key delete inside a Bucket.
 - `info/1` — implementation-specific introspection.
 
+## Optional callbacks
+
+- `head/3` — fast-path read that returns the substrate's HEAD wire
+  format (`<<HlcLen:16, Hlc/binary, ValueBytes/binary>>`) without
+  decoding the full V2 frame. Adapters that have a native HEAD
+  mechanism (e.g. leveled's tag extractor + `book_head/4`) implement
+  it; adapters that don't can omit the export and the substrate falls
+  back to `get/3 + bondy_oplog_cell_frame:extract_head/1`.
+
 Adapters MUST be safe under concurrent readers; `put_batch/2` may be
 single-writer (the substrate guarantees one applier per shard).
 
@@ -110,3 +119,8 @@ See `bondy_oplog_cache_adapter` for the orthogonal read-cache surface.
 -callback delete(handle(), bucket(), Key :: term()) -> ok.
 
 -callback info(handle()) -> #{atom() => term()}.
+
+-callback head(handle(), bucket(), Key :: term()) ->
+    {ok, HeadBytes :: binary()} | not_found.
+
+-optional_callbacks([head/3]).

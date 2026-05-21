@@ -120,7 +120,7 @@ lww_converges_across_three_nodes() ->
             ok = peer_append_cell_at(NB, InstId, <<"b">>, 20, <<"v-b">>),
             ok = peer_append_cell_at(NC, InstId, <<"c">>, 30, <<"v-c">>),
             %% Pre-sync each node only sees its own write.
-            ?assertEqual({{set, <<"v-a">>, 10}, 10},
+            ?assertEqual({<<"v-a">>, 10},
                          bondy_db_core:read(NS, primary, <<"a">>)),
             ?assertEqual(undefined,
                          bondy_db_core:read(NS, primary, <<"b">>)),
@@ -187,11 +187,11 @@ later_hlc_wins_after_sync() ->
             _ = bondy_oplog_instance:await_apply(InstId),
             ok = peer_await_apply(NB, InstId),
             ok = peer_await_apply(NC, InstId),
-            ?assertEqual({{set, <<"latest">>, 5}, 5},
+            ?assertEqual({<<"latest">>, 5},
                          bondy_db_core:read(NS, primary, <<"k">>)),
-            ?assertEqual({{set, <<"latest">>, 5}, 5},
+            ?assertEqual({<<"latest">>, 5},
                          remote_read(NB, NS, <<"k">>)),
-            ?assertEqual({{set, <<"latest">>, 5}, 5},
+            ?assertEqual({<<"latest">>, 5},
                          remote_read(NC, NS, <<"k">>))
         after
             ok = bondy_oplog:stop_instance(InstId),
@@ -232,9 +232,9 @@ new_node_catches_up_via_sync() ->
             ok = peer_sync_from(NB, InstId, [node()]),
             _ = bondy_oplog_instance:await_apply(InstId),
             ok = peer_await_apply(NB, InstId),
-            ?assertEqual({{set, <<"vx">>, 1}, 1},
+            ?assertEqual({<<"vx">>, 1},
                          bondy_db_core:read(NS, primary, <<"x">>)),
-            ?assertEqual({{set, <<"vy">>, 2}, 2},
+            ?assertEqual({<<"vy">>, 2},
                          remote_read(NB, NS, <<"y">>)),
             %% Now C joins the cluster.
             {ok, PC, NC} = start_peer_node("nc3"),
@@ -247,9 +247,9 @@ new_node_catches_up_via_sync() ->
                 %% projection with both x and y.
                 ok = peer_sync_from(NC, InstId, [node()]),
                 ok = peer_await_apply(NC, InstId),
-                ?assertEqual({{set, <<"vx">>, 1}, 1},
+                ?assertEqual({<<"vx">>, 1},
                              remote_read(NC, NS, <<"x">>)),
-                ?assertEqual({{set, <<"vy">>, 2}, 2},
+                ?assertEqual({<<"vy">>, 2},
                              remote_read(NC, NS, <<"y">>)),
                 _ = erpc:call(NC, bondy_oplog, stop_instance, [InstId]),
                 _ = peer_unregister_shard_at(NC, NS, primary, 0)
@@ -393,15 +393,15 @@ orset_remove_propagates_via_sync() ->
 %% =============================================================================
 
 assert_all_three_cells(NS, ReadFun) ->
-    ?assertEqual({{set, <<"v-a">>, 10}, 10}, ReadFun(NS, primary, <<"a">>)),
-    ?assertEqual({{set, <<"v-b">>, 20}, 20}, ReadFun(NS, primary, <<"b">>)),
-    ?assertEqual({{set, <<"v-c">>, 30}, 30}, ReadFun(NS, primary, <<"c">>)).
+    ?assertEqual({<<"v-a">>, 10}, ReadFun(NS, primary, <<"a">>)),
+    ?assertEqual({<<"v-b">>, 20}, ReadFun(NS, primary, <<"b">>)),
+    ?assertEqual({<<"v-c">>, 30}, ReadFun(NS, primary, <<"c">>)).
 
 
 assert_all_three_cells_remote(Node, NS) ->
-    ?assertEqual({{set, <<"v-a">>, 10}, 10}, remote_read(Node, NS, <<"a">>)),
-    ?assertEqual({{set, <<"v-b">>, 20}, 20}, remote_read(Node, NS, <<"b">>)),
-    ?assertEqual({{set, <<"v-c">>, 30}, 30}, remote_read(Node, NS, <<"c">>)).
+    ?assertEqual({<<"v-a">>, 10}, remote_read(Node, NS, <<"a">>)),
+    ?assertEqual({<<"v-b">>, 20}, remote_read(Node, NS, <<"b">>)),
+    ?assertEqual({<<"v-c">>, 30}, remote_read(Node, NS, <<"c">>)).
 
 
 assert_orset_live(NS, Key, Expected) ->
@@ -416,8 +416,10 @@ assert_orset_live_remote(Node, NS, Key, Expected) ->
 
 orset_live_elements(undefined) ->
     [];
-orset_live_elements({#{live := L}, _Hlc}) ->
-    maps:keys(L).
+orset_live_elements({Value, _Hlc}) ->
+    %% Post-§3.6 the read API returns the fold's `to_value/1`, which
+    %% for orset is an ordset of the currently live elements.
+    Value.
 
 
 %% =============================================================================
@@ -720,7 +722,7 @@ peer_append_orset_remove(InstId, Key, Hlc, _Elem, Dots) ->
     %% `remove` events tombstone the listed dots; the OR-set fold
     %% scrubs them from every element's live set regardless of which
     %% `_Elem` name is passed (matches the fold's contract — see
-    %% `bondy_oplog_fold_orset:apply_event/2`).
+    %% `bondy_oplog_fold_orset:apply_event/3`).
     _ = bondy_oplog:append(
         InstId,
         {cell_apply, <<>>, Key, {remove, Hlc, _Elem, Dots}}

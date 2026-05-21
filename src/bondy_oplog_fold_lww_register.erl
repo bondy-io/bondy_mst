@@ -80,7 +80,9 @@ Events use the same leading-tag pattern.
 """).
 
 -export([initial_value/0]).
--export([apply_event/2]).
+-export([apply_event/3]).
+-export([to_value/1]).
+-export([apply_value_delta/2]).
 -export([merge_states/2]).
 -export([hlc/1]).
 -export([gc_threshold/1]).
@@ -111,53 +113,72 @@ initial_value() ->
     undefined.
 
 
--spec apply_event(state(), event()) -> state().
+-spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
+    bondy_oplog_fold:apply_result().
 
-apply_event(undefined, {set, H, V}) when is_binary(V) ->
-    {set, V, H};
+apply_event(undefined, {set, H, V}, _Meta) when is_binary(V) ->
+    {{set, V, H}, V};
 
-apply_event(undefined, {clear, H}) ->
-    {cleared, H};
+apply_event(undefined, {clear, H}, _Meta) ->
+    {{cleared, H}, none};
 
 %% set vs current set:
-apply_event({set, _OldV, OldH}, {set, H, V}) when H > OldH, is_binary(V) ->
-    {set, V, H};
+apply_event({set, _OldV, OldH}, {set, H, V}, _Meta)
+        when H > OldH, is_binary(V) ->
+    {{set, V, H}, V};
 
-apply_event({set, OldV, OldH} = S, {set, H, V}) when H == OldH, is_binary(V) ->
+apply_event({set, OldV, OldH} = S, {set, H, V}, _Meta)
+        when H == OldH, is_binary(V) ->
     %% Tie at same HLC — deterministic resolution on the payload.
     case V > OldV of
-        true  -> {set, V, OldH};
-        false -> S
+        true  -> {{set, V, OldH}, V};
+        false -> {S, none}
     end;
 
-apply_event({set, _, _} = S, {set, _, _}) ->
+apply_event({set, _, _} = S, {set, _, _}, _Meta) ->
     %% Older HLC; rejected.
-    S;
+    {S, none};
 
 %% set vs incoming clear:
-apply_event({set, _OldV, OldH}, {clear, H}) when H > OldH ->
-    {cleared, H};
+apply_event({set, _OldV, OldH}, {clear, H}, _Meta) when H > OldH ->
+    {{cleared, H}, undefined};
 
-apply_event({set, _OldV, OldH}, {clear, H}) when H == OldH ->
+apply_event({set, _OldV, OldH}, {clear, H}, _Meta) when H == OldH ->
     %% Tie — cleared deterministically wins.
-    {cleared, OldH};
+    {{cleared, OldH}, undefined};
 
-apply_event({set, _, _} = S, {clear, _}) ->
+apply_event({set, _, _} = S, {clear, _}, _Meta) ->
     %% Older clear; rejected.
-    S;
+    {S, none};
 
 %% cleared vs incoming set:
-apply_event({cleared, OldH}, {set, H, V}) when H > OldH, is_binary(V) ->
+apply_event({cleared, OldH}, {set, H, V}, _Meta)
+        when H > OldH, is_binary(V) ->
     %% Later-HLC set resurrects the register (LWW: latest wins).
-    {set, V, H};
+    {{set, V, H}, V};
 
-apply_event({cleared, OldH} = S, {set, H, _}) when H =< OldH ->
+apply_event({cleared, OldH} = S, {set, H, _}, _Meta) when H =< OldH ->
     %% Older or tied set; cleared retains (cleared wins at tie).
-    S;
+    {S, none};
 
 %% cleared vs incoming clear:
-apply_event({cleared, OldH}, {clear, H}) ->
-    {cleared, erlang:max(OldH, H)}.
+apply_event({cleared, OldH}, {clear, H}, _Meta) ->
+    {{cleared, erlang:max(OldH, H)}, none}.
+
+
+-spec to_value(state()) -> undefined | register_value().
+
+to_value(undefined)        -> undefined;
+to_value({set, V, _H})     -> V;
+to_value({cleared, _H})    -> undefined.
+
+
+-spec apply_value_delta(undefined | register_value(),
+                        undefined | register_value()) ->
+    undefined | register_value().
+
+apply_value_delta(_OldValue, NewValue) ->
+    NewValue.
 
 
 -spec merge_states(state(), state()) -> state().

@@ -46,7 +46,7 @@ initial_value_test() ->
 add_to_empty_inserts_element_test() ->
     H = hlc(100, 0),
     D = dot(<<"n1">>, 1),
-    S = ?MOD:apply_event(initial(), {add, H, <<"e1">>, D}),
+    S = apply_ev(initial(), {add, H, <<"e1">>, D}),
     ?assertEqual(
         #{live => #{<<"e1">> => [D]}, tombstones => [], hlc => H},
         S
@@ -56,8 +56,8 @@ add_same_dot_idempotent_test() ->
     H = hlc(100, 0),
     D = dot(<<"n1">>, 1),
     E = <<"e1">>,
-    S1 = ?MOD:apply_event(initial(), {add, H, E, D}),
-    S2 = ?MOD:apply_event(S1, {add, H, E, D}),
+    S1 = apply_ev(initial(), {add, H, E, D}),
+    S2 = apply_ev(S1, {add, H, E, D}),
     ?assertEqual(S1, S2).
 
 add_two_dots_same_element_keeps_both_test() ->
@@ -65,7 +65,7 @@ add_two_dots_same_element_keeps_both_test() ->
     D1 = dot(<<"n1">>, 1),
     D2 = dot(<<"n2">>, 1),
     E = <<"e1">>,
-    S = lists:foldl(fun(Ev, Acc) -> ?MOD:apply_event(Acc, Ev) end,
+    S = lists:foldl(fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
                     initial(),
                     [{add, H, E, D1}, {add, H, E, D2}]),
     ?assertEqual(lists:sort([D1, D2]),
@@ -77,9 +77,50 @@ add_after_tombstone_is_noop_test() ->
     H = hlc(100, 0),
     D = dot(<<"n1">>, 1),
     E = <<"e1">>,
-    S0 = ?MOD:apply_event(initial(), {remove, H, E, [D]}),
-    S1 = ?MOD:apply_event(S0, {add, H, E, D}),
+    S0 = apply_ev(initial(), {remove, H, E, [D]}),
+    S1 = apply_ev(S0, {add, H, E, D}),
     ?assertEqual(S0, S1).
+
+%% Dot reuse across different elements (e.g. a node's dot-counter
+%% resetting on kill+restart, then re-issuing the same dot for a new
+%% value) does NOT shadow either element in an add-only workload.
+%% Both adds land under their own element key carrying the colliding
+%% dot; `to_value/1` returns the union. The Jepsen OR-set workload
+%% reuses dots after `killall -9 beam.smp` because the in-shim atomics
+%% counter is process-local and rebuilds at 0; this test pins that
+%% behaviour as harmless so long as no `remove` is ever issued.
+add_reused_dot_different_elements_both_visible_test() ->
+    H = hlc(100, 0),
+    D = dot(<<"n1">>, 1),
+    S = lists:foldl(fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
+                    initial(),
+                    [{add, H, <<"v_pre">>,  D},
+                     {add, H, <<"v_post">>, D}]),
+    L = maps:get(live, S),
+    ?assertEqual([D], maps:get(<<"v_pre">>,  L)),
+    ?assertEqual([D], maps:get(<<"v_post">>, L)),
+    ?assertEqual(
+        ordsets:from_list([<<"v_pre">>, <<"v_post">>]),
+        ?MOD:to_value(S)
+    ).
+
+%% Companion to the above: once a `remove` enters the workload, dot
+%% reuse stops being harmless. A remove of `v_post` observing dot D
+%% tombstones D, which scrubs D from every live element — including
+%% `v_pre`, which silently disappears. Pins the theoretical bug for
+%% any future workload that issues remove ops, complementing the
+%% add-only harmless case above.
+remove_after_reused_dot_collateral_removes_other_element_test() ->
+    H1 = hlc(100, 0),
+    H2 = hlc(200, 0),
+    D  = dot(<<"n1">>, 1),
+    S0 = lists:foldl(fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
+                     initial(),
+                     [{add, H1, <<"v_pre">>,  D},
+                      {add, H1, <<"v_post">>, D}]),
+    S1 = apply_ev(S0, {remove, H2, <<"v_post">>, [D]}),
+    ?assertEqual(#{}, maps:get(live, S1)),
+    ?assertEqual([D], maps:get(tombstones, S1)).
 
 %% =============================================================================
 %% Remove semantics
@@ -89,8 +130,8 @@ remove_drops_element_when_all_dots_gone_test() ->
     H = hlc(100, 0),
     D = dot(<<"n1">>, 1),
     E = <<"e1">>,
-    S0 = ?MOD:apply_event(initial(), {add, H, E, D}),
-    S1 = ?MOD:apply_event(S0, {remove, hlc(200, 0), E, [D]}),
+    S0 = apply_ev(initial(), {add, H, E, D}),
+    S1 = apply_ev(S0, {remove, hlc(200, 0), E, [D]}),
     ?assertEqual(#{}, maps:get(live, S1)),
     ?assertEqual([D], maps:get(tombstones, S1)).
 
@@ -99,10 +140,10 @@ remove_partial_keeps_surviving_dots_test() ->
     D1 = dot(<<"n1">>, 1),
     D2 = dot(<<"n2">>, 1),
     E = <<"e1">>,
-    S0 = lists:foldl(fun(Ev, Acc) -> ?MOD:apply_event(Acc, Ev) end,
+    S0 = lists:foldl(fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
                      initial(),
                      [{add, H, E, D1}, {add, H, E, D2}]),
-    S1 = ?MOD:apply_event(S0, {remove, hlc(200, 0), E, [D1]}),
+    S1 = apply_ev(S0, {remove, hlc(200, 0), E, [D1]}),
     ?assertEqual(#{E => [D2]}, maps:get(live, S1)),
     ?assertEqual([D1], maps:get(tombstones, S1)).
 
@@ -112,10 +153,10 @@ remove_before_add_tombstones_dot_test() ->
     H = hlc(100, 0),
     D = dot(<<"n1">>, 1),
     E = <<"e1">>,
-    S0 = ?MOD:apply_event(initial(), {remove, H, E, [D]}),
+    S0 = apply_ev(initial(), {remove, H, E, [D]}),
     ?assertEqual([D], maps:get(tombstones, S0)),
     ?assertEqual(#{}, maps:get(live, S0)),
-    S1 = ?MOD:apply_event(S0, {add, H, E, D}),
+    S1 = apply_ev(S0, {add, H, E, D}),
     ?assertEqual([D], maps:get(tombstones, S1)),
     ?assertEqual(#{}, maps:get(live, S1)).
 
@@ -124,8 +165,8 @@ remove_empty_dot_list_only_bumps_hlc_test() ->
     H2 = hlc(200, 0),
     E = <<"e1">>,
     D = dot(<<"n1">>, 1),
-    S0 = ?MOD:apply_event(initial(), {add, H1, E, D}),
-    S1 = ?MOD:apply_event(S0, {remove, H2, E, []}),
+    S0 = apply_ev(initial(), {add, H1, E, D}),
+    S1 = apply_ev(S0, {remove, H2, E, []}),
     ?assertEqual(maps:get(live, S0), maps:get(live, S1)),
     ?assertEqual([], maps:get(tombstones, S1)),
     ?assertEqual(H2, maps:get(hlc, S1)).
@@ -142,7 +183,7 @@ concurrent_add_survives_remove_test() ->
     D1 = dot(<<"n1">>, 1),
     D2 = dot(<<"n2">>, 1),
     E = <<"e1">>,
-    S = lists:foldl(fun(Ev, Acc) -> ?MOD:apply_event(Acc, Ev) end,
+    S = lists:foldl(fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
                     initial(),
                     [{add, H, E, D1},
                      {add, H, E, D2},
@@ -158,7 +199,7 @@ hlc_of_initial_is_zero_test() ->
     ?assertEqual(0, ?MOD:hlc(initial())).
 
 hlc_tracks_max_event_hlc_test() ->
-    S = lists:foldl(fun(Ev, Acc) -> ?MOD:apply_event(Acc, Ev) end,
+    S = lists:foldl(fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
                     initial(),
                     [{add, hlc(100, 0), <<"e">>, dot(<<"n">>, 1)},
                      {add, hlc(50, 0),  <<"e">>, dot(<<"n">>, 2)}]),
@@ -169,7 +210,7 @@ gc_threshold_of_initial_is_undefined_test() ->
 
 gc_threshold_after_event_is_hlc_test() ->
     H = hlc(100, 0),
-    S = ?MOD:apply_event(initial(), {add, H, <<"e">>, dot(<<"n">>, 1)}),
+    S = apply_ev(initial(), {add, H, <<"e">>, dot(<<"n">>, 1)}),
     ?assertEqual(H, ?MOD:gc_threshold(S)).
 
 %% =============================================================================
@@ -178,18 +219,18 @@ gc_threshold_after_event_is_hlc_test() ->
 
 merge_initial_left_returns_right_test() ->
     H = hlc(100, 0),
-    B = ?MOD:apply_event(initial(), {add, H, <<"e">>, dot(<<"n">>, 1)}),
+    B = apply_ev(initial(), {add, H, <<"e">>, dot(<<"n">>, 1)}),
     ?assertEqual(B, ?MOD:merge_states(initial(), B)).
 
 merge_initial_right_returns_left_test() ->
     H = hlc(100, 0),
-    A = ?MOD:apply_event(initial(), {add, H, <<"e">>, dot(<<"n">>, 1)}),
+    A = apply_ev(initial(), {add, H, <<"e">>, dot(<<"n">>, 1)}),
     ?assertEqual(A, ?MOD:merge_states(A, initial())).
 
 merge_disjoint_adds_unions_live_test() ->
     H = hlc(100, 0),
-    A = ?MOD:apply_event(initial(), {add, H, <<"e1">>, dot(<<"n1">>, 1)}),
-    B = ?MOD:apply_event(initial(), {add, H, <<"e2">>, dot(<<"n2">>, 1)}),
+    A = apply_ev(initial(), {add, H, <<"e1">>, dot(<<"n1">>, 1)}),
+    B = apply_ev(initial(), {add, H, <<"e2">>, dot(<<"n2">>, 1)}),
     AB = ?MOD:merge_states(A, B),
     BA = ?MOD:merge_states(B, A),
     ?assertEqual(AB, BA),
@@ -197,8 +238,8 @@ merge_disjoint_adds_unions_live_test() ->
 
 merge_same_element_distinct_dots_unions_dots_test() ->
     H = hlc(100, 0),
-    A = ?MOD:apply_event(initial(), {add, H, <<"e">>, dot(<<"n1">>, 1)}),
-    B = ?MOD:apply_event(initial(), {add, H, <<"e">>, dot(<<"n2">>, 1)}),
+    A = apply_ev(initial(), {add, H, <<"e">>, dot(<<"n1">>, 1)}),
+    B = apply_ev(initial(), {add, H, <<"e">>, dot(<<"n2">>, 1)}),
     AB = ?MOD:merge_states(A, B),
     ?assertEqual(
         lists:sort([dot(<<"n1">>, 1), dot(<<"n2">>, 1)]),
@@ -211,16 +252,16 @@ merge_tombstone_drops_dot_from_other_side_test() ->
     H = hlc(100, 0),
     D1 = dot(<<"n1">>, 1),
     E = <<"e">>,
-    A = ?MOD:apply_event(initial(), {add, H, E, D1}),
-    B = ?MOD:apply_event(initial(), {remove, H, E, [D1]}),
+    A = apply_ev(initial(), {add, H, E, D1}),
+    B = apply_ev(initial(), {remove, H, E, [D1]}),
     AB = ?MOD:merge_states(A, B),
     ?assertEqual(#{}, maps:get(live, AB)),
     ?assertEqual([D1], maps:get(tombstones, AB)).
 
 merge_hlc_takes_max_test() ->
-    A = ?MOD:apply_event(initial(),
+    A = apply_ev(initial(),
                          {add, hlc(100, 0), <<"e1">>, dot(<<"n1">>, 1)}),
-    B = ?MOD:apply_event(initial(),
+    B = apply_ev(initial(),
                          {add, hlc(200, 0), <<"e2">>, dot(<<"n2">>, 1)}),
     AB = ?MOD:merge_states(A, B),
     ?assertEqual(hlc(200, 0), maps:get(hlc, AB)).
@@ -234,15 +275,15 @@ encode_decode_state_initial_test() ->
     ?assertEqual(S, ?MOD:decode_state(?MOD:encode_state(S))).
 
 encode_decode_state_one_element_test() ->
-    S = ?MOD:apply_event(initial(),
+    S = apply_ev(initial(),
                          {add, hlc(100, 0), <<"e">>, dot(<<"n">>, 1)}),
     ?assertEqual(S, ?MOD:decode_state(?MOD:encode_state(S))).
 
 encode_decode_state_with_tombstones_test() ->
     H = hlc(100, 0),
     D = dot(<<"n">>, 1),
-    S0 = ?MOD:apply_event(initial(), {add, H, <<"e">>, D}),
-    S1 = ?MOD:apply_event(S0, {remove, hlc(200, 0), <<"e">>, [D]}),
+    S0 = apply_ev(initial(), {add, H, <<"e">>, D}),
+    S1 = apply_ev(S0, {remove, hlc(200, 0), <<"e">>, [D]}),
     ?assertEqual(S1, ?MOD:decode_state(?MOD:encode_state(S1))).
 
 encode_decode_state_multi_element_multi_dot_test() ->
@@ -253,7 +294,7 @@ encode_decode_state_multi_element_multi_dot_test() ->
         {add, H, <<"b">>, dot(<<"n1">>, 2)},
         {remove, hlc(200, 0), <<"b">>, [dot(<<"n1">>, 2)]}
     ],
-    S = lists:foldl(fun(E, Acc) -> ?MOD:apply_event(Acc, E) end,
+    S = lists:foldl(fun(E, Acc) -> apply_ev(Acc, E) end,
                     initial(), Events),
     ?assertEqual(S, ?MOD:decode_state(?MOD:encode_state(S))).
 
@@ -261,10 +302,10 @@ encode_state_is_canonical_test() ->
     %% Two semantically equal states encode to the same bytes — required
     %% for content-addressable storage if we ever hash encoded states.
     H = hlc(100, 0),
-    A = lists:foldl(fun(E, Acc) -> ?MOD:apply_event(Acc, E) end, initial(),
+    A = lists:foldl(fun(E, Acc) -> apply_ev(Acc, E) end, initial(),
                     [{add, H, <<"a">>, dot(<<"n1">>, 1)},
                      {add, H, <<"b">>, dot(<<"n2">>, 1)}]),
-    B = lists:foldl(fun(E, Acc) -> ?MOD:apply_event(Acc, E) end, initial(),
+    B = lists:foldl(fun(E, Acc) -> apply_ev(Acc, E) end, initial(),
                     [{add, H, <<"b">>, dot(<<"n2">>, 1)},
                      {add, H, <<"a">>, dot(<<"n1">>, 1)}]),
     ?assertEqual(A, B),
@@ -291,13 +332,21 @@ dispatcher_resolves_shorthand_test() ->
 
 dispatcher_apply_event_via_shorthand_test() ->
     H = hlc(100, 0),
-    S = bondy_oplog_fold:apply_event(orset, initial(),
-                                     {add, H, <<"e">>, dot(<<"n">>, 1)}),
-    ?assertEqual(#{<<"e">> => [dot(<<"n">>, 1)]}, maps:get(live, S)).
+    {S, Delta} = bondy_oplog_fold:apply_event(
+        orset, initial(),
+        {add, H, <<"e">>, dot(<<"n">>, 1)},
+        undefined),
+    ?assertEqual(#{<<"e">> => [dot(<<"n">>, 1)]}, maps:get(live, S)),
+    ?assertEqual({add_elem, <<"e">>}, Delta).
 
 dispatcher_merge_states_via_shorthand_test() ->
     H = hlc(100, 0),
-    A = ?MOD:apply_event(initial(), {add, H, <<"e1">>, dot(<<"n1">>, 1)}),
-    B = ?MOD:apply_event(initial(), {add, H, <<"e2">>, dot(<<"n2">>, 1)}),
+    A = apply_ev(initial(), {add, H, <<"e1">>, dot(<<"n1">>, 1)}),
+    B = apply_ev(initial(), {add, H, <<"e2">>, dot(<<"n2">>, 1)}),
     AB = bondy_oplog_fold:merge_states(orset, A, B),
     ?assertEqual(2, map_size(maps:get(live, AB))).
+
+%% Wrapper over %`apply_event/3`%; existing folds ignore Meta.
+apply_ev(S, E) ->
+    {NewState, _Delta} = ?MOD:apply_event(S, E, undefined),
+    NewState.

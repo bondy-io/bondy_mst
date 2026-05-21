@@ -162,7 +162,13 @@ without protocol changes.
     %% to the applier so it can read the next WAL batch. Bounds the
     %% instance's mailbox at `cap × batch_size` events.
     install_in_flight :: atomics:atomics_ref() | undefined,
-    max_install_in_flight :: pos_integer()
+    max_install_in_flight :: pos_integer(),
+    %% Bootstrap lifecycle (`bondy_oplog_bootstrap_lifecycle`). Opened
+    %% at `init/1` and published via the registry so the applier can
+    %% gate its WAL drain on the durable two-state machine
+    %% (`pre_bootstrap | live`). See
+    %% `_design/catalogue_expansion_plan.md` §2.
+    lifecycle :: bondy_oplog_bootstrap_lifecycle:handle()
 }).
 
 -type backend() :: map | ets | module().
@@ -214,7 +220,19 @@ without protocol changes.
     applier => #{
         commit_every => pos_integer(),
         poll_interval_ms => pos_integer()
-    }
+    },
+    %% Bootstrap lifecycle seed. `true` declares the instance as a
+    %% genesis peer in a fresh cluster (no peer to bootstrap from); the
+    %% lifecycle starts `live` and, if `storage_path` is set, the
+    %% durable `lifecycle.live` flag file is written so the next
+    %% restart sees `live` without needing the seed opt again. `false`
+    %% (default for persistent instances) keeps the lifecycle in
+    %% `pre_bootstrap` until `bondy_oplog_sync_session:bootstrap/3`
+    %% completes against a live peer. Ephemeral instances (no
+    %% `storage_path`) default to `live` regardless of `seed` —
+    %% there is no persistent state to bootstrap from. See
+    %% `_design/catalogue_expansion_plan.md` §2.
+    seed => boolean()
 }.
 
 -export_type([opts/0]).
@@ -269,6 +287,10 @@ without protocol changes.
 
 %% Bootstrap
 -export([load_snapshot/3]).
+-export([mark_live/1]).
+-export([lifecycle_state/1]).
+-export([install_catalogue_batch/2]).
+-export([finalize_catalogue_bootstrap/3]).
 
 %% Registry helpers
 -export([whereis/1]).
@@ -1160,6 +1182,184 @@ load_snapshot(Target, Watermark, Snapshot) ->
         infinity
     ).
 
+?DOC("""
+Flips the instance bootstrap lifecycle to `live` (durably). Called by
+`bondy_oplog_sync_session:bootstrap/3` after `load_snapshot/3` has
+installed the peer snapshot and the watermark has been advanced.
+
+Idempotent. Order matters: `mark_live/1` MUST be the **last** step in
+the bootstrap completion sequence — the durable flag file is the
+crash-recovery marker that "everything before me succeeded". See
+`_design/catalogue_expansion_plan.md` §2.4.
+""").
+-spec mark_live(instance_id() | pid()) -> ok.
+
+mark_live(InstanceId) when is_binary(InstanceId) ->
+    case bondy_oplog_registry:lifecycle(InstanceId) of
+        undefined ->
+            %% Instance not yet published; nothing to flip. This is a
+            %% race between `mark_live/1` and the instance's `init/1`.
+            %% Callers driving bootstrap are expected to talk to a
+            %% running instance — log and return ok so the call is a
+            %% no-op rather than crash the caller.
+            ?LOG_WARNING(#{
+                description =>
+                    "mark_live/1 called for an instance that has no "
+                    "registry entry; treating as no-op",
+                instance_id => InstanceId
+            }),
+            ok;
+        Handle ->
+            ok = bondy_oplog_bootstrap_lifecycle:mark_live(Handle),
+            ok = nudge_applier(InstanceId)
+    end;
+mark_live(Pid) when is_pid(Pid) ->
+    gen_server:call(Pid, mark_live, infinity).
+
+%% @private
+%% Wake the applier immediately after a lifecycle transition so we
+%% don't have to wait for the next 1s backstop tick. The applier
+%% absorbs unsolicited `drain_resume` casts; the worst case if the
+%% applier isn't running yet is the cast lands in a queue that gets
+%% dropped on supervisor restart.
+nudge_applier(InstanceId) ->
+    case bondy_oplog_registry:applier_pid(InstanceId) of
+        undefined -> ok;
+        Pid when is_pid(Pid) ->
+            ok = bondy_oplog_applier:notify_drain_resume(Pid),
+            ok
+    end.
+
+?DOC("""
+Returns the current bootstrap lifecycle state of an instance.
+`pre_bootstrap` while the instance is waiting for a successful
+`bondy_oplog_sync_session:bootstrap/3`; `live` once it can serve
+fold-driven reads. `undefined` when the instance is not registered.
+""").
+-spec lifecycle_state(instance_id() | pid()) ->
+    bondy_oplog_bootstrap_lifecycle:state() | undefined.
+
+lifecycle_state(InstanceId) when is_binary(InstanceId) ->
+    case bondy_oplog_registry:lifecycle(InstanceId) of
+        undefined -> undefined;
+        Handle -> bondy_oplog_bootstrap_lifecycle:state(Handle)
+    end;
+lifecycle_state(Pid) when is_pid(Pid) ->
+    gen_server:call(Pid, lifecycle_state, infinity).
+
+?DOC("""
+Installs a batch of catalogue-snapshot cells into the instance's
+projection. Each cell is a `{Bucket, Key, Frame}` triple where `Frame`
+is the V2 cell frame produced by the peer's projection adapter.
+
+`Mode` is `replace` (fresh bootstrap) or `merge` (recovering
+bootstrap). See `bondy_oplog_applier:install_catalogue_batch/2` for
+the per-mode semantics. The arity-2 form is equivalent to
+`install_catalogue_batch(Inst, {replace, Cells})`.
+
+Returns `{ok, #{installed := _, skipped := _, merged := _,
+replaced_no_merge := _}}`.
+
+Called by `bondy_oplog_sync_session:bootstrap_catalogue/3` between
+`get_catalogue_snapshot_init` and `finalize_catalogue_bootstrap/3`.
+""").
+-spec install_catalogue_batch(
+    instance_id() | pid(),
+    [bondy_oplog_transport:cell()]
+    | {replace | merge, [bondy_oplog_transport:cell()]}
+) ->
+    {ok, #{installed := non_neg_integer(),
+           skipped := non_neg_integer(),
+           merged := non_neg_integer(),
+           replaced_no_merge := non_neg_integer()}}
+    | {error, term()}.
+
+install_catalogue_batch(InstanceId, Cells)
+        when is_binary(InstanceId), is_list(Cells) ->
+    install_catalogue_batch(InstanceId, {replace, Cells});
+install_catalogue_batch(InstanceId, {Mode, Cells})
+        when is_binary(InstanceId),
+             (Mode =:= replace orelse Mode =:= merge) ->
+    case bondy_oplog_registry:applier_pid(InstanceId) of
+        undefined ->
+            {error, instance_not_running};
+        ApplierPid ->
+            bondy_oplog_applier:install_catalogue_batch(
+                ApplierPid, {Mode, Cells}
+            )
+    end;
+install_catalogue_batch(Pid, ModeAndCells) when is_pid(Pid) ->
+    case bondy_oplog_registry:instance_id_by_sup_pid(Pid) of
+        {ok, InstanceId} ->
+            install_catalogue_batch(InstanceId, ModeAndCells);
+        not_found ->
+            {error, instance_not_found}
+    end.
+
+?DOC("""
+Finalises a catalogue-snapshot bootstrap session.
+
+For a fresh-bootstrap caller (`WasLive = false`) this marks the
+instance `live` durably. For a recovering caller (`WasLive = true`)
+the instance is already live and no lifecycle change is needed.
+
+`Watermark` is the peer's high-water HLC at session start, captured
+into the per-shard high-water atomic so future replicas reading from
+this peer see at least that watermark. (In v1 this is informational —
+high-water is advanced cell-by-cell during `install_catalogue_batch/2`
+already; this call is the last-write barrier.)
+""").
+-spec finalize_catalogue_bootstrap(
+    instance_id() | pid(),
+    Watermark :: non_neg_integer(),
+    WasLive :: boolean()
+) -> ok.
+
+finalize_catalogue_bootstrap(InstanceId, Watermark, WasLive)
+        when is_binary(InstanceId),
+             is_integer(Watermark), Watermark >= 0,
+             is_boolean(WasLive) ->
+    ok = maybe_advance_high_water(InstanceId, Watermark),
+    case WasLive of
+        true ->
+            ok;
+        false ->
+            ok = mark_live(InstanceId)
+    end;
+finalize_catalogue_bootstrap(Pid, Watermark, WasLive) when is_pid(Pid) ->
+    case bondy_oplog_registry:instance_id_by_sup_pid(Pid) of
+        {ok, InstanceId} ->
+            finalize_catalogue_bootstrap(InstanceId, Watermark, WasLive);
+        not_found ->
+            ok
+    end.
+
+%% @private — advance the per-shard high-water atomic for the
+%% applier's `cell_apply_target`. No-op if the instance is not
+%% catalogue-mode.
+maybe_advance_high_water(_InstanceId, 0) ->
+    ok;
+maybe_advance_high_water(InstanceId, Watermark) ->
+    case bondy_oplog_registry:applier_pid(InstanceId) of
+        undefined ->
+            ok;
+        ApplierPid ->
+            case bondy_oplog_applier:cell_apply_target(ApplierPid) of
+                undefined ->
+                    ok;
+                {ok, {NS, Index, Shard}} ->
+                    case bondy_db_core_registry:lookup(NS, Index, Shard) of
+                        not_found ->
+                            ok;
+                        {ok, Entry} ->
+                            Ref = bondy_db_core_registry:entry_high_water_ref(
+                                Entry
+                            ),
+                            ok = bondy_oplog_high_water:advance(Ref, Watermark)
+                    end
+            end
+    end.
+
 %% =============================================================================
 %% REGISTRY
 %% =============================================================================
@@ -1355,7 +1555,8 @@ init({InstanceId, Opts}) ->
         overlay_counters = atomics:new(2, [{signed, false}]),
         max_local_installed_seq = MaxLocalInstalledSeq,
         install_in_flight = atomics:new(1, [{signed, false}]),
-        max_install_in_flight = maps:get(max_install_in_flight, Opts, 16)
+        max_install_in_flight = maps:get(max_install_in_flight, Opts, 16),
+        lifecycle = bondy_oplog_bootstrap_lifecycle:open(InstanceId, Opts)
     },
     ok = publish(State),
     %% Publish the overlay tid via a dedicated setter so a stale tid
@@ -1384,6 +1585,13 @@ init({InstanceId, Opts}) ->
         InstanceId,
         State#state.install_in_flight,
         State#state.max_install_in_flight
+    ),
+    %% Publish the bootstrap lifecycle handle. The applier reads this
+    %% in its own `init/1` and gates the WAL drain on it. The handle is
+    %% set once and never replaced — the atomic mirror inside it is
+    %% flipped in place when the instance transitions to `live`.
+    ok = bondy_oplog_registry:set_lifecycle(
+        InstanceId, State#state.lifecycle
     ),
     {ok, State}.
 
@@ -1792,6 +2000,13 @@ do_handle_call({compact, PeerRoots}, From, State) ->
     do_compact_async(State, PeerRoots, From);
 do_handle_call({load_snapshot, NewWatermark, Snapshot}, _From, State) ->
     do_load_snapshot(State, NewWatermark, Snapshot);
+do_handle_call(mark_live, _From,
+        #state{lifecycle = LC, instance_id = Id} = State) ->
+    ok = bondy_oplog_bootstrap_lifecycle:mark_live(LC),
+    ok = nudge_applier(Id),
+    {reply, ok, State};
+do_handle_call(lifecycle_state, _From, #state{lifecycle = LC} = State) ->
+    {reply, bondy_oplog_bootstrap_lifecycle:state(LC), State};
 do_handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
@@ -1872,7 +2087,7 @@ terminate(_Reason, #state{
     %% gen_server's init runs and republishes; lock-free read paths
     %% use `is_process_alive/1` to detect that case.
     _ = catch SnapMod:close(SnapState),
-    _ = catch bondy_mst:delete(MST),
+    _ = catch bondy_mst:destroy(MST),
     %% Drop the overlay — it dies with the instance, no heir, no
     %% survival across subtree restart. The applier reads the tid
     %% from the registry, and the registry row's `overlay_tab`
@@ -2094,6 +2309,15 @@ install_fast_events(#state{} = State0, Events) ->
     {Pairs, MaxSeq, MaxKey, MaxHlc, Count} = scan_fast_events(Events, State0),
     MST1 = bondy_mst:put_batch(State0#state.mst, Pairs),
     _ = bondy_oplog_hlc:update(State0#state.hlc, MaxHlc),
+    %% Mirror the HLC update for the local-Seq atomic. Rebuilding the
+    %% MST from the WAL on restart (init seeds SeqRef from
+    %% `max_local_seq/2`, which returns `undefined` for an empty MST)
+    %% would otherwise leave SeqRef at 0 while WAL-replayed events
+    %% carry seqs 1..N. A concurrent `append_fast/3` mid-replay would
+    %% then allocate a colliding seq and the resulting event would
+    %% clobber a pre-restart event at the same `{HLC, Origin, Seq}`
+    %% key. CAS-loop because concurrent local appenders can race here.
+    ok = maybe_bump_seq_atomic(State0#state.seq, MaxSeq),
     telemetry:execute(
         [bondy_oplog, instance, apply_event, ok],
         #{count => Count},
@@ -2105,6 +2329,26 @@ install_fast_events(#state{} = State0, Events) ->
         last_event_key = greater_key(State0#state.last_event_key, MaxKey),
         live_size = State0#state.live_size + Count
     }.
+
+%% @private
+%% Lift `SeqRef` to at least `Target`. No-op when the atomic is
+%% already at or above `Target`. Concurrent appenders that allocate a
+%% higher seq mid-call land naturally on the no-op branch on retry.
+maybe_bump_seq_atomic(_SeqRef, 0) ->
+    ok;
+maybe_bump_seq_atomic(SeqRef, Target) ->
+    Cur = atomics:get(SeqRef, 1),
+    case Target =< Cur of
+        true ->
+            ok;
+        false ->
+            case atomics:compare_exchange(SeqRef, 1, Cur, Target) of
+                ok ->
+                    ok;
+                _Observed ->
+                    maybe_bump_seq_atomic(SeqRef, Target)
+            end
+    end.
 
 %% @private
 %% Single pass over the fast-suffix events: builds the `{Key, Value}`
@@ -2307,6 +2551,28 @@ install_event(#state{} = State, Key, Value, Source, IsNew) ->
     _ = bondy_oplog_hlc:update(
         State#state.hlc, bondy_oplog_event:key_hlc(Key)
     ),
+    %% If the installed event's origin is **ours**, bump the SeqRef
+    %% atomic so a concurrent local `append_fast/3` can't allocate a
+    %% colliding seq. This handles two paths:
+    %%   1. Slow batch (`install_local_safe`): WAL-replayed local-
+    %%      origin events that the fast batcher skipped (resume-
+    %%      overlap probe).
+    %%   2. Peer loopback (`do_append_remote`): a peer ships back our
+    %%      own events via sync — `Origin == self`. Without this bump,
+    %%      a subsequent local append after crash recovery could
+    %%      allocate a seq that already lives in the MST (installed by
+    %%      the peer-shipped copy).
+    %% The fast batch path bumps once at end-of-batch in
+    %% `install_fast_events/2` (cheaper) and does **not** go through
+    %% `install_event/5`, so the per-event bump here doesn't duplicate.
+    case bondy_oplog_event:key_origin(Key) of
+        Origin when Origin =:= State#state.origin ->
+            ok = maybe_bump_seq_atomic(
+                State#state.seq, bondy_oplog_event:key_seq(Key)
+            );
+        _Other ->
+            ok
+    end,
     SizeDelta =
         case IsNew of
             true -> 1;

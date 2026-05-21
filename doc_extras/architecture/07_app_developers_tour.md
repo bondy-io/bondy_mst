@@ -1,0 +1,553 @@
+# An app developer's tour
+
+> Audience: anyone designing a schema on top of `bondy_db`.
+> Time to read: ~25 min.
+> Premise: by the end you'll have mapped your domain onto a small
+> set of tables, with a fold per table and a topology per cluster.
+
+The previous chapters walked through the substrate from the inside.
+This one walks through it from your end of the API. The question we
+answer: **given a piece of state you want to replicate, how do you
+turn it into a `bondy_db` table?**
+
+We use the twelve tables Bondy Router maintains today as the worked
+example. By the end, every table will have a one-paragraph
+justification for its fold and its topology.
+
+## 1. The model, in one picture
+
+```mermaid
+flowchart TB
+    DB["DB · bondy_db:open/2<br/>name, topology, defaults"]
+    TBL["Table · bondy_db:open_table/3<br/>EntityType, fold_module, shard_count"]
+    SH["Shard · one oplog_instance<br/>WAL + MST + projection + applier"]
+    BK["Bucket · routing label<br/>Topology:bucket_for(EntityType, Realm, ...)"]
+    CELL["Cell · {Bucket, Key}<br/>HLC + folded value"]
+
+    DB --> TBL --> SH --> BK --> CELL
+```
+
+Two API surfaces sit above this:
+
+- **`bondy_db`** — the consumer-facing facade. You call
+  `open_table/3`, `read/3`, and `put/4` with table-handle maps. Each
+  table is a [namespace](05_fold_strategies.md).
+- **`bondy_db_core`** — the substrate primitive
+  ([chapter 03](03_bondy_db.md)). It takes `(NS, Index, Key)` and
+  exposes the freshness fence (`ensure_fresh/2`), batch reads
+  (`read_batch/2`), and the registry.
+
+App code mostly uses `bondy_db`. `bondy_db_core` shows up when you
+need `ensure_fresh/2` (auth paths) or `read_batch/2` (multi-cell
+atomic-as-of-fence reads).
+
+The single most important rule of this tutorial is one sentence:
+
+> **Fold attaches to Table.** Two pieces of data that need
+> different merge semantics are two tables.
+
+Everything else in this chapter is a consequence of that rule.
+
+## 2. Picking a fold
+
+`bondy_db` ships ten folds (see [chapter 05](05_fold_strategies.md)) —
+six general-purpose / record-shaped and four Tier 1 textbook CRDTs.
+Reframed by "what does the data look like":
+
+```mermaid
+flowchart TB
+    Q1{"keys unique<br/>by construction?"}
+    QN{"counting events?<br/>(integers that add)"}
+    QM{"monotone max/min<br/>over an integer?"}
+    QG{"grow-only set?"}
+    Q2{"hard expiry on each cell?"}
+    Q3{"set with observed-remove<br/>semantics?"}
+    Q4{"concurrent writes are<br/>an invariant violation?"}
+    Q5{"whole record updated<br/>atomically?"}
+
+    PRES["presence_basic"]
+    PNC["pn_counter"]
+    MAXR["max_register"]
+    MINR["min_register"]
+    GSET["g_set"]
+    TTL["ttl_presence"]
+    ORSET["orset"]
+    STRICT["strict_register"]
+    LWW["lww_register"]
+    MOF["map_of_fields"]
+
+    Q1 -->|yes| PRES
+    Q1 -->|no| QN
+    QN -->|yes| PNC
+    QN -->|no| QM
+    QM -->|max| MAXR
+    QM -->|min| MINR
+    QM -->|no| QG
+    QG -->|yes| GSET
+    QG -->|no| Q2
+    Q2 -->|yes| TTL
+    Q2 -->|no| Q3
+    Q3 -->|yes| ORSET
+    Q3 -->|no| Q4
+    Q4 -->|yes| STRICT
+    Q4 -->|no| Q5
+    Q5 -->|yes| LWW
+    Q5 -->|no| MOF
+```
+
+A few practical notes:
+
+- **`lww_register` covers the common case.** If your code already
+  reads-modifies-writes the whole record (which Bondy does today via
+  `plum_db_object` wrapping a DVVSet), `lww_register` matches that
+  shape exactly. Don't reach for `map_of_fields` until concurrent
+  field-level edits are an actual problem.
+- **`strict_register` is for invariants, not for performance.** Use
+  it where two concurrent writes mean someone broke a rule
+  (authorisation grants, single-policy registrations). The substrate
+  surfaces the conflict; your handler decides what to do.
+- **`map_of_fields` is the escape hatch for record-shaped data
+  with mixed semantics**, not the default for records. The cost is
+  one event per field-change instead of one per record-change.
+- **`orset` belongs in its own table.** A set living inside a
+  `lww_register` record is the "members-in-record" anti-pattern —
+  members get clobbered by whole-record LWW.
+- **Tier 1 folds are for *quantities*, not records.** `pn_counter`,
+  `max_register`, `min_register`, and `g_set` each model one value
+  per cell with a single algebraic merge rule. Don't try to encode
+  a record inside one — use a separate cell key per quantity.
+- **Counters use `bondy_db:counter_inc/4`.** It's a thin wrapper
+  over `apply/4` that issues `{inc, Delta}` events. Negative deltas
+  decrement. Duplicate delivery is absorbed by the WAL key's
+  per-Origin Seq dedup; the fold sees each event exactly once.
+
+## 3. Picking `shard_count` and topology
+
+A table's shards are independent oplog instances. They have their
+own WAL, MST, applier, projection. The topology decides how cells
+route to shards and how shards map to Bookies.
+
+```mermaid
+flowchart LR
+    SHBY["plum_db shard_by"]
+    PFX["shard_by = prefix<br/>(shared prefix lives on one shard)"]
+    KEY["shard_by = key<br/>(hash each key independently)"]
+
+    TOPO["bondy_db topology"]
+    PERE["per_entity<br/>one Bookie per (EntityType, Realm)"]
+    SHARED["shared_shards<br/>N Bookies, hash to one"]
+    SINGLE["single_bookie<br/>one Bookie per node"]
+
+    SHBY --> PFX
+    SHBY --> KEY
+    PFX --> PERE
+    PFX --> SHARED
+    KEY --> SHARED
+    TOPO --> SINGLE
+```
+
+For app developers, the recommendation is short:
+
+- **Default to `bondy_db_topology_shared_shards`.** Single Bookie
+  pool, predictable footprint, every table multiplexes onto the
+  same physical storage. This is what you want unless a specific
+  table needs isolation.
+- **Reach for `bondy_db_topology_per_entity` when you need
+  operational isolation** — auth grants and security sources are
+  the canonical cases. Cluster ops can quiesce a single
+  `(EntityType, Realm)` Bookie without touching the registry.
+- **`single_bookie` is for tests and single-node deployments.**
+  Don't use it in production unless you've measured that you
+  cannot saturate a single Bookie.
+
+`shard_count` sizing rule-of-thumb: **start at the number of peer
+nodes you expect, double on measurement**. Each shard runs its own
+AE sessions; the cluster-wide AE bandwidth is roughly
+`shard_count × write_rate × peer_count`. Eight is a fine starting
+point for most Bondy tables; tickets and tokens benefit from more
+(32–64) because they have high write churn and low per-write
+contention.
+
+## 4. The Bondy Router tour
+
+The current Bondy state lives in twelve plum_db prefixes. Mapped
+onto `bondy_db`, each becomes a table. Below, every row gives a
+sample `open_table/3` call, the fold choice, the topology choice,
+and the one-line "why".
+
+### 4.1 Registrations and subscriptions
+
+```erlang
+{ok, Regs} = bondy_db:open_table(Db, bondy_registration, #{
+    fold_module => bondy_oplog_fold_presence_basic,
+    shard_count => 8
+}).
+{ok, Subs} = bondy_db:open_table(Db, bondy_subscription, #{
+    fold_module => bondy_oplog_fold_presence_basic,
+    shard_count => 8
+}).
+```
+
+WAMP registrations and subscriptions are keyed by
+`{Realm, Uri, SessionId, RegistrationId}`. No two writers ever
+target the same cell — uniqueness is structural. The cell is
+either `live` or `dead`; `dead` is terminal. That's exactly
+`presence_basic`. RAM-only is fine because session-bound state
+disappears when the session closes; no recovery from disk needed.
+
+### 4.2 Realm
+
+```erlang
+{ok, Realms} = bondy_db:open_table(Db, bondy_realm, #{
+    fold_module => bondy_oplog_fold_lww_register,
+    shard_count => 4
+}).
+```
+
+A realm is a single record with security settings, allowed
+authentication methods, default groups, etc. Today Bondy reads,
+modifies, and writes the whole record. `lww_register` matches that
+read-modify-write contract exactly. Same-HLC ties break
+deterministically by lex order on the encoded payload, so two
+concurrent realm edits converge to the same winner on every node.
+
+If field-level concurrent edits become a real problem (rare),
+splitting into `map_of_fields` is a one-table refactor.
+
+### 4.3 Users
+
+```erlang
+{ok, Users} = bondy_db:open_table(Db, security_users, #{
+    fold_module => bondy_oplog_fold_lww_register,
+    shard_count => 8
+}).
+```
+
+Same pattern as realms. A user record holds display_name,
+authorized_keys, meta, etc. Today the whole record is replaced on
+every write. `lww_register` is the right shape. The user's group
+membership is **not** stored in this record (see 4.4).
+
+### 4.4 Groups and group memberships
+
+```erlang
+{ok, Groups} = bondy_db:open_table(Db, security_groups, #{
+    fold_module => bondy_oplog_fold_lww_register,
+    shard_count => 4
+}).
+{ok, Members} = bondy_db:open_table(Db, security_group_members, #{
+    fold_module => bondy_oplog_fold_orset,
+    shard_count => 8
+}).
+```
+
+This is the one table-shape change from plum_db. Today
+`security_groups` stores the group record **with the members list
+inline**, replaced LWW on every membership change. That works for
+small, slowly-changing groups but loses concurrent member updates
+under contention.
+
+```mermaid
+flowchart LR
+    OLD["plum_db today<br/>security_groups<br/>(record + members list, lww)"]
+    NEW1["bondy_db<br/>security_groups<br/>(record minus members, lww_register)"]
+    NEW2["bondy_db<br/>security_group_members<br/>(membership relation, orset)"]
+
+    OLD -->|"split"| NEW1
+    OLD -->|"+"| NEW2
+```
+
+The migration: keep the group record in `security_groups` with
+`lww_register` (name, meta, default policies); move membership to
+a new `security_group_members` table with `orset`. The cell key is
+`{Realm, GroupId, UserId}`; concurrent adds and removes converge
+via the OR-Set's dot/tombstone protocol
+([chapter 05](05_fold_strategies.md)).
+
+This is the recommendation for Bondy: **memberships scale better
+as a dedicated OR-Set table** than as a list inside an LWW record.
+
+### 4.5 Grants (user and group)
+
+```erlang
+{ok, UserGrants} = bondy_db:open_table(Db, security_user_grants, #{
+    fold_module => bondy_oplog_fold_strict_register,
+    shard_count => 8,
+    topology_hint => isolated
+}).
+{ok, GroupGrants} = bondy_db:open_table(Db, security_group_grants, #{
+    fold_module => bondy_oplog_fold_strict_register,
+    shard_count => 4,
+    topology_hint => isolated
+}).
+```
+
+Authorisation grants are the canonical `strict_register` case. Two
+concurrent grants to the same `(Realm, Principal, Resource)` mean
+someone violated single-writer discipline at the management plane.
+The substrate surfaces the conflict; the management API treats it
+as an admin alert, not a silent LWW.
+
+These are the tables where `per_entity` topology pays off: ops can
+quiesce or migrate the grants Bookie for one realm without
+touching anything else.
+
+### 4.6 Sources
+
+```erlang
+{ok, Sources} = bondy_db:open_table(Db, security_sources, #{
+    fold_module => bondy_oplog_fold_strict_register,
+    shard_count => 4,
+    topology_hint => isolated
+}).
+```
+
+Auth sources pin a `{Realm, Username, CIDR}` to a method. Same
+invariant as grants — concurrent edits to the same source must
+surface as a conflict.
+
+### 4.7 API Gateway
+
+```erlang
+{ok, Gateway} = bondy_db:open_table(Db, api_gateway, #{
+    fold_module => bondy_oplog_fold_lww_register,
+    shard_count => 4
+}).
+```
+
+Static-ish API config. Writes are rare and almost always come from
+one operator at a time. `lww_register` is plenty.
+
+### 4.8 Tickets
+
+```erlang
+{ok, Tickets} = bondy_db:open_table(Db, bondy_ticket, #{
+    fold_module => bondy_oplog_fold_ttl_presence,
+    shard_count => 32
+}).
+```
+
+Tickets are short-lived auth artefacts with a hard expiry. Two
+properties matter:
+
+1. **TTL must auto-evict.** `ttl_presence` carries an `expiry_hlc`
+   on every cell. Cells past their HLC are skipped on read; the GC
+   threshold drops them from the snapshot.
+2. **High cardinality, key-independent.** Sharding by key
+   (hash) spreads load evenly. 32 shards is a fine starting point;
+   tune up if write rates climb.
+
+### 4.9 OAuth tokens
+
+```erlang
+{ok, Tokens} = bondy_db:open_table(Db, bondy_oauth_token, #{
+    fold_module => bondy_oplog_fold_ttl_presence,
+    shard_count => 32
+}).
+```
+
+Same shape as tickets. Two things worth calling out:
+
+- **Refresh-token rotation needs `revoked → issued` reanimation.**
+  `ttl_presence` supports this (see
+  [chapter 05](05_fold_strategies.md)); a later-HLC `ISSUE`
+  reanimates a revoked cell, which is what you want when re-issuing
+  a rotated refresh token to the same `{user, realm, device}`.
+- **The "bounded N tokens per `{user, realm, device}`" rule is
+  app-level.** No CRDT can express "keep the N latest" without
+  coordination. Your auth handler reads the current token set,
+  deletes the oldest if you're at the limit, and then writes the
+  new one. `ttl_presence` handles auto-eviction of *expired*
+  tokens; the count cap stays in your code.
+
+### 4.10 Bridge relays
+
+```erlang
+{ok, Bridges} = bondy_db:open_table(Db, bondy_bridge_relay, #{
+    fold_module => bondy_oplog_fold_lww_register,
+    shard_count => 4
+}).
+```
+
+Edge bridge config. Whole-record updates, rare writes, `lww` is
+fine. Could be `map_of_fields` if independent per-field updates
+become a thing.
+
+### 4.11 When to use a counter (illustrative)
+
+Bondy itself does not ship a counter table yet, but the Tier 1
+folds are domain-neutral and the `pn_counter` fold + `counter_inc/4`
+helper exist so consumers can opt in without writing a custom fold.
+The shape:
+
+```erlang
+{ok, Counters} = bondy_db:open_table(Db, app_counters, #{
+    fold_module => bondy_oplog_fold_pn_counter,
+    shard_count => 8
+}).
+
+%% Increment a counter — positive or negative deltas allowed.
+ok = bondy_db:counter_inc(Counters, <<"my_realm">>, <<"page:home">>, +1),
+ok = bondy_db:counter_inc(Counters, <<"my_realm">>, <<"page:home">>, +1),
+ok = bondy_db:counter_inc(Counters, <<"my_realm">>, <<"page:home">>, -1).
+
+%% Read the converged value.
+{ok, 1, _Hlc} = bondy_db:read(Counters, <<"my_realm">>, <<"page:home">>).
+```
+
+When the shape fits:
+
+- **Quantities that monotonically add up across replicas.** Page
+  views, click counts, retry counts, queue depths, gauge
+  increments. Anything where every observer's contribution should
+  be summed and the order of summation doesn't matter.
+- **Per-Origin Seq dedup is free.** Duplicate
+  `counter_inc(Table, Realm, Key, +1)` deliveries from the same
+  origin (WAL replay, AE re-shipping a page) are absorbed by the
+  WAL's per-Origin Seq counter. Your code doesn't need any extra
+  idempotency token.
+- **Negative deltas decrement.** A "delete" of a previously-added
+  +1 is just `counter_inc(_, _, _, -1)`. The state tracks `Pos`
+  and `Neg` accumulators per origin so the converged value can go
+  up and down without loss.
+
+When *not* to reach for it:
+
+- **You need at-most-N semantics.** `pn_counter` is unbounded —
+  it cannot express "stop at 100." Bounded counters need
+  coordination (escrow, leases) that lives above the catalogue.
+- **You need *which client* contributed what.** PN-Counter is a
+  sum; individual increments are not preserved past compaction.
+  If you need provenance, use `g_set` of audit records keyed by
+  the contributor identity.
+- **You're counting unique members.** That's set cardinality, not
+  a sum. Use `g_set` (or `orset` if removes are needed) and read
+  the set size.
+
+#### Adjacent shapes
+
+- **Max-Register / Min-Register** model "the largest (or smallest)
+  value any replica has reported." Use `max_register` for quorum
+  sizes, observed watermarks, peak throughput; `min_register` for
+  deadlines (`min(expiry)` across competing writers) and rate
+  floors. Once the lattice rises (or falls), it cannot reverse.
+- **G-Set** is the grow-only set of binaries. Suitable for
+  append-only catalogues, audit trails, "members ever seen". If
+  membership ever has to *retract*, use `orset` instead — G-Set
+  has no remove event by design.
+
+### 4.12 Summary table
+
+| Table | Fold | shard_count | Topology hint |
+|---|---|---|---|
+| `bondy_registration` | `presence_basic` | 8 | shared_shards |
+| `bondy_subscription` | `presence_basic` | 8 | shared_shards |
+| `bondy_realm` | `lww_register` | 4 | shared_shards |
+| `security_users` | `lww_register` | 8 | shared_shards |
+| `security_groups` | `lww_register` | 4 | shared_shards |
+| `security_group_members` | `orset` | 8 | shared_shards |
+| `security_user_grants` | `strict_register` | 8 | **per_entity** |
+| `security_group_grants` | `strict_register` | 4 | **per_entity** |
+| `security_sources` | `strict_register` | 4 | **per_entity** |
+| `api_gateway` | `lww_register` | 4 | shared_shards |
+| `bondy_ticket` | `ttl_presence` | 32 | shared_shards |
+| `bondy_oauth_token` | `ttl_presence` | 32 | shared_shards |
+| `bondy_bridge_relay` | `lww_register` | 4 | shared_shards |
+
+Nine tables on `shared_shards`, three (auth grants and sources) on
+`per_entity`. None of Bondy's tables today use the Tier 1 folds —
+`pn_counter`, `max_register`, `min_register`, and `g_set` are
+available for consumers that need them; the §4.11 example shows
+the typical setup.
+
+## 5. Patterns you'll keep using
+
+- **New table when fold differs.** Don't try to unify two tables
+  that need different merge semantics. The cost of a table is
+  small; the cost of a wrong fold is silent divergence.
+
+- **Memberships as their own OR-Set table.** Whenever the data
+  shape is "X has many Y", and X is not flat config, lift the
+  membership into a dedicated `orset` table. Group members,
+  subscriptions-per-topic, capabilities-per-role.
+
+- **`ttl_presence` for anything with hard expiry.** Don't track
+  expiry in app code — the substrate already does. Count caps stay
+  in app code (no CRDT solves that).
+
+- **Read-your-writes is free.** The overlay
+  ([chapter 03](03_bondy_db.md)) makes a `bondy_db:put` immediately
+  visible to the next `bondy_db:read` on the same node, before the
+  applier has materialised the projection.
+
+- **Cross-node freshness needs `ensure_fresh/2`.** Auth paths
+  should call `bondy_db_core:ensure_fresh([users, grants], 1s)`
+  before reading. The wall-clock predicate is wait-free; it costs
+  one atomic read.
+
+- **`read_batch/2` when multiple cells must be consistent.**
+  `bondy_db_core:read_batch/2` gives you "all of these as-of HLC
+  F", with skew detection. Use it when (e.g.) authorisation
+  combines a user row and a grants row.
+
+## 6. Anti-patterns
+
+- **`map_of_fields` for whole-record-update workloads.** Every
+  write goes through one field at a time. If your app already does
+  read-modify-write, you're paying the cost without using the
+  benefit. Default to `lww_register`; revisit if field-level
+  contention shows up in telemetry.
+
+- **Over-sharding.** Each shard runs its own AE. Doubling
+  `shard_count` doubles AE bandwidth at low write rates. Start
+  small.
+
+- **App-level TTL eviction.** If you're writing background sweepers
+  to delete expired entries, you've reinvented `ttl_presence`
+  badly. Move the expiry into the cell and let the substrate
+  evict.
+
+- **Splitting tables that share fold and lifecycle.** Two tables
+  that always get written together, with the same fold, are
+  signalling that they should be one table with a richer key. Use
+  the cell key `{Bucket, Key}` to model the relationship.
+
+- **Conflating realms with shards.** Realms are an application
+  concept; they appear in cell keys (`{RealmUri, ...}`) or in the
+  topology's `bucket_for/3`. They are not shards. Two tenants
+  share the same shards by default; if you need physical
+  isolation, that's a per_entity topology question, not a
+  schema question.
+
+- **Records inside a counter (or any Tier 1 fold).** PN-Counter,
+  Max-Register, Min-Register, and G-Set each model **one value
+  per cell.** A `{counter, metadata}` tuple stuffed into a
+  pn_counter table will neither be merged nor projected correctly.
+  If the data has shape, it belongs in `lww_register`,
+  `map_of_fields`, or its own table. One cell, one quantity.
+
+- **Counters used for set cardinality.** Counting distinct member
+  inserts via `counter_inc(_, _, _, +1)` will be off after AE
+  reships an event from a peer that had already inserted the
+  member: the WAL's per-Origin Seq dedup absorbs the duplicate
+  *from that origin*, but two separate origins each contributing
+  +1 for the *same logical member* still sum to 2. Use `g_set` (or
+  `orset`) and read its size.
+
+## Pointers
+
+- [Chapter 03](03_bondy_db.md) — the read side: `bondy_db_core`,
+  cache, overlay, projection, `ensure_fresh/2`, `read_batch/2`.
+- [Chapter 05](05_fold_strategies.md) — the ten fold modules in
+  detail, with the same decision tree, plus the Tier 1 fold
+  sections (PN-Counter, Max-Register, Min-Register, G-Set).
+- [Chapter 06](06_compaction_and_bootstrap.md) — what happens to
+  your events once peers agree they have them.
+- `bondy_db.erl` — the consumer facade
+  (`open/2`, `open_table/3`, `read/3`, `apply/4`,
+  `counter_inc/4`).
+- `bondy_db_core.erl` — substrate primitives
+  (`read/3`, `read_batch/2`, `ensure_fresh/2`, `range/4`).
+- `bondy_db_topology_shared_shards.erl`,
+  `bondy_db_topology_per_entity.erl`,
+  `bondy_db_topology_single_bookie.erl` — the three topologies.

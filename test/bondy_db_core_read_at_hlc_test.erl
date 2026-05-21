@@ -54,10 +54,10 @@ projection_at_or_before_t_returns_projection() ->
         setup_shard(NS, primary, 0, 1, lww_register),
     materialise(PH, <<"k">>, {set, <<"v">>, 5}, 5),
     %% T = 10; projection HLC 5 ≤ T → return.
-    ?assertEqual({ok, {set, <<"v">>, 5}, 5},
+    ?assertEqual({ok, <<"v">>, 5},
                  bondy_db_core:read_at_hlc(NS, <<"k">>, 10)),
     %% T = 5; projection HLC 5 ≤ T → return (=< boundary).
-    ?assertEqual({ok, {set, <<"v">>, 5}, 5},
+    ?assertEqual({ok, <<"v">>, 5},
                  bondy_db_core:read_at_hlc(NS, <<"k">>, 5)),
     teardown_shard(Setup).
 
@@ -79,7 +79,7 @@ overlay_events_through_t_are_folded() ->
     overlay_insert(OV, <<"k">>, 10, {set, 10, <<"mid">>}),
     overlay_insert(OV, <<"k">>, 20, {set, 20, <<"new">>}),
     %% T = 15; project=5, overlay events <= 15: only HLC=10.
-    ?assertEqual({ok, {set, <<"mid">>, 10}, 10},
+    ?assertEqual({ok, <<"mid">>, 10},
                  bondy_db_core:read_at_hlc(NS, <<"k">>, 15)),
     teardown_shard(Setup).
 
@@ -92,7 +92,7 @@ overlay_events_past_t_are_excluded() ->
     overlay_insert(OV, <<"k">>, 100, {set, 100, <<"far">>}),
     overlay_insert(OV, <<"k">>, 200, {set, 200, <<"farther">>}),
     %% T = 10; projection at 5; no overlay applies.
-    ?assertEqual({ok, {set, <<"old">>, 5}, 5},
+    ?assertEqual({ok, <<"old">>, 5},
                  bondy_db_core:read_at_hlc(NS, <<"k">>, 10)),
     teardown_shard(Setup).
 
@@ -105,7 +105,7 @@ overlay_below_projection_hlc_is_ignored() ->
     materialise(PH, <<"k">>, {set, <<"absorbed">>, 50}, 50),
     overlay_insert(OV, <<"k">>, 20, {set, 20, <<"stale">>}),
     %% T = 100; projection at 50; overlay at 20 (=< proj) → ignored.
-    ?assertEqual({ok, {set, <<"absorbed">>, 50}, 50},
+    ?assertEqual({ok, <<"absorbed">>, 50},
                  bondy_db_core:read_at_hlc(NS, <<"k">>, 100)),
     teardown_shard(Setup).
 
@@ -118,10 +118,10 @@ mix_projection_and_overlay_with_partial_window() ->
     overlay_insert(OV, <<"k">>, 15, {set, 15, <<"v15">>}),
     overlay_insert(OV, <<"k">>, 25, {set, 25, <<"v25">>}),
     %% T = 15; window = (5, 15] → events 10 and 15 apply.
-    ?assertEqual({ok, {set, <<"v15">>, 15}, 15},
+    ?assertEqual({ok, <<"v15">>, 15},
                  bondy_db_core:read_at_hlc(NS, <<"k">>, 15)),
     %% T = 12; window = (5, 12] → only event 10 applies.
-    ?assertEqual({ok, {set, <<"v10">>, 10}, 10},
+    ?assertEqual({ok, <<"v10">>, 10},
                  bondy_db_core:read_at_hlc(NS, <<"k">>, 12)),
     teardown_shard(Setup).
 
@@ -138,10 +138,7 @@ mk_event(Hlc, Origin, Seq, Op) ->
     bondy_oplog_event:new(K, Op, undefined).
 
 materialise(PH, Key, State, Hlc) ->
-    Frame = bondy_oplog_cell_frame:encode(
-        Hlc,
-        bondy_oplog_fold:encode_state(lww_register, State)
-    ),
+    Frame = bondy_oplog_test_helpers:frame(lww_register, State, Hlc),
     ok = bondy_oplog_projection_ets:put_batch(PH, [{<<>>, Key, Frame}]).
 
 overlay_insert(OV, Key, Hlc, Op) ->

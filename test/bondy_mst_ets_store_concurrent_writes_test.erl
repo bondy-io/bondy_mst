@@ -37,7 +37,7 @@ capabilities_advertises_concurrent_writes_test() ->
     ),
     Caps = bondy_mst_ets_store:capabilities(Store),
     ?assertEqual(true, maps:get(concurrent_writes, Caps, false)),
-    ok = bondy_mst_ets_store:delete(Store).
+    ok = bondy_mst_ets_store:destroy(Store).
 
 
 non_owner_can_insert_into_store_tab_test() ->
@@ -80,7 +80,7 @@ non_owner_can_insert_into_store_tab_test() ->
     %% deterministic.
     _ = catch unlink(Pid),
     _ = catch exit(Pid, kill),
-    ok = bondy_mst_ets_store:delete(Store),
+    ok = bondy_mst_ets_store:destroy(Store),
     ?assertEqual(ok, Outcome).
 
 
@@ -104,7 +104,7 @@ concurrent_writers_do_not_interfere_test() ->
         receive {outcome, Pid, R} -> R after 1_000 -> timeout end
         || Pid <- Workers
     ],
-    ok = bondy_mst_ets_store:delete(Store),
+    ok = bondy_mst_ets_store:destroy(Store),
     ?assertEqual([ok, ok], Results).
 
 

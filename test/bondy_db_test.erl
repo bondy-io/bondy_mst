@@ -90,7 +90,7 @@ apply_then_read({Db, _Sup, _Dir}) ->
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     H = bondy_db:tick(T),
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H, <<"v1">>}),
-    ?assertEqual({ok, {set, <<"v1">>, H}, H},
+    ?assertEqual({ok, <<"v1">>, H},
                  bondy_db:read(T, <<"r1">>, <<"alice">>)),
     ok = bondy_db:close_table(T).
 
@@ -108,7 +108,7 @@ later_hlc_wins({Db, _Sup, _Dir}) ->
     H2 = bondy_db:tick(T),
     ?assert(H2 > H1),
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H2, <<"second">>}),
-    ?assertEqual({ok, {set, <<"second">>, H2}, H2},
+    ?assertEqual({ok, <<"second">>, H2},
                  bondy_db:read(T, <<"r1">>, <<"alice">>)),
     ok = bondy_db:close_table(T).
 
@@ -116,14 +116,14 @@ later_hlc_wins({Db, _Sup, _Dir}) ->
 earlier_hlc_is_rejected({Db, _Sup, _Dir}) ->
     %% LWW: an event with an HLC older than the current cell's HLC must
     %% leave the cell unchanged. Tests the read-modify-write contract
-    %% routes events through fold:apply_event/2 (not blind overwrite).
+    %% routes events through fold:apply_event/3 (not blind overwrite).
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     H2 = bondy_db:tick(T),
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H2, <<"newer">>}),
     %% Replay a fabricated older event.
     H1 = H2 - 1,
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H1, <<"older">>}),
-    ?assertEqual({ok, {set, <<"newer">>, H2}, H2},
+    ?assertEqual({ok, <<"newer">>, H2},
                  bondy_db:read(T, <<"r1">>, <<"alice">>)),
     ok = bondy_db:close_table(T).
 
@@ -134,7 +134,9 @@ clear_then_read({Db, _Sup, _Dir}) ->
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H1, <<"v">>}),
     H2 = bondy_db:tick(T),
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {clear, H2}),
-    ?assertEqual({ok, {cleared, H2}, H2},
+    %% lww_register's `to_value({cleared, _}) -> undefined`, so the
+    %% read collapses to `not_found`.
+    ?assertEqual(not_found,
                  bondy_db:read(T, <<"r1">>, <<"alice">>)),
     ok = bondy_db:close_table(T).
 
@@ -148,7 +150,7 @@ clear_then_resurrect({Db, _Sup, _Dir}) ->
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {clear, H2}),
     H3 = bondy_db:tick(T),
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H3, <<"v2">>}),
-    ?assertEqual({ok, {set, <<"v2">>, H3}, H3},
+    ?assertEqual({ok, <<"v2">>, H3},
                  bondy_db:read(T, <<"r1">>, <<"alice">>)),
     ok = bondy_db:close_table(T).
 
@@ -159,16 +161,16 @@ realm_isolation({Db, _Sup, _Dir}) ->
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H1, <<"v1">>}),
     H2 = bondy_db:tick(T),
     ok = bondy_db:apply(T, <<"r2">>, <<"alice">>, {set, H2, <<"v2">>}),
-    ?assertEqual({ok, {set, <<"v1">>, H1}, H1},
+    ?assertEqual({ok, <<"v1">>, H1},
                  bondy_db:read(T, <<"r1">>, <<"alice">>)),
-    ?assertEqual({ok, {set, <<"v2">>, H2}, H2},
+    ?assertEqual({ok, <<"v2">>, H2},
                  bondy_db:read(T, <<"r2">>, <<"alice">>)),
     ?assertEqual(not_found, bondy_db:read(T, <<"r3">>, <<"alice">>)),
     ok = bondy_db:close_table(T).
 
 
 range_returns_states({Db, _Sup, _Dir}) ->
-    %% range/5 must return decoded fold states (not user-level values).
+    %% range/5 returns user-facing values (post-`to_value/1`).
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     Keys = [list_to_binary("k" ++ integer_to_list(I))
             || I <- lists:seq(1, 20)],
@@ -184,19 +186,18 @@ range_returns_states({Db, _Sup, _Dir}) ->
     Shard = erlang:phash2(hd(Keys), 4),
     {ok, Rows} = bondy_db:range(T, <<"r1">>, <<"k">>, <<"l">>,
                                 #{shard => Shard, limit => 100}),
-    Got = [K || {K, _State, _Hlc} <- Rows],
+    Got = [K || {K, _Value, _Hlc} <- Rows],
     %% Sorted ascending.
     ?assertEqual(lists:sort(Got), Got),
     %% Every returned key lies in [<<"k">>, <<"l">>).
     ?assert(lists:all(fun(K) -> K >= <<"k">> andalso K < <<"l">> end, Got)),
     %% Every returned key was written.
     ?assert(lists:all(fun(K) -> lists:member(K, Written) end, Got)),
-    %% Every returned state is a {set, V, H} with V = <<K, "v">>.
+    %% Every returned value is <<K, "v">> with matching HLC.
     ?assert(lists:all(
-        fun({K, {set, V, H}, Hlc}) ->
+        fun({K, V, Hlc}) ->
             V =:= <<K/binary, "v">>
-                andalso is_integer(H)
-                andalso Hlc =:= H
+                andalso is_integer(Hlc)
         end,
         Rows
     )),

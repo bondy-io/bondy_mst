@@ -132,7 +132,9 @@ Events:
 """).
 
 -export([initial_value/0]).
--export([apply_event/2]).
+-export([apply_event/3]).
+-export([to_value/1]).
+-export([apply_value_delta/2]).
 -export([merge_states/2]).
 -export([hlc/1]).
 -export([gc_threshold/1]).
@@ -168,58 +170,75 @@ initial_value() ->
     undefined.
 
 
--spec apply_event(state(), event()) -> state().
+-spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
+    bondy_oplog_fold:apply_result().
 
 %% --- from undefined ---------------------------------------------------------
 
-apply_event(undefined, {issue, H, E, P})
+apply_event(undefined, {issue, H, E, P}, _Meta)
         when is_integer(H), is_integer(E), is_binary(P) ->
-    {issued, H, E, P};
+    {{issued, H, E, P}, P};
 
-apply_event(undefined, {revoke, H}) when is_integer(H) ->
+apply_event(undefined, {revoke, H}, _Meta) when is_integer(H) ->
     %% Tombstone — preserves idempotency under out-of-order delivery (a
     %% later-arriving `issue` with H' < H would otherwise reanimate).
-    {revoked, H};
+    %% Value stays undefined.
+    {{revoked, H}, none};
 
 %% --- from {issued, _, _, _} -------------------------------------------------
 
-apply_event({issued, OldH, OldE, OldP} = S, {issue, H, E, P})
+apply_event({issued, OldH, OldE, OldP} = S, {issue, H, E, P}, _Meta)
         when is_binary(P) ->
     if
         H > OldH ->
-            {issued, H, E, P};
+            {{issued, H, E, P}, P};
         H == OldH andalso E == OldE andalso P == OldP ->
-            S;
+            {S, none};
         H == OldH ->
             %% Tie at HLC — deterministic resolution by `{payload,
             %% expiry}` (payload primary; required for merge associativity).
             case {P, E} > {OldP, OldE} of
-                true  -> {issued, OldH, E, P};
-                false -> S
+                true  -> {{issued, OldH, E, P}, P};
+                false -> {S, none}
             end;
         true ->
-            S
+            {S, none}
     end;
 
-apply_event({issued, OldH, _OldE, _OldP}, {revoke, H}) when H >= OldH ->
+apply_event({issued, OldH, _OldE, _OldP}, {revoke, H}, _Meta)
+        when H >= OldH ->
     %% Revoke wins ties (security-critical).
-    {revoked, H};
+    {{revoked, H}, undefined};
 
-apply_event({issued, _, _, _} = S, {revoke, _}) ->
-    S;
+apply_event({issued, _, _, _} = S, {revoke, _}, _Meta) ->
+    {S, none};
 
 %% --- from {revoked, _} ------------------------------------------------------
 
-apply_event({revoked, OldH}, {issue, H, E, P})
+apply_event({revoked, OldH}, {issue, H, E, P}, _Meta)
         when H > OldH, is_binary(P) ->
     %% Re-issue after revoke (LWW); see deviation note in moduledoc.
-    {issued, H, E, P};
+    {{issued, H, E, P}, P};
 
-apply_event({revoked, _} = S, {issue, _, _, _}) ->
-    S;
+apply_event({revoked, _} = S, {issue, _, _, _}, _Meta) ->
+    {S, none};
 
-apply_event({revoked, OldH}, {revoke, H}) ->
-    {revoked, erlang:max(OldH, H)}.
+apply_event({revoked, OldH}, {revoke, H}, _Meta) ->
+    {{revoked, erlang:max(OldH, H)}, none}.
+
+
+-spec to_value(state()) -> undefined | payload().
+
+to_value(undefined)         -> undefined;
+to_value({issued, _H, _E, P}) -> P;
+to_value({revoked, _})      -> undefined.
+
+
+-spec apply_value_delta(undefined | payload(), undefined | payload()) ->
+    undefined | payload().
+
+apply_value_delta(_OldValue, NewValue) ->
+    NewValue.
 
 
 -spec merge_states(state(), state()) -> state().

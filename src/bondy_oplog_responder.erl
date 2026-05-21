@@ -54,11 +54,13 @@ gen_server:call(
 ).
 ```
 
-| Request               | Reply                                              |
+| Request                                  | Reply                                                                  |
 |---|---|
-| `get_root`            | `{ok, hash() \| undefined}`                        |
-| `{get_pages, Set}`    | `{ok, #{hash() => page()}}`                        |
-| `get_snapshot`        | `{ok, no_snapshot}` \| `{ok, event_key(), term()}` |
+| `get_root`                               | `{ok, hash() \| undefined}`                                            |
+| `{get_pages, Set}`                       | `{ok, #{hash() => page()}}`                                            |
+| `get_snapshot`                           | `{ok, no_snapshot}` \| `{ok, event_key(), term()}`                     |
+| `get_catalogue_snapshot_init`            | `{ok, no_snapshot}` \| `{ok, {init, {watermark(), cursor()}}}`         |
+| `{get_catalogue_snapshot_next, Cursor}`  | `{ok, {batch, {cursor(), [cell()]}}}` \| `{ok, {done, []}}` \| `{error, cursor_expired}` |
 
 Errors propagate as `{error, Reason}` (e.g. `{instance_not_running, Id}`).
 """).
@@ -144,6 +146,32 @@ dispatch(InstanceId, get_snapshot) when is_binary(InstanceId) ->
             case bondy_oplog_instance:snapshot(InstanceId) of
                 not_found -> {ok, no_snapshot};
                 {ok, W, S} -> {ok, W, S}
+            end
+    end;
+dispatch(InstanceId, get_catalogue_snapshot_init)
+        when is_binary(InstanceId) ->
+    case bondy_oplog_instance:whereis(InstanceId) of
+        undefined ->
+            {error, {instance_not_running, InstanceId}};
+        _Pid ->
+            _ = bondy_oplog_instance:await_apply(InstanceId),
+            case bondy_oplog_catalogue_snapshot:init(InstanceId) of
+                {ok, no_snapshot} ->
+                    {ok, no_snapshot};
+                {ok, {Watermark, Cursor}} ->
+                    {ok, {init, {Watermark, Cursor}}}
+            end
+    end;
+dispatch(InstanceId, {get_catalogue_snapshot_next, Cursor})
+        when is_binary(InstanceId), is_binary(Cursor) ->
+    case bondy_oplog_instance:whereis(InstanceId) of
+        undefined ->
+            {error, {instance_not_running, InstanceId}};
+        _Pid ->
+            case bondy_oplog_catalogue_snapshot:next(InstanceId, Cursor) of
+                {ok, {batch, _} = Batch} -> {ok, Batch};
+                {ok, {done, _} = Done}   -> {ok, Done};
+                {error, _} = E           -> E
             end
     end.
 

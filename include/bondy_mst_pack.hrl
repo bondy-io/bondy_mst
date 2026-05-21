@@ -75,7 +75,6 @@
 %% -----------------------------------------------------------------------------
 
 -define(BONDY_MST_PACK_INCOMING_PACK_FILENAME, "incoming.pack").
--define(BONDY_MST_PACK_INCOMING_IDX_FILENAME,  "incoming.idx").
 -define(BONDY_MST_PACK_ROOT_FILENAME,          "root").
 
 %% -----------------------------------------------------------------------------
@@ -155,6 +154,16 @@
 %% missing tombstones by replaying puts forward from its watermark.
 -define(BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_RECORDS, 32).
 -define(BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_MS,      200).
+%%
+%% `gc_threshold_dead_fraction` — minimum `dropped / (kept + dropped)`
+%% required for `gc/2` to actually rewrite a single sealed pack. A
+%% value of `0.0` (the default) preserves the original "rewrite on any
+%% drop" behaviour; raising it to e.g. `0.5` lets operators accept up
+%% to that fraction of dead pages in a single pack before paying for
+%% a full rewrite. Multi-pack coalescing is unaffected — when there
+%% are 2+ sealed packs, GC always merges them into one (the threshold
+%% only gates the dead-fraction case). See QA #9 / design §8.1.
+-define(BONDY_MST_PACK_DEFAULT_GC_THRESHOLD_DEAD_FRACTION, 0.0).
 
 %% -----------------------------------------------------------------------------
 %% Shared in-memory records

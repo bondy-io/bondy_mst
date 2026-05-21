@@ -21,6 +21,7 @@ previous one.
 | 04 | [Applier](04_applier.md) | The reconciler loop that ties writes, the MST, and the projection together. |
 | 05 | [Fold strategies](05_fold_strategies.md) | The op-based CRDT merge contract — and why one substrate can serve LWW, OR-Set, presence, strict-uniqueness, … |
 | 06 | [Compaction & bootstrap](06_compaction_and_bootstrap.md) | Why the oplog is bounded: causal stability, the compaction watermark, physical MST truncation, and how new replicas join via snapshot transfer. |
+| 07 | [An app developer's tour](07_app_developers_tour.md) | Worked example over the twelve Bondy Router tables: picking a fold, picking shard_count, picking a topology. Patterns and anti-patterns. |
 
 ## Style notes
 

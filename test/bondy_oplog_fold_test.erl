@@ -59,8 +59,8 @@ validate_rejects_module_missing_callbacks_test() ->
     Result = bondy_oplog_fold:validate(bondy_oplog_merge_strict_uniqueness),
     ?assertMatch({error, {missing_callbacks, _, [_ | _]}}, Result),
     {error, {missing_callbacks, _, Missing}} = Result,
-    %% At minimum apply_event/2 must be flagged.
-    ?assert(lists:member({apply_event, 2}, Missing)).
+    %% At minimum apply_event/3 (the post-§3.1 contract) must be flagged.
+    ?assert(lists:member({apply_event, 3}, Missing)).
 
 validate_rejects_non_atom_strategy_test() ->
     ?assertEqual(

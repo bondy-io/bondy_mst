@@ -87,7 +87,7 @@ choice.
 ## Merge
 
 `merge_states/2` is symmetric union with the same rules as
-`apply_event/2`:
+`apply_event/3`:
 
 - `undefined ∪ X = X`
 - `{revoked, _} ∪ X = {revoked, max_hlc}` (revoke dominates)
@@ -124,7 +124,9 @@ Events:
 """).
 
 -export([initial_value/0]).
--export([apply_event/2]).
+-export([apply_event/3]).
+-export([to_value/1]).
+-export([apply_value_delta/2]).
 -export([merge_states/2]).
 -export([hlc/1]).
 -export([gc_threshold/1]).
@@ -159,88 +161,111 @@ initial_value() ->
     undefined.
 
 
--spec apply_event(state(), event()) -> state().
+-spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
+    bondy_oplog_fold:apply_result().
 
 %% --- from undefined ---------------------------------------------------------
 
-apply_event(undefined, {set, H, V}) when is_binary(V) ->
-    {set, V, H};
+apply_event(undefined, {set, H, V}, _Meta) when is_binary(V) ->
+    {{set, V, H}, V};
 
-apply_event(undefined, {revoke, H}) ->
-    {revoked, H};
+apply_event(undefined, {revoke, H}, _Meta) ->
+    {{revoked, H}, revoked};
 
-apply_event(undefined, {resolve, H, V}) when is_binary(V) ->
+apply_event(undefined, {resolve, H, V}, _Meta) when is_binary(V) ->
     %% Admin-issued resolve on an empty cell degrades to a normal set.
-    {set, V, H};
+    {{set, V, H}, V};
 
 %% --- from {set, _, _} -------------------------------------------------------
 
-apply_event({set, V, OldH} = S, {set, H, V2}) when is_binary(V2) ->
+apply_event({set, V, OldH} = S, {set, H, V2}, _Meta) when is_binary(V2) ->
     if
         H < OldH ->
-            S;
+            {S, none};
         H == OldH andalso V == V2 ->
-            S;
+            {S, none};
         H == OldH ->
             %% Concurrent write at the same HLC with a different value —
             %% surface as a conflict (canonical sorted form).
-            {conflict, lists:usort([{V, OldH}, {V2, H}])};
+            NewState = {conflict, lists:usort([{V, OldH}, {V2, H}])},
+            {NewState, to_value(NewState)};
         H > OldH ->
             %% Strictly newer — causally ordered, LWW.
-            {set, V2, H}
+            {{set, V2, H}, V2}
     end;
 
-apply_event({set, _V, OldH}, {revoke, H}) when H >= OldH ->
+apply_event({set, _V, OldH}, {revoke, H}, _Meta) when H >= OldH ->
     %% Revoke at >= state HLC: terminal. Tie goes to revoke (security-
     %% critical operation wins ties, like cleared in lww_register).
-    {revoked, H};
+    {{revoked, H}, revoked};
 
-apply_event({set, _, _} = S, {revoke, _}) ->
-    S;
+apply_event({set, _, _} = S, {revoke, _}, _Meta) ->
+    {S, none};
 
-apply_event({set, _V, OldH}, {resolve, H, V2}) when H >= OldH, is_binary(V2) ->
-    {set, V2, H};
+apply_event({set, _V, OldH}, {resolve, H, V2}, _Meta)
+        when H >= OldH, is_binary(V2) ->
+    {{set, V2, H}, V2};
 
-apply_event({set, _, _} = S, {resolve, _, _}) ->
-    S;
+apply_event({set, _, _} = S, {resolve, _, _}, _Meta) ->
+    {S, none};
 
 %% --- from {conflict, States} ------------------------------------------------
 
-apply_event({conflict, States}, {set, H, V}) when is_binary(V) ->
+apply_event({conflict, States}, {set, H, V}, _Meta) when is_binary(V) ->
     Entry = {V, H},
     case lists:member(Entry, States) of
         true ->
-            {conflict, States};
+            {{conflict, States}, none};
         false ->
             %% Keep canonical sorted form so equal sets of entries
             %% produce equal states regardless of arrival order.
-            {conflict, lists:usort([Entry | States])}
+            NewState = {conflict, lists:usort([Entry | States])},
+            {NewState, to_value(NewState)}
     end;
 
-apply_event({conflict, States}, {revoke, H}) ->
+apply_event({conflict, States}, {revoke, H}, _Meta) ->
     MaxH = max_conflict_hlc(States),
     case H >= MaxH of
-        true  -> {revoked, H};
-        false -> {conflict, States}
+        true  -> {{revoked, H}, revoked};
+        false -> {{conflict, States}, none}
     end;
 
-apply_event({conflict, States}, {resolve, H, V}) when is_binary(V) ->
+apply_event({conflict, States}, {resolve, H, V}, _Meta) when is_binary(V) ->
     MaxH = max_conflict_hlc(States),
     case H >= MaxH of
-        true  -> {set, V, H};
-        false -> {conflict, States}
+        true  -> {{set, V, H}, V};
+        false -> {{conflict, States}, none}
     end;
 
 %% --- from {revoked, _} (terminal) ------------------------------------------
 
-apply_event({revoked, OldH}, {set, H, V}) when is_binary(V) ->
-    {revoked, erlang:max(OldH, H)};
+apply_event({revoked, OldH}, {set, H, V}, _Meta) when is_binary(V) ->
+    {{revoked, erlang:max(OldH, H)}, none};
 
-apply_event({revoked, OldH}, {revoke, H}) ->
-    {revoked, erlang:max(OldH, H)};
+apply_event({revoked, OldH}, {revoke, H}, _Meta) ->
+    {{revoked, erlang:max(OldH, H)}, none};
 
-apply_event({revoked, OldH}, {resolve, H, V}) when is_binary(V) ->
-    {revoked, erlang:max(OldH, H)}.
+apply_event({revoked, OldH}, {resolve, H, V}, _Meta) when is_binary(V) ->
+    {{revoked, erlang:max(OldH, H)}, none}.
+
+
+-spec to_value(state()) ->
+    undefined
+    | register_value()
+    | revoked
+    | {conflict, [register_value()]}.
+
+to_value(undefined)         -> undefined;
+to_value({set, V, _})       -> V;
+to_value({revoked, _})      -> revoked;
+to_value({conflict, States}) ->
+    {conflict, [V || {V, _} <- States]}.
+
+
+-spec apply_value_delta(term(), term()) -> term().
+
+apply_value_delta(_OldValue, NewValue) ->
+    NewValue.
 
 
 -spec merge_states(state(), state()) -> state().

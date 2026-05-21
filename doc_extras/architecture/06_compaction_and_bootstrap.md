@@ -336,6 +336,191 @@ whole history.
 - Otherwise refuse with `{error, watermark_not_advancing}` and fall
   through to plain AE.
 
+## Bootstrap lifecycle: gating the applier
+
+There is a subtle hazard in the bootstrap story above: between "instance
+process starts" and "snapshot installed", what stops the applier from
+draining live events onto an empty projection? Nothing, historically —
+the applier would happily apply `+100` onto bottom state and converge
+to wrong values. The failure is silent and affects **every** fold
+strategy, not just counters.
+
+The fix is an explicit, substrate-enforced two-state lifecycle per
+instance:
+
+```mermaid
+stateDiagram-v2
+    [*] --> pre_bootstrap
+    pre_bootstrap --> live : bootstrap/3 success
+    pre_bootstrap --> live : seed: true on first open
+```
+
+- **`pre_bootstrap`** — default state for a freshly-opened
+  *persistent* instance. The WAL accepts writes from local appenders
+  and sync sessions (the WAL is the durable buffer); the applier does
+  not drain.
+- **`live`** — applier drains normally.
+
+The lifecycle bit lives in `<instance_dir>/lifecycle.live`, an empty
+flag file. Presence ⇒ `live`. Absence ⇒ `pre_bootstrap`. The
+transition is atomic via `file:rename/2` — no parsing, no checksum,
+no version handshake. A boolean mirror in `atomics` keeps the
+applier's hot-loop check syscall-free.
+
+### Bootstrap completion ordering
+
+`bondy_oplog_sync_session:bootstrap/3` performs three durable effects.
+Order matters:
+
+1. `load_snapshot` installs the snapshot and advances the watermark
+   to `H_boot` (idempotent under crash-replay).
+2. `mark_live/1` writes the durable flag file — **the marker that
+   "everything before me succeeded."**
+3. Plain AE picks up events past the new watermark.
+
+`mark_live/1` MUST run last. A crash between (1) and (2) leaves no
+flag file; on restart the lifecycle goes back to `pre_bootstrap` and
+the operator re-runs `bootstrap/3`, which idempotently re-installs
+the snapshot.
+
+### Genesis: `seed: true`
+
+The first peer in a fresh cluster has nothing to bootstrap from. To
+declare a genesis peer, pass `seed => true` in the instance opts.
+On first open this flips the lifecycle directly to `live` and (when
+`storage_path` is configured) writes the flag file so subsequent
+restarts also see `live` without needing the opt again.
+
+### Ephemeral instances
+
+Instances without `storage_path` cannot persist a flag file. For
+those the lifecycle is in-memory only and defaults to `live` —
+there is no persistent state to bootstrap from, and tests that
+don't think about lifecycle work unchanged. `seed: false` is still
+honoured for tests that want to exercise the gate.
+
+### Summary
+
+| Configuration | Initial state |
+|---|---|
+| `lifecycle.live` exists on disk | `live` |
+| `seed: true` in opts | `live` (writes flag file if persistent) |
+| No `storage_path` (ephemeral) | `live` |
+| Persistent, no flag file, `seed: false` | `pre_bootstrap` |
+
+Modules: `bondy_oplog_bootstrap_lifecycle.erl` (the durable bit +
+atomic mirror), `bondy_oplog_instance.erl` (`mark_live/1`,
+`lifecycle_state/1`), `bondy_oplog_applier.erl` (gate in
+`drain_loop/1`).
+
+## Auto-bootstrap and dispatch policy
+
+The lifecycle gate above guarantees correctness — the applier does
+not drain until the snapshot is in place. But the gate alone is
+inert: someone has to call `bondy_oplog_sync_session:bootstrap/3`
+to flip a fresh persistent replica from `pre_bootstrap` to `live`.
+Before this layer, that someone was application code; consumers
+who forgot to call `bootstrap/3` ended up with replicas that
+silently never drained.
+
+`bondy_oplog_sync_scheduler` closes the loop. The default tick
+inspects each running instance's lifecycle and routes
+accordingly:
+
+```mermaid
+flowchart TD
+    Tick[Scheduler tick] --> Lifecycle{lifecycle_state}
+    Lifecycle -->|pre_bootstrap| Backoff{In backoff?}
+    Lifecycle -->|live| FanOut[Fan out AE sync per peer]
+    Lifecycle -->|undefined| NoOp[No-op, retry next tick]
+
+    Backoff -->|yes| Deferred[Skip · emit telemetry]
+    Backoff -->|no| Cap{Under in-flight cap?}
+
+    Cap -->|no| Capped[Skip · emit telemetry]
+    Cap -->|yes| Pick[Pick peer via strategy]
+    Pick --> Spawn[Spawn bootstrap session]
+    Spawn --> Monitor[Monitor pid · track in-flight]
+    Monitor --> DOWN{Session exits}
+    DOWN -->|normal| Clear[Clear backoff entry]
+    DOWN -->|other| Bump[Bump fail count · schedule retry]
+```
+
+A `pre_bootstrap` instance is dispatched to **exactly one** peer
+per tick. Bootstrap ships a full projection (catalogue mode) or a
+full MST snapshot (single-CRDT mode), so multi-peer dispatch would
+duplicate I/O without improving correctness. A `live` instance
+fans out one async pull-direction sync session per peer — the
+historical AE behaviour, unchanged.
+
+### Four knobs in front of one decision
+
+| Knob | Default | Purpose |
+|---|---|---|
+| `bootstrap_peer_strategy` | `first` | Which peer is selected when dispatching: `first` (deterministic head of the peer list), `random` (uniform), or `round_robin` (per-instance index). |
+| `max_inflight_bootstraps` | `4` | Global cap on parallel bootstrap sessions. Over-cap dispatches are skipped; the instance stays `pre_bootstrap` and retries on the next tick as in-flight sessions drain. `0` disables dispatch — operator escape hatch. |
+| `bootstrap_retry_base_ms` | `500` | Initial backoff after a non-`normal` session exit. Doubles on each consecutive failure. |
+| `bootstrap_retry_max_ms` | `30000` | Upper bound on the exponential backoff. |
+| `bootstrap_retry_jitter` | `true` | Multiplies the wait by uniform `[0.5, 1.5]` to spread retries when many instances fail in the same window. |
+
+Each knob has a runtime setter on `bondy_oplog_sync_scheduler` (no
+restart, no recompile). The current configuration is visible via
+`bondy_oplog_sync_scheduler:info/0`.
+
+### Gate ordering
+
+The two skip gates run in this order on every `pre_bootstrap`
+dispatch:
+
+1. **Backoff** — if `now < NextRetryMs` for this instance, skip.
+   An instance in backoff does NOT consume an in-flight cap slot
+   (so other instances still dispatch).
+2. **Cap** — if `inflight_count >= max_inflight_bootstraps`,
+   skip. Within a single tick, the in-flight count is monotonic
+   (DOWN messages queue but are not processed until the tick
+   completes), so the cap is deterministic per-tick.
+
+### Lifecycle state machine extended
+
+```mermaid
+stateDiagram-v2
+    [*] --> pre_bootstrap
+    pre_bootstrap --> dispatched : tick · under cap · not in backoff
+    dispatched --> live : bootstrap success (DOWN normal)
+    dispatched --> pre_bootstrap : bootstrap failure (DOWN other)
+    pre_bootstrap --> live : seed: true on first open
+```
+
+A failed bootstrap session keeps the instance in `pre_bootstrap`;
+the next tick re-evaluates the lifecycle and (assuming backoff has
+elapsed) re-dispatches. This is the structural self-healing
+property — there is no separate retry machinery, just the standard
+tick + lifecycle re-evaluation.
+
+### Telemetry surface
+
+Each gate emits a dedicated event so operators can monitor
+retry pressure without sampling logs:
+
+| Event | When | Meta |
+|---|---|---|
+| `[bondy_oplog, sync_scheduler, dispatch_bootstrap]` | A session was spawned. | `instance_id`, `peer`, `mode` (`catalogue \| single_crdt`), `strategy` |
+| `[bondy_oplog, sync_scheduler, bootstrap_session, started]` | Session pid was added to the in-flight set. | `instance_id`, `pid` |
+| `[bondy_oplog, sync_scheduler, bootstrap_session, ended]` | Session pid exited (any reason). | `instance_id`, `pid`, `reason` |
+| `[bondy_oplog, sync_scheduler, bootstrap_capped]` | Dispatch skipped because in-flight cap was hit. | `instance_id` |
+| `[bondy_oplog, sync_scheduler, bootstrap_backoff_deferred]` | Dispatch skipped because `now < NextRetryMs`. | `instance_id` |
+| `[bondy_oplog, sync_scheduler, bootstrap_retry_scheduled]` | A failure bumped the fail count + wrote a new retry time. | `instance_id`, `wait_ms`, `fail_count` |
+
+### Operator playbook
+
+| Symptom | Action |
+|---|---|
+| New cluster cold-start storms peer network/disk. | Lower `max_inflight_bootstraps`. Default `4` is conservative; very large clusters may want lower. |
+| One specific peer is hot under bootstrap load. | Switch `bootstrap_peer_strategy` to `round_robin` or `random`. |
+| A specific replica keeps failing to bootstrap. | Watch `bootstrap_retry_scheduled` telemetry for that `instance_id` — `fail_count` rising past 5+ means the peer-pool is genuinely unreachable for this replica, not a flake. |
+| Need to quiesce bootstrap traffic without disabling AE. | `set_max_inflight_bootstraps(0)` — sessions in flight drain naturally; no new ones are spawned. |
+| Tests need deterministic retry timing. | `set_bootstrap_retry_base_ms(0)` + `set_bootstrap_retry_jitter(false)`. |
+
 ## The independent-watermark reconciliation rule
 
 Two replicas may compact at different rates. Say Replica X has
@@ -389,6 +574,10 @@ snapshot.
 | Peer ships events the local replica has already truncated. | Integrate path drops events with `key ≤ watermark`. |
 | Bootstrap snapshot is older than local. | `load_snapshot/3` refuses with `watermark_not_advancing` and falls through to plain AE. |
 | `interpret_cog/2` is non-deterministic. | Convergence breaks silently. The behaviour documentation flags this as the invariant; PropEr suites for each CRDT verify it (`bondy_mst_crdt_SUITE.erl`). |
+| Fresh persistent replica never flips to `live` because nobody calls `bootstrap/3`. | The default scheduler dispatch is lifecycle-aware: `pre_bootstrap` instances are auto-bootstrapped from the first available peer on the next tick. |
+| Cluster cold-start fires N parallel snapshot transfers and saturates the peer pool. | `max_inflight_bootstraps` cap (default `4`) gates concurrent sessions. Over-cap dispatches are deferred to the next tick as in-flight sessions drain. |
+| A replica with an unreachable peer-pool retries every 500 ms forever. | Per-instance exponential backoff (`500 ms → 30 s` ceiling, optional ±50 % jitter) drops the steady-state retry rate to ~1/30 Hz after a few failures. |
+| Multiple replicas hammer the same first peer. | `bootstrap_peer_strategy` (`first` \| `random` \| `round_robin`) — switch to `round_robin` or `random` to spread load. |
 
 ## Tests that pin this down
 
@@ -403,6 +592,14 @@ because everything else relies on it. The relevant suites:
   watermark monotonicity, no-snapshot fallback, post-bootstrap AE.
 - `test/bondy_mst_crdt_SUITE.erl` — end-to-end determinism + Strong
   Eventual Consistency for the test CRDT (`bondy_mst_test_crdt_server`).
+- `test/bondy_oplog_sync_scheduler_bootstrap_test.erl` — lifecycle-
+  aware dispatch (pre_bootstrap routes to bootstrap; live fans out).
+- `test/bondy_oplog_sync_scheduler_peer_strategy_test.erl` —
+  `first` / `random` / `round_robin` selection.
+- `test/bondy_oplog_sync_scheduler_cap_test.erl` — in-flight cap
+  honoured within a tick; DOWN cleanup; `0` escape hatch.
+- `test/bondy_oplog_sync_scheduler_backoff_test.erl` —
+  exponential progression, normal-exit clear, deferred telemetry.
 
 ## Things to keep in mind
 
@@ -443,16 +640,59 @@ Implementation:
   one-snapshot-per-instance behaviour and implementations.
 - `bondy_oplog_sync_session.erl:bootstrap/3` — fetch peer snapshot
   then pull live tail; falls back to plain AE on `no_snapshot`.
+  Calls `mark_live/1` *after* the snapshot install succeeds — the
+  durable barrier that flips the lifecycle.
+- `bondy_oplog_bootstrap_lifecycle.erl` — the `<instance_dir>/lifecycle.live`
+  flag file + atomics mirror; `open/2`, `is_live/1`, `mark_live/1`.
+- `bondy_oplog_sync_scheduler.erl`:
+    - `default_dispatch/2` — lifecycle-aware routing
+      (`pre_bootstrap` → bootstrap; `live` → fan-out AE).
+    - `maybe_dispatch_bootstrap/2` — backoff gate, then cap gate.
+    - `pick_bootstrap_peer/3` — `first` / `random` /
+      `round_robin` strategies. RR counter lives in the
+      `bondy_oplog_sync_scheduler_rr` named ETS table.
+    - `track_inflight/2` — monitors the spawned session pid and
+      records `{Pid, InstanceId}` in the
+      `bondy_oplog_sync_scheduler_inflight` named ETS table.
+    - `update_backoff/2` — DOWN-reason classifier; clears the
+      entry on `normal`, bumps fail-count + writes a new
+      `NextRetryMs` otherwise. State lives in the
+      `bondy_oplog_sync_scheduler_backoff` named ETS table.
+    - `set_bootstrap_peer_strategy/1`,
+      `set_max_inflight_bootstraps/1`,
+      `set_bootstrap_retry_base_ms/1`,
+      `set_bootstrap_retry_max_ms/1`,
+      `set_bootstrap_retry_jitter/1` — runtime setters; all
+      write through to `bondy_mst` app env so the choice
+      survives a scheduler restart within the same VM lifetime.
+    - `info/0` — current configuration including
+      `current_inflight_bootstraps`.
+- `bondy_oplog_sync_session.erl`:
+    - `start_bootstrap/3` — async single-CRDT bootstrap spawner.
+    - `start_bootstrap_catalogue/3` — async catalogue bootstrap
+      spawner. Both return `{ok, Pid}`; the scheduler monitors
+      the pid and translates its exit reason into the backoff
+      decision.
 - `bondy_oplog_crdt.erl` — `interpret_cog/2` callback.
 - `bondy_mst.erl:delete/2`, `delete_below_level/5`,
   `delete_from_level/4`, `merge_subtrees/3` — physical page deletion
   with sibling-subtree merge.
+
+Design rationale for the dispatch-policy chain lives in
+`_design/catalogue_expansion_plan.md` §§4.13–4.16 (PR-D3
+auto-bootstrap, PR-D4 peer strategy, PR-D5 in-flight cap, PR-D6
+retry backoff).
 
 Tests:
 
 - `test/bondy_oplog_compaction_test.erl`
 - `test/bondy_oplog_gc_scheduler_test.erl`
 - `test/bondy_oplog_bootstrap_test.erl`
+- `test/bondy_oplog_bootstrap_lifecycle_test.erl` — the durable flag
+  file + `mark_live` ordering, in isolation.
+- `test/bondy_oplog_bootstrap_lifecycle_e2e_test.erl` — applier-gate
+  integration: appends sit in the overlay until `mark_live` flips the
+  lifecycle.
 - `test/bondy_mst_crdt_SUITE.erl` (+ `bondy_mst_test_crdt_server.erl`)
 
 Background / origin:

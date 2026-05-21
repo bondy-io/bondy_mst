@@ -228,7 +228,16 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% into the projection until the replay path runs. Advancing the
     %% watermark from `commit_now/1` regresses convergence (Jepsen
     %% OR-set: 27/226 lost adds).
-    last_replayed_root = undefined :: undefined | bondy_mst:hash()
+    last_replayed_root = undefined :: undefined | bondy_mst:hash(),
+    %% Bootstrap lifecycle handle (`bondy_oplog_bootstrap_lifecycle`).
+    %% Cached once at `init/1` from the registry; the gate check in
+    %% `drain_loop/1` is then a single `atomics:get/2`. `undefined`
+    %% means the entry hasn't published one yet (race with the
+    %% instance's `init/1`) and is treated as `live` for backward
+    %% compatibility — the instance's publish is idempotent and will
+    %% catch up by the next backstop tick. See
+    %% `_design/catalogue_expansion_plan.md` §2.
+    lifecycle :: bondy_oplog_bootstrap_lifecycle:handle() | undefined
 }).
 
 -type shard_key()   :: {atom(), atom(), non_neg_integer()}.
@@ -245,7 +254,14 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% a different process returns stale state — the cache is
     %% populate-on-miss and never invalidated by writers otherwise.
     cache_adapter   => module() | undefined,
-    cache_handle    => term()
+    cache_handle    => term(),
+    %% Per-shard high-water HLC mark. Advanced via
+    %% `bondy_oplog_high_water:advance/2` after every successful
+    %% projection write in `apply_one_cell/11`. `undefined` when the
+    %% shard's registry entry has no ref (legacy entries created
+    %% before PR-D1 §3 — defensive only; new registrations always
+    %% allocate).
+    high_water_ref  => bondy_oplog_high_water:ref() | undefined
 }.
 
 -type opts() :: #{
@@ -275,6 +291,9 @@ configured; defaults are no-ops so existing instances are unaffected.
 -export([notify_drain_resume/1]).
 -export([replay_cell_events/1]).
 -export([replay_cell_events_sync/1]).
+-export([cell_apply_target/1]).
+-export([install_catalogue_batch/2]).
+-export([resolve_logical_event/4]).
 
 -export([init/1]).
 -export([handle_call/3]).
@@ -377,7 +396,7 @@ register, OR-set, map_of_fields, ttl_presence): replaying an
 absorbed event either no-ops (same dot already in OR-set live or
 tombstones; same `{set, V, H}` already applied) or yields the same
 terminal state (later-HLC LWW). `strict_register` rejects duplicates
-with `{error, ...}` from `apply_event/2` but `apply_one_cell` already
+with `{error, ...}` from `apply_event/3` but `apply_one_cell` already
 catches and logs.
 
 A no-op when the instance was started without a `cell_apply_target`
@@ -415,6 +434,97 @@ should call `bondy_oplog:await_apply/1` first.
 """.
 projection(ApplierPid) when is_pid(ApplierPid) ->
     gen_server:call(ApplierPid, get_projection, infinity).
+
+-spec cell_apply_target(pid()) -> {ok, shard_key()} | undefined.
+
+-doc """
+Returns the applier's resolved `cell_apply_target` shard key, or
+`undefined` if no projection target was configured. Used by the
+catalogue-snapshot bootstrap path to discover where to read the
+projection's cells from.
+""".
+cell_apply_target(ApplierPid) when is_pid(ApplierPid) ->
+    gen_server:call(ApplierPid, cell_apply_target, infinity).
+
+
+-spec resolve_logical_event(pid(), term(), term(), term()) ->
+    {ok, term() | passthrough} | {error, term()}.
+
+-doc """
+Translate a logical event into a physical event by reading the
+current projection state for `(Bucket, Key)` and dispatching to the
+fold's `resolve_event/2` callback. Used by `bondy_db:apply/4` for
+event shapes that need server-side resolution (e.g. AW-Map's
+`{remove_aw_key, K}` → `{remove, K, ObservedDots}`).
+
+Returns `{ok, passthrough}` when the logical event has no effect
+against current state (e.g. remove of an absent / tombstoned key);
+the caller skips the WAL append. Otherwise returns
+`{ok, ResolvedEvent}` for substrate-side append.
+
+`{error, no_cell_apply_target}` if the applier wasn't configured
+with a `cell_apply_target`.
+""".
+resolve_logical_event(ApplierPid, Bucket, Key, Event)
+        when is_pid(ApplierPid) ->
+    gen_server:call(ApplierPid,
+                    {resolve_logical_event, Bucket, Key, Event},
+                    infinity).
+
+-type install_mode() :: replace | merge.
+
+-spec install_catalogue_batch(
+    pid(),
+    [bondy_oplog_transport:cell()] | {install_mode(), [bondy_oplog_transport:cell()]}
+) ->
+    {ok, #{installed := non_neg_integer(),
+           skipped := non_neg_integer(),
+           merged := non_neg_integer(),
+           replaced_no_merge := non_neg_integer()}}
+    | {error, term()}.
+
+-doc """
+Installs a batch of catalogue-snapshot cells into the applier's
+projection shard. Each cell is `{Bucket, Key, Frame}` where `Frame` is
+a V2 cell frame as produced by the peer's projection adapter.
+
+Two modes:
+
+- **`replace`** (fresh bootstrap; `WasLive = false`): for each cell,
+  if the existing local HLC is `>=` the incoming HLC the cell is
+  skipped (Q11 per-cell HLC guard against bootstrap-vs-live
+  interleave). Otherwise the frame is written through unchanged.
+- **`merge`** (recovering bootstrap; `WasLive = true`): for each cell,
+  if no local cell exists it is written through; if a local cell
+  exists, the fold's `merge_states/2` is invoked on
+  `(IncomingState, LocalState)` and the merged state is encoded into
+  a fresh frame. Folds without `merge_states/2` (only `presence_basic`
+  in the shipped catalogue) emit telemetry
+  `[bondy_oplog, applier, catalogue_bootstrap, presence_basic_replaced]`
+  and fall back to skip-if-older replacement.
+
+Both modes invalidate the read cache and advance the per-shard
+high-water HLC atomic after each successful write.
+
+Returns `{ok, #{installed := N, skipped := M, merged := P,
+replaced_no_merge := Q}}`.
+
+`installed` counts straight writes, `merged` counts merge_states
+writes, `replaced_no_merge` counts merge-mode cells where the fold
+lacks `merge_states/2` and the path fell back to skip-if-older.
+
+Returns `{error, no_cell_apply_target}` if the applier was not started
+with a `cell_apply_target`.
+""".
+install_catalogue_batch(ApplierPid, Cells)
+        when is_pid(ApplierPid), is_list(Cells) ->
+    install_catalogue_batch(ApplierPid, {replace, Cells});
+install_catalogue_batch(ApplierPid, {Mode, Cells})
+        when is_pid(ApplierPid), is_list(Cells),
+             (Mode =:= replace orelse Mode =:= merge) ->
+    gen_server:call(
+        ApplierPid, {install_catalogue_batch, Mode, Cells}, infinity
+    ).
 
 %% =============================================================================
 %% gen_server CALLBACKS
@@ -471,6 +581,8 @@ do_init_2(InstanceId, WalDir, CommitEvery, PollMs, _Opts,
                         bondy_oplog_registry:install_in_flight(InstanceId),
                     InFlightCap =
                         bondy_oplog_registry:max_install_in_flight(InstanceId),
+                    Lifecycle =
+                        bondy_oplog_registry:lifecycle(InstanceId),
                     State = #state{
                         instance_id = InstanceId,
                         instance_pid = InstP,
@@ -490,7 +602,8 @@ do_init_2(InstanceId, WalDir, CommitEvery, PollMs, _Opts,
                         publish_fun = PublishFun,
                         cell_apply_ctx = CellCtx,
                         install_in_flight = InFlightRef,
-                        max_install_in_flight = InFlightCap
+                        max_install_in_flight = InFlightCap,
+                        lifecycle = Lifecycle
                     },
                     ok = bondy_oplog_registry:set_applier_pid(
                         InstanceId, self()
@@ -528,17 +641,19 @@ resolve_cell_apply_ctx(Opts) ->
             case bondy_db_core_registry:lookup(NS, Index, Shard) of
                 {ok, Entry} ->
                     {ok, #{
-                        shard_key     => Key,
-                        adapter       =>
+                        shard_key      => Key,
+                        adapter        =>
                             bondy_db_core_registry:entry_projection_adapter(Entry),
-                        handle        =>
+                        handle         =>
                             bondy_db_core_registry:entry_projection_handle(Entry),
-                        fold_module   =>
+                        fold_module    =>
                             bondy_db_core_registry:entry_fold_module(Entry),
-                        cache_adapter =>
+                        cache_adapter  =>
                             bondy_db_core_registry:entry_cache_adapter(Entry),
-                        cache_handle  =>
-                            bondy_db_core_registry:entry_cache_handle(Entry)
+                        cache_handle   =>
+                            bondy_db_core_registry:entry_cache_handle(Entry),
+                        high_water_ref =>
+                            bondy_db_core_registry:entry_high_water_ref(Entry)
                     }};
                 not_found ->
                     {error, {cell_apply_target_not_registered, Key}}
@@ -596,12 +711,54 @@ handle_call(get_projection, _From,
 handle_call(get_projection, _From,
             #state{fold_state = FS} = State) ->
     {reply, {ok, FS}, State};
+handle_call(cell_apply_target, _From,
+            #state{cell_apply_ctx = undefined} = State) ->
+    {reply, undefined, State};
+handle_call(cell_apply_target, _From,
+            #state{cell_apply_ctx = #{shard_key := Key}} = State) ->
+    {reply, {ok, Key}, State};
+handle_call({install_catalogue_batch, _Mode, _Cells}, _From,
+            #state{cell_apply_ctx = undefined} = State) ->
+    {reply, {error, no_cell_apply_target}, State};
+handle_call({install_catalogue_batch, Mode, Cells}, _From,
+            #state{cell_apply_ctx = Ctx,
+                   instance_id = Id} = State) ->
+    Result = do_install_catalogue_batch(Id, Ctx, Mode, Cells),
+    {reply, Result, State};
 handle_call(replay_cell_events, _From, State) ->
     %% Synchronous variant of the `replay_cell_events` cast. Runs the
     %% same diff fold and replies `ok` once the projection has caught
     %% up. Callers that need read-your-peers-write semantics use this
     %% instead of the cast.
     {reply, ok, do_replay_cell_events(State)};
+handle_call({resolve_logical_event, _Bucket, _Key, _Event}, _From,
+            #state{cell_apply_ctx = undefined} = State) ->
+    {reply, {error, no_cell_apply_target}, State};
+handle_call({resolve_logical_event, Bucket, Key, Event}, _From,
+            #state{cell_apply_ctx = Ctx} = State) ->
+    #{adapter := Adapter,
+      handle  := Handle,
+      fold_module := Fold} = Ctx,
+    %% Read current cell state. With single-applier-per-cell, this
+    %% read is serialised against the applier's event loop (the
+    %% applier's `drain_loop/1` releases between batches; gen_server
+    %% calls dispatch between handler returns). The instance defers
+    %% WAL append until our reply, so resolve+append is atomic from
+    %% the caller's perspective.
+    State0 = case Adapter:get(Handle, Bucket, Key) of
+        not_found ->
+            bondy_oplog_fold:initial_value(Fold);
+        {ok, Frame} ->
+            {_PrevHlc, StateBytes, _ValueBytes} =
+                bondy_oplog_cell_frame:decode_full(Frame),
+            bondy_oplog_fold:decode_state(Fold, StateBytes)
+    end,
+    Reply =
+        case bondy_oplog_fold:resolve_event(Fold, State0, Event) of
+            passthrough -> {ok, passthrough};
+            Resolved    -> {ok, Resolved}
+        end,
+    {reply, Reply, State};
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
@@ -804,12 +961,31 @@ read_consumer_offset(WalDir) ->
 %% _)` marks `drain_deferred = true`; the loop is rearmed by the
 %% instance's `drain_resume` cast.
 drain_loop(#state{} = State0) ->
-    case install_dispatch_allowed(State0) of
+    case lifecycle_live(State0) of
         false ->
             {paused, State0};
         true ->
-            drain_loop_step(State0)
+            case install_dispatch_allowed(State0) of
+                false ->
+                    {paused, State0};
+                true ->
+                    drain_loop_step(State0)
+            end
     end.
+
+%% @private
+%% Bootstrap lifecycle gate. Returns `true` when the instance is `live`
+%% (the applier may drain), `false` when the instance is still
+%% `pre_bootstrap` (the applier must NOT touch the per-cell projection).
+%% Treats a missing handle as `live` — the registry publish can race
+%% with the applier's `init/1` after a one_for_all subtree restart, and
+%% the WAL is the durable buffer either way; backwards-compatibility
+%% for callers that haven't migrated to the lifecycle yet is the same
+%% fail-open path.
+lifecycle_live(#state{lifecycle = undefined}) ->
+    true;
+lifecycle_live(#state{lifecycle = H}) ->
+    bondy_oplog_bootstrap_lifecycle:is_live(H).
 
 drain_loop_step(#state{iter = Iter} = State0) ->
     case bondy_oplog_wal_reader:next(Iter) of
@@ -951,9 +1127,12 @@ apply_fold_batch(#state{fold_module = Mod,
     try
         FS1 = lists:foldl(
             fun(Event, Acc) ->
-                bondy_oplog_fold:apply_event(
-                    Mod, Acc, bondy_oplog_event:op(Event)
-                )
+                {NewState, _Delta} = bondy_oplog_fold:apply_event(
+                    Mod, Acc,
+                    bondy_oplog_event:op(Event),
+                    bondy_oplog_event:key(Event)
+                ),
+                NewState
             end,
             FS0,
             Verified
@@ -980,7 +1159,7 @@ apply_fold_batch(#state{fold_module = Mod,
 %% in `CellEvents` carries op `{cell_apply, Bucket, Key, FoldEvent}`. For
 %% each, read the cell's current frame from the projection adapter,
 %% decode to state via the fold's `decode_state/1`, fold the event in
-%% via `apply_event/2`, encode back, and write the new frame via
+%% via `apply_event/3`, encode back, and write the new frame via
 %% `put_batch/2`. Bucket is a first-class call-time parameter on the
 %% projection adapter; the applier passes it through verbatim.
 apply_cell_batch(State, []) ->
@@ -992,13 +1171,16 @@ apply_cell_batch(#state{cell_apply_ctx = Ctx,
     #{adapter := Adapter, handle := Handle, fold_module := Fold} = Ctx,
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
     CacheHandle  = maps:get(cache_handle,  Ctx, undefined),
+    HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
     lists:foreach(
         fun(Event) ->
             case bondy_oplog_event:op(Event) of
                 {cell_apply, Bucket, Key, FoldEvent} ->
+                    Meta = bondy_oplog_event:key(Event),
                     apply_one_cell(Id, Adapter, Handle, Fold,
                                    CacheAdapter, CacheHandle,
-                                   Bucket, Key, FoldEvent);
+                                   HighWaterRef,
+                                   Bucket, Key, FoldEvent, Meta);
                 _ ->
                     ok
             end
@@ -1010,24 +1192,32 @@ apply_cell_batch(#state{cell_apply_ctx = Ctx,
 %% @private
 apply_one_cell(Id, Adapter, Handle, Fold,
                CacheAdapter, CacheHandle,
-               Bucket, Key, FoldEvent) ->
+               HighWaterRef,
+               Bucket, Key, FoldEvent, Meta) ->
     try
-        OldState =
+        {OldState, OldValueOpt} =
             case Adapter:get(Handle, Bucket, Key) of
                 not_found ->
-                    bondy_oplog_fold:initial_value(Fold);
+                    {bondy_oplog_fold:initial_value(Fold), undefined};
                 {ok, OldFrame} ->
-                    {_PrevHlc, OldBody} =
-                        bondy_oplog_cell_frame:decode(OldFrame),
-                    bondy_oplog_fold:decode_state(Fold, OldBody)
+                    {_PrevHlc, OldStateBytes, OldValueBytes} =
+                        bondy_oplog_cell_frame:decode_full(OldFrame),
+                    {bondy_oplog_fold:decode_state(Fold, OldStateBytes),
+                     OldValueBytes}
             end,
-        NewState = bondy_oplog_fold:apply_event(Fold, OldState, FoldEvent),
+        {NewState, Delta} =
+            bondy_oplog_fold:apply_event(Fold, OldState, FoldEvent, Meta),
         Hlc = bondy_oplog_fold:hlc(Fold, NewState),
-        NewBody = bondy_oplog_fold:encode_state(Fold, NewState),
-        NewFrame = bondy_oplog_cell_frame:encode(Hlc, NewBody),
+        NewStateBytes = bondy_oplog_fold:encode_state(Fold, NewState),
+        NewValueBytes = compose_value_bytes(Fold, OldValueOpt, Delta),
+        NewFrame = bondy_oplog_cell_frame:encode(
+            Hlc, NewStateBytes, NewValueBytes,
+            bondy_oplog_fold:value_equals_state(Fold)
+        ),
         case Adapter:put_batch(Handle, [{Bucket, Key, NewFrame}]) of
             ok ->
                 invalidate_cache(CacheAdapter, CacheHandle, Bucket, Key),
+                advance_high_water(HighWaterRef, Hlc),
                 ok;
             {error, Reason} ->
                 ?LOG_WARNING(#{
@@ -1061,7 +1251,7 @@ apply_one_cell(Id, Adapter, Handle, Fold,
 
 %% @private
 %% Re-fold the `cell_apply` events that landed in the MST since the
-%% last replay through `apply_one_cell/9`. Called from the instance
+%% last replay through `apply_one_cell/11`. Called from the instance
 %% after a sync session merges peer events. Without this, remote events
 %% sit in the MST but never reach the projection — `bondy_db:read/3`
 %% would only see events authored locally.
@@ -1137,21 +1327,23 @@ diff_pairs(MST, LastRoot, Id) ->
 
 %% @private
 %% Walks the `{Key, Value}` pairs from the MST (or its diff) and
-%% dispatches every `cell_apply` op through `apply_one_cell/9`.
+%% dispatches every `cell_apply` op through `apply_one_cell/11`.
 %% Non-cell ops are skipped here — the per-instance fold owns them and
 %% has already seen them via the WAL drain.
 apply_cell_pairs(Ctx, Id, Pairs) ->
     #{adapter := Adapter, handle := Handle, fold_module := Fold} = Ctx,
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
     CacheHandle  = maps:get(cache_handle,  Ctx, undefined),
+    HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
     try
         lists:foldl(
             fun
-                ({_Key, {{cell_apply, Bucket, CellKey, FoldEvent},
-                         _Meta, _Prev, _Sig}}, N) ->
+                ({MstKey, {{cell_apply, Bucket, CellKey, FoldEvent},
+                           _Meta, _Prev, _Sig}}, N) ->
                     apply_one_cell(Id, Adapter, Handle, Fold,
                                    CacheAdapter, CacheHandle,
-                                   Bucket, CellKey, FoldEvent),
+                                   HighWaterRef,
+                                   Bucket, CellKey, FoldEvent, MstKey),
                     N + 1;
                 (_, N) ->
                     N
@@ -1175,6 +1367,49 @@ apply_cell_pairs(Ctx, Id, Pairs) ->
     end.
 
 %% @private
+%% Encode the value bytes column for the V2 cell frame
+%% (`bondy_oplog_cell_frame:encode/4`).
+%%
+%% For folds that declare `value_equals_state/0 -> true` the substrate
+%% omits the value column and reuses the state bytes; we return
+%% `undefined` here so the encoder sets `HasValueColumn = 0`.
+%%
+%% Otherwise we honour the op-based delta the fold emitted from
+%% `apply_event/3`:
+%%
+%%  - `Delta =:= none` — the event did not change the value (dedup,
+%%    no-op, monotone-rejected). The cell's value column keeps the
+%%    prior bytes (or, on cold-start, the initial value's bytes).
+%%  - `Delta` of any other shape — the substrate calls
+%%    `apply_value_delta(Fold, OldValue, Delta)` to combine into the
+%%    new value, then encodes it.
+%%
+%% `OldValueOpt` is `undefined` only when there was no prior cell
+%% frame (cold-start on `not_found`); the substrate seeds OldValue
+%% from `to_value(initial_value(Fold))` in that case.
+compose_value_bytes(Fold, OldValueOpt, Delta) ->
+    case bondy_oplog_fold:value_equals_state(Fold) of
+        true ->
+            undefined;
+        false ->
+            OldValue = decode_old_value(Fold, OldValueOpt),
+            NewValue = case Delta of
+                none ->
+                    OldValue;
+                _ ->
+                    bondy_oplog_fold:apply_value_delta(
+                        Fold, OldValue, Delta
+                    )
+            end,
+            term_to_binary(NewValue)
+    end.
+
+decode_old_value(Fold, undefined) ->
+    bondy_oplog_fold:to_value(Fold, bondy_oplog_fold:initial_value(Fold));
+decode_old_value(_Fold, Bytes) when is_binary(Bytes) ->
+    binary_to_term(Bytes).
+
+%% @private
 %% Evict the (Bucket, Key) entry from the per-shard read cache so the
 %% next `bondy_db_core:read/4` re-reads from the projection. Without
 %% this, `bondy_db:apply/4` followed by a `read/3` from a different
@@ -1196,6 +1431,256 @@ invalidate_cache(Adapter, Handle, Bucket, Key) ->
     %% a failed cache eviction must not stop the drain.
     _ = catch Adapter:delete(Handle, Bucket, Key),
     ok.
+
+%% @private
+%% Advance the per-shard high-water HLC mark
+%% (`bondy_oplog_high_water:advance/2`) after a successful projection
+%% write. The ref may be `undefined` defensively (older
+%% `bondy_db_core_registry` entries created before PR-D1 §3); new
+%% registrations always allocate, so this branch is dead in practice
+%% but keeps the applier resilient to a partial rollback.
+advance_high_water(undefined, _Hlc) ->
+    ok;
+advance_high_water(Ref, Hlc) ->
+    bondy_oplog_high_water:advance(Ref, Hlc).
+
+%% @private
+%% Installs a catalogue-snapshot batch of `[{Bucket, Key, Frame}]`
+%% triples into the projection.
+%%
+%% `replace` mode: for fresh bootstrap. Skip-if-older guards a stale
+%% bootstrap write from clobbering a newer locally-applied event (see
+%% Q11, `_design/catalogue_expansion_plan.md` §4.12).
+%%
+%% `merge` mode: for recovering bootstrap. Calls the fold's
+%% `merge_states/2` on the incoming + local state and writes the
+%% merged frame. Folds without `merge_states/2` (only `presence_basic`
+%% in the shipped catalogue) emit telemetry and fall back to
+%% skip-if-older replacement.
+do_install_catalogue_batch(Id, Ctx, Mode, Cells) ->
+    #{
+        adapter        := Adapter,
+        handle         := Handle,
+        cache_adapter  := CacheAdapter,
+        cache_handle   := CacheHandle,
+        high_water_ref := HighWaterRef,
+        fold_module    := Fold
+    } = Ctx,
+    Counts = lists:foldl(
+        fun(Cell, Acc) ->
+            install_one_cell(Id, Mode, Fold, Adapter, Handle,
+                             CacheAdapter, CacheHandle,
+                             HighWaterRef, Cell, Acc)
+        end,
+        #{installed => 0, skipped => 0,
+          merged => 0, replaced_no_merge => 0},
+        Cells
+    ),
+    {ok, Counts}.
+
+%% @private
+install_one_cell(Id, Mode, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
+                 HighWaterRef, {Bucket, Key, Frame}, Acc) ->
+    try bondy_oplog_cell_frame:decode_full(Frame) of
+        {IncomingHlc, IncomingStateBytes, _IncomingValueBytes} ->
+            Existing = read_existing_for_install(
+                Mode, Adapter, Handle, Bucket, Key
+            ),
+            handle_cell(
+                Id, Mode, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
+                HighWaterRef, Bucket, Key, Frame,
+                IncomingHlc, IncomingStateBytes, Existing, Acc
+            )
+    catch
+        C:R:St ->
+            ?LOG_WARNING(#{
+                description =>
+                    "install_catalogue_batch: cell skipped due to "
+                    "decode error",
+                instance_id => Id,
+                bucket => Bucket,
+                cell_key => Key,
+                class => C, reason => R, stacktrace => St
+            }),
+            bump(skipped, Acc)
+    end.
+
+%% @private
+%% Returns one of:
+%%   not_found
+%% | {ok, ExistingHlc, ExistingStateBytes | undefined}
+%%
+%% In `replace` mode only the HLC is needed for the skip-if-older
+%% check, so we use the adapter's optional `head/3` callback when
+%% available and avoid pulling the full V2 frame off the journal.
+%% In `merge` mode the local state bytes are needed by the fold's
+%% `merge_states/2`, so we always pay for a full `get/3`.
+read_existing_for_install(replace, Adapter, Handle, Bucket, Key) ->
+    case adapter_head_hlc(Adapter, Handle, Bucket, Key) of
+        not_found ->
+            not_found;
+        {ok, ExistingHlc} ->
+            {ok, ExistingHlc, undefined}
+    end;
+read_existing_for_install(merge, Adapter, Handle, Bucket, Key) ->
+    case Adapter:get(Handle, Bucket, Key) of
+        not_found ->
+            not_found;
+        {ok, ExistingFrame} ->
+            {ExistingHlc, ExistingStateBytes, _ExistingValueBytes} =
+                bondy_oplog_cell_frame:decode_full(ExistingFrame),
+            {ok, ExistingHlc, ExistingStateBytes}
+    end.
+
+%% @private
+%% HLC-only read against the projection adapter. Uses the optional
+%% `head/3` callback when the adapter exports it; otherwise falls
+%% back to `get/3 + decode_full/1`.
+adapter_head_hlc(Adapter, Handle, Bucket, Key) ->
+    case erlang:function_exported(Adapter, head, 3) of
+        true ->
+            case Adapter:head(Handle, Bucket, Key) of
+                not_found ->
+                    not_found;
+                {ok, HeadBytes} ->
+                    {Hlc, _ValueBytes} =
+                        bondy_oplog_cell_frame:decode_head(HeadBytes),
+                    {ok, Hlc}
+            end;
+        false ->
+            case Adapter:get(Handle, Bucket, Key) of
+                not_found ->
+                    not_found;
+                {ok, Frame} ->
+                    {Hlc, _StateBytes, _ValueBytes} =
+                        bondy_oplog_cell_frame:decode_full(Frame),
+                    {ok, Hlc}
+            end
+    end.
+
+%% @private
+handle_cell(_Id, _Mode, _Fold, Adapter, Handle, CacheAdapter, CacheHandle,
+            HighWaterRef, Bucket, Key, Frame, IncomingHlc,
+            _IncomingStateBytes, not_found, Acc) ->
+    %% No local cell — install verbatim under both modes.
+    install_cell_unchecked(
+        Adapter, Handle, CacheAdapter, CacheHandle, HighWaterRef,
+        Bucket, Key, Frame, IncomingHlc
+    ),
+    bump(installed, Acc);
+handle_cell(Id, replace, _Fold, Adapter, Handle, CacheAdapter, CacheHandle,
+            HighWaterRef, Bucket, Key, Frame, IncomingHlc,
+            _IncomingStateBytes, {ok, ExistingHlc, _ExistingStateBytes}, Acc) ->
+    case IncomingHlc > ExistingHlc of
+        true ->
+            install_cell_unchecked(
+                Adapter, Handle, CacheAdapter, CacheHandle, HighWaterRef,
+                Bucket, Key, Frame, IncomingHlc
+            ),
+            bump(installed, Acc);
+        false ->
+            telemetry:execute(
+                [bondy_oplog, applier, catalogue_bootstrap, cell_skipped],
+                #{count => 1},
+                #{instance_id => Id, bucket => Bucket, cell_key => Key,
+                  incoming_hlc => IncomingHlc, existing_hlc => ExistingHlc}
+            ),
+            bump(skipped, Acc)
+    end;
+handle_cell(Id, merge, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
+            HighWaterRef, Bucket, Key, _Frame, IncomingHlc,
+            IncomingStateBytes, {ok, ExistingHlc, ExistingStateBytes}, Acc) ->
+    try
+        IncomingState = bondy_oplog_fold:decode_state(Fold, IncomingStateBytes),
+        ExistingState = bondy_oplog_fold:decode_state(Fold, ExistingStateBytes),
+        MergedState = bondy_oplog_fold:merge_states(
+            Fold, IncomingState, ExistingState
+        ),
+        MergedHlc = bondy_oplog_fold:hlc(Fold, MergedState),
+        MergedStateBytes = bondy_oplog_fold:encode_state(Fold, MergedState),
+        MergedValueBytes = compose_merged_value_bytes(
+            Fold, MergedState, MergedStateBytes
+        ),
+        MergedFrame = bondy_oplog_cell_frame:encode(
+            MergedHlc, MergedStateBytes, MergedValueBytes,
+            bondy_oplog_fold:value_equals_state(Fold)
+        ),
+        install_cell_unchecked(
+            Adapter, Handle, CacheAdapter, CacheHandle, HighWaterRef,
+            Bucket, Key, MergedFrame, MergedHlc
+        ),
+        bump(merged, Acc)
+    catch
+        error:{merge_states_not_supported, _} ->
+            telemetry:execute(
+                [bondy_oplog, applier, catalogue_bootstrap,
+                 presence_basic_replaced],
+                #{count => 1},
+                #{instance_id => Id, bucket => Bucket, cell_key => Key,
+                  fold_module => Fold}
+            ),
+            ?LOG_WARNING(#{
+                description =>
+                    "merge-mode catalogue bootstrap encountered a "
+                    "fold without merge_states/2; falling back to "
+                    "skip-if-older replacement",
+                instance_id => Id,
+                bucket => Bucket,
+                cell_key => Key,
+                fold_module => Fold
+            }),
+            handle_cell(Id, replace, Fold, Adapter, Handle,
+                        CacheAdapter, CacheHandle, HighWaterRef,
+                        Bucket, Key, _Frame, IncomingHlc,
+                        IncomingStateBytes,
+                        {ok, ExistingHlc, ExistingStateBytes},
+                        bump(replaced_no_merge, Acc));
+        C:R:St ->
+            ?LOG_WARNING(#{
+                description =>
+                    "install_catalogue_batch: merge raised; cell skipped",
+                instance_id => Id,
+                bucket => Bucket,
+                cell_key => Key,
+                class => C, reason => R, stacktrace => St
+            }),
+            bump(skipped, Acc)
+    end.
+
+%% @private
+%% Rebuild the value column for the merged state. `value_equals_state`
+%% folds (G-Set) keep `undefined` (cell-frame elides the column);
+%% others encode `to_value(MergedState)`.
+compose_merged_value_bytes(Fold, MergedState, _MergedStateBytes) ->
+    case bondy_oplog_fold:value_equals_state(Fold) of
+        true ->
+            undefined;
+        false ->
+            term_to_binary(bondy_oplog_fold:to_value(Fold, MergedState))
+    end.
+
+%% @private
+bump(Key, Acc) ->
+    maps:update_with(Key, fun(X) -> X + 1 end, Acc).
+
+%% @private
+install_cell_unchecked(Adapter, Handle, CacheAdapter, CacheHandle,
+                       HighWaterRef, Bucket, Key, Frame, Hlc) ->
+    case Adapter:put_batch(Handle, [{Bucket, Key, Frame}]) of
+        ok ->
+            invalidate_cache(CacheAdapter, CacheHandle, Bucket, Key),
+            advance_high_water(HighWaterRef, Hlc),
+            ok;
+        {error, Reason} ->
+            ?LOG_WARNING(#{
+                description =>
+                    "install_catalogue_batch: projection write failed",
+                bucket => Bucket,
+                cell_key => Key,
+                reason => Reason
+            }),
+            ok
+    end.
 
 %% @private
 %% Folds the batch in order, partitioning into verified events and

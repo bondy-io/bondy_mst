@@ -180,16 +180,13 @@ unsynced pages on recovery. Callers that need stricter durability
 -export([set_root/2]).
 -export([set_manifest/2]).
 
-%% Sealed-pack I/O helpers (shared with gc/2 in `bondy_mst_pack_store`)
--export([create_sealed_pack/6]).
--export([delete_sealed_pack_files/2]).
-
 %% Inspection
 -export([dir/1]).
 -export([manifest/1]).
 -export([instance_id/1]).
 -export([instance_hash/1]).
 -export([hash_algo/1]).
+-export([derive_instance_hash/1]).
 -export([pending_count/1]).
 -export([pending_hashes/1]).
 -export([pending_lookup/2]).
@@ -448,70 +445,6 @@ set_manifest(#?MODULE{} = W, M) ->
         next_pack_id = next_pack_id_from(M)
     }).
 
-?DOC("""
-Streams a new sealed `pack-NNNN.pack` + `.idx` pair from `Hashes` (sorted
-ascending, no duplicates) and a `Reader` function that returns the body
-bytes for each hash on demand.
-
-For each hash the writer pread's the body via `Reader`, encodes the
-record, writes it to the tmp pack file, and folds it into a running
-sha256 context — so peak RAM is one record body, not the full pack.
-After the last record the running sha256 becomes the pack's trailer.
-The `.idx` is built from the offsets accumulated during the stream
-(small — 32-byte hash + 8-byte offset per entry).
-
-Performs the full pipeline: tmp write, datasync, rename, dir fsync,
-with tmp cleanup on any failure. Does NOT touch the manifest or
-`incoming.pack` — those are the caller's concern (the writer's own
-`seal/1` does the manifest swap; `gc/2` in `bondy_mst_pack_store` does
-its own atomic swap).
-
-A `Reader` failure for any hash aborts the stream and surfaces as
-`{error, _}`; the tmp files are cleaned up.
-""").
--spec create_sealed_pack(
-        Dir :: file:filename_all(),
-        InstanceHash :: non_neg_integer(),
-        HashAlgo :: atom(),
-        PackId :: pos_integer(),
-        Hashes :: [binary()],
-        Reader :: fun((binary()) -> {ok, binary()} | {error, term()})
-    ) -> ok | {error, term()}.
-
-create_sealed_pack(Dir, InstanceHash, HashAlgo, PackId, Hashes, Reader) ->
-    case stream_sealed_pack(Dir, InstanceHash, HashAlgo, PackId, Hashes,
-                            Reader) of
-        {ok, Entries} ->
-            case write_sealed_idx_from_entries(Dir, PackId, Entries) of
-                ok ->
-                    case rename_sealed_pair(Dir, PackId) of
-                        ok ->
-                            ok;
-                        {error, _} = E ->
-                            cleanup_tmp(Dir, PackId),
-                            E
-                    end;
-                {error, R} ->
-                    cleanup_tmp(Dir, PackId),
-                    {error, R}
-            end;
-        {error, R} ->
-            cleanup_tmp(Dir, PackId),
-            {error, R}
-    end.
-
-?DOC("""
-Deletes the on-disk `pack-NNNN.pack` and `pack-NNNN.idx` for a
-retired sealed pack. Missing files are tolerated (idempotent — safe
-to call on a half-rolled-back compaction).
-""").
--spec delete_sealed_pack_files(file:filename_all(), non_neg_integer()) -> ok.
-
-delete_sealed_pack_files(Dir, PackId) ->
-    _ = prim_file:delete(bondy_mst_pack_paths:sealed_pack_path(Dir, PackId)),
-    _ = prim_file:delete(bondy_mst_pack_paths:sealed_idx_path(Dir, PackId)),
-    ok.
-
 %% =============================================================================
 %% API — inspection
 %% =============================================================================
@@ -652,9 +585,21 @@ validate_manifest(M, InstanceId, HashAlgo) ->
             {error, {instance_id_mismatch, Other, InstanceId}}
     end.
 
+?DOC("""
+Computes the `instance_hash` carried in the pack header from the
+human-readable `InstanceId`. Centralised so the writer, the sealed-
+view opener, and any future tooling that needs to recognise a foreign
+pack all hash the same way.
+""").
+-spec derive_instance_hash(binary()) -> non_neg_integer().
+
+derive_instance_hash(InstanceId) when is_binary(InstanceId) ->
+    erlang:phash2(InstanceId, 1 bsl 32).
+
+
 %% @private
 open_incoming(Dir, InstanceId, HashAlgo, Manifest, Policy) ->
-    InstanceHash = erlang:phash2(InstanceId, 1 bsl 32),
+    InstanceHash = derive_instance_hash(InstanceId),
     Path = bondy_mst_pack_paths:incoming_pack_path(Dir),
     Declared = bondy_mst_pack_manifest:incoming_pack(Manifest),
     Exists = filelib:is_regular(Path),
@@ -769,6 +714,17 @@ resume_incoming(Dir, Path, InstanceId, HashAlgo, InstanceHash, Manifest,
         {ok, Fd} ->
             case scan_incoming(Fd, InstanceHash, HashAlgo) of
                 {ok, EndOffset, Pending} ->
+                    %% `scan_incoming` uses `pread` exclusively, which
+                    %% does not move the fd's file pointer — so without
+                    %% an explicit seek, the next `prim_file:write` in
+                    %% `do_append` would write at offset 0 (where the
+                    %% header lives) instead of at `EndOffset`,
+                    %% clobbering the header. Plant the pointer at
+                    %% EndOffset so subsequent writes append correctly.
+                    case prim_file:position(Fd, EndOffset) of
+                        {ok, EndOffset} -> ok;
+                        {error, R}      -> error({resume_seek, R})
+                    end,
                     Now = erlang:monotonic_time(millisecond),
                     {ok, #?MODULE{
                         dir = Dir,
@@ -815,9 +771,16 @@ scan_incoming(Fd, ExpectedInstanceHash, ExpectedAlgo) ->
                     when IH =:= ExpectedInstanceHash, A =:= ExpectedAlgo ->
                     scan_records(Fd, HeaderBytes, #{});
                 {ok, _} ->
+                    %% Header decoded cleanly but the instance or hash
+                    %% algo do not match — this is not our incoming
+                    %% pack. Recovery would erase it; refuse to open.
                     {error, {pending_scan, header_mismatch}};
-                {error, R} ->
-                    {error, {pending_scan, R}}
+                {error, _} ->
+                    %% Magic or version corrupt. The file is from us
+                    %% (manifest declares it present) but the bytes are
+                    %% unreadable. Route through the recovery path so
+                    %% it can reset the file + manifest.
+                    {error, needs_recovery}
             end;
         {ok, _Short} ->
             {error, needs_recovery};
@@ -1130,7 +1093,8 @@ do_seal(#?MODULE{
 } = W) ->
     Hashes = lists:sort(maps:keys(Pending)),
     Reader = pending_reader(Fd, Pending),
-    case create_sealed_pack(Dir, IH, HashAlgo, PackId, Hashes, Reader) of
+    case bondy_mst_pack_seal:create_sealed_pack(
+            Dir, IH, HashAlgo, PackId, Hashes, Reader) of
         ok ->
             commit_seal(Dir, M, PackId, W);
         {error, R} ->
@@ -1158,138 +1122,18 @@ read_pending_body(_Fd, Pending, Hash) ->
     end.
 
 %% @private
-%% Streams the sealed pack to disk one record at a time, accumulating
-%% the running sha256 in a `crypto:hash_init/1` context. Returns
-%% `{ok, Entries}` (the `.idx` entries built inline) on success.
-stream_sealed_pack(Dir, IH, HashAlgo, PackId, Hashes, Reader) ->
-    TmpPath = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, PackId),
-    Header = bondy_mst_pack_codec:encode_pack_header(#{
-        version       => bondy_mst_pack_codec:version(),
-        flags         => 0,
-        pack_id       => PackId,
-        instance_hash => IH,
-        hash_algo     => HashAlgo,
-        created_at    => erlang:system_time(millisecond),
-        record_count  => length(Hashes)
-    }),
-    case prim_file:open(TmpPath, [write, raw, binary, exclusive]) of
-        {ok, Fd} ->
-            try
-                stream_sealed_pack_body(Fd, Header, Hashes, Reader)
-            after
-                _ = prim_file:close(Fd)
-            end;
-        {error, _} = E ->
-            E
-    end.
-
-%% @private
-stream_sealed_pack_body(Fd, Header, Hashes, Reader) ->
-    case prim_file:write(Fd, Header) of
-        ok ->
-            Ctx = crypto:hash_update(crypto:hash_init(sha256), Header),
-            stream_records(Fd, Ctx, byte_size(Header), Hashes, Reader, []);
-        {error, _} = E ->
-            E
-    end.
-
-%% @private
-stream_records(Fd, Ctx, _Off, [], _Reader, Acc) ->
-    Trailer = crypto:hash_final(Ctx),
-    case prim_file:write(Fd, Trailer) of
-        ok ->
-            case bondy_mst_io:datasync(Fd) of
-                ok             -> {ok, lists:reverse(Acc)};
-                {error, _} = E -> E
-            end;
-        {error, _} = E ->
-            E
-    end;
-stream_records(Fd, Ctx, Off, [Hash | Rest], Reader, Acc) ->
-    case Reader(Hash) of
-        {ok, Body} when is_binary(Body) ->
-            Record = bondy_mst_pack_codec:encode_record(Hash, Body),
-            case prim_file:write(Fd, Record) of
-                ok ->
-                    Ctx1 = crypto:hash_update(Ctx, Record),
-                    RecBytes = bondy_mst_pack_codec:record_header_bytes()
-                              + byte_size(Body),
-                    stream_records(Fd, Ctx1, Off + RecBytes, Rest, Reader,
-                                   [{Hash, Off} | Acc]);
-                {error, _} = E ->
-                    E
-            end;
-        {error, _} = E ->
-            E
-    end.
-
-%% @private
-%% Entries are `[{Hash, Offset}]` already in sort-by-hash order — the
-%% stream produced them in that order because the caller passes
-%% `Hashes` sorted.
-write_sealed_idx_from_entries(Dir, PackId, Entries) ->
-    case bondy_mst_pack_index:build(Entries) of
-        {ok, IO} ->
-            write_sealed_idx_bin(Dir, PackId, iolist_to_binary(IO));
-        {error, Reason} ->
-            {error, {idx_build, Reason}}
-    end.
-
-%% @private
-write_sealed_idx_bin(Dir, PackId, Bin) ->
-    TmpPath = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, PackId),
-    case prim_file:open(TmpPath, [write, raw, binary, exclusive]) of
-        {ok, Fd} ->
-            try
-                case prim_file:write(Fd, Bin) of
-                    ok ->
-                        bondy_mst_io:datasync(Fd);
-                    {error, _} = E ->
-                        E
-                end
-            after
-                _ = prim_file:close(Fd)
-            end;
-        {error, _} = E ->
-            E
-    end.
-
-%% @private
 %% Step 4 of seal: the sealed `pack-NNNN` pair is already renamed into
-%% place by `create_sealed_pack/6`; here we atomically swap the manifest
-%% (sealed_packs += [PackId], incoming_pack := absent), then close +
-%% unlink the now-superseded incoming.pack.
+%% place by `bondy_mst_pack_seal:create_sealed_pack/6`; here we
+%% delegate to the same module's `commit_manifest/3` for the atomic
+%% swap (sealed_packs += [PackId], incoming_pack := absent), then
+%% close + unlink the now-superseded incoming.pack.
 commit_seal(Dir, M, PackId, W) ->
-    M1 = bondy_mst_pack_manifest:with_incoming_pack(
-        bondy_mst_pack_manifest:add_sealed_pack(M, PackId),
-        absent
-    ),
-    case bondy_mst_pack_manifest:write(Dir, M1) of
-        ok ->
+    case bondy_mst_pack_seal:commit_manifest(Dir, M, PackId) of
+        {ok, M1} ->
             close_and_unlink_incoming(W#?MODULE.incoming_fd, Dir),
             reopen_fresh_incoming(W, M1, PackId);
-        {error, R} ->
-            {error, {manifest, R}}
-    end.
-
-%% @private
-rename_sealed_pair(Dir, PackId) ->
-    PackTmp = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, PackId),
-    Pack    = bondy_mst_pack_paths:sealed_pack_path(Dir, PackId),
-    IdxTmp  = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, PackId),
-    Idx     = bondy_mst_pack_paths:sealed_idx_path(Dir, PackId),
-    case bondy_mst_io:rename(PackTmp, Pack) of
-        ok ->
-            case bondy_mst_io:rename(IdxTmp, Idx) of
-                ok ->
-                    _ = bondy_mst_io:fsync_dir(Dir),
-                    ok;
-                {error, R} ->
-                    _ = prim_file:delete(Pack),
-                    {error, {rename_idx, R}}
-            end;
-        {error, R} ->
-            {error, {rename_pack, R}}
+        {error, _} = E ->
+            E
     end.
 
 %% @private
@@ -1321,12 +1165,6 @@ reopen_fresh_incoming(W, M1, PackId) ->
           root_flush_every_ms       => W#?MODULE.root_flush_every_ms}
     ),
     {ok, PackId, Fresh#?MODULE{next_pack_id = PackId + 1}}.
-
-%% @private
-cleanup_tmp(Dir, PackId) ->
-    _ = prim_file:delete(bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, PackId)),
-    _ = prim_file:delete(bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, PackId)),
-    ok.
 
 %% =============================================================================
 %% PRIVATE — misc

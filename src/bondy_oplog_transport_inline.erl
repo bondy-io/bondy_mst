@@ -69,4 +69,26 @@ do_request(PeerInstance, get_snapshot) ->
     case bondy_oplog_instance:snapshot(PeerInstance) of
         not_found -> {ok, no_snapshot};
         {ok, W, S} -> {ok, W, S}
+    end;
+do_request(PeerInstance, get_catalogue_snapshot_init) ->
+    %% Drain the peer's applier so the watermark and any cells already
+    %% in the WAL are visible before we mint the cursor. Without this,
+    %% an event appended just before `init` could land on the peer
+    %% AFTER our high-water read, leaving the initiator stuck waiting
+    %% for an old watermark to advance.
+    _ = bondy_oplog_instance:await_apply(PeerInstance),
+    case bondy_oplog_catalogue_snapshot:init(PeerInstance) of
+        {ok, no_snapshot} ->
+            {ok, no_snapshot};
+        {ok, {Watermark, Cursor}} ->
+            {ok, {init, {Watermark, Cursor}}}
+    end;
+do_request(PeerInstance, {get_catalogue_snapshot_next, Cursor}) ->
+    case bondy_oplog_catalogue_snapshot:next(PeerInstance, Cursor) of
+        {ok, {batch, _} = Batch} ->
+            {ok, Batch};
+        {ok, {done, _} = Done} ->
+            {ok, Done};
+        {error, _} = E ->
+            E
     end.

@@ -36,7 +36,7 @@ read_test_() ->
         fun read_merges_overlay_with_projection/0,
         fun read_hits_cache_after_first_slow_read/0,
         fun cache_returns_value_unchanged_when_set/0,
-        fun write_through_updates_existing_cache_entry/0,
+        fun write_through_invalidates_existing_cache_entry/0,
         fun write_through_skips_when_key_not_cached/0
     ]}.
 
@@ -71,14 +71,12 @@ read_returns_undefined_when_projection_and_overlay_empty() ->
 read_returns_projection_value_when_no_overlay() ->
     NS = mk_ns(),
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0, 1, lww_register),
-    %% Materialise a cell at HLC=42 with value {set, <<"v">>, 42}.
+    %% Materialise a cell at HLC=42 with state {set, <<"v">>, 42};
+    %% lww_register's to_value/1 unwraps to the bare value.
     State = {set, <<"v">>, 42},
-    Frame = bondy_oplog_cell_frame:encode(
-        42,
-        bondy_oplog_fold:encode_state(lww_register, State)
-    ),
+    Frame = bondy_oplog_test_helpers:frame(lww_register, State, 42),
     ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, <<"k">>, Frame}]),
-    ?assertEqual({{set, <<"v">>, 42}, 42},
+    ?assertEqual({<<"v">>, 42},
                  bondy_db_core:read(NS, primary, <<"k">>)),
     teardown_shard(Setup).
 
@@ -86,16 +84,15 @@ read_merges_overlay_with_projection() ->
     NS = mk_ns(),
     {Setup, #{projection := PH, overlay := OV}} =
         setup_shard(NS, primary, 0, 1, lww_register),
-    %% Projection at HLC=10 → {set, <<"old">>, 10}.
-    OldFrame = bondy_oplog_cell_frame:encode(
-        10,
-        bondy_oplog_fold:encode_state(lww_register, {set, <<"old">>, 10})
+    %% Projection at HLC=10 → state {set, <<"old">>, 10}.
+    OldFrame = bondy_oplog_test_helpers:frame(
+        lww_register, {set, <<"old">>, 10}, 10
     ),
     ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, <<"k">>, OldFrame}]),
     %% Overlay carries a newer event at HLC=20.
     Event = mk_event(20, <<"o">>, 0, {set, 20, <<"new">>}),
     ok = bondy_oplog_db_overlay:insert(OV, ?B, <<"k">>, Event),
-    ?assertEqual({{set, <<"new">>, 20}, 20},
+    ?assertEqual({<<"new">>, 20},
                  bondy_db_core:read(NS, primary, <<"k">>)),
     teardown_shard(Setup).
 
@@ -103,14 +100,13 @@ read_hits_cache_after_first_slow_read() ->
     NS = mk_ns(),
     {Setup, #{projection := PH, cache_handle := CH}} =
         setup_shard(NS, primary, 0, 1, lww_register),
-    Frame = bondy_oplog_cell_frame:encode(
-        7,
-        bondy_oplog_fold:encode_state(lww_register, {set, <<"v">>, 7})
+    Frame = bondy_oplog_test_helpers:frame(
+        lww_register, {set, <<"v">>, 7}, 7
     ),
     ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, <<"k">>, Frame}]),
-    %% First read: slow path populates the cache.
-    {{set, <<"v">>, 7}, 7} = bondy_db_core:read(NS, primary, <<"k">>),
-    ?assertMatch({ok, {{set, <<"v">>, 7}, 7}},
+    %% First read: slow path populates the cache with the user-facing value.
+    {<<"v">>, 7} = bondy_db_core:read(NS, primary, <<"k">>),
+    ?assertMatch({ok, {<<"v">>, 7}},
                  bondy_oplog_cache_ets:get(CH, ?B, <<"k">>)),
     teardown_shard(Setup).
 
@@ -120,23 +116,24 @@ cache_returns_value_unchanged_when_set() ->
         setup_shard(NS, primary, 0, 1, lww_register),
     %% Pre-populate the cache directly with a synthetic value; the read
     %% must come back from cache (projection is empty so a slow path
-    %% would return `undefined`).
-    ok = bondy_oplog_cache_ets:put(CH, ?B, <<"k">>, {{set, <<"v">>, 99}, 99}),
-    ?assertEqual({{set, <<"v">>, 99}, 99},
+    %% would return `undefined`). After §3.6 the cache stores values
+    %% (not states).
+    ok = bondy_oplog_cache_ets:put(CH, ?B, <<"k">>, {<<"v">>, 99}),
+    ?assertEqual({<<"v">>, 99},
                  bondy_db_core:read(NS, primary, <<"k">>)),
     teardown_shard(Setup).
 
-write_through_updates_existing_cache_entry() ->
+write_through_invalidates_existing_cache_entry() ->
     NS = mk_ns(),
     {Setup, #{cache_handle := CH}} =
         setup_shard(NS, primary, 0, 1, lww_register),
-    %% Pre-populate the cache with HLC=5.
-    ok = bondy_oplog_cache_ets:put(CH, ?B, <<"k">>, {{set, <<"v1">>, 5}, 5}),
-    %% Push a write-through with a newer event.
+    %% Pre-populate the cache. After §3.6 the write-through path
+    %% invalidates rather than folding (no fold currently exports
+    %% `apply_value_delta/2`); the next read repopulates via HEAD.
+    ok = bondy_oplog_cache_ets:put(CH, ?B, <<"k">>, {<<"v1">>, 5}),
     Event = mk_event(10, <<"o">>, 0, {set, 10, <<"v2">>}),
     ok = bondy_db_core:write_through(NS, primary, <<"k">>, Event),
-    ?assertEqual({ok, {{set, <<"v2">>, 10}, 10}},
-                 bondy_oplog_cache_ets:get(CH, ?B, <<"k">>)),
+    ?assertEqual(not_found, bondy_oplog_cache_ets:get(CH, ?B, <<"k">>)),
     teardown_shard(Setup).
 
 write_through_skips_when_key_not_cached() ->

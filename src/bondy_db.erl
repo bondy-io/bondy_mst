@@ -62,7 +62,7 @@ the composition rule:
 `bondy_oplog:append/2`. The fold-state update happens inside the
 applier (`MST_DB_DESIGN.md` §6.3): the applier reads the current cell
 frame, decodes via the fold module, folds the event in via
-`apply_event/2`, encodes the new state, and writes it back through the
+`apply_event/3`, encodes the new state, and writes it back through the
 projection adapter with Bucket and Key as separate operands. After
 the append, `apply/4` calls `bondy_oplog:await_apply/1` so the next
 `read/3` from the same caller sees the updated cell.
@@ -116,6 +116,10 @@ it).
 -export([close_table/1]).
 -export([tick/1]).
 -export([apply/4]).
+-export([counter_inc/4]).
+-export([aw_put/5]).
+-export([aw_apply/5]).
+-export([aw_remove/4]).
 -export([read/3]).
 -export([range/5]).
 -export([info/1]).
@@ -326,7 +330,7 @@ instance. Once the WAL append returns, blocks on
 `bondy_oplog:await_apply/1` so the projection write is visible to a
 subsequent `read/3` from the same caller (read-your-writes).
 
-The event shape is whatever the table's `fold_module:apply_event/2`
+The event shape is whatever the table's `fold_module:apply_event/3`
 accepts. Idempotency and conflict resolution are inherited from the
 fold's contract; the facade does not validate event shapes.
 
@@ -347,18 +351,178 @@ apply(#{db_topology := Topology, table_state := TableState,
         when is_binary(Realm), is_binary(Key) ->
     Bucket = Topology:bucket_for(EntityType, Realm, TableState),
     InstanceId = instance_id_for(Table, Bucket, Key),
-    Op = {cell_apply, Bucket, Key, Event},
-    try bondy_oplog:append(InstanceId, Op) of
+    try maybe_resolve(InstanceId, Bucket, Key, Event) of
         {error, _} = Err ->
             Err;
-        _EventKey ->
-            await(InstanceId)
+        passthrough ->
+            %% Resolved logical event has no effect (target absent /
+            %% tombstoned). Skip WAL append; treat as ok.
+            ok;
+        Resolved ->
+            Op = {cell_apply, Bucket, Key, Resolved},
+            try bondy_oplog:append(InstanceId, Op) of
+                {error, _} = Err ->
+                    Err;
+                _EventKey ->
+                    await(InstanceId)
+            catch
+                exit:{noproc, _} ->
+                    {error, {instance_unavailable, InstanceId}};
+                exit:{shutdown, _} ->
+                    {error, {instance_unavailable, InstanceId}}
+            end
     catch
         exit:{noproc, _} ->
             {error, {instance_unavailable, InstanceId}};
         exit:{shutdown, _} ->
             {error, {instance_unavailable, InstanceId}}
     end.
+
+
+%% Logical events have application-level shapes that the fold's
+%% `resolve_event/2` callback translates into physical events against
+%% the current projection state. Resolution must happen before WAL
+%% append so cross-replica convergence holds (the WAL stores the
+%% resolved form).
+%%
+%% Pattern-matched here rather than always-calling-resolve so the
+%% hot path (regular events) skips the applier round-trip.
+maybe_resolve(InstanceId, Bucket, Key, Event) ->
+    case is_logical_event(Event) of
+        false -> Event;
+        true ->
+            case bondy_oplog_registry:applier_pid(InstanceId) of
+                undefined ->
+                    {error, {instance_unavailable, InstanceId}};
+                ApplierPid ->
+                    case bondy_oplog_applier:resolve_logical_event(
+                            ApplierPid, Bucket, Key, Event) of
+                        {ok, R} -> R;
+                        {error, _} = Err -> Err
+                    end
+            end
+    end.
+
+
+%% Add new logical-event tags here as folds register them. Folds
+%% without server-side resolution don't appear in this list (their
+%% events skip the round-trip).
+is_logical_event({remove_aw_key, _}) -> true;
+is_logical_event(_)                  -> false.
+
+
+-doc("""
+Increment the PN-Counter at `(Realm, Key)` in `Table` by `Delta`.
+
+Convenience wrapper over `apply/4` for tables backed by the
+`pn_counter` fold. `Delta` may be negative (a "decrement" is just
+`counter_inc(_, _, _, -K)`). The fold absorbs the event under the
+per-Origin Seq number tracked in the WAL event key — duplicate
+delivery and replay are no-ops by construction.
+
+Returns `ok` once the WAL append is durable and the applier has
+committed the projection write, or `{error, _}` on substrate failure.
+
+The fold module is **not** validated here; using this helper against
+a non-`pn_counter` table will route a `{inc, Delta}` event into a
+fold that does not understand it and `apply/4` will fail at the
+projection layer.
+""").
+-spec counter_inc(
+    Table :: table(),
+    Realm :: realm(),
+    Key :: binary(),
+    Delta :: integer()
+) -> ok | {error, term()}.
+
+counter_inc(Table, Realm, Key, Delta) when is_integer(Delta) ->
+    ?MODULE:apply(Table, Realm, Key, {inc, Delta}).
+
+
+-doc("""
+Put `MapKey` into the AW-Map cell at `(Realm, Key)` in `Table`, using
+`SubFold` as the per-key sub-CRDT and `SubInitState` as its initial
+state.
+
+Convenience wrapper over `apply/4` that synthesises the AW-Map
+`{put, MapKey, SubFold, SubInitState}` physical event. `SubInitState`
+must be a valid state for `SubFold` — typically built by
+`bondy_oplog_fold:initial_value(SubFold)` and then evolved, or
+constructed inline (e.g. `{set, V, H}` for `lww_register`).
+
+The fold module is **not** validated here; using this helper against a
+non-`aw_map` table routes the event into a fold that does not
+understand it and `apply/4` will fail at the projection layer.
+
+A put on a key already live with a different `SubFold` crashes the
+applier with `{strategy_mismatch, MapKey, Stored, SubFold}`.
+""").
+-spec aw_put(
+    Table :: table(),
+    Realm :: realm(),
+    Key :: binary(),
+    MapKey :: binary(),
+    {SubFold :: atom(), SubInitState :: term()}
+) -> ok | {error, term()}.
+
+aw_put(Table, Realm, Key, MapKey, {SubFold, SubInitState})
+        when is_binary(MapKey), is_atom(SubFold) ->
+    ?MODULE:apply(Table, Realm, Key, {put, MapKey, SubFold, SubInitState}).
+
+
+-doc("""
+Apply `SubEvent` to `MapKey` under the AW-Map cell at `(Realm, Key)`
+in `Table`, using `SubFold` as the sub-CRDT strategy.
+
+Convenience wrapper over `apply/4` that synthesises the AW-Map
+`{apply, MapKey, SubFold, SubEvent}` physical event. If `MapKey` is
+absent or tombstoned, the apply revives it by starting from
+`bondy_oplog_fold:initial_value(SubFold)` and folding the sub-event
+in (a contribution dot is added either way — the apply observation
+strengthens the AW claim).
+
+The fold module is **not** validated; routing an `apply` event into a
+non-`aw_map` table fails at the projection layer.
+
+`SubFold` mismatch with an existing live or tombstoned entry crashes
+the applier with `{strategy_mismatch, MapKey, Stored, SubFold}`.
+""").
+-spec aw_apply(
+    Table :: table(),
+    Realm :: realm(),
+    Key :: binary(),
+    MapKey :: binary(),
+    {SubFold :: atom(), SubEvent :: term()}
+) -> ok | {error, term()}.
+
+aw_apply(Table, Realm, Key, MapKey, {SubFold, SubEvent})
+        when is_binary(MapKey), is_atom(SubFold) ->
+    ?MODULE:apply(Table, Realm, Key, {apply, MapKey, SubFold, SubEvent}).
+
+
+-doc("""
+Remove `MapKey` from the AW-Map cell at `(Realm, Key)` in `Table`.
+
+Convenience wrapper that issues the logical
+`{remove_aw_key, MapKey}` event. The substrate's
+`maybe_resolve/4` translates this into a physical
+`{remove, MapKey, ObservedDots}` event by reading the current
+state inside the cell's single-applier scope — the resolved form
+is what lands in the WAL, so cross-replica convergence holds.
+
+If `MapKey` is absent (or already tombstoned, or carries zero
+AddDots) the resolution is a passthrough: no WAL append, returns
+`ok`.
+""").
+-spec aw_remove(
+    Table :: table(),
+    Realm :: realm(),
+    Key :: binary(),
+    MapKey :: binary()
+) -> ok | {error, term()}.
+
+aw_remove(Table, Realm, Key, MapKey) when is_binary(MapKey) ->
+    ?MODULE:apply(Table, Realm, Key, {remove_aw_key, MapKey}).
 
 
 -doc("""
@@ -385,7 +549,7 @@ this facade.
     Table :: table(),
     Realm :: realm(),
     Key :: binary()
-) -> {ok, State :: term(), Hlc :: bondy_oplog_hlc:hlc()}
+) -> {ok, Value :: term(), Hlc :: bondy_oplog_hlc:hlc()}
    | not_found
    | {error, term()}.
 

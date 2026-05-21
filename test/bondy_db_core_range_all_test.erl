@@ -55,8 +55,8 @@ single_shard_matches_single_shard_range() ->
     {ok, R} = bondy_db_core:range_all(NS, primary, <<>>,
                                       {<<"a">>, <<"z">>}, #{}),
     ?assertEqual(
-        [{<<"a">>, {set, <<"va">>, 10}, 10},
-         {<<"b">>, {set, <<"vb">>, 20}, 20}],
+        [{<<"a">>, <<"va">>, 10},
+         {<<"b">>, <<"vb">>, 20}],
         R
     ),
     teardown_shard(Setup).
@@ -158,10 +158,10 @@ bucket_isolation_within_shard() ->
     materialise_bucket(PH, <<"b2">>, <<"k">>, {set, <<"v2">>, 20}, 20),
     {ok, R1} = bondy_db_core:range_all(NS, primary, <<"b1">>,
                                        {<<"a">>, <<"z">>}, #{}),
-    ?assertEqual([{<<"k">>, {set, <<"v1">>, 10}, 10}], R1),
+    ?assertEqual([{<<"k">>, <<"v1">>, 10}], R1),
     {ok, R2} = bondy_db_core:range_all(NS, primary, <<"b2">>,
                                        {<<"a">>, <<"z">>}, #{}),
-    ?assertEqual([{<<"k">>, {set, <<"v2">>, 20}, 20}], R2),
+    ?assertEqual([{<<"k">>, <<"v2">>, 20}], R2),
     teardown_shard(Setup).
 
 
@@ -189,7 +189,7 @@ other_index_not_scanned() ->
     materialise(PH2, <<"a">>, {set, <<"secondary">>, 20}, 20),
     {ok, R} = bondy_db_core:range_all(NS, primary, <<>>,
                                       {<<"a">>, <<"z">>}, #{}),
-    ?assertEqual([{<<"a">>, {set, <<"primary">>, 10}, 10}], R),
+    ?assertEqual([{<<"a">>, <<"primary">>, 10}], R),
     teardown_shard(S1),
     teardown_shard(S2).
 
@@ -210,10 +210,7 @@ materialise(PH, Key, State, Hlc) ->
     materialise_bucket(PH, <<>>, Key, State, Hlc).
 
 materialise_bucket(PH, Bucket, Key, State, Hlc) ->
-    Frame = bondy_oplog_cell_frame:encode(
-        Hlc,
-        bondy_oplog_fold:encode_state(lww_register, State)
-    ),
+    Frame = bondy_oplog_test_helpers:frame(lww_register, State, Hlc),
     ok = bondy_oplog_projection_ets:put_batch(PH, [{Bucket, Key, Frame}]).
 
 overlay_insert(OV, Key, Hlc, Op) ->

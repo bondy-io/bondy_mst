@@ -110,7 +110,8 @@ open(Dir) ->
     case bondy_mst_pack_manifest:read(Dir) of
         {ok, M} ->
             PackIds = bondy_mst_pack_manifest:sealed_packs(M),
-            case open_all_sealed(Dir, PackIds, []) of
+            Ctx = bondy_mst_pack_sealed_view:open_ctx_from_manifest(M),
+            case open_all_sealed(Dir, Ctx, PackIds, []) of
                 {ok, Views} ->
                     Sorted = lists:reverse(
                         lists:keysort(#sealed_view.pack_id, Views)
@@ -236,42 +237,22 @@ sealed_pack_ids(#?MODULE{sealed = Views}) ->
 %% =============================================================================
 
 %% @private
-open_all_sealed(_Dir, [], Acc) ->
+%% Sealed-pack opens are delegated to `bondy_mst_pack_sealed_view`
+%% so the reader inherits the same self-healing rebuild behaviour as
+%% the read-write store. A missing or corrupt `.idx` is reconstructed
+%% from the authoritative `.pack` on first open; a corrupt `.pack`
+%% bubbles up unchanged for operator triage.
+open_all_sealed(_Dir, _Ctx, [], Acc) ->
     {ok, Acc};
-open_all_sealed(Dir, [PackId | Rest], Acc) ->
-    case open_one_sealed(Dir, PackId) of
+open_all_sealed(Dir, Ctx, [PackId | Rest], Acc) ->
+    case bondy_mst_pack_sealed_view:open(Dir, Ctx, PackId) of
         {ok, View} ->
-            open_all_sealed(Dir, Rest, [View | Acc]);
+            open_all_sealed(Dir, Ctx, Rest, [View | Acc]);
         {error, _} = E ->
             lists:foreach(
                 fun(#sealed_view{pack_fd = Fd}) -> _ = prim_file:close(Fd) end,
                 Acc
             ),
             E
-    end.
-
-%% @private
-open_one_sealed(Dir, PackId) ->
-    IdxPath = bondy_mst_pack_paths:sealed_idx_path(Dir, PackId),
-    PackPath = bondy_mst_pack_paths:sealed_pack_path(Dir, PackId),
-    case prim_file:read_file(IdxPath) of
-        {ok, IdxBin} ->
-            case bondy_mst_pack_index:open(IdxBin) of
-                {ok, Idx} ->
-                    case prim_file:open(PackPath, [read, raw, binary]) of
-                        {ok, Fd} ->
-                            {ok, #sealed_view{
-                                pack_id = PackId,
-                                idx = Idx,
-                                pack_fd = Fd
-                            }};
-                        {error, R} ->
-                            {error, {sealed_pack, PackId, R}}
-                    end;
-                {error, R} ->
-                    {error, {sealed_idx, PackId, R}}
-            end;
-        {error, R} ->
-            {error, {sealed_idx, PackId, R}}
     end.
 

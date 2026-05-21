@@ -94,6 +94,14 @@ keeps reads parallel.
     %% Stored as `monotonic_time(millisecond)`; read wait-free by
     %% `ensure_fresh/2` (`MST_DB_DESIGN.md` §11).
     ae_atomics         :: atomics:atomics_ref(),
+    %% Per-shard high-water HLC mark
+    %% (`bondy_oplog_high_water`). Tracks the highest HLC of any
+    %% `cell_apply` event the applier has materialised into the
+    %% shard's projection. Allocated here so it can be shared between
+    %% the applier (writer) and read-only consumers
+    %% (catalogue-freshness reporting, bootstrap finalisation) without
+    %% threading through the applier's process state.
+    high_water_ref     :: bondy_oplog_high_water:ref(),
     %% Per-namespace policy (§15). `ap` (default) places no constraint
     %% on reads; `cp` rejects `eventual`-consistency batch reads to
     %% prevent unfenced staleness. Owners pass this on `register/4`;
@@ -162,6 +170,7 @@ keeps reads parallel.
 %% Freshness (`MST_DB_DESIGN.md` §11).
 -export([bump_ae/3]).
 -export([bump_ae/4]).
+-export([high_water_hlc/3]).
 -export([bump_ae_targets/1]).
 -export([bump_ae_targets/2]).
 -export([last_ae_at/3]).
@@ -178,6 +187,7 @@ keeps reads parallel.
 -export([entry_fold_module/1]).
 -export([entry_shard_count/1]).
 -export([entry_ae_atomics/1]).
+-export([entry_high_water_ref/1]).
 -export([entry_consistency_class/1]).
 
 %% Namespace-level consistency_class lookup (`MST_DB_DESIGN.md` §15).
@@ -332,6 +342,31 @@ bump_ae(NS, Index, Shard, Now) when is_integer(Now) ->
 
 
 -doc("""
+Read the per-shard high-water HLC mark
+(`bondy_oplog_high_water`).
+
+Returns `{ok, Hlc}` when at least one `cell_apply` event has been
+materialised into the shard's projection since the shard's last
+registration (or `finalize_catalogue_bootstrap/3` call), `{ok,
+no_watermark}` otherwise, and `not_found` when no shard is
+registered under the given key.
+
+The watermark is *not* durable across instance restarts — see
+`bondy_oplog_high_water` module docs.
+""").
+-spec high_water_hlc(atom(), atom(), non_neg_integer()) ->
+    {ok, non_neg_integer()} | {ok, no_watermark} | not_found.
+
+high_water_hlc(NS, Index, Shard) ->
+    case lookup(NS, Index, Shard) of
+        {ok, #entry{high_water_ref = Ref}} ->
+            bondy_oplog_high_water:read(Ref);
+        not_found ->
+            not_found
+    end.
+
+
+-doc("""
 Bump every shard in `Targets` with a single shared
 `erlang:monotonic_time(millisecond)` so the batch observes the same
 "now". Returns `{Bumped, NotFound}` counts for telemetry. An empty
@@ -443,6 +478,7 @@ entry_overlay(#entry{overlay = V}) -> V.
 entry_fold_module(#entry{fold_module = V}) -> V.
 entry_shard_count(#entry{shard_count = V}) -> V.
 entry_ae_atomics(#entry{ae_atomics = V}) -> V.
+entry_high_water_ref(#entry{high_water_ref = V}) -> V.
 entry_consistency_class(#entry{consistency_class = V}) -> V.
 
 
@@ -510,6 +546,7 @@ handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
             ok = atomics:put(NewRef, 1, -(1 bsl 62)),
             NewRef
     end,
+    HighWater = bondy_oplog_high_water:new(),
     Entry = #entry{
         key = Key,
         shard_count = maps:get(shard_count, Config),
@@ -520,6 +557,7 @@ handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
         overlay = maps:get(overlay, Config),
         fold_module = maps:get(fold_module, Config),
         ae_atomics = Ae,
+        high_water_ref = HighWater,
         consistency_class = maps:get(consistency_class, Config, ap)
     },
     true = ets:insert(?TABLE, Entry),

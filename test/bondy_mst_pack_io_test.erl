@@ -2,7 +2,7 @@
 %% EUnit suite for `bondy_mst_pack_io:read_record/3`. Covers the four
 %% terminal return shapes — `{ok, _}`, `not_found`, `{error, {pack_io,
 %% _, _}}`, `{error, {crc_mismatch, _, _}}` — against a real sealed
-%% pack built by `bondy_mst_pack_writer:create_sealed_pack/6` and then
+%% pack built by `bondy_mst_pack_seal:create_sealed_pack/6` and then
 %% opened directly so the test exercises the I/O module in isolation
 %% from the reader/store wrappers.
 %% =============================================================================
@@ -39,7 +39,7 @@ with_sealed_view(BodiesByHash, Fun) ->
         Hashes = lists:sort(maps:keys(BodiesByHash)),
         InstanceHash = erlang:phash2(<<"io-test">>, 1 bsl 32),
         Reader = fun(H) -> {ok, maps:get(H, BodiesByHash)} end,
-        ok = bondy_mst_pack_writer:create_sealed_pack(
+        ok = bondy_mst_pack_seal:create_sealed_pack(
             Dir, InstanceHash, sha256, 1, Hashes, Reader
         ),
         View = open_sealed_view(Dir, 1),

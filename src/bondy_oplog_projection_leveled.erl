@@ -46,7 +46,12 @@ Anything else in `Opts` is ignored.
 
 ## Encoding choices
 
-- **Tag** — `?STD_TAG` (leveled's general-purpose object tag, atom `o`).
+- **Tag** — `?BONDY_FOLD_TAG` (atom `o_fold`). Activates
+  `bondy_oplog_leveled_tag`'s `extract_metadata/3` + `build_head/2`
+  hooks so `book_head/4` returns the HEAD wire format
+  (`<<HlcLen:16, Hlc/binary, ValueBytes/binary>>`) directly from the
+  ledger without a full-object fetch. See
+  `_design/catalogue_expansion_plan.md` §3.4.
 - **Bucket** — passthrough; must be binary (leveled enforces this).
 - **Key** — passthrough; must be binary.
 - **Value** — passthrough.
@@ -68,6 +73,7 @@ Anything else in `Opts` is ignored.
     open/4,
     close/1,
     get/3,
+    head/3,
     put_batch/2,
     range/5,
     delete/3,
@@ -105,8 +111,31 @@ close(#{bookie := _Pid}) ->
 
 get(#{bookie := Pid}, Bucket, Key)
         when is_binary(Bucket), is_binary(Key) ->
-    case leveled_bookie:book_get(Pid, Bucket, Key, ?STD_TAG) of
+    case leveled_bookie:book_get(Pid, Bucket, Key, ?BONDY_FOLD_TAG) of
         {ok, Frame}     -> {ok, Frame};
+        not_found       -> not_found
+    end.
+
+
+-doc """
+HEAD fast-path read. Returns the HEAD wire format
+(`<<HlcLen:16, Hlc/binary, ValueBytes/binary>>`) without fetching the
+full V2 frame from the journal — the bytes are reconstructed in-ledger
+by `bondy_oplog_leveled_tag:build_head/2` from the metadata that the
+extractor stashed at write time.
+
+This is the optional `head/3` callback on
+`bondy_oplog_projection_adapter` — substrates that lack a native HEAD
+mechanism can skip the export and let the caller fall back to
+`get/3 + bondy_oplog_cell_frame:extract_head/1`.
+""".
+-spec head(handle(), Bucket :: binary(), Key :: binary()) ->
+    {ok, HeadBytes :: binary()} | not_found.
+
+head(#{bookie := Pid}, Bucket, Key)
+        when is_binary(Bucket), is_binary(Key) ->
+    case leveled_bookie:book_head(Pid, Bucket, Key, ?BONDY_FOLD_TAG) of
+        {ok, HeadBytes} -> {ok, HeadBytes};
         not_found       -> not_found
     end.
 
@@ -135,7 +164,7 @@ range(#{bookie := Pid}, Bucket, Low, High, Opts)
     Direction = maps:get(direction, Opts, asc),
     FoldFun = make_range_fold_fun(Limit, High),
     {async, Folder} = leveled_bookie:book_objectfold(
-        Pid, ?STD_TAG, Bucket, {Low, High}, {FoldFun, {0, []}}, true
+        Pid, ?BONDY_FOLD_TAG, Bucket, {Low, High}, {FoldFun, {0, []}}, true
     ),
     {_N, AccRev} = try Folder() catch
         throw:{limit_reached, State} -> State
@@ -151,7 +180,12 @@ range(#{bookie := Pid}, Bucket, Low, High, Opts)
 
 delete(#{bookie := Pid}, Bucket, Key)
         when is_binary(Bucket), is_binary(Key) ->
-    case leveled_bookie:book_delete(Pid, Bucket, Key, []) of
+    %% `leveled_bookie:book_delete/4` hardcodes `?STD_TAG`, so we go
+    %% direct to `book_put/6` with the `delete` tombstone payload to
+    %% target `?BONDY_FOLD_TAG`.
+    case leveled_bookie:book_put(
+        Pid, Bucket, Key, delete, [], ?BONDY_FOLD_TAG
+    ) of
         ok      -> ok;
         pause   -> ok
     end.
@@ -163,7 +197,7 @@ info(#{bookie := Pid}) ->
     #{
         backend => leveled,
         bookie => Pid,
-        tag => ?STD_TAG
+        tag => ?BONDY_FOLD_TAG
     }.
 
 
@@ -176,7 +210,9 @@ do_put_batch(_Pid, []) ->
 
 do_put_batch(Pid, [{Bucket, Key, Frame} | Rest])
         when is_binary(Bucket), is_binary(Key), is_binary(Frame) ->
-    case leveled_bookie:book_put(Pid, Bucket, Key, Frame, []) of
+    case leveled_bookie:book_put(
+        Pid, Bucket, Key, Frame, [], ?BONDY_FOLD_TAG
+    ) of
         ok      -> do_put_batch(Pid, Rest);
         pause   -> do_put_batch(Pid, Rest)
     end.

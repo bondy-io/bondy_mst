@@ -231,23 +231,17 @@ insert_overlay(NS, Key, E) ->
     ok = bondy_oplog_db_overlay:insert(OV, ?BUCKET, Key, Event).
 
 materialise(NS, Key, {set, _, _} = State) ->
-    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
-    PH = bondy_db_core_registry:entry_projection_handle(Entry),
-    Frame = bondy_oplog_cell_frame:encode(
-        hlc_of(State),
-        bondy_oplog_fold:encode_state(?STRATEGY, State)
-    ),
-    ok = ?PROJ_MOD:put_batch(PH, [{?BUCKET, Key, Frame}]);
+    do_materialise(NS, Key, State);
 materialise(NS, Key, {cleared, _} = State) ->
-    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
-    PH = bondy_db_core_registry:entry_projection_handle(Entry),
-    Frame = bondy_oplog_cell_frame:encode(
-        hlc_of(State),
-        bondy_oplog_fold:encode_state(?STRATEGY, State)
-    ),
-    ok = ?PROJ_MOD:put_batch(PH, [{?BUCKET, Key, Frame}]);
+    do_materialise(NS, Key, State);
 materialise(_NS, _Key, undefined) ->
     ok.
+
+do_materialise(NS, Key, State) ->
+    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
+    PH = bondy_db_core_registry:entry_projection_handle(Entry),
+    Frame = bondy_oplog_test_helpers:frame(?STRATEGY, State, hlc_of(State)),
+    ok = ?PROJ_MOD:put_batch(PH, [{?BUCKET, Key, Frame}]).
 
 mk_event(Hlc, Op) ->
     Key = bondy_oplog_event:key(Hlc, <<"o">>, Hlc),
@@ -258,7 +252,11 @@ initial() ->
 
 fold_events(State, Events) ->
     lists:foldl(
-        fun(E, Acc) -> bondy_oplog_fold:apply_event(?STRATEGY, Acc, E) end,
+        fun(E, Acc) ->
+            {NewState, _Delta} =
+                bondy_oplog_fold:apply_event(?STRATEGY, Acc, E, undefined),
+            NewState
+        end,
         State,
         Events
     ).
@@ -273,9 +271,10 @@ hlc_of_event({clear, H})   -> H.
 expected_read(Events) ->
     Sorted = lists:sort(fun(A, B) -> hlc_of_event(A) =< hlc_of_event(B) end,
                         Events),
-    case fold_events(initial(), Sorted) of
+    State = fold_events(initial(), Sorted),
+    case bondy_oplog_fold:to_value(?STRATEGY, State) of
         undefined -> undefined;
-        V         -> {V, hlc_of(V)}
+        Value     -> {Value, hlc_of(State)}
     end.
 
 equal_read_result(Got, Expected) ->

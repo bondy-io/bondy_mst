@@ -83,7 +83,7 @@ events_gen() ->
 
 state_gen() ->
     ?LET(Events, events_gen(),
-         lists:foldl(fun(E, S) -> ?MOD:apply_event(S, E) end,
+         lists:foldl(fun(E, S) -> apply_ev(S, E) end,
                      ?MOD:initial_value(),
                      Events)).
 
@@ -94,8 +94,8 @@ state_gen() ->
 prop_apply_event_idempotent() ->
     ?FORALL({State, Event}, {state_gen(), event_gen()},
         begin
-            S1 = ?MOD:apply_event(State, Event),
-            S2 = ?MOD:apply_event(S1, Event),
+            S1 = apply_ev(State, Event),
+            S2 = apply_ev(S1, Event),
             S1 =:= S2
         end).
 
@@ -103,7 +103,7 @@ prop_apply_event_hlc_monotonic() ->
     ?FORALL({State, Event}, {state_gen(), event_gen()},
         begin
             H0 = ?MOD:hlc(State),
-            H1 = ?MOD:hlc(?MOD:apply_event(State, Event)),
+            H1 = ?MOD:hlc(apply_ev(State, Event)),
             H1 >= H0
         end).
 
@@ -134,11 +134,11 @@ prop_encode_event_roundtrip() ->
 prop_gc_safe() ->
     ?FORALL(Events, events_gen(),
         begin
-            S = lists:foldl(fun(E, Acc) -> ?MOD:apply_event(Acc, E) end,
+            S = lists:foldl(fun(E, Acc) -> apply_ev(Acc, E) end,
                             ?MOD:initial_value(), Events),
             Threshold = ?MOD:gc_threshold(S),
             Remaining = [E || E <- Events, event_hlc(E) > as_int(Threshold)],
-            S2 = lists:foldl(fun(E, Acc) -> ?MOD:apply_event(Acc, E) end,
+            S2 = lists:foldl(fun(E, Acc) -> apply_ev(Acc, E) end,
                              S, Remaining),
             S =:= S2
         end).
@@ -182,3 +182,8 @@ inner_event_hlc({issue, H, _, _}) -> H.
 
 as_int(undefined)            -> -1;
 as_int(N) when is_integer(N) -> N.
+
+%% Wrapper over %`apply_event/3`%; existing folds ignore Meta.
+apply_ev(S, E) ->
+    {NewState, _Delta} = ?MOD:apply_event(S, E, undefined),
+    NewState.

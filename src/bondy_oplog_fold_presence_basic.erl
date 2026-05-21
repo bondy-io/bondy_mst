@@ -79,7 +79,9 @@ already-serialised binaries.
 """).
 
 -export([initial_value/0]).
--export([apply_event/2]).
+-export([apply_event/3]).
+-export([to_value/1]).
+-export([apply_value_delta/2]).
 -export([hlc/1]).
 -export([gc_threshold/1]).
 -export([encode_state/1]).
@@ -109,38 +111,57 @@ initial_value() ->
     empty.
 
 
--spec apply_event(state(), event()) -> state().
+-spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
+    bondy_oplog_fold:apply_result().
 
-apply_event(empty, {create, H, P}) ->
-    {live, H, P};
+apply_event(empty, {create, H, P}, _Meta) ->
+    {{live, H, P}, P};
 
-apply_event(empty, {delete, H}) ->
+apply_event(empty, {delete, H}, _Meta) ->
     %% Delete arriving before its corresponding create — record a
     %% tombstone so a later-arriving create with smaller HLC cannot
-    %% silently resurrect the cell.
-    {dead, H};
+    %% silently resurrect the cell. Value stays undefined.
+    {{dead, H}, none};
 
-apply_event({live, OldH, _OldP} = S, {create, H, _}) when H < OldH ->
+apply_event({live, OldH, _OldP} = S, {create, H, _}, _Meta) when H < OldH ->
     %% Older-HLC create on live state — out-of-order, rejected.
-    S;
+    {S, none};
 
-apply_event({live, _, _}, {create, H, P}) ->
-    %% H >= OldH: idempotent absorb (same HLC) or supersede.
-    {live, H, P};
+apply_event({live, _, OldP}, {create, H, P}, _Meta) when P =:= OldP ->
+    %% Idempotent absorb (same payload) — only HLC moves, value unchanged.
+    {{live, H, P}, none};
 
-apply_event({live, OldH, _}, {delete, H}) ->
+apply_event({live, _, _}, {create, H, P}, _Meta) ->
+    %% H >= OldH and payload changed: supersede.
+    {{live, H, P}, P};
+
+apply_event({live, OldH, _}, {delete, H}, _Meta) ->
     %% Delete moves the cell to terminal `dead`. Preserve HLC
     %% monotonicity even if the delete is causally older.
-    {dead, erlang:max(OldH, H)};
+    {{dead, erlang:max(OldH, H)}, undefined};
 
-apply_event({dead, OldH}, {create, H, _}) ->
+apply_event({dead, OldH}, {create, H, _}, _Meta) ->
     %% Terminal — do not resurrect. Bump the cell HLC to reflect that
-    %% we have observed an event with this HLC.
-    {dead, erlang:max(OldH, H)};
+    %% we have observed an event with this HLC. Value unchanged.
+    {{dead, erlang:max(OldH, H)}, none};
 
-apply_event({dead, OldH}, {delete, H}) ->
+apply_event({dead, OldH}, {delete, H}, _Meta) ->
     %% Terminal — bump HLC on duplicate or late-arriving delete.
-    {dead, erlang:max(OldH, H)}.
+    {{dead, erlang:max(OldH, H)}, none}.
+
+
+-spec to_value(state()) -> undefined | payload().
+
+to_value(empty)          -> undefined;
+to_value({live, _H, P})  -> P;
+to_value({dead, _H})     -> undefined.
+
+
+-spec apply_value_delta(undefined | payload(), undefined | payload()) ->
+    undefined | payload().
+
+apply_value_delta(_OldValue, NewValue) ->
+    NewValue.
 
 
 -spec hlc(state()) -> bondy_oplog_hlc:hlc().

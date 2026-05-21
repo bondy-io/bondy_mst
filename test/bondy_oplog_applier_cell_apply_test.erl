@@ -67,7 +67,7 @@ apply_writes_projection() ->
                                 {set, 1, <<"v1">>}}),
     _ = barrier(Id),
     {ok, Frame} = bondy_oplog_projection_ets:get(Proj, ?B, <<"alice">>),
-    {Hlc, Body} = bondy_oplog_cell_frame:decode(Frame),
+    {Hlc, Body, _} = bondy_oplog_cell_frame:decode_full(Frame),
     State = bondy_oplog_fold:decode_state(lww_register, Body),
     ?assertEqual({set, <<"v1">>, 1}, State),
     ?assertEqual(1, Hlc),
@@ -76,13 +76,14 @@ apply_writes_projection() ->
 
 apply_round_trips_through_db_core_read() ->
     %% Substrate read must see the frame the applier just wrote and
-    %% return the decoded fold state with its HLC.
+    %% return the user-facing value (post-§3.6 the read API returns
+    %% `to_value/1`).
     {Id, NS, Cache, Proj} = setup_instance(),
     _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"bob">>,
                                 {set, 42, <<"v">>}}),
     _ = barrier(Id),
     Result = bondy_db_core:read(NS, primary, <<"bob">>),
-    ?assertEqual({{set, <<"v">>, 42}, 42}, Result),
+    ?assertEqual({<<"v">>, 42}, Result),
     teardown_instance(Id, NS, Cache, Proj).
 
 
@@ -93,14 +94,14 @@ later_hlc_wins() ->
     _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
                                 {set, 2, <<"second">>}}),
     _ = barrier(Id),
-    {{set, <<"second">>, 2}, 2} =
+    {<<"second">>, 2} =
         bondy_db_core:read(NS, primary, <<"k">>),
     teardown_instance(Id, NS, Cache, Proj).
 
 
 earlier_hlc_is_absorbed() ->
     %% Applying an HLC-older event after a newer one must leave the
-    %% cell unchanged — the LWW fold's `apply_event/2` is responsible
+    %% cell unchanged — the LWW fold's `apply_event/3` is responsible
     %% for the absorption. The applier just hands the event to the
     %% fold; this proves the read-modify-write loop reads the current
     %% state instead of blindly overwriting.
@@ -110,7 +111,7 @@ earlier_hlc_is_absorbed() ->
     _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
                                 {set, 3, <<"older">>}}),
     _ = barrier(Id),
-    {{set, <<"newer">>, 5}, 5} =
+    {<<"newer">>, 5} =
         bondy_db_core:read(NS, primary, <<"k">>),
     teardown_instance(Id, NS, Cache, Proj).
 
@@ -123,7 +124,7 @@ clear_then_resurrect() ->
     _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
                                 {set, 3, <<"v2">>}}),
     _ = barrier(Id),
-    {{set, <<"v2">>, 3}, 3} =
+    {<<"v2">>, 3} =
         bondy_db_core:read(NS, primary, <<"k">>),
     teardown_instance(Id, NS, Cache, Proj).
 

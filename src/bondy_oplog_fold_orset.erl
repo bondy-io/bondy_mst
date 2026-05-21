@@ -119,7 +119,9 @@ dot sets are ordset (sorted), tombstones are ordset (sorted) — so two
 """).
 
 -export([initial_value/0]).
--export([apply_event/2]).
+-export([apply_event/3]).
+-export([to_value/1]).
+-export([apply_value_delta/2]).
 -export([merge_states/2]).
 -export([hlc/1]).
 -export([gc_threshold/1]).
@@ -157,10 +159,11 @@ initial_value() ->
     #{live => #{}, tombstones => [], hlc => 0}.
 
 
--spec apply_event(state(), event()) -> state().
+-spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
+    bondy_oplog_fold:apply_result().
 
 apply_event(#{live := L, tombstones := T, hlc := H0} = S,
-            {add, H, Elem, Dot})
+            {add, H, Elem, Dot}, _Meta)
         when is_binary(Elem) ->
     H1 = erlang:max(H, H0),
     case ordsets:is_element(Dot, T) of
@@ -168,15 +171,21 @@ apply_event(#{live := L, tombstones := T, hlc := H0} = S,
             %% Dot was observed-removed; OR-Set semantics says a re-add
             %% of a tombstoned dot is a no-op. (To "re-add" the element,
             %% the application allocates a fresh dot.)
-            S#{hlc := H1};
+            {S#{hlc := H1}, none};
         false ->
+            WasLive = maps:is_key(Elem, L),
             Dots0 = maps:get(Elem, L, []),
             Dots1 = ordsets:add_element(Dot, Dots0),
-            S#{live := L#{Elem => Dots1}, hlc := H1}
+            NewS = S#{live := L#{Elem => Dots1}, hlc := H1},
+            Delta = case WasLive of
+                true  -> none;
+                false -> {add_elem, Elem}
+            end,
+            {NewS, Delta}
     end;
 
 apply_event(#{live := L0, tombstones := T0, hlc := H0} = S,
-            {remove, H, _Elem, ObservedDots})
+            {remove, H, _Elem, ObservedDots}, _Meta)
         when is_list(ObservedDots) ->
     H1 = erlang:max(H, H0),
     DotsToTomb = ordsets:from_list(ObservedDots),
@@ -187,8 +196,39 @@ apply_event(#{live := L0, tombstones := T0, hlc := H0} = S,
     %% `live ∩ tombstones = ∅` even when the remove names the wrong
     %% element (which is malformed input, but the fold sanitises rather
     %% than corrupting state).
-    L1 = scrub_dots(L0, DotsToTomb),
-    S#{live := L1, tombstones := T1, hlc := H1}.
+    {L1, RemovedElems} = scrub_dots(L0, DotsToTomb),
+    NewS = S#{live := L1, tombstones := T1, hlc := H1},
+    Delta = case RemovedElems of
+        []  -> none;
+        Els -> {remove_elems, ordsets:from_list(Els)}
+    end,
+    {NewS, Delta}.
+
+
+-spec to_value(state()) -> ordsets:ordset(element_v()).
+
+to_value(#{live := L}) ->
+    ordsets:from_list(maps:keys(L)).
+
+
+-doc """
+Combine an OR-Set value with an `apply_event/3` delta.
+
+Deltas:
+
+- `{add_elem, Elem}` — the event lifted `Elem` into membership.
+- `{remove_elems, Elems}` — the event evicted every listed element
+  (their last live dot was tombstoned).
+""".
+-spec apply_value_delta(ordsets:ordset(element_v()),
+                        {add_elem, element_v()}
+                        | {remove_elems, ordsets:ordset(element_v())}) ->
+    ordsets:ordset(element_v()).
+
+apply_value_delta(OldValue, {add_elem, Elem}) ->
+    ordsets:add_element(Elem, OldValue);
+apply_value_delta(OldValue, {remove_elems, Elems}) ->
+    ordsets:subtract(OldValue, Elems).
 
 
 -spec merge_states(state(), state()) -> state().
@@ -276,14 +316,14 @@ decode_event(<<2, H:64/big-unsigned, ElemSize:32/big-unsigned,
 
 scrub_dots(Live, DotsToTomb) ->
     maps:fold(
-        fun(K, Dots, Acc) ->
+        fun(K, Dots, {AccLive, AccRemoved}) ->
             Remaining = ordsets:subtract(Dots, DotsToTomb),
             case Remaining of
-                [] -> Acc;
-                _  -> Acc#{K => Remaining}
+                [] -> {AccLive, [K | AccRemoved]};
+                _  -> {AccLive#{K => Remaining}, AccRemoved}
             end
         end,
-        #{},
+        {#{}, []},
         Live).
 
 %% =============================================================================

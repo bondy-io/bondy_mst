@@ -43,7 +43,7 @@
 -export([capabilities/1]).
 -export([close/1]).
 -export([copy/3]).
--export([delete/1]).
+-export([destroy/1]).
 -export([delete/2]).
 -export([free/3]).
 -export([gc/2]).
@@ -183,9 +183,9 @@ missing_set(T, Root) ->
 page_refs(Page) ->
     bondy_mst_page:refs(Page).
 
--spec delete(t()) -> ok.
+-spec destroy(t()) -> ok.
 
-delete(#?MODULE{pid = _Pid, name = _Name}) ->
+destroy(#?MODULE{pid = _Pid, name = _Name}) ->
     %% TODO fold over bucket (name) elements and delete them
     ok.
 

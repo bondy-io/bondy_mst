@@ -44,6 +44,9 @@ setup() ->
     %% via the start_link/0 link in cleanup) does not also kill the
     %% per-test process.
     process_flag(trap_exit, true),
+    %% Adapter writes go through the `?BONDY_FOLD_TAG` extractor, which
+    %% needs the leveled hooks installed before `book_put` lands.
+    ok = bondy_oplog_leveled_tag:install(),
     Dir = make_tempdir(),
     {ok, Sup} = bondy_db_leveled_sup:start_link(),
     {Sup, Dir}.
@@ -197,13 +200,15 @@ end_to_end_put_get_through_topology({Sup, Dir}) ->
         %% facade folds the realm into the bucket and uses a bare cell
         %% key. Drive the adapter with two distinct buckets (one per
         %% realm) at the same key to exercise that path.
+        F1 = mk_frame(<<"f1">>),
+        F2 = mk_frame(<<"f2">>),
         ok = Adapter:put_batch(Handle, [
-            {<<"realm-1">>, <<"alice">>, <<"f1">>},
-            {<<"realm-2">>, <<"alice">>, <<"f2">>}
+            {<<"realm-1">>, <<"alice">>, F1},
+            {<<"realm-2">>, <<"alice">>, F2}
         ]),
-        ?assertEqual({ok, <<"f1">>},
+        ?assertEqual({ok, F1},
                      Adapter:get(Handle, <<"realm-1">>, <<"alice">>)),
-        ?assertEqual({ok, <<"f2">>},
+        ?assertEqual({ok, F2},
                      Adapter:get(Handle, <<"realm-2">>, <<"alice">>))
     end.
 
@@ -220,6 +225,12 @@ make_tempdir() ->
     ]),
     ok = filelib:ensure_dir(filename:join(Base, ".keep")),
     Base.
+
+
+mk_frame(Bytes) when is_binary(Bytes) ->
+    %% Wrap raw bytes in the minimal V2 cell-frame shape so the leveled
+    %% tag extractor accepts the object.
+    bondy_oplog_cell_frame:encode(0, Bytes, Bytes, false).
 
 
 rmrf(Dir) ->

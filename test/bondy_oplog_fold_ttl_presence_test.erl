@@ -42,7 +42,7 @@ undefined_plus_issue_becomes_issued_test() ->
     E = hlc(1000, 0),
     P = mk_payload(1),
     ?assertEqual({issued, H, E, P},
-                 ?MOD:apply_event(undefined, {issue, H, E, P})).
+                 apply_ev(undefined, {issue, H, E, P})).
 
 issued_plus_newer_issue_supersedes_test() ->
     H1 = hlc(100, 0),
@@ -51,28 +51,28 @@ issued_plus_newer_issue_supersedes_test() ->
     E2 = hlc(2000, 0),
     S0 = {issued, H1, E1, mk_payload(1)},
     ?assertEqual({issued, H2, E2, mk_payload(2)},
-                 ?MOD:apply_event(S0, {issue, H2, E2, mk_payload(2)})).
+                 apply_ev(S0, {issue, H2, E2, mk_payload(2)})).
 
 issued_plus_older_issue_rejected_test() ->
     H1 = hlc(200, 0),
     H2 = hlc(100, 0),
     S0 = {issued, H1, hlc(1000, 0), mk_payload(1)},
     ?assertEqual(S0,
-                 ?MOD:apply_event(S0, {issue, H2, hlc(2000, 0), mk_payload(2)})).
+                 apply_ev(S0, {issue, H2, hlc(2000, 0), mk_payload(2)})).
 
 issued_plus_same_hlc_same_data_idempotent_test() ->
     H = hlc(100, 0),
     E = hlc(1000, 0),
     P = mk_payload(1),
     S0 = {issued, H, E, P},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {issue, H, E, P})).
+    ?assertEqual(S0, apply_ev(S0, {issue, H, E, P})).
 
 issued_plus_same_hlc_larger_payload_resolves_test() ->
     H = hlc(100, 0),
     E = hlc(1000, 0),
     S0 = {issued, H, E, <<"a">>},
     ?assertEqual({issued, H, E, <<"z">>},
-                 ?MOD:apply_event(S0, {issue, H, E, <<"z">>})).
+                 apply_ev(S0, {issue, H, E, <<"z">>})).
 
 %% =============================================================================
 %% Revoke semantics
@@ -80,36 +80,36 @@ issued_plus_same_hlc_larger_payload_resolves_test() ->
 
 undefined_plus_revoke_tombstones_test() ->
     H = hlc(100, 0),
-    ?assertEqual({revoked, H}, ?MOD:apply_event(undefined, {revoke, H})).
+    ?assertEqual({revoked, H}, apply_ev(undefined, {revoke, H})).
 
 issued_plus_newer_revoke_terminates_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
     S0 = {issued, H1, hlc(1000, 0), mk_payload(1)},
-    ?assertEqual({revoked, H2}, ?MOD:apply_event(S0, {revoke, H2})).
+    ?assertEqual({revoked, H2}, apply_ev(S0, {revoke, H2})).
 
 issued_plus_same_hlc_revoke_wins_tie_test() ->
     H = hlc(100, 0),
     S0 = {issued, H, hlc(1000, 0), mk_payload(1)},
-    ?assertEqual({revoked, H}, ?MOD:apply_event(S0, {revoke, H})).
+    ?assertEqual({revoked, H}, apply_ev(S0, {revoke, H})).
 
 issued_plus_older_revoke_rejected_test() ->
     H1 = hlc(200, 0),
     H2 = hlc(100, 0),
     S0 = {issued, H1, hlc(1000, 0), mk_payload(1)},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {revoke, H2})).
+    ?assertEqual(S0, apply_ev(S0, {revoke, H2})).
 
 revoked_plus_newer_revoke_bumps_hlc_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
     ?assertEqual({revoked, H2},
-                 ?MOD:apply_event({revoked, H1}, {revoke, H2})).
+                 apply_ev({revoked, H1}, {revoke, H2})).
 
 revoked_plus_older_revoke_idempotent_test() ->
     H1 = hlc(200, 0),
     H2 = hlc(100, 0),
     S0 = {revoked, H1},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {revoke, H2})).
+    ?assertEqual(S0, apply_ev(S0, {revoke, H2})).
 
 %% =============================================================================
 %% Re-issue after revoke (deviation from doc §4.6)
@@ -124,19 +124,19 @@ revoked_plus_newer_issue_reanimates_test() ->
     P2 = mk_payload(2),
     S0 = {revoked, H1},
     ?assertEqual({issued, H2, E, P2},
-                 ?MOD:apply_event(S0, {issue, H2, E, P2})).
+                 apply_ev(S0, {issue, H2, E, P2})).
 
 revoked_plus_older_issue_rejected_test() ->
     H1 = hlc(200, 0),
     H2 = hlc(100, 0),
     S0 = {revoked, H1},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {issue, H2, hlc(2000, 0), mk_payload(2)})).
+    ?assertEqual(S0, apply_ev(S0, {issue, H2, hlc(2000, 0), mk_payload(2)})).
 
 revoked_plus_same_hlc_issue_revoke_wins_test() ->
     H = hlc(100, 0),
     S0 = {revoked, H},
     ?assertEqual(S0,
-                 ?MOD:apply_event(S0, {issue, H, hlc(2000, 0), mk_payload(2)})).
+                 apply_ev(S0, {issue, H, hlc(2000, 0), mk_payload(2)})).
 
 %% =============================================================================
 %% is_currently_valid/2
@@ -279,11 +279,17 @@ dispatcher_apply_event_via_shorthand_test() ->
     E = hlc(1000, 0),
     P = mk_payload(1),
     ?assertEqual(
-        {issued, H, E, P},
-        bondy_oplog_fold:apply_event(ttl_presence, undefined, {issue, H, E, P})
+        {{issued, H, E, P}, P},
+        bondy_oplog_fold:apply_event(ttl_presence, undefined,
+                                     {issue, H, E, P}, undefined)
     ).
 
 dispatcher_merge_states_via_shorthand_test() ->
     A = {issued, hlc(100, 0), hlc(1000, 0), mk_payload(1)},
     B = {issued, hlc(200, 0), hlc(2000, 0), mk_payload(2)},
     ?assertEqual(B, bondy_oplog_fold:merge_states(ttl_presence, A, B)).
+
+%% Wrapper over %`apply_event/3`%; existing folds ignore Meta.
+apply_ev(S, E) ->
+    {NewState, _Delta} = ?MOD:apply_event(S, E, undefined),
+    NewState.

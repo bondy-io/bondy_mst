@@ -40,7 +40,7 @@ initial_value_is_undefined_test() ->
 undefined_plus_set_becomes_set_test() ->
     H = hlc(100, 0),
     V = mk_value(1),
-    ?assertEqual({set, V, H}, ?MOD:apply_event(undefined, {set, H, V})).
+    ?assertEqual({set, V, H}, apply_ev(undefined, {set, H, V})).
 
 set_plus_newer_set_supersedes_test() ->
     H1 = hlc(100, 0),
@@ -48,20 +48,20 @@ set_plus_newer_set_supersedes_test() ->
     S0 = {set, mk_value(1), H1},
     ?assertEqual(
         {set, mk_value(2), H2},
-        ?MOD:apply_event(S0, {set, H2, mk_value(2)})
+        apply_ev(S0, {set, H2, mk_value(2)})
     ).
 
 set_plus_older_set_rejected_test() ->
     H1 = hlc(200, 0),
     H2 = hlc(100, 0),
     S0 = {set, mk_value(1), H1},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {set, H2, mk_value(2)})).
+    ?assertEqual(S0, apply_ev(S0, {set, H2, mk_value(2)})).
 
 set_plus_same_hlc_same_value_idempotent_test() ->
     H = hlc(100, 0),
     V = mk_value(1),
     S0 = {set, V, H},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {set, H, V})).
+    ?assertEqual(S0, apply_ev(S0, {set, H, V})).
 
 set_plus_same_hlc_lex_tie_break_test() ->
     %% Tie-break is deterministic: larger lex payload wins, regardless
@@ -71,11 +71,11 @@ set_plus_same_hlc_lex_tie_break_test() ->
     Vlarge = <<"z">>,
     ?assertEqual(
         {set, Vlarge, H},
-        ?MOD:apply_event({set, Vsmall, H}, {set, H, Vlarge})
+        apply_ev({set, Vsmall, H}, {set, H, Vlarge})
     ),
     ?assertEqual(
         {set, Vlarge, H},
-        ?MOD:apply_event({set, Vlarge, H}, {set, H, Vsmall})
+        apply_ev({set, Vlarge, H}, {set, H, Vsmall})
     ).
 
 %% =============================================================================
@@ -84,25 +84,25 @@ set_plus_same_hlc_lex_tie_break_test() ->
 
 undefined_plus_clear_becomes_cleared_test() ->
     H = hlc(100, 0),
-    ?assertEqual({cleared, H}, ?MOD:apply_event(undefined, {clear, H})).
+    ?assertEqual({cleared, H}, apply_ev(undefined, {clear, H})).
 
 set_plus_newer_clear_becomes_cleared_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
     S0 = {set, mk_value(1), H1},
-    ?assertEqual({cleared, H2}, ?MOD:apply_event(S0, {clear, H2})).
+    ?assertEqual({cleared, H2}, apply_ev(S0, {clear, H2})).
 
 set_plus_older_clear_rejected_test() ->
     H1 = hlc(200, 0),
     H2 = hlc(100, 0),
     S0 = {set, mk_value(1), H1},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {clear, H2})).
+    ?assertEqual(S0, apply_ev(S0, {clear, H2})).
 
 set_plus_same_hlc_clear_clear_wins_test() ->
     %% Tie at same HLC — cleared deterministically wins.
     H = hlc(100, 0),
     ?assertEqual({cleared, H},
-                 ?MOD:apply_event({set, mk_value(1), H}, {clear, H})).
+                 apply_ev({set, mk_value(1), H}, {clear, H})).
 
 cleared_plus_newer_set_resurrects_register_test() ->
     %% LWW: a later-HLC set re-populates the register; cleared is NOT
@@ -111,18 +111,18 @@ cleared_plus_newer_set_resurrects_register_test() ->
     H2 = hlc(200, 0),
     V = mk_value(1),
     ?assertEqual({set, V, H2},
-                 ?MOD:apply_event({cleared, H1}, {set, H2, V})).
+                 apply_ev({cleared, H1}, {set, H2, V})).
 
 cleared_plus_older_set_rejected_test() ->
     H1 = hlc(200, 0),
     H2 = hlc(100, 0),
     S0 = {cleared, H1},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {set, H2, mk_value(1)})).
+    ?assertEqual(S0, apply_ev(S0, {set, H2, mk_value(1)})).
 
 cleared_plus_same_hlc_set_cleared_wins_test() ->
     H = hlc(100, 0),
     S0 = {cleared, H},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {set, H, mk_value(1)})).
+    ?assertEqual(S0, apply_ev(S0, {set, H, mk_value(1)})).
 
 cleared_plus_clear_bumps_hlc_test() ->
     %% Repeated clear: bump HLC so the cell's last-modified reflects
@@ -130,7 +130,7 @@ cleared_plus_clear_bumps_hlc_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
     ?assertEqual({cleared, H2},
-                 ?MOD:apply_event({cleared, H1}, {clear, H2})).
+                 apply_ev({cleared, H1}, {clear, H2})).
 
 %% =============================================================================
 %% hlc/1
@@ -252,3 +252,8 @@ dispatcher_merge_states_via_shorthand_test() ->
     A = {set, mk_value(1), hlc(100, 0)},
     B = {set, mk_value(2), hlc(200, 0)},
     ?assertEqual(B, bondy_oplog_fold:merge_states(lww_register, A, B)).
+
+%% Wrapper over %`apply_event/3`%; existing folds ignore Meta.
+apply_ev(S, E) ->
+    {NewState, _Delta} = ?MOD:apply_event(S, E, undefined),
+    NewState.

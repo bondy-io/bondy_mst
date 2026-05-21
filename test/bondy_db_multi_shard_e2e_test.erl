@@ -118,7 +118,7 @@ fan_out_routing_exercises_all_shards({Topology, Db, _Sup, _Dir}) ->
     ),
     lists:foreach(
         fun({K, V, H}) ->
-            ?assertEqual({ok, {set, V, H}, H}, bondy_db:read(T, Realm, K))
+            ?assertEqual({ok, V, H}, bondy_db:read(T, Realm, K))
         end,
         Writes
     ),
@@ -155,8 +155,8 @@ multi_table_isolation_under_fanout({_Topo, Db, _Sup, _Dir}) ->
     ),
     lists:foreach(
         fun(K) ->
-            {ok, {set, Vu, _}, _} = bondy_db:read(Users, Realm, K),
-            {ok, {set, Vs, _}, _} = bondy_db:read(Sessions, Realm, K),
+            {ok, Vu, _} = bondy_db:read(Users, Realm, K),
+            {ok, Vs, _} = bondy_db:read(Sessions, Realm, K),
             ?assertEqual(<<K/binary, "/u">>, Vu),
             ?assertEqual(<<K/binary, "/s">>, Vs)
         end,
@@ -190,7 +190,7 @@ multi_realm_isolation_under_fanout({_Topo, Db, _Sup, _Dir}) ->
             lists:foreach(
                 fun(K) ->
                     Expect = <<R/binary, "::", K/binary>>,
-                    {ok, {set, V, _}, _} = bondy_db:read(T, R, K),
+                    {ok, V, _} = bondy_db:read(T, R, K),
                     ?assertEqual(Expect, V)
                 end,
                 Keys
@@ -231,7 +231,7 @@ per_shard_scan_recovers_all_keys({_Topo, Db, _Sup, _Dir}) ->
         || S <- lists:seq(0, ?SHARDS - 1)
     ],
     Rows = lists:flatmap(
-        fun({ok, Xs}) -> [{K, V, H} || {K, {set, V, H}, _} <- Xs] end,
+        fun({ok, Xs}) -> [{K, V, H} || {K, V, H} <- Xs] end,
         PerShard
     ),
     GotKeys = lists:usort([K || {K, _, _} <- Rows]),
@@ -270,7 +270,7 @@ concurrent_apply_visible_after_completion({_Topo, Db, _Sup, _Dir}) ->
     ?assertEqual(Writers * PerWriter, length(All)),
     lists:foreach(
         fun({K, V, H}) ->
-            ?assertEqual({ok, {set, V, H}, H}, bondy_db:read(T, Realm, K))
+            ?assertEqual({ok, V, H}, bondy_db:read(T, Realm, K))
         end,
         All
     ),
@@ -302,7 +302,7 @@ later_hlc_wins_across_fanout({_Topo, Db, _Sup, _Dir}) ->
     lists:foreach(
         fun({K, H2}) ->
             ?assertEqual(
-                {ok, {set, <<K/binary, "-v2">>, H2}, H2},
+                {ok, <<K/binary, "-v2">>, H2},
                 bondy_db:read(T, Realm, K)
             )
         end,

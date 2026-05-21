@@ -52,7 +52,11 @@ topology_suite(Topology) ->
             test("concurrent_writers/" ++ Tag,
                  fun concurrent_writers/1),
             test("mst_state_persists_across_close_reopen/" ++ Tag,
-                 fun mst_state_persists_across_close_reopen/1)
+                 fun mst_state_persists_across_close_reopen/1),
+            test("head_path_telemetry_reports_native/" ++ Tag,
+                 fun head_path_telemetry_reports_native/1),
+            test("counter_inc_round_trip/" ++ Tag,
+                 fun counter_inc_round_trip/1)
         ]}.
 
 
@@ -80,7 +84,13 @@ setup(Topology) ->
         %% provisioned via the topology above.
         oplog_instance_opts => #{
             backend      => bondy_mst_pack_store,
-            storage_path => unicode:characters_to_binary(PackDir)
+            storage_path => unicode:characters_to_binary(PackDir),
+            %% Single-process e2e test: each shard's instance is a
+            %% genesis peer with no cluster to bootstrap from. Without
+            %% `seed: true` the applier would refuse to drain the WAL
+            %% per the bootstrap-lifecycle gate
+            %% (`_design/catalogue_expansion_plan.md` §2).
+            seed         => true
         }
     }),
     {Topology, Db, Sup, LeveledDir, PackDir}.
@@ -112,7 +122,7 @@ put_read_round_trip({_Topo, Db, _Sup, _LDir, _PDir}) ->
     H = bondy_db:tick(T),
     V = <<"alice@example.com">>,
     ok = bondy_db:apply(T, Realm, Key, {set, H, V}),
-    ?assertEqual({ok, {set, V, H}, H}, bondy_db:read(T, Realm, Key)),
+    ?assertEqual({ok, V, H}, bondy_db:read(T, Realm, Key)),
     ok = bondy_db:close_table(T).
 
 
@@ -134,7 +144,7 @@ multi_shard_fanout({Topology, Db, _Sup, _LDir, _PDir}) ->
     ),
     lists:foreach(
         fun({K, V, H}) ->
-            ?assertEqual({ok, {set, V, H}, H}, bondy_db:read(T, Realm, K))
+            ?assertEqual({ok, V, H}, bondy_db:read(T, Realm, K))
         end,
         Writes
     ),
@@ -175,7 +185,7 @@ concurrent_writers({_Topo, Db, _Sup, _LDir, _PDir}) ->
     ?assertEqual(Writers * PerWriter, length(All)),
     lists:foreach(
         fun({K, V, H}) ->
-            ?assertEqual({ok, {set, V, H}, H}, bondy_db:read(T, Realm, K))
+            ?assertEqual({ok, V, H}, bondy_db:read(T, Realm, K))
         end,
         All
     ),
@@ -231,7 +241,7 @@ mst_state_persists_across_close_reopen({Topology, Db, _Sup, LDir, PDir}) ->
     try
         lists:foreach(
             fun({K, V, H}) ->
-                ?assertEqual({ok, {set, V, H}, H},
+                ?assertEqual({ok, V, H},
                              bondy_db:read(T1, Realm, K))
             end,
             Writes
@@ -246,6 +256,114 @@ mst_state_persists_across_close_reopen({Topology, Db, _Sup, LDir, PDir}) ->
             false -> ok
         end
     end.
+
+head_path_telemetry_reports_native({Topology, Db, _Sup, _LDir, _PDir}) ->
+    %% Pin the leveled fast-read path: the projection adapter exports
+    %% `head/3` natively, so a read served from the projection must
+    %% emit `path => head` and `head_path => native`. ETS test
+    %% adapters lack `head/3` and fall back; this assertion guards
+    %% against silent regressions on the leveled path
+    %% (`_design/catalogue_expansion_plan.md` §3.10 deferred item).
+    {ok, T} = bondy_db:open_table(Db, users, #{}),
+    Realm = <<"r1">>,
+    Key = <<"head-path-key">>,
+    H = bondy_db:tick(T),
+    V = <<"head-path-val">>,
+    ok = bondy_db:apply(T, Realm, Key, {set, H, V}),
+    %% Drive the applier to bake the event into the projection. The
+    %% drain loop uses `bondy_db:read/3` which warms the value cache;
+    %% we explicitly evict that cache afterwards so the assertion read
+    %% must travel the projection path.
+    ok = wait_for_overlay_drain(T, Realm, Key),
+    Bucket = bucket_for(Topology, users, Realm),
+    NS = maps:get(namespace, T),
+    ok = evict_value_cache(NS, Bucket, Key),
+    Self = self(),
+    HandlerId = {?MODULE, head_path, erlang:unique_integer()},
+    ok = telemetry:attach(
+        HandlerId,
+        [bondy_db_core, read],
+        fun(_, Meas, Meta, _) ->
+            Self ! {read_event, Meas, Meta}
+        end,
+        undefined
+    ),
+    try
+        ?assertEqual({ok, V, H}, bondy_db:read(T, Realm, Key)),
+        Meta = receive {read_event, _, M} -> M after 1000 ->
+            error(no_read_event)
+        end,
+        ?assertEqual(projection, maps:get(source, Meta)),
+        ?assertEqual(head, maps:get(path, Meta)),
+        ?assertEqual(native, maps:get(head_path, Meta))
+    after
+        telemetry:detach(HandlerId),
+        bondy_db:close_table(T)
+    end.
+
+
+wait_for_overlay_drain(T, Realm, Key) ->
+    wait_for_overlay_drain(T, Realm, Key, 50).
+
+
+wait_for_overlay_drain(T, Realm, Key, 0) ->
+    %% Last-ditch read — let the test fail downstream if the cache is
+    %% still warm. We don't have a hook to confirm overlay drain so
+    %% best-effort 5s timeout is the contract.
+    _ = bondy_db:read(T, Realm, Key),
+    ok;
+wait_for_overlay_drain(T, Realm, Key, N) ->
+    case bondy_db:read(T, Realm, Key) of
+        {ok, _, _} -> ok;
+        _ ->
+            timer:sleep(100),
+            wait_for_overlay_drain(T, Realm, Key, N - 1)
+    end.
+
+
+counter_inc_round_trip({_Topo, Db, _Sup, _LDir, _PDir}) ->
+    %% Exercise `bondy_db:counter_inc/4` end-to-end against a
+    %% leveled-backed `pn_counter` table. Multiple positive/negative
+    %% increments must converge to the sum (per-Origin Seq dedup is
+    %% native to the WAL key — duplicate sends are no-ops). Closes
+    %% out the PR-3 carry-over that requested a write-then-read e2e
+    %% for `counter_inc/4` (§4.7).
+    {ok, T} = bondy_db:open_table(Db, counters, #{
+        fold_module => bondy_oplog_fold_pn_counter
+    }),
+    Realm = <<"r1">>,
+    Key = <<"visits">>,
+    Deltas = [+5, -1, +10, -3, +7],
+    Expected = lists:sum(Deltas),
+    lists:foreach(
+        fun(D) -> ok = bondy_db:counter_inc(T, Realm, Key, D) end,
+        Deltas
+    ),
+    ?assertMatch({ok, Expected, _Hlc}, bondy_db:read(T, Realm, Key)),
+    ok = bondy_db:close_table(T).
+
+
+%% Evict the (NS, Bucket, Key) entry from every shard's value cache.
+%% Iterating every shard is cheaper than computing phash2 ourselves
+%% and matches what `bondy_db_core_registry:lookup/3` exposes.
+evict_value_cache(NS, Bucket, Key) ->
+    {ok, ShardCount} = bondy_db_core_registry:shard_count(NS, primary),
+    lists:foreach(
+        fun(Shard) ->
+            case bondy_db_core_registry:lookup(NS, primary, Shard) of
+                {ok, Entry} ->
+                    CA = bondy_db_core_registry:entry_cache_adapter(Entry),
+                    CH = bondy_db_core_registry:entry_cache_handle(Entry),
+                    case CA:get(CH, Bucket, Key) of
+                        {ok, _} -> _ = CA:delete(CH, Bucket, Key);
+                        not_found -> ok
+                    end;
+                not_found -> ok
+            end
+        end,
+        lists:seq(0, ShardCount - 1)
+    ).
+
 
 %% =============================================================================
 %% Helpers

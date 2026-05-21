@@ -67,6 +67,9 @@ set) from making the session run forever.
 -export([start/3]).
 -export([start/4]).
 -export([bootstrap/3]).
+-export([bootstrap_catalogue/3]).
+-export([start_bootstrap/3]).
+-export([start_bootstrap_catalogue/3]).
 
 %% =============================================================================
 %% API
@@ -163,6 +166,14 @@ bootstrap(Instance, Peer, Opts) when is_binary(Instance) ->
     TransportOpts = maps:get(transport_opts, Opts, #{}),
     case Transport:request(Peer, Instance, get_snapshot, TransportOpts) of
         {ok, no_snapshot} ->
+            %% Peer has nothing to bootstrap from. The local instance
+            %% has no path to a `live` projection state through this
+            %% peer — but a *fresh* peer with empty state and no events
+            %% behind the watermark is still safe to flip live (there
+            %% is nothing to apply incorrectly). Skip the snapshot
+            %% install and proceed with plain sync; the lifecycle stays
+            %% as it was (caller is expected to have seeded a genesis
+            %% peer separately, or to try a peer with a snapshot).
             run(Instance, Peer, Opts);
         {ok, Watermark, Snapshot} ->
             case
@@ -171,16 +182,225 @@ bootstrap(Instance, Peer, Opts) when is_binary(Instance) ->
                 )
             of
                 {ok, _} ->
+                    %% Bootstrap completion ordering
+                    %% (`_design/catalogue_expansion_plan.md` §2.4):
+                    %%   1. load_snapshot (done above) installs the
+                    %%      snapshot and advances the watermark to
+                    %%      H_boot.
+                    %%   2. `mark_live/1` writes the durable flag
+                    %%      file — the marker that "everything
+                    %%      before me succeeded." MUST be last:
+                    %%      a crash between (1) and (2) leaves no
+                    %%      flag, so restart re-runs bootstrap
+                    %%      idempotently; a crash after (2)
+                    %%      durably leaves the instance live.
+                    %%   3. Run anti-entropy for events past the new
+                    %%      watermark. Safe to interleave because
+                    %%      the applier is already gated and the WAL
+                    %%      is the buffer.
+                    ok = bondy_oplog_instance:mark_live(Instance),
                     run(Instance, Peer, Opts);
                 {error, watermark_not_advancing} ->
-                    %% Local watermark is already ≥ peer's. Skip the
-                    %% snapshot install and proceed with plain sync.
+                    %% Local watermark is already ≥ peer's. The local
+                    %% instance is either already live (flag exists)
+                    %% or was a genesis seed (lifecycle was already
+                    %% live). Either way mark_live is idempotent;
+                    %% calling it here makes the path uniformly leave
+                    %% the lifecycle in `live` regardless of which
+                    %% branch was taken.
+                    ok = bondy_oplog_instance:mark_live(Instance),
                     run(Instance, Peer, Opts);
                 {error, _} = E ->
                     E
             end;
         {error, _} = E ->
             E
+    end.
+
+?DOC("""
+Catalogue-mode bootstrap session. The peer streams its projection
+cells in chunks (`get_catalogue_snapshot_init` +
+`{get_catalogue_snapshot_next, Cursor}`); the initiator installs each
+batch into its own projection. After the stream ends, the lifecycle is
+marked `live` (for a fresh caller) and the regular pull-direction sync
+runs to catch up on any events newer than the peer's session-start
+watermark.
+
+The local instance MUST be catalogue-mode (`crdt_module = undefined`).
+Single-CRDT-mode callers must use `bootstrap/3` instead. A
+`{error, not_a_catalogue_instance}` is returned otherwise.
+
+If the peer reports `no_snapshot` (it is itself single-CRDT mode, or
+has not yet wired a `cell_apply_target`) the call falls through to
+plain `run/3`. This handles the new-cluster genesis case cleanly: an
+empty peer + empty local replica produces an immediate `done`.
+
+`WasLive` is captured at session start so `finalize_catalogue_bootstrap`
+can decide whether to mark live (fresh) or skip the lifecycle update
+(recovering).
+""").
+-spec bootstrap_catalogue(instance_id(), peer_id(), opts()) ->
+    {ok, bondy_mst:hash() | undefined}
+    | {error, not_a_catalogue_instance}
+    | {error, cursor_expired}
+    | {error, term()}.
+
+bootstrap_catalogue(Instance, Peer, Opts) when is_binary(Instance) ->
+    case bondy_oplog_instance:crdt_module(Instance) of
+        Mod when is_atom(Mod), Mod =/= undefined ->
+            {error, not_a_catalogue_instance};
+        undefined ->
+            do_bootstrap_catalogue(Instance, Peer, Opts)
+    end.
+
+%% @private
+do_bootstrap_catalogue(Instance, Peer, Opts) ->
+    Transport = maps:get(
+        transport,
+        Opts,
+        bondy_oplog_transport_inline
+    ),
+    TransportOpts = maps:get(transport_opts, Opts, #{}),
+    WasLive = is_live(Instance),
+    Start = erlang:monotonic_time(),
+    Result = case Transport:request(
+        Peer, Instance, get_catalogue_snapshot_init, TransportOpts
+    ) of
+        {ok, no_snapshot} ->
+            %% Peer has nothing to ship. Run the regular pull and let
+            %% the lifecycle stay where it was — the caller seeded the
+            %% replica as `live` (genesis) or expects a future
+            %% bootstrap against a non-empty peer.
+            run(Instance, Peer, Opts);
+        {ok, {init, {Watermark, Cursor}}} ->
+            case pull_install_loop(
+                Instance, Peer, Transport, TransportOpts, Cursor, 0, 0
+            ) of
+                {ok, Installed, Skipped} ->
+                    ok = bondy_oplog_instance:finalize_catalogue_bootstrap(
+                        Instance, Watermark, WasLive
+                    ),
+                    telemetry:execute(
+                        [bondy_oplog, sync, catalogue_bootstrap, complete],
+                        #{installed => Installed, skipped => Skipped,
+                          watermark => Watermark},
+                        #{instance_id => Instance, peer => Peer,
+                          was_live => WasLive}
+                    ),
+                    run(Instance, Peer, Opts);
+                {error, _} = E ->
+                    E
+            end;
+        {error, _} = E ->
+            E
+    end,
+    Duration = erlang:monotonic_time() - Start,
+    Outcome = case Result of
+        {ok, _}    -> ok;
+        {error, _} -> error
+    end,
+    telemetry:execute(
+        [bondy_oplog, sync, catalogue_bootstrap, Outcome],
+        #{duration => Duration},
+        #{instance_id => Instance, peer => Peer, was_live => WasLive}
+    ),
+    Result.
+
+%% @private
+pull_install_loop(
+    Instance, Peer, Transport, TransportOpts, Cursor, Installed, Skipped
+) ->
+    Mode = install_mode(Instance),
+    Req = {get_catalogue_snapshot_next, Cursor},
+    case Transport:request(Peer, Instance, Req, TransportOpts) of
+        {ok, {done, []}} ->
+            {ok, Installed, Skipped};
+        {ok, {batch, {NextCursor, Cells}}} ->
+            case
+                bondy_oplog_instance:install_catalogue_batch(
+                    Instance, {Mode, Cells}
+                )
+            of
+                {ok, #{installed := I, skipped := S} = _Counts} ->
+                    pull_install_loop(
+                        Instance, Peer, Transport, TransportOpts,
+                        NextCursor, Installed + I, Skipped + S
+                    );
+                {error, _} = E ->
+                    E
+            end;
+        {error, _} = E ->
+            E
+    end.
+
+%% @private
+%% Pick the install mode based on the local lifecycle: `replace` for
+%% fresh (pre_bootstrap) callers — local projection is empty so per-
+%% cell replacement is identity. `merge` for live callers — the local
+%% projection already has state and the install must use
+%% `merge_states/2` (or fall back to skip-if-older for folds without).
+install_mode(Instance) ->
+    case is_live(Instance) of
+        true  -> merge;
+        false -> replace
+    end.
+
+?DOC("""
+Spawns a `bootstrap/3` (single-CRDT) session in a separate process and
+returns immediately. Failures are logged and the process exits with
+`{bootstrap_failed, Reason}`. Used by the sync scheduler for
+auto-bootstrap of single-CRDT pre_bootstrap instances.
+""").
+-spec start_bootstrap(instance_id(), peer_id(), opts()) -> {ok, pid()}.
+
+start_bootstrap(Instance, Peer, Opts) ->
+    Pid = spawn(fun() ->
+        case bootstrap(Instance, Peer, Opts) of
+            {ok, _} ->
+                ok;
+            {error, Reason} ->
+                ?LOG_WARNING(#{
+                    description => "bootstrap session failed",
+                    instance => Instance,
+                    peer => Peer,
+                    reason => Reason
+                }),
+                exit({bootstrap_failed, Reason})
+        end
+    end),
+    {ok, Pid}.
+
+?DOC("""
+Spawns a `bootstrap_catalogue/3` session in a separate process and
+returns immediately. Failures are logged and the process exits with
+`{bootstrap_catalogue_failed, Reason}`. Used by the sync scheduler for
+auto-bootstrap of catalogue-mode pre_bootstrap instances.
+""").
+-spec start_bootstrap_catalogue(instance_id(), peer_id(), opts()) ->
+    {ok, pid()}.
+
+start_bootstrap_catalogue(Instance, Peer, Opts) ->
+    Pid = spawn(fun() ->
+        case bootstrap_catalogue(Instance, Peer, Opts) of
+            {ok, _} ->
+                ok;
+            {error, Reason} ->
+                ?LOG_WARNING(#{
+                    description => "bootstrap_catalogue session failed",
+                    instance => Instance,
+                    peer => Peer,
+                    reason => Reason
+                }),
+                exit({bootstrap_catalogue_failed, Reason})
+        end
+    end),
+    {ok, Pid}.
+
+%% @private
+is_live(Instance) ->
+    case bondy_oplog_instance:lifecycle_state(Instance) of
+        live -> true;
+        _    -> false
     end.
 
 %% =============================================================================

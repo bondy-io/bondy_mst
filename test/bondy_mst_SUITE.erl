@@ -199,9 +199,9 @@ small_test(Config) ->
             ?assertEqual(D, B)
     end,
 
-    ok = bondy_mst:delete(A),
-    ok = bondy_mst:delete(B),
-    ok = bondy_mst:delete(Z).
+    ok = bondy_mst:destroy(A),
+    ok = bondy_mst:destroy(B),
+    ok = bondy_mst:destroy(Z).
 
 large_test(Config) ->
     Mod = ?config(store, Config),
@@ -263,9 +263,9 @@ large_test(Config) ->
             ?assertEqual(D, B)
     end,
 
-    ok = bondy_mst:delete(A),
-    ok = bondy_mst:delete(B),
-    ok = bondy_mst:delete(Z).
+    ok = bondy_mst:destroy(A),
+    ok = bondy_mst:destroy(B),
+    ok = bondy_mst:destroy(Z).
 
 first_last_test(Config) ->
     Mod = ?config(store, Config),

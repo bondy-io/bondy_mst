@@ -210,20 +210,26 @@ prop_subscription_delivers_matches() ->
             Got =:= Expected
         end).
 
-%% D2 — Cache coherence. After `write_through/4` against a cached
-%% cell, the cached value equals what an uncached slow read would
-%% return (we simulate slow read by invalidating + re-reading).
+%% D2 — Cache coherence post-§3.6. `write_through/4` no longer folds
+%% the event into the cached value (no fold currently exports
+%% `apply_value_delta/2`); it **invalidates** the cache entry so the
+%% next read repopulates from the projection (which still holds the
+%% pre-event state, because this test never drives the applier). We
+%% therefore assert two things:
+%%
+%% 1. After write_through, the cache is empty (the writer's
+%%    in-flight RYOW is delegated to the next read; the underlying
+%%    projection is unchanged).
+%% 2. The next read returns the projection's pre-event value (same
+%%    as an explicit `invalidate_all/1`-then-read sequence).
 prop_cache_coherence_write_through() ->
     ?FORALL({Key, Events, ExtraOp},
             {key_gen(), events_gen(), op_kind_gen()},
         ?IMPLIES(Events =/= [],
             with_shard(fun(NS) ->
-                %% Materialise projection from the event stream so the
-                %% cache will populate on first read.
                 ProjValue = fold_events(initial(), Events),
                 materialise(NS, Key, ProjValue),
                 _ = bondy_db_core:read(NS, primary, Key),
-                %% Write through a new event onto the cached cell.
                 NewHlc = max_hlc(Events) + 10,
                 Event = case ExtraOp of
                     set   -> mk_event(NewHlc, {set, NewHlc,
@@ -231,24 +237,21 @@ prop_cache_coherence_write_through() ->
                     clear -> mk_event(NewHlc, {clear, NewHlc})
                 end,
                 ok = bondy_db_core:write_through(NS, primary, Key, Event),
-                Cached = bondy_db_core:read(NS, primary, Key),
-                %% Slow read = drop cache and re-read against
-                %% projection + (empty) overlay.
                 {ok, Entry} =
                     bondy_db_core_registry:lookup(NS, primary, 0),
                 CH = bondy_db_core_registry:entry_cache_handle(Entry),
+                %% Invariant 1: cache empty after write_through.
+                CacheEmpty = ?CACHE_MOD:get(CH, <<>>, Key) =:= not_found,
+                %% Invariant 2: subsequent read returns the projection's
+                %% pre-event value (write_through did not touch the
+                %% projection).
+                Cached = bondy_db_core:read(NS, primary, Key),
                 ok = ?CACHE_MOD:invalidate_all(CH),
-                %% After invalidation the only state is the projection
-                %% — the event was never applied projection-side, only
-                %% to the cache via write_through. So slow read returns
-                %% the projection's value.
                 Slow = bondy_db_core:read(NS, primary, Key),
-                %% Cache coherence: the value the writer saw must be
-                %% equal to fold(ProjValue, [extra_event]).
-                Expected = expected_read(Events ++ [event_to_op(Event)]),
-                equal_read_result(Cached, Expected)
-                  andalso equal_read_result(Slow,
-                                            expected_read(Events))
+                Expected = expected_read(Events),
+                CacheEmpty
+                  andalso equal_read_result(Cached, Expected)
+                  andalso equal_read_result(Slow, Expected)
             end))).
 
 %% D8 — Concurrent reader safety. With N readers and 1 writer, every
@@ -357,23 +360,17 @@ insert_overlay(NS, Key, E) ->
     ok = bondy_oplog_db_overlay:insert(OV, <<>>, Key, Event).
 
 materialise(NS, Key, {set, _, _} = State) ->
-    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
-    PH = bondy_db_core_registry:entry_projection_handle(Entry),
-    Frame = bondy_oplog_cell_frame:encode(
-        hlc_of(State),
-        bondy_oplog_fold:encode_state(?STRATEGY, State)
-    ),
-    ok = ?PROJ_MOD:put_batch(PH, [{<<>>, Key, Frame}]);
+    do_materialise(NS, Key, State);
 materialise(NS, Key, {cleared, _} = State) ->
-    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
-    PH = bondy_db_core_registry:entry_projection_handle(Entry),
-    Frame = bondy_oplog_cell_frame:encode(
-        hlc_of(State),
-        bondy_oplog_fold:encode_state(?STRATEGY, State)
-    ),
-    ok = ?PROJ_MOD:put_batch(PH, [{<<>>, Key, Frame}]);
+    do_materialise(NS, Key, State);
 materialise(_NS, _Key, undefined) ->
     ok.
+
+do_materialise(NS, Key, State) ->
+    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
+    PH = bondy_db_core_registry:entry_projection_handle(Entry),
+    Frame = bondy_oplog_test_helpers:frame(?STRATEGY, State, hlc_of(State)),
+    ok = ?PROJ_MOD:put_batch(PH, [{<<>>, Key, Frame}]).
 
 mk_event(Hlc, Op) ->
     Key = bondy_oplog_event:key(Hlc, <<"o">>, Hlc),
@@ -391,7 +388,11 @@ initial() ->
 
 fold_events(State, Events) ->
     lists:foldl(
-        fun(E, Acc) -> bondy_oplog_fold:apply_event(?STRATEGY, Acc, E) end,
+        fun(E, Acc) ->
+            {NewState, _Delta} =
+                bondy_oplog_fold:apply_event(?STRATEGY, Acc, E, undefined),
+            NewState
+        end,
         State,
         Events
     ).
@@ -409,9 +410,10 @@ max_hlc(Events) ->
 expected_read(Events) ->
     Sorted = lists:sort(fun(A, B) -> hlc_of_event(A) =< hlc_of_event(B) end,
                         Events),
-    case fold_events(initial(), Sorted) of
+    State = fold_events(initial(), Sorted),
+    case bondy_oplog_fold:to_value(?STRATEGY, State) of
         undefined -> undefined;
-        V         -> {V, hlc_of(V)}
+        Value     -> {Value, hlc_of(State)}
     end.
 
 equal_read_result(Got, Expected) ->
@@ -451,22 +453,28 @@ collect_snaps(P) ->
 build_lineage(Events) ->
     Sorted = lists:sort(fun(A, B) -> hlc_of_event(A) =< hlc_of_event(B) end,
                         Events),
+    %% Lineage maps each HLC to the user-facing value the reader would
+    %% observe after folding the prefix of events ending at that HLC.
+    %% Step 2's read API returns `to_value(State)`, not the raw state.
     {Map, _} = lists:foldl(
         fun(E, {Acc, Prev}) ->
-            New = bondy_oplog_fold:apply_event(?STRATEGY, Prev, E),
+            {New, _Delta} =
+                bondy_oplog_fold:apply_event(?STRATEGY, Prev, E, undefined),
             H = case New of
                 undefined -> 0;
                 _         -> hlc_of(New)
             end,
-            {maps:put(H, New, Acc), New}
+            Value = bondy_oplog_fold:to_value(?STRATEGY, New),
+            {maps:put(H, Value, Acc), New}
         end,
-        {#{0 => initial()}, initial()},
+        {#{0 => bondy_oplog_fold:to_value(?STRATEGY, initial())}, initial()},
         Sorted
     ),
     Map.
 
 in_lineage({undefined, 0}, Lineage) ->
-    maps:get(0, Lineage, undefined) =:= initial();
+    InitValue = bondy_oplog_fold:to_value(?STRATEGY, initial()),
+    maps:get(0, Lineage, undefined) =:= InitValue;
 in_lineage({V, H}, Lineage) ->
     case maps:get(H, Lineage, missing) of
         missing -> false;

@@ -61,7 +61,10 @@ adapter_test_() ->
 %% =============================================================================
 
 setup() ->
-    %% Per-test fresh Bookie in a fresh temp directory.
+    %% Per-test fresh Bookie in a fresh temp directory. The leveled
+    %% tag hooks are wired here so the adapter can use `?BONDY_FOLD_TAG`
+    %% without depending on `bondy_mst_app:start/2`.
+    ok = bondy_oplog_leveled_tag:install(),
     Dir = make_tempdir(),
     {ok, Pid} = leveled_bookie:book_start(Dir, 2000, 100_000_000, none),
     {Pid, Dir}.
@@ -108,17 +111,20 @@ get_returns_not_found_for_missing_key({Pid, _Dir}) ->
 put_then_get_roundtrip({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        ok = ?MOD:put_batch(H, [{?BUCKET, <<"k1">>, <<"v1">>}]),
-        ?assertEqual({ok, <<"v1">>}, ?MOD:get(H, ?BUCKET, <<"k1">>))
+        F = mk_frame(<<"v1">>),
+        ok = ?MOD:put_batch(H, [{?BUCKET, <<"k1">>, F}]),
+        ?assertEqual({ok, F}, ?MOD:get(H, ?BUCKET, <<"k1">>))
     end.
 
 
 put_batch_with_multiple_entries({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        Entries = [{?BUCKET, key_n(I), value_n(I)} || I <- lists:seq(1, 10)],
+        Entries = [{?BUCKET, key_n(I), mk_frame(value_n(I))}
+                   || I <- lists:seq(1, 10)],
         ok = ?MOD:put_batch(H, Entries),
-        [?assertEqual({ok, value_n(I)}, ?MOD:get(H, ?BUCKET, key_n(I)))
+        [?assertEqual({ok, mk_frame(value_n(I))},
+                      ?MOD:get(H, ?BUCKET, key_n(I)))
             || I <- lists:seq(1, 10)],
         ok
     end.
@@ -134,8 +140,9 @@ put_batch_with_empty_list({Pid, _Dir}) ->
 delete_removes_the_key({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        ok = ?MOD:put_batch(H, [{?BUCKET, <<"k">>, <<"v">>}]),
-        ?assertEqual({ok, <<"v">>}, ?MOD:get(H, ?BUCKET, <<"k">>)),
+        F = mk_frame(<<"v">>),
+        ok = ?MOD:put_batch(H, [{?BUCKET, <<"k">>, F}]),
+        ?assertEqual({ok, F}, ?MOD:get(H, ?BUCKET, <<"k">>)),
         ok = ?MOD:delete(H, ?BUCKET, <<"k">>),
         ?assertEqual(not_found, ?MOD:get(H, ?BUCKET, <<"k">>))
     end.
@@ -144,12 +151,14 @@ delete_removes_the_key({Pid, _Dir}) ->
 distinct_buckets_do_not_collide({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
+        F1 = mk_frame(<<"v1">>),
+        F2 = mk_frame(<<"v2">>),
         ok = ?MOD:put_batch(H, [
-            {<<"b1">>, <<"k">>, <<"v1">>},
-            {<<"b2">>, <<"k">>, <<"v2">>}
+            {<<"b1">>, <<"k">>, F1},
+            {<<"b2">>, <<"k">>, F2}
         ]),
-        ?assertEqual({ok, <<"v1">>}, ?MOD:get(H, <<"b1">>, <<"k">>)),
-        ?assertEqual({ok, <<"v2">>}, ?MOD:get(H, <<"b2">>, <<"k">>))
+        ?assertEqual({ok, F1}, ?MOD:get(H, <<"b1">>, <<"k">>)),
+        ?assertEqual({ok, F2}, ?MOD:get(H, <<"b2">>, <<"k">>))
     end.
 
 
@@ -165,9 +174,9 @@ range_excludes_the_high_bound({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
         ok = ?MOD:put_batch(H, [
-            {?BUCKET, <<"k01">>, <<"v01">>},
-            {?BUCKET, <<"k02">>, <<"v02">>},
-            {?BUCKET, <<"k03">>, <<"v03">>}
+            {?BUCKET, <<"k01">>, mk_frame(<<"v01">>)},
+            {?BUCKET, <<"k02">>, mk_frame(<<"v02">>)},
+            {?BUCKET, <<"k03">>, mk_frame(<<"v03">>)}
         ]),
         %% [k01, k03) — must include k01 and k02, exclude k03.
         {ok, Rows} = ?MOD:range(H, ?BUCKET, <<"k01">>, <<"k03">>,
@@ -180,7 +189,8 @@ range_excludes_the_high_bound({Pid, _Dir}) ->
 range_respects_limit({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        Entries = [{?BUCKET, key_n(I), value_n(I)} || I <- lists:seq(1, 10)],
+        Entries = [{?BUCKET, key_n(I), mk_frame(value_n(I))}
+                   || I <- lists:seq(1, 10)],
         ok = ?MOD:put_batch(H, Entries),
         {ok, Rows} = ?MOD:range(H, ?BUCKET, key_n(1), key_n(11),
                                 #{limit => 3}),
@@ -193,7 +203,8 @@ range_respects_limit({Pid, _Dir}) ->
 range_limit_larger_than_data_returns_all({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
-        Entries = [{?BUCKET, key_n(I), value_n(I)} || I <- lists:seq(1, 5)],
+        Entries = [{?BUCKET, key_n(I), mk_frame(value_n(I))}
+                   || I <- lists:seq(1, 5)],
         ok = ?MOD:put_batch(H, Entries),
         {ok, Rows} = ?MOD:range(H, ?BUCKET, key_n(1), key_n(99),
                                 #{limit => 100}),
@@ -205,9 +216,9 @@ range_asc_returns_ascending({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
         ok = ?MOD:put_batch(H, [
-            {?BUCKET, <<"k01">>, <<"v01">>},
-            {?BUCKET, <<"k02">>, <<"v02">>},
-            {?BUCKET, <<"k03">>, <<"v03">>}
+            {?BUCKET, <<"k01">>, mk_frame(<<"v01">>)},
+            {?BUCKET, <<"k02">>, mk_frame(<<"v02">>)},
+            {?BUCKET, <<"k03">>, mk_frame(<<"v03">>)}
         ]),
         {ok, Rows} = ?MOD:range(H, ?BUCKET, <<"k01">>, <<"k99">>,
                                 #{direction => asc}),
@@ -219,9 +230,9 @@ range_desc_returns_reversed({Pid, _Dir}) ->
     fun() ->
         H = handle(Pid),
         ok = ?MOD:put_batch(H, [
-            {?BUCKET, <<"k01">>, <<"v01">>},
-            {?BUCKET, <<"k02">>, <<"v02">>},
-            {?BUCKET, <<"k03">>, <<"v03">>}
+            {?BUCKET, <<"k01">>, mk_frame(<<"v01">>)},
+            {?BUCKET, <<"k02">>, mk_frame(<<"v02">>)},
+            {?BUCKET, <<"k03">>, mk_frame(<<"v03">>)}
         ]),
         {ok, Rows} = ?MOD:range(H, ?BUCKET, <<"k01">>, <<"k99">>,
                                 #{direction => desc}),
@@ -253,6 +264,14 @@ key_n(I) ->
 
 value_n(I) ->
     list_to_binary(io_lib:format("v~3..0B", [I])).
+
+%% Adapter-level tests want to verify get/put/range/delete with opaque
+%% byte payloads but the leveled tag extractor now expects a V2 frame
+%% (`bondy_oplog_cell_frame:encode/4`). Wrap arbitrary bytes in a
+%% minimal V2 frame so the extractor succeeds; the adapter just stores
+%% and returns the bytes round-trip.
+mk_frame(Bytes) when is_binary(Bytes) ->
+    bondy_oplog_cell_frame:encode(0, Bytes, Bytes, false).
 
 
 make_tempdir() ->

@@ -122,7 +122,7 @@ hash.
 -export_type([hash/0]).
 
 -export([capabilities/1]).
--export([delete/1]).
+-export([destroy/1]).
 -export([delete/2]).
 -export([diff_to_list/2]).
 -export([dump/1]).
@@ -308,12 +308,13 @@ capabilities(#?MODULE{store = Store}) ->
     bondy_mst_store:capabilities(Store).
 
 ?DOC("""
-Deletes the tree (by deleting its backend store).
+Destroys the tree by destroying its backend store. Irreversible.
+Distinct from `delete/2`, which removes a single key from the tree.
 """).
--spec delete(t()) -> ok.
+-spec destroy(t()) -> ok.
 
-delete(#?MODULE{store = Val}) ->
-    bondy_mst_store:delete(Val).
+destroy(#?MODULE{store = Val}) ->
+    bondy_mst_store:destroy(Val).
 
 ?DOC("""
 Returns the tree's root hash.

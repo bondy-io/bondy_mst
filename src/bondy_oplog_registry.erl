@@ -127,7 +127,16 @@ table's lifecycle tied to a supervisor child.
     %% the instance's `init/1` finishing (a brief race the applier
     %% tolerates by treating it as "no cap" until visible).
     install_in_flight :: atomics:atomics_ref() | undefined,
-    max_install_in_flight :: pos_integer() | undefined
+    max_install_in_flight :: pos_integer() | undefined,
+    %% Per-instance bootstrap lifecycle handle
+    %% (`bondy_oplog_bootstrap_lifecycle`). Created at instance init —
+    %% see `bondy_oplog_bootstrap_lifecycle:open/2` — and published
+    %% once. The applier reads this row at its own `init/1` and caches
+    %% the handle; the gate check in the drain loop is then a single
+    %% atomic read. `undefined` between the entry's creation and the
+    %% instance's `init/1` finishing; treated as "live" by the
+    %% applier when missing, matching pre-PR-1 behaviour (no gate).
+    lifecycle :: bondy_oplog_bootstrap_lifecycle:handle() | undefined
 }).
 
 -record(state, {}).
@@ -195,6 +204,7 @@ table's lifecycle tied to a supervisor child.
 -export([ae_targets/1]).
 -export([install_in_flight/1]).
 -export([max_install_in_flight/1]).
+-export([lifecycle/1]).
 -export([instance_id_by_sup_pid/1]).
 %% Composite reads — pull several fields in one ETS lookup. Used by
 %% hot lock-free reader paths in `bondy_oplog_instance` that would
@@ -210,6 +220,7 @@ table's lifecycle tied to a supervisor child.
 -export([set_fast_path/2]).
 -export([set_ae_targets/2]).
 -export([set_install_in_flight/3]).
+-export([set_lifecycle/2]).
 
 %% gen_server callbacks
 -export([init/1]).
@@ -406,6 +417,18 @@ max_install_in_flight(InstanceId) ->
     field(InstanceId, #entry.max_install_in_flight).
 
 ?DOC("""
+Returns the bootstrap lifecycle handle for `InstanceId`, or `undefined`
+when the entry has not yet been published. The applier reads this once
+at `init/1` and caches the handle; the gate check then collapses to a
+single `atomics:get/2`.
+""").
+-spec lifecycle(instance_id()) ->
+    bondy_oplog_bootstrap_lifecycle:handle() | undefined.
+
+lifecycle(InstanceId) ->
+    field(InstanceId, #entry.lifecycle).
+
+?DOC("""
 Returns the cached fast-path bundle for an instance, or `undefined`
 when none is published (callers must route through the instance
 gen_server).
@@ -579,6 +602,19 @@ set_install_in_flight(InstanceId, Ref, Cap)
         [] ->
             ok
     end.
+
+?DOC("""
+Publishes the per-instance bootstrap lifecycle handle. Set once by
+the instance's `init/1`; read by the applier at its own `init/1` to
+gate the WAL drain.
+""").
+-spec set_lifecycle(
+    instance_id(), bondy_oplog_bootstrap_lifecycle:handle()
+) -> ok.
+
+set_lifecycle(InstanceId, Handle) when is_binary(InstanceId) ->
+    _ = update_field(InstanceId, #entry.lifecycle, Handle),
+    ok.
 
 %% =============================================================================
 %% gen_server CALLBACKS

@@ -35,13 +35,13 @@ initial_value_is_empty_test() ->
 empty_plus_create_becomes_live_test() ->
     H = hlc(100, 0),
     P = mk_payload(1),
-    ?assertEqual({live, H, P}, ?MOD:apply_event(empty, {create, H, P})).
+    ?assertEqual({live, H, P}, apply_ev(empty, {create, H, P})).
 
 empty_plus_delete_tombstones_test() ->
     %% Delete arriving before create produces a tombstone — a smaller-
     %% HLC create arriving later must not silently resurrect the cell.
     H = hlc(50, 0),
-    ?assertEqual({dead, H}, ?MOD:apply_event(empty, {delete, H})).
+    ?assertEqual({dead, H}, apply_ev(empty, {delete, H})).
 
 live_plus_create_supersedes_with_higher_hlc_test() ->
     H1 = hlc(100, 0),
@@ -49,26 +49,26 @@ live_plus_create_supersedes_with_higher_hlc_test() ->
     S0 = {live, H1, mk_payload(1)},
     ?assertEqual(
         {live, H2, mk_payload(2)},
-        ?MOD:apply_event(S0, {create, H2, mk_payload(2)})
+        apply_ev(S0, {create, H2, mk_payload(2)})
     ).
 
 live_plus_create_idempotent_at_same_hlc_test() ->
     H = hlc(100, 0),
     P = mk_payload(1),
     S0 = {live, H, P},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {create, H, P})).
+    ?assertEqual(S0, apply_ev(S0, {create, H, P})).
 
 live_plus_older_create_rejected_test() ->
     H1 = hlc(200, 0),
     H2 = hlc(100, 0),
     S0 = {live, H1, mk_payload(1)},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {create, H2, mk_payload(2)})).
+    ?assertEqual(S0, apply_ev(S0, {create, H2, mk_payload(2)})).
 
 live_plus_delete_becomes_dead_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
     S0 = {live, H1, mk_payload(1)},
-    ?assertEqual({dead, H2}, ?MOD:apply_event(S0, {delete, H2})).
+    ?assertEqual({dead, H2}, apply_ev(S0, {delete, H2})).
 
 live_plus_older_delete_preserves_monotonic_hlc_test() ->
     %% Delete arrives with a causally older HLC than live's; dead's HLC
@@ -76,7 +76,7 @@ live_plus_older_delete_preserves_monotonic_hlc_test() ->
     H_live = hlc(200, 0),
     H_del  = hlc(100, 0),
     S0 = {live, H_live, mk_payload(1)},
-    ?assertEqual({dead, H_live}, ?MOD:apply_event(S0, {delete, H_del})).
+    ?assertEqual({dead, H_live}, apply_ev(S0, {delete, H_del})).
 
 dead_plus_newer_create_stays_dead_but_bumps_hlc_test() ->
     %% Dead is terminal — never resurrects. The cell HLC bumps to the
@@ -86,7 +86,7 @@ dead_plus_newer_create_stays_dead_but_bumps_hlc_test() ->
     H2 = hlc(300, 0),
     ?assertEqual(
         {dead, H2},
-        ?MOD:apply_event({dead, H1}, {create, H2, mk_payload(1)})
+        apply_ev({dead, H1}, {create, H2, mk_payload(1)})
     ).
 
 dead_plus_older_create_idempotent_test() ->
@@ -94,21 +94,21 @@ dead_plus_older_create_idempotent_test() ->
     H1 = hlc(300, 0),
     H2 = hlc(100, 0),
     S0 = {dead, H1},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {create, H2, mk_payload(1)})).
+    ?assertEqual(S0, apply_ev(S0, {create, H2, mk_payload(1)})).
 
 dead_plus_newer_delete_bumps_hlc_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(300, 0),
     ?assertEqual(
         {dead, H2},
-        ?MOD:apply_event({dead, H1}, {delete, H2})
+        apply_ev({dead, H1}, {delete, H2})
     ).
 
 dead_plus_older_delete_idempotent_test() ->
     H1 = hlc(300, 0),
     H2 = hlc(100, 0),
     S0 = {dead, H1},
-    ?assertEqual(S0, ?MOD:apply_event(S0, {delete, H2})).
+    ?assertEqual(S0, apply_ev(S0, {delete, H2})).
 
 %% =============================================================================
 %% hlc/1
@@ -178,8 +178,9 @@ dispatcher_apply_event_via_shorthand_test() ->
     H = hlc(100, 0),
     P = mk_payload(1),
     ?assertEqual(
-        {live, H, P},
-        bondy_oplog_fold:apply_event(presence_basic, empty, {create, H, P})
+        {{live, H, P}, P},
+        bondy_oplog_fold:apply_event(presence_basic, empty,
+                                     {create, H, P}, undefined)
     ).
 
 dispatcher_initial_value_via_shorthand_test() ->
@@ -199,3 +200,8 @@ dispatcher_page_refs_defaults_to_empty_test() ->
         [],
         bondy_oplog_fold:page_refs(presence_basic, {create, H, mk_payload(1)})
     ).
+
+%% Wrapper over %`apply_event/3`%; existing folds ignore Meta.
+apply_ev(S, E) ->
+    {NewState, _Delta} = ?MOD:apply_event(S, E, undefined),
+    NewState.
