@@ -28,10 +28,10 @@ jepsen/
 ```
 
 The Erlang side that the test drives lives at
-`apps/bondy_mst_jepsen/` in the repo root (an OTP app that depends
-on `bondy_mst`, opens the 10×16 table layout, registers a disterl
-sync dispatch + net-kernel monitor, and exposes a small Cowboy HTTP
-shim on port 8080).
+`jepsen/bondy_mst_jepsen/` — a sibling rebar3 project that depends on
+`bondy_mst` via a `_checkouts/` symlink to the repo root. It opens
+the 10×16 table layout, registers a disterl sync dispatch + net-
+kernel monitor, and exposes a small Cowboy HTTP shim on port 8080.
 
 ## 1. Build the release
 

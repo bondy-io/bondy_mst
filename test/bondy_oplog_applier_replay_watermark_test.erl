@@ -37,7 +37,8 @@ replay_watermark_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         fun cold_replay_full_fold/0,
         fun second_replay_short_circuits_when_root_unchanged/0,
-        fun incremental_replay_skips_already_folded_events/0
+        fun incremental_replay_skips_already_folded_events/0,
+        fun sync_replay_blocks_until_projection_updated/0
     ]}.
 
 %% =============================================================================
@@ -170,6 +171,26 @@ incremental_replay_skips_already_folded_events() ->
             bondy_db_core:read(NS, primary, <<"k">>)
     after
         detach_telemetry(SubRef),
+        teardown_instance(Id, NS, Cache, Proj)
+    end.
+
+
+sync_replay_blocks_until_projection_updated() ->
+    %% `replay_cell_events_sync/1` is the call-variant: it must not
+    %% return until the diff fold has been applied to the projection.
+    %% The cast variant gives no such guarantee — a read taken
+    %% immediately after the cast can race the handler. This test
+    %% drives the call directly with no intervening barrier and
+    %% asserts the projection reflects the latest write.
+    {Id, NS, Cache, Proj, Applier} = setup_instance(),
+    try
+        ok = append_n(Id, <<"k">>, 4),
+        ok = barrier(Id),
+        ok = bondy_oplog_applier:replay_cell_events_sync(Applier),
+        %% No `barrier/1` here — the sync call is the barrier.
+        {{set, <<"v4">>, 4}, 4} =
+            bondy_db_core:read(NS, primary, <<"k">>)
+    after
         teardown_instance(Id, NS, Cache, Proj)
     end.
 

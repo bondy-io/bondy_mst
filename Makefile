@@ -7,7 +7,9 @@ WAL_FUZZ_BUDGET ?= 60
 JEPSEN_BUILD_IMAGE   ?= erlang:27
 JEPSEN_RELEASE_NAME  ?= bondy_mst_jepsen_release
 JEPSEN_RELEASE_VSN   ?= 0.4.0
-JEPSEN_RELEASE_TGZ   ?= _build/jepsen/rel/$(JEPSEN_RELEASE_NAME)/$(JEPSEN_RELEASE_NAME)-$(JEPSEN_RELEASE_VSN).tar.gz
+## The release lives under the sibling project at `jepsen/bondy_mst_jepsen/`.
+## Inside Docker, `REBAR_BASE_DIR` overrides this — see `rel-jepsen`.
+JEPSEN_RELEASE_TGZ   ?= jepsen/bondy_mst_jepsen/_build/default/rel/$(JEPSEN_RELEASE_NAME)/$(JEPSEN_RELEASE_NAME)-$(JEPSEN_RELEASE_VSN).tar.gz
 
 .PHONY: node1 node2 node3 node fuzz-wal fuzz-wal-1h fuzz-wal-24h \
         rel-jepsen rel-jepsen-local jepsen-up jepsen-down jepsen-provision
@@ -59,22 +61,25 @@ docs:
 ## tarball the Jepsen control container installs onto n1/n2/n3 via
 ## the `db/DB` setup hook.
 ##
-## We force `REBAR_BASE_DIR=/tmp/bondy_mst_build` so the in-container
-## OTP version (often different from the host's) doesn't trip over
-## host-compiled .beam files in `_build/`.
+## The release lives in its own rebar3 project at
+## `jepsen/bondy_mst_jepsen/`, which depends on this lib via a
+## `_checkouts/bondy_mst` symlink to the repo root. We force
+## `REBAR_BASE_DIR=/tmp/jepsen_build` so the in-container OTP version
+## doesn't trip over host-compiled .beam files inside the sibling
+## project's `_build/`.
 rel-jepsen:
 	docker run --rm \
 	  -v "$(PWD)":/usr/src/bondy_mst \
-	  -e REBAR_BASE_DIR=/tmp/bondy_mst_build \
-	  -w /usr/src/bondy_mst \
+	  -e REBAR_BASE_DIR=/tmp/jepsen_build \
+	  -w /usr/src/bondy_mst/jepsen/bondy_mst_jepsen \
 	  $(JEPSEN_BUILD_IMAGE) \
-	  bash -c '$(REBAR) as jepsen tar -n $(JEPSEN_RELEASE_NAME) && cp /tmp/bondy_mst_build/jepsen/rel/$(JEPSEN_RELEASE_NAME)/$(JEPSEN_RELEASE_NAME)-$(JEPSEN_RELEASE_VSN).tar.gz jepsen/jepsen.bondymst/'
+	  bash -c '$(REBAR) tar -n $(JEPSEN_RELEASE_NAME) && cp /tmp/jepsen_build/default/rel/$(JEPSEN_RELEASE_NAME)/$(JEPSEN_RELEASE_NAME)-$(JEPSEN_RELEASE_VSN).tar.gz /usr/src/bondy_mst/jepsen/jepsen.bondymst/'
 
 ## Same as rel-jepsen but builds locally (skip Docker). Only useful on
 ## a Linux dev box; macOS-built releases will not run inside the
 ## Debian Jepsen nodes.
 rel-jepsen-local:
-	$(REBAR) as jepsen release tar
+	cd jepsen/bondy_mst_jepsen && $(REBAR) release tar
 	cp $(JEPSEN_RELEASE_TGZ) jepsen/jepsen.bondymst/
 
 jepsen-up:

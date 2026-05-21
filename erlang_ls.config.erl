@@ -1,8 +1,8 @@
 otp_path: "/Users/aramallo/otp/27.0.1/"
 % otp_path: "${_KERL_ACTIVE_DIR}"
 apps_dirs:
-  - "apps/*"
   - "lib/*"
+  - "jepsen/bondy_mst_jepsen"
 deps_dirs:
   - "_build/default/lib/*"
   - "_build/default/checkouts/*"

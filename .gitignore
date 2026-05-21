@@ -20,6 +20,11 @@
 _*
 _build
 _rel
+## Track the rebar3 _checkouts override that pins bondy_mst to the
+## sibling project at jepsen/bondy_mst_jepsen/. The directory itself
+## is otherwise caught by the `_*` rule above.
+!jepsen/bondy_mst_jepsen/_checkouts/
+!jepsen/bondy_mst_jepsen/_checkouts/bondy_mst
 app-deps.dot
 app-deps.png
 data

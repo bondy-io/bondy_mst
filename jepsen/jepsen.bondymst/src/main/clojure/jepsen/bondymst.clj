@@ -13,7 +13,6 @@
 
 (ns jepsen.bondymst
   (:require [clojure.tools.logging :refer :all]
-            [knossos.model :as model]
             [slingshot.slingshot :refer [try+]]
             [jepsen [cli :as cli]
                     [checker :as checker]
@@ -213,20 +212,27 @@
    :final-generator (gen/each-thread (gen/once read-op))})
 
 (defn register-workload
-  "Linearizable register over independent keys: read, write, CAS.
+  "Register-shaped workload over independent keys: read, write, CAS.
 
    The Jepsen `independent` wrapper drives many keys in parallel; the
    Java client deterministically maps each integer key onto one of the
    10 bondy_mst tables, so this single workload also exercises the
-   table sharding across the 16 shared leveled shards per node."
+   table sharding across the 16 shared leveled shards per node.
+
+   Checker: timeline + per-op stats only. The bondy_mst register fold
+   is `lww_register` (LWW by HLC) — a CRDT, not a linearizable
+   register. Earlier revisions wired this into
+   `checker/linearizable {:model (model/cas-register) :algorithm :linear}`
+   but Knossos cannot find a serialisable history through CRDT reads
+   and the search cost blows up exponentially (observed 1.36E+20 on a
+   30s 10-key run before timing out). The right correctness story for
+   this workload is the OR-set `set-full` checker (see
+   `set-workload`); this one stays as a stress + shape probe."
   [opts]
   {:client    (Client. nil)
    :checker   (independent/checker
                 (checker/compose
-                  {:linear   (checker/linearizable
-                              {:model     (model/cas-register)
-                               :algorithm :linear})
-                   :timeline (timeline/html)}))
+                  {:timeline (timeline/html)}))
    :generator (independent/concurrent-generator
                 10
                 (repeatedly #(rand-int 75))
@@ -408,11 +414,15 @@
               (gen/log "Healing cluster")
               (gen/nemesis (:stop-generator nemesis-generator))
               (gen/log "Waiting for recovery")
-              ;; 30s — generous on purpose. CRDT convergence over disterl
-              ;; takes ~sync_interval_ms × (depth of MST divergence)
-              ;; per shard; 30s = 150 sync ticks with the default 200ms
-              ;; cadence, plenty for a 3-node OR-set to settle.
-              (gen/sleep 30)
+              ;; 10s — empirically 50× the sync_interval_ms tick, with
+              ;; per-batch convergence under random-partition-halves
+              ;; observed in <1s and post-kill-vm restart + first
+              ;; sync ack at ~2s. 30s padded sync latency out of the
+              ;; reported `stable-latency` — at 10s the metric reflects
+              ;; the substrate's true convergence shape. Bump it if a
+              ;; checker run flips to `valid? false` for a reason that
+              ;; looks like "didn't have time to sync".
+              (gen/sleep 10)
               (gen/clients (:final-generator workload)))})))
 
 (defn -main

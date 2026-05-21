@@ -274,6 +274,7 @@ configured; defaults are no-ops so existing instances are unaffected.
 -export([projection/1]).
 -export([notify_drain_resume/1]).
 -export([replay_cell_events/1]).
+-export([replay_cell_events_sync/1]).
 
 -export([init/1]).
 -export([handle_call/3]).
@@ -381,6 +382,17 @@ notify_drain_resume(ApplierPid) when is_pid(ApplierPid) ->
 replay_cell_events(ApplierPid) when is_pid(ApplierPid) ->
     gen_server:cast(ApplierPid, replay_cell_events).
 
+-spec replay_cell_events_sync(pid()) -> ok.
+
+%% @doc Synchronous variant of `replay_cell_events/1`. Blocks the
+%% caller until the diff fold has been applied to the projection, so a
+%% read issued immediately after this returns observes the peer-merged
+%% events the corresponding sync session installed. Otherwise identical
+%% to the cast (idempotent, no-op when `cell_apply_target` is not
+%% configured).
+replay_cell_events_sync(ApplierPid) when is_pid(ApplierPid) ->
+    gen_server:call(ApplierPid, replay_cell_events, infinity).
+
 -spec projection(pid()) ->
     {ok, term()} | {error, no_fold_configured}.
 
@@ -479,6 +491,17 @@ do_init_2(InstanceId, WalDir, CommitEvery, PollMs, _Opts,
                         InstanceId, self()
                     ),
                     self() ! drain,
+                    %% Cold-replay catch-up: a durable MST can hold
+                    %% peer-authored events from a previous run whose
+                    %% `replay_cell_events` never ran (process died
+                    %% between `integrate_peer_root/2` and the cast).
+                    %% The WAL drain only handles events past
+                    %% `resume_position/2`, so without this the
+                    %% projection stays stale until the next sync tick.
+                    case CellCtx of
+                        undefined -> ok;
+                        _ -> gen_server:cast(self(), replay_cell_events)
+                    end,
                     {ok, State};
                 {error, Reason} ->
                     {stop, {reader_open_failed, Reason}}
@@ -568,6 +591,12 @@ handle_call(get_projection, _From,
 handle_call(get_projection, _From,
             #state{fold_state = FS} = State) ->
     {reply, {ok, FS}, State};
+handle_call(replay_cell_events, _From, State) ->
+    %% Synchronous variant of the `replay_cell_events` cast. Runs the
+    %% same diff fold and replies `ok` once the projection has caught
+    %% up. Callers that need read-your-peers-write semantics use this
+    %% instead of the cast.
+    {reply, ok, do_replay_cell_events(State)};
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
