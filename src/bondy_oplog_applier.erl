@@ -212,7 +212,23 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% Set when the applier deferred a drain because the cap was
     %% reached. The next `drain_resume` cast (or, defensively, the
     %% backstop poll timer) re-arms `self() ! drain`.
-    drain_deferred = false :: boolean()
+    drain_deferred = false :: boolean(),
+    %% Root hash of the MST snapshot whose `cell_apply` events have
+    %% already been folded into the projection. `do_replay_cell_events/1`
+    %% diffs the live MST against this root via `bondy_mst:diff_to_list/2`
+    %% and only re-applies the new entries — so the cost of a replay is
+    %% O(events since last sync), not O(events in MST). `undefined`
+    %% triggers a one-time full fold (cold start / restart, since the
+    %% MST may hold peer-authored events whose `cell_apply` has never
+    %% been replayed on this node). Advanced exclusively from
+    %% `do_replay_cell_events/1` after the diff fold completes — *not*
+    %% from `commit_now/1`, because a peer `integrate_peer_root` can
+    %% interleave with the WAL drain and land remote pages under the
+    %% post-barrier root, and those remote events have not been folded
+    %% into the projection until the replay path runs. Advancing the
+    %% watermark from `commit_now/1` regresses convergence (Jepsen
+    %% OR-set: 27/226 lost adds).
+    last_replayed_root = undefined :: undefined | bondy_mst:hash()
 }).
 
 -type shard_key()   :: {atom(), atom(), non_neg_integer()}.
@@ -222,7 +238,14 @@ configured; defaults are no-ops so existing instances are unaffected.
     shard_key       := shard_key(),
     adapter         := module(),
     handle          := term(),
-    fold_module     := bondy_oplog_fold:strategy()
+    fold_module     := bondy_oplog_fold:strategy(),
+    %% Cache adapter pair captured at init time so the applier can
+    %% keep the per-shard read cache coherent after every projection
+    %% write. Without this, `bondy_db:apply/4` followed by `read/3` on
+    %% a different process returns stale state — the cache is
+    %% populate-on-miss and never invalidated by writers otherwise.
+    cache_adapter   => module() | undefined,
+    cache_handle    => term()
 }.
 
 -type opts() :: #{
@@ -250,6 +273,7 @@ configured; defaults are no-ops so existing instances are unaffected.
 -export([refresh_validator/2]).
 -export([projection/1]).
 -export([notify_drain_resume/1]).
+-export([replay_cell_events/1]).
 
 -export([init/1]).
 -export([handle_call/3]).
@@ -335,6 +359,27 @@ refresh_validator(ApplierPid, Reason) when is_pid(ApplierPid) ->
 %% operation are absorbed by the `drain_deferred` flag.
 notify_drain_resume(ApplierPid) when is_pid(ApplierPid) ->
     gen_server:cast(ApplierPid, drain_resume).
+
+-spec replay_cell_events(pid()) -> ok.
+
+%% @doc Re-fold the entire MST through the cell_apply path. Intended
+%% to be called by the instance after a `merge_pages` /
+%% `integrate_peer_root` cycle — without this, peer-received events
+%% sit in the local MST but never reach the per-cell projection, and
+%% `bondy_db:read/3` returns only events authored on the local node.
+%%
+%% Idempotent for the CRDT folds that ship with the library (LWW
+%% register, OR-set, map_of_fields, ttl_presence): replaying an
+%% absorbed event either no-ops (same dot already in OR-set live or
+%% tombstones; same {set, V, H} already applied) or yields the same
+%% terminal state (later-HLC LWW). `strict_register` rejects
+%% duplicates with `{error, ...}` from `apply_event/2` but
+%% `apply_one_cell` already catches and logs.
+%%
+%% A no-op when the instance was started without a `cell_apply_target`
+%% — pure-substrate consumers are not affected.
+replay_cell_events(ApplierPid) when is_pid(ApplierPid) ->
+    gen_server:cast(ApplierPid, replay_cell_events).
 
 -spec projection(pid()) ->
     {ok, term()} | {error, no_fold_configured}.
@@ -455,13 +500,17 @@ resolve_cell_apply_ctx(Opts) ->
             case bondy_db_core_registry:lookup(NS, Index, Shard) of
                 {ok, Entry} ->
                     {ok, #{
-                        shard_key   => Key,
-                        adapter     =>
+                        shard_key     => Key,
+                        adapter       =>
                             bondy_db_core_registry:entry_projection_adapter(Entry),
-                        handle      =>
+                        handle        =>
                             bondy_db_core_registry:entry_projection_handle(Entry),
-                        fold_module =>
-                            bondy_db_core_registry:entry_fold_module(Entry)
+                        fold_module   =>
+                            bondy_db_core_registry:entry_fold_module(Entry),
+                        cache_adapter =>
+                            bondy_db_core_registry:entry_cache_adapter(Entry),
+                        cache_handle  =>
+                            bondy_db_core_registry:entry_cache_handle(Entry)
                     }};
                 not_found ->
                     {error, {cell_apply_target_not_registered, Key}}
@@ -524,6 +573,8 @@ handle_call(_Req, _From, State) ->
 
 handle_cast({refresh_validator, Reason}, State) ->
     {noreply, do_refresh_validator(Reason, State)};
+handle_cast(replay_cell_events, State) ->
+    {noreply, do_replay_cell_events(State)};
 handle_cast(drain_resume, #state{drain_deferred = false} = State) ->
     %% Already draining (or about to); the next `self() ! drain` will
     %% pick up the freed slot anyway. Drop the redundant signal.
@@ -905,11 +956,14 @@ apply_cell_batch(#state{cell_apply_ctx = undefined} = State, _Events) ->
 apply_cell_batch(#state{cell_apply_ctx = Ctx,
                         instance_id = Id} = State, Events) ->
     #{adapter := Adapter, handle := Handle, fold_module := Fold} = Ctx,
+    CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
+    CacheHandle  = maps:get(cache_handle,  Ctx, undefined),
     lists:foreach(
         fun(Event) ->
             case bondy_oplog_event:op(Event) of
                 {cell_apply, Bucket, Key, FoldEvent} ->
                     apply_one_cell(Id, Adapter, Handle, Fold,
+                                   CacheAdapter, CacheHandle,
                                    Bucket, Key, FoldEvent);
                 _ ->
                     ok
@@ -920,7 +974,9 @@ apply_cell_batch(#state{cell_apply_ctx = Ctx,
     State.
 
 %% @private
-apply_one_cell(Id, Adapter, Handle, Fold, Bucket, Key, FoldEvent) ->
+apply_one_cell(Id, Adapter, Handle, Fold,
+               CacheAdapter, CacheHandle,
+               Bucket, Key, FoldEvent) ->
     try
         OldState =
             case Adapter:get(Handle, Bucket, Key) of
@@ -937,6 +993,7 @@ apply_one_cell(Id, Adapter, Handle, Fold, Bucket, Key, FoldEvent) ->
         NewFrame = bondy_oplog_cell_frame:encode(Hlc, NewBody),
         case Adapter:put_batch(Handle, [{Bucket, Key, NewFrame}]) of
             ok ->
+                invalidate_cache(CacheAdapter, CacheHandle, Bucket, Key),
                 ok;
             {error, Reason} ->
                 ?LOG_WARNING(#{
@@ -967,6 +1024,144 @@ apply_one_cell(Id, Adapter, Handle, Fold, Bucket, Key, FoldEvent) ->
             }),
             ok
     end.
+
+%% @private
+%% Re-fold the `cell_apply` events that landed in the MST since the
+%% last replay through `apply_one_cell/9`. Called from the instance
+%% after a sync session merges peer events. Without this, remote events
+%% sit in the MST but never reach the projection — `bondy_db:read/3`
+%% would only see events authored locally.
+%%
+%% The walk is incremental: `bondy_mst:diff_to_list/3` prunes subtrees
+%% whose root hash is shared between the current MST and
+%% `last_replayed_root`, so the cost is O(events since last sync) rather
+%% than O(events in MST). A cold start (`last_replayed_root = undefined`)
+%% does one full fold so any peer-authored events present in the MST at
+%% boot time are observed; subsequent replays use the diff.
+do_replay_cell_events(#state{cell_apply_ctx = undefined} = State) ->
+    State;
+do_replay_cell_events(#state{cell_apply_ctx = Ctx,
+                             instance_id = Id,
+                             last_replayed_root = LastRoot} = State) ->
+    case bondy_oplog_registry:mst(Id) of
+        undefined ->
+            State;
+        MST ->
+            CurrentRoot = bondy_mst:root(MST),
+            case CurrentRoot of
+                LastRoot ->
+                    telemetry:execute(
+                        [bondy_oplog, applier, replay_cell_events],
+                        #{cells_applied => 0, pairs => 0},
+                        #{instance_id => Id, outcome => no_change,
+                          incremental => LastRoot =/= undefined}
+                    ),
+                    State;
+                _ ->
+                    Pairs = diff_pairs(MST, LastRoot, Id),
+                    Count = apply_cell_pairs(Ctx, Id, Pairs),
+                    ?LOG_DEBUG(#{
+                        description => "replay_cell_events done",
+                        instance_id => Id,
+                        cells_applied => Count,
+                        incremental => LastRoot =/= undefined
+                    }),
+                    telemetry:execute(
+                        [bondy_oplog, applier, replay_cell_events],
+                        #{cells_applied => Count, pairs => length(Pairs)},
+                        #{instance_id => Id, outcome => applied,
+                          incremental => LastRoot =/= undefined}
+                    ),
+                    State#state{last_replayed_root = CurrentRoot}
+            end
+    end.
+
+%% @private
+%% Returns the `[{Key, Value}]` list to re-apply. Falls back to a full
+%% `to_list/1` if the diff raises — for example, if `LastRoot`'s pages
+%% have been partially GC'd between two replays. The applier never
+%% silently misses events: a failed diff costs one extra full fold.
+diff_pairs(MST, undefined, _Id) ->
+    bondy_mst:to_list(MST);
+diff_pairs(MST, LastRoot, Id) ->
+    try
+        bondy_mst:diff_to_list(MST, LastRoot)
+    catch
+        C:R:S ->
+            ?LOG_WARNING(#{
+                description =>
+                    "bondy_mst:diff_to_list raised; falling back to "
+                    "full MST scan for this replay",
+                instance_id => Id,
+                last_root => LastRoot,
+                class => C,
+                reason => R,
+                stacktrace => S
+            }),
+            bondy_mst:to_list(MST)
+    end.
+
+%% @private
+%% Walks the `{Key, Value}` pairs from the MST (or its diff) and
+%% dispatches every `cell_apply` op through `apply_one_cell/9`.
+%% Non-cell ops are skipped here — the per-instance fold owns them and
+%% has already seen them via the WAL drain.
+apply_cell_pairs(Ctx, Id, Pairs) ->
+    #{adapter := Adapter, handle := Handle, fold_module := Fold} = Ctx,
+    CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
+    CacheHandle  = maps:get(cache_handle,  Ctx, undefined),
+    try
+        lists:foldl(
+            fun
+                ({_Key, {{cell_apply, Bucket, CellKey, FoldEvent},
+                         _Meta, _Prev, _Sig}}, N) ->
+                    apply_one_cell(Id, Adapter, Handle, Fold,
+                                   CacheAdapter, CacheHandle,
+                                   Bucket, CellKey, FoldEvent),
+                    N + 1;
+                (_, N) ->
+                    N
+            end,
+            0,
+            Pairs
+        )
+    catch
+        C:R:S ->
+            ?LOG_WARNING(#{
+                description =>
+                    "bondy_oplog_applier replay_cell_events raised; "
+                    "the projection may be temporarily stale on this "
+                    "node — the next sync tick re-issues the replay.",
+                instance_id => Id,
+                class => C,
+                reason => R,
+                stacktrace => S
+            }),
+            0
+    end.
+
+%% @private
+%% Evict the (Bucket, Key) entry from the per-shard read cache so the
+%% next `bondy_db_core:read/4` re-reads from the projection. Without
+%% this, `bondy_db:apply/4` followed by a `read/3` from a different
+%% process returns stale state — the cache adapter is populate-on-miss
+%% and has no other invalidation path.
+%%
+%% A `delete` is preferred over a `put` because (a) we cannot
+%% reconstruct the cache value here (it is `{Value, Hlc}` where Value
+%% is the *decoded* fold state, but the cache adapter stores it
+%% post-overlay-merge — the applier has no overlay context) and
+%% (b) the next reader's `slow_read_traced/3` will repopulate the
+%% cache anyway.
+invalidate_cache(undefined, _Handle, _Bucket, _Key) ->
+    ok;
+invalidate_cache(_Adapter, undefined, _Bucket, _Key) ->
+    ok;
+invalidate_cache(Adapter, Handle, Bucket, Key) ->
+    %% `delete/3` is the cache_adapter callback. Swallow any errors —
+    %% a failed cache eviction must not stop the drain.
+    _ = catch Adapter:delete(Handle, Bucket, Key),
+    ok.
 
 %% @private
 %% Folds the batch in order, partitioning into verified events and
@@ -1186,6 +1381,25 @@ commit_now(#state{
     %% drop a WAL segment whose events the instance has not yet
     %% applied — a hard durability hole on a co-crash.
     ok = drain_install_queue(InstancePid),
+    %% NOTE: `last_replayed_root` is NOT advanced here even though
+    %% `drain_install_queue/1` proves every local install has been
+    %% applied to the MST. Reason: a peer sync's
+    %% `integrate_peer_root/2` can interleave with the WAL drain and
+    %% land remote pages in the MST under the same root that this
+    %% barrier returns. Those remote events flow through the
+    %% `replay_cell_events` cast — not through `apply_cell_batch/2` —
+    %% so the projection has *not* seen them yet. Advancing the
+    %% watermark to the live root here would mark them as already
+    %% replayed, and `do_replay_cell_events/1` would short-circuit
+    %% before folding them. Empirically (Jepsen OR-set,
+    %% random-partition-halves): doing so produces 27/226 lost adds.
+    %% Leaving the watermark anchored at its previous value keeps the
+    %% next `do_replay_cell_events/1` honest — it sees a diff that
+    %% includes both the locally-installed events and any
+    %% interleaving peer events. Local events are re-folded
+    %% idempotently (CRDT contract); the cost is one extra RMW per
+    %% local event per sync tick, dominated by the sync round-trip
+    %% itself.
     case bondy_oplog_wal_state:write_consumer_offset(Dir, CO) of
         ok ->
             Seg = bondy_oplog_wal_state:committed_segment(CO),

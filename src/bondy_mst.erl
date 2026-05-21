@@ -485,9 +485,22 @@ keys(#?MODULE{} = T) ->
     lists:reverse(fold(T, fun({K, _}, Acc) -> [K | Acc] end, [])).
 
 ?DOC("""
-Computes the difference between two MSTs and returns it as a list.
+Computes the difference between two MSTs (or between an MST and a
+previous root of the same store) and returns it as a list of
+`{Key, Value}` pairs.
+
+When the second argument is an MST handle, both stores and roots are
+used. When it is a binary root hash (or `undefined`), the first MST's
+store is used for both sides and the diff is taken against that root.
+Pages shared by hash between the two roots are pruned from the
+descent, so the walk is O(diff) rather than O(tree).
+
+A binary root that does not resolve in the store (typically because GC
+has pruned it) is treated as `undefined`, and the result is equivalent
+to `to_list(T1)`. Callers that need different fallback semantics
+should pre-check the page's reachability.
 """).
--spec diff_to_list(t(), t()) -> list().
+-spec diff_to_list(t(), t() | hash() | undefined) -> [{key(), value()}].
 
 diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
     diff_to_list(
@@ -496,7 +509,17 @@ diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
         root(T1),
         T2#?MODULE.store,
         root(T2)
-    ).
+    );
+diff_to_list(#?MODULE{store = Store} = T, undefined) ->
+    diff_to_list(T, Store, root(T), Store, undefined);
+diff_to_list(#?MODULE{store = Store} = T, OtherRoot) when is_binary(OtherRoot) ->
+    case bondy_mst_store:get(Store, OtherRoot) of
+        undefined ->
+            %% Previous root has been GC'd; fall back to full list.
+            diff_to_list(T, Store, root(T), Store, undefined);
+        _Page ->
+            diff_to_list(T, Store, root(T), Store, OtherRoot)
+    end.
 
 ?DOC("""
 Get the last `N` items of the tree, or the last `N` items strictly

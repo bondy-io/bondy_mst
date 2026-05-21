@@ -1762,6 +1762,18 @@ do_handle_call(
             undefined -> State#state.max_local_installed_seq;
             S -> erlang:max(S, State#state.max_local_installed_seq)
         end,
+    %% Sync produced new events in the local MST; ask the applier to
+    %% re-fold the cell_apply projection so peer-authored events become
+    %% visible to `bondy_db:read/3`. No-op when the instance was
+    %% started without a `cell_apply_target` (the applier's
+    %% `cell_apply_ctx` is `undefined` and the cast falls through).
+    %% Cast — best-effort; the next sync tick re-arms the request if
+    %% the applier was busy.
+    case bondy_oplog_registry:applier_pid(State#state.instance_id) of
+        undefined -> ok;
+        ApplierPid when is_pid(ApplierPid) ->
+            bondy_oplog_applier:replay_cell_events(ApplierPid)
+    end,
     {reply, ok, State#state{
         mst = MST2,
         live_size = compute_live_size(MST2),

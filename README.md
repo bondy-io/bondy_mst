@@ -1118,6 +1118,27 @@ node-shared registries, the responder, and the schedulers.
 
 ---
 
+## Jepsen
+
+A 3-node Jepsen integration lives under `jepsen/jepsen.bondymst/` and
+exercises 1 namespace × 10 tables × 16 leveled-backed shards per
+table across Distributed Erlang. See
+[`jepsen/jepsen.bondymst/README.md`](jepsen/jepsen.bondymst/README.md)
+for the full run flow:
+
+```sh
+make rel-jepsen     # build the Linux release in a one-shot Docker
+make jepsen-up      # 1 control + 3 nodes via docker-compose
+docker exec -it jepsen-control bash
+cd /root/jepsen.bondymst
+lein run test --nodes n1,n2,n3 \
+  --ssh-private-key /root/shared/jepsen-bot \
+  --workload register --nemesis random-partition-halves \
+  --time-limit 60 --concurrency 10 --rate 10
+```
+
+---
+
 ## Credits
 
 This library builds directly on two pieces of academic work, and would
