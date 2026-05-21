@@ -2502,17 +2502,6 @@ backpressure_admit(
     end.
 
 %% @private
-%% Drops every key in MST that is `=< Watermark`. Used both by explicit
-%% truncation and post-merge re-truncation. Linear in the prefix size;
-%% a structural prefix-truncate that touches only the leftmost path
-%% would be the long-term optimisation.
-%%
-%% Deletes are issued in **descending** order (highest first within the
-%% to-remove prefix). The underlying `bondy_mst:delete/2` has been
-%% observed to leave a page in an invalid state when keys are deleted
-%% in ascending order — manifesting as a `case_clause` in
-%% `bondy_mst:first/2`. Descending order avoids the pathological path.
-%% @private
 %% Monotone watermark advance: returns whichever of the two values is
 %% higher, treating `undefined` as the bottom. Used by both compaction
 %% (via direct assignment, which is safe by construction — the worker
@@ -2524,6 +2513,16 @@ advance_watermark(Cur, New) when New > Cur -> New;
 advance_watermark(Cur, _New) -> Cur.
 
 %% @private
+%% Drops every key in MST that is `=< Watermark`. Used both by explicit
+%% truncation and post-merge re-truncation. Linear in the prefix size;
+%% a structural prefix-truncate that touches only the leftmost path
+%% would be the long-term optimisation.
+%%
+%% Deletes are issued in **descending** order (highest first within the
+%% to-remove prefix). The underlying `bondy_mst:delete/2` has been
+%% observed to leave a page in an invalid state when keys are deleted
+%% in ascending order — manifesting as a `case_clause` in
+%% `bondy_mst:first/2`. Descending order avoids the pathological path.
 truncate_below_or_equal(MST, Watermark) ->
     %% Collect keys ≤ Watermark *in descending order* (the fold cons-es
     %% in ascending order; we keep them ascending and reverse only when
@@ -2775,7 +2774,6 @@ events_in_open_range(MST, W0, Frontier) ->
         )
     ).
 
-%% @private
 %% Stability frontier:
 %%   "the largest event key K such that every event with key ≤ K
 %%    is reachable from every peer's confirmed root"

@@ -558,7 +558,6 @@ scan_loop_for_index(Fd, Off, Acc, BodyEnc) ->
 %% Head segment
 %% -----------------------------------------------------------------------------
 
-%% @private
 %% Per-frame record built during the head-segment scan. In `strict`
 %% mode `accepted_rev` is unused (we keep the writer's idx accumulator
 %% and the file's existing layout). In `rescan` mode we also retain

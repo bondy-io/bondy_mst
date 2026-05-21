@@ -1,0 +1,370 @@
+# bondy_db: the read side
+
+> Audience: anyone who needs to know how `bondy_db:read/3` turns into a
+> nanosecond.
+> Time to read: ~15 min.
+
+`bondy_db` is the consumer-facing reader. Applications never read from
+the oplog directly — they go through `bondy_db`, which composes three
+storage tiers (cache, overlay, projection) and a per-namespace fold
+strategy into a single, predictable read API.
+
+The substrate-level primitive is `bondy_db_core`; `bondy_db` is the
+thin facade that adds Bondy-style tables, realms, and topology. Both
+live in this package.
+
+## The mental model: three tiers
+
+```mermaid
+flowchart TB
+    subgraph HOT["Hot, in-RAM"]
+        CACHE["cache_adapter<br/>bondy_oplog_cache_ets"]
+        OV["overlay<br/>ETS, ordered_set"]
+    end
+    subgraph WARM["Warm, on-disk"]
+        PROJ["projection_adapter<br/>bondy_oplog_projection_leveled per shard"]
+    end
+
+    CACHE -. "miss → read" .-> PROJ
+    OV    -. "merge with" .-> PROJ
+
+    subgraph FOLD[Per-namespace]
+        F[fold_module]
+    end
+    F --- PROJ
+    F --- OV
+```
+
+- **Cache** is the read-after-first-read fast path. A hit returns
+  `{Value, Hlc}` without touching the LSM.
+- **Overlay** is the "events not yet folded into the LSM" buffer.
+  Without it, every read after a write would block on the applier.
+- **Projection** is the materialised state — one cell per
+  `(Bucket, Key)`, value is `<<HlcLen:16, Hlc/binary, FoldedValue>>`.
+
+The **fold module** is what gives the read CRDT semantics.
+[Chapter 05](05_fold_strategies.md) covers folds in detail; here,
+just note that the fold is what merges the projection's snapshot
+with the overlay's tail.
+
+## What a cell looks like
+
+A projection cell value, on disk:
+
+```mermaid
+flowchart LR
+    subgraph CELL[Cell value frame]
+        H["HlcLen<br/>16-bit"]
+        HLC["Hlc bytes<br/>(8 today)"]
+        BODY["FoldedValue bytes<br/>fold-module-encoded"]
+    end
+
+    H --> HLC --> BODY
+```
+
+The HLC is **always present**. Reads return `{Value, Hlc}`, period.
+Causality is exposed, not synthesized. This is the load-bearing
+choice that lets multi-cell reads detect skew without any cluster
+coordination.
+
+## Following a read
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App
+    participant Core as bondy_db_core
+    participant Reg as registry
+    participant Cache
+    participant Proj as projection
+    participant Ov as overlay
+    participant Fold as fold_module
+
+    App->>Core: read(NS, Idx, Bucket, Key)
+    Core->>Reg: lookup(NS, Idx, shard_for(Bucket,Key))
+    Reg-->>Core: {cache, proj, fold, ...}
+
+    Core->>Cache: get(Key)
+    alt cache hit
+        Cache-->>Core: {Value, Hlc}
+        Core-->>App: {Value, Hlc}
+    else cache miss
+        Core->>Proj: get(Key)
+        alt no projection cell
+            Proj-->>Core: not_found
+            Note over Core,Fold: ProjValue = fold:initial_value()<br/>ProjHlc = 0
+        else cell exists
+            Proj-->>Core: <<HlcLen, Hlc, Body>>
+            Core->>Fold: decode_state(Body)
+            Fold-->>Core: ProjValue
+        end
+        Core->>Ov: events_for(Key, after=ProjHlc)
+        Ov-->>Core: [Event1, Event2, ...]
+        loop each overlay event
+            Core->>Fold: apply_event(state, Event)
+            Fold-->>Core: state'
+        end
+        Core->>Cache: put(Key, {Value, Hlc})
+        Core-->>App: {Value, Hlc}
+    end
+```
+
+The slow path is "one LSM get + a tiny fold" — typically a couple of
+microseconds. The cache hit is sub-microsecond.
+
+## The overlay, in pictures
+
+The overlay key shape is the trick:
+
+```
+{{Bucket, Key}, EventHlc, EventKey}
+       ^             ^         ^
+       |             |         full event key (Hlc, Origin, Seq)
+       |             orders within a (Bucket, Key) by HLC
+       composite cell key — Bucket + Key, not a single token
+```
+
+This means `ets:select` can answer "give me all events for
+`(Bucket, Key)` with HLC > T, in HLC order" in one match-spec — no
+per-key linear scans, no sorting in Erlang
+(`bondy_oplog_db_overlay.erl:111`, match-specs at lines 124-129,
+146-155, 173-183).
+
+```mermaid
+flowchart LR
+    subgraph OVERLAY[ETS ordered_set]
+        E1["{ {B,K1}, H1, ekA }"]
+        E2["{ {B,K1}, H2, ekB }"]
+        E3["{ {B,K1}, H3, ekC }"]
+        E4["{ {B,K2}, H1, ekD }"]
+        E5["{ {B,K2}, H2, ekE }"]
+    end
+
+    READK1["read (B,K1)<br/>after H1.5"] -.->|ets:select| E2
+    READK1 -.-> E3
+    READK2["read (B,K2)<br/>after 0"] -.-> E4
+    READK2 -.-> E5
+```
+
+The instance (not the applier) evicts overlay rows per-event after
+the install batch completes — the overlay stays bounded
+(`bondy_oplog_instance.erl:evict_overlay_batch/2`).
+
+## Cache invalidation
+
+The cache is kept coherent via **invalidate-on-commit**: after the
+applier writes a projection cell, it explicitly evicts the cache
+entry for that `(Bucket, Key)` so the next read repopulates from the
+projection.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as applier
+    participant Adapter as projection_adapter
+    participant Cache as cache_adapter
+
+    App->>Adapter: put_batch([{Bucket, Key, NewFrame}])
+    Adapter-->>App: ok
+    App->>Cache: delete(Handle, Bucket, Key)
+    Note over App,Cache: invalidate_cache/4<br/>(bondy_oplog_applier.erl:1190)
+```
+
+There is also an optional **write-through warmth** path,
+`bondy_db_core:write_through/5`, that an application can call to
+populate the cache directly for known hot keys. It only touches the
+cache; the projection itself is still written by the applier.
+Today's `bondy_db` facade does not use it.
+
+## The freshness fence
+
+Reads can be **causal** when they need to be. The substrate exposes a
+wall-clock predicate on `bondy_db_core`:
+
+```erlang
+bondy_db_core:ensure_fresh([users, grants], milliseconds(1000)).
+```
+
+Each `(NS, Index, Shard)` triple registers an **`ae_atomics`** ref
+(a one-element atomics array; see `bondy_db_core_registry.erl`),
+bumped to a monotonic-ms timestamp every time the applier completes
+an AE round for that shard (`bump_ae/3`). The predicate is
+wait-free: read the atomic, subtract from `now`, compare to MaxLag.
+
+```mermaid
+flowchart LR
+    NS[namespaces in scope] --> SHARDS["shards for each (NS, primary, Shard)"]
+    SHARDS --> READA["read ae_atomics ref"]
+    READA --> CHECK["now - last_ae < MaxLag ?"]
+    CHECK -->|all true| OK[ok]
+    CHECK -->|some false| STALE["{stale, [NS, ...]}"]
+```
+
+This is the load-bearing primitive for security consistency. The
+auth path is:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Auth
+    participant Core as bondy_db_core
+    participant FRESH as ensure_fresh
+
+    Client->>Auth: present JWT
+    Auth->>Auth: verify signature + expiry (local)
+    Auth->>FRESH: bondy_db_core:ensure_fresh([users, grants], 1s)
+    alt stale
+        FRESH-->>Auth: {stale, [...]}
+        Auth-->>Client: wamp.error.security_unavailable
+    else fresh
+        FRESH-->>Auth: ok
+        Auth->>Core: bondy_db_core:read(users, primary, Subject)
+        Auth->>Core: bondy_db_core:read(grants, primary, Subject)
+        Auth-->>Client: proceed
+    end
+```
+
+Crucially, the predicate is **independent of the projection that
+might be stale**. Whether or not the projection has been updated,
+the `ae_atomics` timestamp tells you when the shard last completed
+a full anti-entropy round with its peers.
+
+## `read_batch/2` — atomic-as-of-fence reads
+
+When the application needs multiple cells at a common point in time:
+
+```erlang
+bondy_db_core:read_batch(
+    [{users, primary, U1}, {grants, primary, U1}],
+    #{fence => hlc:now(),
+      max_lag => milliseconds(100),
+      consistency => bounded_stale,
+      require_skew_below => milliseconds(50)}
+).
+```
+
+Semantics (`bondy_db_core.erl:180-207`):
+
+```mermaid
+flowchart LR
+    R["fence Hlc<sub>F</sub>"] --> E1[ensure_fresh]
+    E1 -->|stale| ERR["{error, stale}"]
+    E1 -->|ok| F["per-cell read<br/>overlay events with Hlc ≤ Hlc<sub>F</sub>"]
+    F --> SKEW{skew within<br/>require_skew_below ?}
+    SKEW -->|yes| RES["{ok, #{Key => {Value, Hlc}}, Hlc<sub>F</sub>}"]
+    SKEW -->|no| ERR
+```
+
+- Every read in the batch sees the **same upper bound**.
+- The caller observes per-cell HLCs and can compute skew.
+- This is *consistent-as-of-now* with skew detection — not
+  MVCC-as-of-historical-T.
+
+## Secondary indexes — not yet implemented
+
+The registry key carries an `Index` dimension
+(`bondy_db_core_registry.erl`), and the API signatures take an
+`Index` argument, but today **only `primary` is wired**:
+
+- `bondy_db.erl` hard-codes `?INDEX = primary` at every call site.
+- There is no secondary-writer process, no `{apply_secondary, ...}`
+  dispatch in the applier, no `lag_bound` config, no `by_session`
+  read path.
+
+The dimension exists so future secondaries can be added without an
+API break. Until they are, plan reads against the primary index
+only.
+
+## Range scans
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Core as bondy_db_core
+    participant Proj
+    participant Ov as overlay
+
+    App->>Core: range(NS, Idx, Bucket, Lo..Hi)
+    Core->>Proj: range(Lo..Hi)
+    Proj-->>Core: cursor
+    Core->>Ov: overlay_range(Lo..Hi, after=earliest_proj_hlc)
+    Ov-->>Core: list
+    loop each result
+        Core->>Core: merge projection cell with overlay events
+    end
+    Core-->>App: results
+```
+
+Ranges respect the same fold contract as point reads, only batched.
+
+## Topology and the registry
+
+`bondy_db` (the consumer facade, above `bondy_db_core`) introduces:
+
+- **Tables** — like SQL tables but realm-scoped.
+- **Topologies** — pluggable strategies for which Bookie owns which
+  shard. Three ship: `bondy_db_topology_single_bookie`,
+  `bondy_db_topology_per_entity`,
+  `bondy_db_topology_shared_shards`.
+
+```mermaid
+flowchart LR
+    APP[Application] --> FACADE[bondy_db]
+    FACADE --> TOPO["topology<br/>route+bucket_for"]
+    FACADE --> CORE[bondy_db_core]
+    CORE   --> REG[db_core_registry]
+    REG    --> SHARDS["one entry per<br/>(NS, Index, Shard)"]
+```
+
+The registry entry per `(NS, Index, Shard)` carries:
+
+- `projection_adapter` + `projection_handle` — published by the
+  **shard owner** (typically `bondy_db:provision_shard/9`) at
+  open time, not by the applier itself.
+- `cache_adapter` + `cache_handle` — same.
+- `overlay` — the per-instance ETS overlay tid.
+- `fold_module` — the per-namespace fold ([chapter 05](05_fold_strategies.md)).
+- `ae_atomics` — the wait-free freshness ref read by
+  `ensure_fresh/2` and bumped by `bump_ae/3` after each AE round.
+
+The applier reads the registry at init to resolve its
+`cell_apply_target` — the (projection, cache, fold, overlay) tuple
+it writes through on every event.
+
+## Things to keep in mind
+
+- **Reads are lock-free.** Cache hit is ETS read. Cache miss is one
+  Leveled get + a tiny overlay fold.
+- **HLC is always returned.** Causality is part of the API.
+- **Bounded staleness is a per-shard concern.** `ensure_fresh/2`
+  reads the per-shard `ae_atomics` ref; auth namespaces declare it
+  required, routing namespaces don't.
+- **The applier is the only writer to the projection.** Readers
+  share that handle through the registry.
+- **Cache coherence is by invalidation.** The applier deletes the
+  cache entry after each projection write; the next read
+  repopulates.
+- **Secondary indexes are a registry-key dimension only.** No
+  secondary-writer code path exists yet; only `primary` is wired.
+
+## Pointers
+
+Implementation:
+
+- `bondy_db.erl` — the consumer facade (tables, realms, topology).
+- `bondy_db_core.erl` — substrate read API: `read/3`,
+  `read_batch/2`, `ensure_fresh/2`, `range/4`, `write_through/5`.
+- `bondy_db_core_registry.erl` — per-(NS, Index, Shard) handle
+  store + `bump_ae/3`.
+- `bondy_db_topology_single_bookie.erl`,
+  `bondy_db_topology_per_entity.erl`,
+  `bondy_db_topology_shared_shards.erl` — three ship-with
+  topologies.
+- `bondy_oplog_db_overlay.erl` — `{{Bucket, Key}, EventHlc, EventKey}`
+  ETS overlay with match-spec range reads.
+- `bondy_oplog_cache_adapter.erl` + `bondy_oplog_cache_ets.erl`
+  — cache behaviour and the single ETS implementation.
+- `bondy_oplog_projection_adapter.erl` +
+  `bondy_oplog_projection_leveled.erl` — Leveled-backed projection.
+- `bondy_oplog_cell_frame.erl` — `<<HlcLen:16, Hlc:64, Body>>`
+  cell encoding.

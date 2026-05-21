@@ -1,0 +1,252 @@
+# The three packages
+
+> Audience: anyone who wants the mental model before reading any code.
+> Time to read: ~10 min.
+
+You can think of `bondy_mst` as three cooperating libraries hiding
+behind a tidy facade. They have crisp jobs and crisper interfaces:
+
+- **`bondy_oplog`** is the **write side**. It appends events durably,
+  ships them to peers, and recovers them after a crash.
+- **`bondy_mst`** is the **replication structure** — a Merkle Search
+  Tree (state-based CRDT) that lets two peers compare what they have
+  without sending the whole world.
+- **`bondy_db`** is the **read side**. It returns the most recent
+  value for a key, fast, with bounded staleness if you ask for it.
+
+Everything else (the applier, the projection, the cache, the fold
+strategies) is glue between those three.
+
+## The 30-second picture
+
+```mermaid
+flowchart LR
+    App(["Application"])
+    OPLOG["bondy_oplog<br/>write • replicate • recover"]
+    MST["bondy_mst<br/>Merkle Search Tree<br/>anti-entropy"]
+    DB["bondy_db<br/>read • cache • freshness"]
+
+    App -- "append(NS, Event)" --> OPLOG
+    App -- "read(NS, Idx, Key)" --> DB
+
+    OPLOG -. "events become<br/>MST pages" .-> MST
+    MST  -. "events get<br/>materialised" .-> DB
+
+    classDef pkg fill:#0b3,stroke:#053,color:#fff;
+    class OPLOG,MST,DB pkg;
+```
+
+Three things to note before we go any further:
+
+1. **Applications never read from the oplog.** Reads go to `bondy_db`.
+   The oplog is replication / durability machinery beneath that.
+2. **The MST is not a key/value store.** It is the *structure* peers
+   use to agree on a set of events. The materialised key/value
+   answers live in the projection (LSM-backed), behind `bondy_db`.
+3. **There is no leader.** All three packages are local-first;
+   convergence is achieved by exchanging MST pages over a sync
+   transport.
+
+## Layered storage
+
+Each shard, per namespace, owns instances of five layers stacked like
+this:
+
+```mermaid
+flowchart TB
+    O["OVERLAY · in-RAM ETS<br/>events between WAL ack and projection commit"]
+    P["PROJECTION · Leveled LSM per shard<br/>materialised cells: HLC + folded value"]
+    SNAP["COMPACTION SNAPSHOT · single file<br/>CRDT state at the compaction watermark"]
+    MST["MST PAGE STORE · packfile + .idx<br/>content-addressed pages, replication substrate"]
+    WAL["WAL · append-only segments<br/>source of truth"]
+
+    O   --> P
+    P   --> SNAP
+    SNAP --> MST
+    MST --> WAL
+```
+
+The arrows mean *"rebuilds from"*. If you delete every other layer, the
+WAL alone can reconstruct the whole stack — that is why the WAL is the
+"must survive" layer and everything above it is a performance choice.
+
+## Following a write end-to-end
+
+Imagine a client calls `bondy_oplog:append(NS, Event)`. Here is what
+happens in the happy path:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Caller
+    participant INST as bondy_oplog_instance
+    participant WAL as bondy_oplog_wal
+    participant OV as overlay (ETS)
+    participant SYNC as sync_scheduler<br/>+ sync_session
+    participant APP as bondy_oplog_applier
+    participant MST as bondy_mst (pages)
+    participant PROJ as projection (Leveled)
+
+    C->>INST: append(Event)
+    INST->>WAL: append(frame)
+    WAL-->>INST: {Hlc, Segment, Offset}
+    INST->>OV: insert(event)
+    INST-->>C: ok (caller unblocks)
+    Note over OV,SYNC: Eager-push happens here<br/>(peer that's already syncing<br/>pulls newest pages).
+
+    par async install
+        APP->>WAL: drain batch
+        APP->>MST: install pages
+        APP->>PROJ: write {Hlc, FoldedValue}
+        APP->>OV: evict applied events
+    and async sync to peers
+        SYNC->>MST: compare roots with peer
+        MST-->>SYNC: missing pages
+        SYNC->>SYNC: ship them
+    end
+```
+
+A few things the diagram is hiding to keep it readable:
+
+- The WAL only writes one frame; what the caller sees as one event
+  becomes one `term_to_binary([Event], _)` payload on disk.
+- The overlay (step 4) is what makes the event visible to **reads**
+  before the projection catches up. It is the read-your-writes
+  primitive.
+- The sync session uses **MST root comparison**, not a full event
+  exchange. That is the whole point of `bondy_mst` — see [chapter 02](02_bondy_mst.md).
+
+## Following a read end-to-end
+
+Now `bondy_db:read(NS, primary, Key)`:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Application
+    participant DB as bondy_db / bondy_db_core
+    participant CACHE as cache_adapter (ETS)
+    participant OV as overlay (ETS)
+    participant PROJ as projection (Leveled)
+    participant FOLD as fold_module
+
+    App->>DB: read(NS, primary, Key)
+    DB->>CACHE: get(Key)
+    alt cache hit
+        CACHE-->>DB: {Value, Hlc}
+        DB-->>App: {Value, Hlc}
+    else cache miss
+        DB->>PROJ: get(Key)
+        PROJ-->>DB: {ProjValue, ProjHlc}
+        DB->>OV: events_after(Key, ProjHlc)
+        OV-->>DB: [Event, ...]
+        DB->>FOLD: apply_event(ProjValue, Event)*
+        FOLD-->>DB: {Value, Hlc}
+        DB->>CACHE: put(Key, {Value, Hlc})
+        DB-->>App: {Value, Hlc}
+    end
+```
+
+Three storage tiers on the hot path: cache, overlay, projection. The
+**fold module** is the per-namespace merge function ([chapter 05](05_fold_strategies.md)) —
+that's what gives the read its CRDT semantics.
+
+## How the three packages talk to each other
+
+Zooming in on the wires:
+
+```mermaid
+flowchart TB
+    subgraph BONDY_OPLOG["bondy_oplog"]
+        OPLOG_INST["oplog_instance"]
+        WAL["wal"]
+        SYNC["sync_scheduler<br/>sync_session"]
+        APP["applier"]
+    end
+    subgraph BONDY_MST["bondy_mst"]
+        TREE["MST in-memory"]
+        PSTORE["pack_store · packfile"]
+        STORES{{"ets_store · map_store · pack_store"}}
+    end
+    subgraph BONDY_DB["bondy_db"]
+        FACADE["bondy_db"]
+        CORE["bondy_db_core"]
+        REG["db_core_registry"]
+        OVERLAY["oplog_db_overlay"]
+        CACHE["cache_adapter"]
+        PROJ["projection_adapter<br/>leveled"]
+    end
+
+    OPLOG_INST -->|"append + install"| WAL
+    OPLOG_INST -->|"install pages"| TREE
+    TREE -->|"put / get pages"| STORES
+    STORES --- PSTORE
+    APP -->|"drain"| WAL
+    APP -->|"cell_apply"| PROJ
+    APP -->|"evict"| OVERLAY
+    SYNC -->|"exchange roots"| TREE
+
+    FACADE --> CORE
+    CORE --> REG
+    CORE --> CACHE
+    CORE --> OVERLAY
+    CORE --> PROJ
+
+    OPLOG_INST -->|"merge into"| OVERLAY
+```
+
+Most of the arrows here are obvious from chapters
+[01](01_bondy_oplog.md) / [02](02_bondy_mst.md) /
+[03](03_bondy_db.md) / [04](04_applier.md); the ones worth
+flagging:
+
+- The **applier is the only writer to the projection.** Reads share
+  the same projection handle through `bondy_db_core_registry`.
+- The **overlay is shared** between the writer (oplog_instance) and
+  the reader (`bondy_db_core`) — that's how reads see events before
+  the applier has folded them in.
+- The **pack_store** is one of several `bondy_mst_store`
+  implementations; tests use `ets_store` / `map_store`.
+
+## Why this shape?
+
+A handful of architectural commitments are worth naming up front, so
+the chapters that follow make sense:
+
+1. **WAL is the source of truth.** Every other layer (MST, snapshot,
+   projection, overlay, cache) is reconstructible from it.
+2. **Per-cell HLC.** Each projection cell carries its own
+   `last_modified_hlc`. Reads return `{Value, Hlc}`; causality is
+   *exposed*, not hidden.
+3. **Per-namespace fold strategy.** The substrate is CRDT-agnostic.
+   What "merge" means for `users` is different from what it means
+   for `registry`, and both live as plain Erlang modules.
+4. **Two-sided API.** `bondy_oplog` for writes, `bondy_db` for reads.
+   Applications never read from the oplog.
+5. **No consensus.** Convergence is by anti-entropy over the MST,
+   plus a wall-clock **freshness fence** for namespaces that need
+   bounded staleness (e.g. auth).
+6. **The MST is bounded.** Once peers confirm they have an event,
+   it is physically removed from the MST and folded into a single
+   per-instance snapshot via `bondy_oplog_compaction`. A fully
+   converged cluster's live MST is empty; new replicas bootstrap
+   from a snapshot, not from the full history
+   ([chapter 06](06_compaction_and_bootstrap.md)).
+
+## Where next?
+
+Read the chapters in order. Each one stands on its own but the order
+is intentional — the write side teaches you what an event is, the
+MST chapter teaches you how peers find their disagreements, then the
+read side, then the glue.
+
+If you only have time for one more chapter: read
+[02 — bondy_mst](02_bondy_mst.md). It is the unique idea in the stack;
+the rest is good engineering around it.
+
+## Pointers
+
+- Design source: [`_design/STORAGE_ARCHITECTURE.md`](../../_design/STORAGE_ARCHITECTURE.md)
+- Companion sub-designs in [`_design/latest/`](../../_design/latest/).
+- Modules to skim before reading further:
+  `bondy_oplog.erl`, `bondy_mst.erl`, `bondy_db.erl`.

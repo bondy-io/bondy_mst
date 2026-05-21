@@ -15,16 +15,16 @@
 Read-concurrent, MST backend using `ets`.
 """).
 
-%% `public` unconditionally: the store's `capabilities/1` advertises
-%% `concurrent_writes => true`, which `bondy_oplog_sync_session:merge_pages/2`
-%% relies on to short-circuit the gen_server hop and `ets:insert/2`
-%% directly from the sync session process. `protected` made that path
-%% fail with `{badarg, [{error_info, #{cause => access}}]}` and the
-%% sync session would error out before `integrate_peer_root` could
-%% run, so peer events never reached the local MST and `bondy_db:read/3`
-%% saw only local writes. `read_concurrency, true` already covers the
-%% read path; the writer-side cost of `public` is negligible compared
-%% to the per-tick gen_server round-trip the fast path avoids.
+%%% 'public' unconditionally: the store's capabilities/1 advertises
+%%% concurrent_writes => true, which bondy_oplog_sync_session:merge_pages/2
+%%% relies on to short-circuit the gen_server hop and ets:insert/2
+%%% directly from the sync session process. 'protected' made that path
+%%% fail with {badarg, [{error_info, #{cause => access}}]} and the
+%%% sync session would error out before integrate_peer_root could
+%%% run, so peer events never reached the local MST and bondy_db:read/3
+%%% saw only local writes. read_concurrency=true already covers the
+%%% read path; the writer-side cost of 'public' is negligible compared
+%%% to the per-tick gen_server round-trip the fast path avoids.
 -define(ETS_ACCESS, public).
 
 -record(?MODULE, {

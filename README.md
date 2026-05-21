@@ -48,6 +48,7 @@ the Quick Start. The rest of this README assumes those concepts.
 ## Table of Contents
 
 - [When to use this library](#when-to-use-this-library)
+- [Architecture (tutorial)](#architecture-tutorial)
 - [Background: MSTs and COGs](#background-msts-and-cogs)
 - [Quick start](#quick-start)
 - [Concepts](#concepts)
@@ -68,6 +69,7 @@ the Quick Start. The rest of this README assumes those concepts.
 - [Behaviour reference](#behaviour-reference)
 - [The MST primitive](#the-mst-primitive)
 - [Installation](#installation)
+- [Jepsen](#jepsen)
 
 ---
 
@@ -88,6 +90,28 @@ Use it when you need:
 Don't use it if you need strong consistency, linearizable writes, or
 read-your-writes across replicas. Those need consensus; this library
 trades them away for availability and partition tolerance.
+
+---
+
+## Architecture (tutorial)
+
+For the chapter-style, mermaid-illustrated walkthrough of how
+`bondy_db` (read side), `bondy_mst` (Merkle Search Tree + page store),
+and `bondy_oplog` (write side + sync) fit together, read the docs
+under [`doc_extras/architecture/`](doc_extras/architecture/):
+
+| # | Doc | Topic |
+|---|---|---|
+| 00 | [Overview](doc_extras/architecture/00_overview.md) | The three packages and one end-to-end write + read. |
+| 01 | [bondy_oplog](doc_extras/architecture/01_bondy_oplog.md) | Instances, WAL, sync sessions, eager-push vs. anti-entropy. |
+| 02 | [bondy_mst](doc_extras/architecture/02_bondy_mst.md) | The Merkle Search Tree, the pack-store backend, AE protocol. |
+| 03 | [bondy_db](doc_extras/architecture/03_bondy_db.md) | Read side: cache + overlay + projection, freshness fence. |
+| 04 | [Applier](doc_extras/architecture/04_applier.md) | The reconciler loop that ties writes, the MST, and the projection together. |
+| 05 | [Fold strategies](doc_extras/architecture/05_fold_strategies.md) | The pluggable per-namespace CRDT merge contract. |
+
+The same docs ship in the ex_doc output (see `make docs`). The
+source-of-truth design notes live under `_design/latest/` in the
+repository; the chapters above are the friendly read.
 
 ---
 
@@ -531,8 +555,12 @@ freshly appended events without an `await_apply`.
 on every successful return at the cost of one fsync per WAL frame
 (~5k frames/sec on commodity SSDs). For higher append throughput when
 you can tolerate a small window of post-ack data loss on a hard crash,
-configure `batched` mode and use `await_durable/1,2` at explicit
-barriers. See `bondy_oplog_wal`'s moduledoc.
+configure `fsync_mode => batched` at `start_instance/2`, and at
+explicit barriers call `bondy_oplog_wal:await_durable/3` on the
+per-instance writer pid (look it up via
+`bondy_oplog_registry:wal_pid/1`). See `bondy_oplog_wal`'s
+moduledoc and the WAL options table in
+[Configuration reference](#configuration-reference) below.
 
 ---
 
@@ -578,6 +606,23 @@ Result = bondy_oplog:query_stable(Id, MyQuery).
 ```
 
 Query semantics are entirely defined by your CRDT module's `query/2`.
+
+### Per-cell fold projection
+
+When the instance is started with a `fold_module` (see [Fold
+strategies](doc_extras/architecture/05_fold_strategies.md)), the
+substrate also maintains a per-instance materialised projection
+fed by the applier:
+
+```erlang
+%% Drains the applier first, then returns the current fold projection.
+{ok, State}            = bondy_oplog:projection(Id).
+{error, no_fold_configured} = bondy_oplog:projection(OtherId).
+```
+
+For full cell-level reads (cache + overlay + projection merge with
+HLC), use the `bondy_db` / `bondy_db_core` read facade documented in
+[`doc_extras/architecture/03_bondy_db.md`](doc_extras/architecture/03_bondy_db.md).
 
 ---
 
@@ -790,19 +835,28 @@ Configure via the `backend` opt at start_instance time:
 
 | Backend | Module | Notes |
 |---|---|---|
-| `map` | `bondy_mst_map_store` | Pure functional map. Slow but simple. |
+| `map` | `bondy_mst_map_store` | Pure functional map. Slow but simple; tests only. |
 | `ets` | `bondy_mst_ets_store` | Default. Per-instance anonymous ETS. Read-concurrent. |
-| Custom | (any) | Implement `bondy_mst_store` behaviour. Pass the module atom as `backend`. |
+| `pack` | `bondy_mst_pack_store` | Durable packfile-based store (git-style sorted-hash packs + fanout/bloom index). Production backend. See [`doc_extras/architecture/02_bondy_mst.md`](doc_extras/architecture/02_bondy_mst.md) and `_design/latest/MST_PAGE_STORE_DESIGN.md`. |
+| Custom | (any module) | Implement `bondy_mst_store` behaviour. Pass the module atom as `backend`. |
 
 ```erlang
+%% In-RAM (default):
 {ok, _} = bondy_oplog:start_instance(Id, #{
     backend         => ets,
-    backend_options => #{persistent => true}
+    backend_options => #{name => <<"my-mst">>}
+}).
+
+%% Durable packfile backend (one directory per instance):
+{ok, _} = bondy_oplog:start_instance(Id, #{
+    backend         => bondy_mst_pack_store,
+    storage_path    => <<"/var/lib/bondy_mst">>,
+    path_strategy   => bondy_oplog_path_sharded
 }).
 ```
 
-For durable backends (RocksDB, leveled, ...) implement `bondy_mst_store`
-yourself; the framework treats it as opaque.
+For other durable backends (RocksDB, custom KVs, …) implement
+`bondy_mst_store` yourself; the framework treats it as opaque.
 
 ### Snapshot stores
 
@@ -1006,7 +1060,9 @@ quiescent. Trigger manually via `bondy_oplog:sync/2,3` and
 | `hash_algorithm` | `sha256` | MST page hashing. |
 | `validator` | `bondy_oplog_validator_trust` | Event signer/verifier. |
 | `validator_opts` | `#{}` | Opts passed to the validator's `init/2`. |
-| `merge_strategy` | `bondy_oplog_merge_strict_uniqueness` | Resolves rare merge collisions. |
+| `fold_module` | `undefined` | Per-namespace fold strategy. Either an atom shorthand (`presence_basic`, `lww_register`, `strict_register`, `orset`, `ttl_presence`, `map_of_fields`) or a module implementing `bondy_oplog_fold`. See [Fold strategies](doc_extras/architecture/05_fold_strategies.md). |
+| `fold_opts` | `#{}` | Opaque options threaded through to the fold module. Shape is fold-specific. |
+| `merge_strategy` | `bondy_oplog_merge_strict_uniqueness` | **Legacy** MST page-merge collision resolver. Superseded by `fold_module`; still honoured for backward compatibility (emits a one-shot deprecation warning at instance start). |
 | `crdt_module` | `undefined` | Required for `compact/1` and `query/2`. |
 | `snapshot_store` | `bondy_oplog_snapshot_store_ets` | In-memory or `_file`. |
 | `snapshot_store_opts` | `#{}` | E.g. `#{path => <<"...">>}` for `_file`. |
@@ -1016,6 +1072,28 @@ quiescent. Trigger manually via `bondy_oplog:sync/2,3` and
 | `overlay_throttle` | `drop` | Behaviour on overlay-cap breach. Only `drop` is currently supported. |
 | `hlc_seed` | `0` | Initial HLC value. Auto-seeded from MST/snapshot at init when applicable. |
 | `seq_seed` | `0` | Initial Seq value. Auto-seeded from MST at init. |
+| `applier` | `#{}` | Per-instance applier tuning. Recognised keys: `commit_every` (default `64`), `poll_interval_ms` (default `5`). See [The applier](doc_extras/architecture/04_applier.md). |
+
+### WAL options (instance-level)
+
+The same opts map accepts WAL-writer configuration. Defaults are
+production-safe; tune only when you have a workload reason. See
+`bondy_oplog_wal` moduledoc for the full list.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `wal_dir` | derived from `storage_path` or `/tmp/bondy_oplog_wal/<os_pid>/` | Base directory under which the WAL writer creates `<InstanceId>/`. |
+| `fsync_mode` | `per_write` | `per_write` (every successful `append` is durable) or `batched` (durability synchronised via `bondy_oplog_wal:await_durable/3`). |
+| `max_segment_bytes` | 64 MiB | Rotate the head segment past this size. |
+| `max_batch_bytes` | 1 MiB | Cap on the body bytes of a single batch frame. |
+| `idx_interval_bytes` | 64 KiB | Sparse `.qidx` granularity. |
+| `batched_fsync_interval` / `batched_fsync_bytes` | — | Fsync trigger thresholds when `fsync_mode = batched`. |
+| `min_live_segments` | 2 | Floor on the number of live segments retained. |
+| `retention_sweep_interval` | 30000 ms | How often retention runs. |
+| `max_total_wal_size` / `max_live_segments` | — | Soft caps the retention sweep honours. |
+| `recovery_mode` | `strict` | `strict` (refuse to advance past a corrupt frame; needs operator action) or `rescan` (best-effort drop of corrupt frames during head-segment recovery). |
+| `body_compression` | `disabled` | Per-frame body compression (`zlib` / `lz4`). |
+| `body_encryption` | `disabled` | Per-frame body encryption envelope; key resolution module-supplied. |
 
 ### App env
 
@@ -1037,14 +1115,18 @@ quiescent. Trigger manually via `bondy_oplog:sync/2,3` and
 
 | Behaviour | Purpose |
 |---|---|
-| `bondy_oplog_crdt` | Consumer-defined CRDT semantics. |
+| `bondy_oplog_crdt` | Consumer-defined CRDT semantics (instance-wide; `interpret_cog/2` + `query/2`). |
+| `bondy_oplog_fold` | Per-namespace cell fold strategy (idempotent, HLC-monotonic). The modern alternative to `merge_strategy` for `bondy_db`-backed reads. Six reference implementations ship (`presence_basic`, `lww_register`, `strict_register`, `map_of_fields`, `orset`, `ttl_presence`). |
 | `bondy_oplog_validator` | Sign local events; verify remote events; detect equivocation. |
-| `bondy_oplog_merge_strategy` | Resolve rare value collisions at the same event key. |
+| `bondy_oplog_merge_strategy` | **Legacy** MST page-merge collision resolver. Kept for backward compatibility; new code uses `bondy_oplog_fold`. |
 | `bondy_oplog_peer_source` | Per-instance peer discovery. |
 | `bondy_oplog_transport` | Network transport for sync sessions. |
 | `bondy_oplog_snapshot_store` | Durable storage of CRDT snapshots. |
 | `bondy_oplog_path_strategy` | On-disk layout for durable backends. |
 | `bondy_mst_store` | MST page-level storage backend. |
+| `bondy_oplog_projection_adapter` | Pluggable materialised-cell store under `bondy_db_core` (the canonical implementation is `bondy_oplog_projection_leveled`). |
+| `bondy_oplog_cache_adapter` | Pluggable read cache under `bondy_db_core` (ETS reference impl: `bondy_oplog_cache_ets`). |
+| `bondy_db_topology` | How `bondy_db` tables map onto Bookie shards. Three ship: `single_bookie`, `per_entity`, `shared_shards`. |
 
 Each behaviour is documented in its source module.
 
@@ -1098,7 +1180,8 @@ This is the building block. The replication layer is built on top.
 
 ### Requirements
 
-- Erlang/OTP 26+
+- Erlang/OTP 27+ (the codebase uses triple-quoted docstrings and the
+  `-doc` attribute).
 
 ### rebar.config
 
@@ -1120,10 +1203,18 @@ node-shared registries, the responder, and the schedulers.
 
 ## Jepsen
 
-A 3-node Jepsen integration lives under `jepsen/jepsen.bondymst/` and
-exercises 1 namespace × 10 tables × 16 leveled-backed shards per
-table across Distributed Erlang. See
-[`jepsen/jepsen.bondymst/README.md`](jepsen/jepsen.bondymst/README.md)
+A 3-node Jepsen integration exercises 1 namespace × 10 tables ×
+16 leveled-backed shards per table across Distributed Erlang. It is
+split into two pieces, both under `jepsen/`:
+
+- `jepsen/bondy_mst_jepsen/` — Erlang OTP wrapper (HTTP shim,
+  disterl-cluster wiring, smoke test). A **sibling rebar3 project**
+  that depends on this library via a `_checkouts/bondy_mst` symlink
+  to the repo root, so the library's own build never pulls in
+  Cowboy / jsx.
+- `jepsen/jepsen.bondymst/` — Jepsen test driver (Clojure / Leiningen).
+
+See [`jepsen/jepsen.bondymst/README.md`](jepsen/jepsen.bondymst/README.md)
 for the full run flow:
 
 ```sh
@@ -1133,7 +1224,8 @@ docker exec -it jepsen-control bash
 cd /root/jepsen.bondymst
 lein run test --nodes n1,n2,n3 \
   --ssh-private-key /root/shared/jepsen-bot \
-  --workload register --nemesis random-partition-halves \
+  --workload set --fold-module orset \
+  --nemesis random-partition-halves \
   --time-limit 60 --concurrency 10 --rate 10
 ```
 

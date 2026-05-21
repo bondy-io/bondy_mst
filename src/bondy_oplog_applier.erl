@@ -353,43 +353,48 @@ refresh_validator(ApplierPid, Reason) when is_pid(ApplierPid) ->
 
 -spec notify_drain_resume(pid()) -> ok.
 
-%% @doc Called by the instance after it processes an
-%% `install_local_batch` cast and the in-flight counter drops below
-%% the cap. Lets the applier resume reading the WAL if it had
-%% deferred its drain. Idempotent: extra resumes during normal
-%% operation are absorbed by the `drain_deferred` flag.
+-doc """
+Called by the instance after it processes an `install_local_batch`
+cast and the in-flight counter drops below the cap. Lets the applier
+resume reading the WAL if it had deferred its drain. Idempotent:
+extra resumes during normal operation are absorbed by the
+`drain_deferred` flag.
+""".
 notify_drain_resume(ApplierPid) when is_pid(ApplierPid) ->
     gen_server:cast(ApplierPid, drain_resume).
 
 -spec replay_cell_events(pid()) -> ok.
 
-%% @doc Re-fold the entire MST through the cell_apply path. Intended
-%% to be called by the instance after a `merge_pages` /
-%% `integrate_peer_root` cycle — without this, peer-received events
-%% sit in the local MST but never reach the per-cell projection, and
-%% `bondy_db:read/3` returns only events authored on the local node.
-%%
-%% Idempotent for the CRDT folds that ship with the library (LWW
-%% register, OR-set, map_of_fields, ttl_presence): replaying an
-%% absorbed event either no-ops (same dot already in OR-set live or
-%% tombstones; same {set, V, H} already applied) or yields the same
-%% terminal state (later-HLC LWW). `strict_register` rejects
-%% duplicates with `{error, ...}` from `apply_event/2` but
-%% `apply_one_cell` already catches and logs.
-%%
-%% A no-op when the instance was started without a `cell_apply_target`
-%% — pure-substrate consumers are not affected.
+-doc """
+Re-fold the entire MST through the cell_apply path. Intended to be
+called by the instance after a `merge_pages` / `integrate_peer_root`
+cycle — without this, peer-received events sit in the local MST but
+never reach the per-cell projection, and `bondy_db:read/3` returns
+only events authored on the local node.
+
+Idempotent for the CRDT folds that ship with the library (LWW
+register, OR-set, map_of_fields, ttl_presence): replaying an
+absorbed event either no-ops (same dot already in OR-set live or
+tombstones; same `{set, V, H}` already applied) or yields the same
+terminal state (later-HLC LWW). `strict_register` rejects duplicates
+with `{error, ...}` from `apply_event/2` but `apply_one_cell` already
+catches and logs.
+
+A no-op when the instance was started without a `cell_apply_target`
+— pure-substrate consumers are not affected.
+""".
 replay_cell_events(ApplierPid) when is_pid(ApplierPid) ->
     gen_server:cast(ApplierPid, replay_cell_events).
 
 -spec replay_cell_events_sync(pid()) -> ok.
 
-%% @doc Synchronous variant of `replay_cell_events/1`. Blocks the
-%% caller until the diff fold has been applied to the projection, so a
-%% read issued immediately after this returns observes the peer-merged
-%% events the corresponding sync session installed. Otherwise identical
-%% to the cast (idempotent, no-op when `cell_apply_target` is not
-%% configured).
+-doc """
+Synchronous variant of `replay_cell_events/1`. Blocks the caller
+until the diff fold has been applied to the projection, so a read
+issued immediately after this returns observes the peer-merged events
+the corresponding sync session installed. Otherwise identical to the
+cast (idempotent, no-op when `cell_apply_target` is not configured).
+""".
 replay_cell_events_sync(ApplierPid) when is_pid(ApplierPid) ->
     gen_server:call(ApplierPid, replay_cell_events, infinity).
 
