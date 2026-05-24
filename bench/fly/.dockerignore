@@ -1,0 +1,29 @@
+# Build artefacts — rebuilt inside the image; volume re-binds the
+# real ones at boot time.
+_build/
+bench/_build/
+bench/_output/
+bench/deps/
+bench/lib/
+
+# Test artefacts — never want in the image.
+/tmp/
+*.dump
+erl_crash.dump
+
+# Editor / OS noise.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# VCS — kept out so the image doesn't carry the full history.
+.git/
+.gitignore
+
+# Workspace-only.
+.claude/
+_design/
+
+# The Fly artefacts themselves — circular reference avoided.
+bench/fly/_build/

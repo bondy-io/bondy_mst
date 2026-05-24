@@ -1,0 +1,69 @@
+# =============================================================================
+# bondy_mst — Linux bench substrate on Fly.io
+#
+# Long-lived SSH-only VM for pack-store QA #14 (write-path floor)
+# bench execution. See `bench/fly/README.md` for the operator
+# runbook and `_design/latest/PACK_STORE_WRITE_PATH_FLOOR_BENCH_PLAN.md`
+# §10 for the bench plan context.
+#
+# Defaults are chosen for cost-controlled, operator-driven benches:
+# the machine auto-stops when idle and only restarts on
+# `fly ssh console` or `fly machine start`. Standing cost is
+# volume-only (~$1.50/month for 10 GB).
+# =============================================================================
+
+app = "bondy-mst-bench"
+primary_region = "lhr"
+
+[build]
+dockerfile = "Dockerfile"
+
+# Build context is the repo root — the Dockerfile copies the whole
+# project source so it can pre-compile. The .dockerignore in this
+# directory keeps build artefacts and the workspace-only `_design/`
+# + `.claude/` out.
+[build.args]
+OTP_VERSION = "28.0"
+ELIXIR_VERSION = "1.18.4"
+REBAR3_VERSION = "3.24.0"
+JUST_VERSION = "1.36.0"
+
+# Persistent volume — survives image rebuilds and machine restarts.
+# Mounts as /data inside the VM; entrypoint.sh symlinks /tmp and
+# the _build dirs onto it. Sized at 10 GB which is overkill for
+# bench artefacts but the increment over 1 GB is ~$0.15/month.
+[[mounts]]
+source = "bench_data"
+destination = "/data"
+initial_size = "10gb"
+
+# No [[services]] block: this is a private SSH-only VM. No public
+# HTTP/TCP exposure, no health checks. Bench output flows out via
+# `fly ssh sftp` or copy-paste from the shell.
+
+# Single-machine deployment. Bench runs are operator-driven; we
+# don't want Fly auto-restarting on health-check failures or
+# spinning up extra machines for "scale" — both would invalidate
+# whatever bench is currently running.
+[deploy]
+strategy = "immediate"
+
+# VM class: performance-2x is the smallest dedicated-CPU tier on
+# Fly. 2 dedicated vCPUs + 4 GB RAM + shared NVMe. Shared-CPU
+# tiers introduce noisy-neighbour effects that would invalidate
+# the bench. Bump to performance-4x for layer-3 concurrency runs
+# if 2 vCPUs prove constraining (one-line change).
+[[vm]]
+size = "performance-2x"
+cpu_kind = "performance"
+cpus = 2
+memory_mb = 4096
+
+# Cost control — stop when idle, restart on demand. Bench runs
+# are operator-driven (`fly ssh console` will wake the machine);
+# between runs the machine is stopped and we only pay for the
+# volume.
+[machine]
+auto_stop_machines = "stop"
+auto_start_machines = true
+min_machines_running = 0
