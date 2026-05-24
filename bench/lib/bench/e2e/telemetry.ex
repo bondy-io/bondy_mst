@@ -43,7 +43,50 @@ defmodule Bench.E2E.Telemetry do
     {[:bondy_oplog, :wal, :append], :wal_append, nil, :batch_size},
     {[:bondy_oplog, :wal, :fsync], :wal_fsync, :duration_us, nil},
     {[:bondy_oplog, :applier, :applied], :applier_applied, nil, :count},
-    {[:bondy_oplog, :applier, :published], :applier_published, nil, :count}
+    {[:bondy_oplog, :applier, :published], :applier_published, nil, :count},
+    # Per-stage breakdown of `apply_batch/2`. Each emits a latency
+    # histogram (`duration_us`) and an event count (`count`), so
+    # `events / calls` gives the mean batch size at that stage and
+    # the histogram p50/p99 give per-batch wall-time. See applier
+    # pipeline residual investigation plan §3.1.
+    {[:bondy_oplog, :applier, :batch_verify], :batch_verify, :duration_us, :count},
+    {[:bondy_oplog, :applier, :batch_fold], :batch_fold, :duration_us, :count},
+    {[:bondy_oplog, :applier, :batch_cell_apply], :batch_cell_apply, :duration_us, :count},
+    {[:bondy_oplog, :applier, :batch_publish], :batch_publish, :duration_us, :count},
+    {[:bondy_oplog, :applier, :batch_install_cast], :batch_install_cast, :duration_us, :count},
+    # Per-cell compute breakdown of `compute_one_cell/9` (PR-PS-15b
+    # split apply_one_cell/11 into a per-event compute + batched
+    # write). Each fires once per event; `cell_put` and
+    # `cell_side_effects` from PR-PS-15a are gone — the put + cache
+    # invalidation + high-water advance now happen once per BATCH
+    # and are measured by `batch_cell_put` (below).
+    {[:bondy_oplog, :applier, :cell_read], :cell_read, :duration_us, nil},
+    {[:bondy_oplog, :applier, :cell_apply_event], :cell_apply_event, :duration_us, nil},
+    # Per-batch substrate write (PR-PS-15b). Fires once per
+    # `apply_cell_batch/2` invocation that has at least one cell to
+    # write; `count` is the number of unique `{Bucket, Key}` entries
+    # in the batch (post-dedup). Measures the cost of the single
+    # `Adapter:put_batch/2` call that replaces the previous per-event
+    # `book_put` storm.
+    {[:bondy_oplog, :applier, :batch_cell_put], :batch_cell_put, :duration_us, :count}
+  ]
+
+  # Subset gated by APPLIER_PROFILE=control. The Erlang-side
+  # `telemetry:execute/3` calls in `apply_batch/2` + `apply_one_cell/11`
+  # still fire (their `monotonic_time` boundaries are unconditional),
+  # but no handler is attached so the bench's per-event counter +
+  # histogram update cost is skipped. Lets the residual-profiling sweep
+  # isolate bench-side collection overhead from the always-paid
+  # Erlang-side cost. See `_design/latest/APPLIER_PIPELINE_RESIDUAL_PLAN.md` §4.
+  @applier_breakdown_keys [
+    :batch_verify,
+    :batch_fold,
+    :batch_cell_apply,
+    :batch_publish,
+    :batch_install_cast,
+    :cell_read,
+    :cell_apply_event,
+    :batch_cell_put
   ]
 
   @doc """
@@ -100,7 +143,7 @@ defmodule Bench.E2E.Telemetry do
       shard_count: shard_count
     }
 
-    Enum.each(@stages, fn {path, key, lat, evt} ->
+    Enum.each(stages_to_attach(), fn {path, key, lat, evt} ->
       handler_id = handler_id(name, path)
 
       :telemetry.attach(
@@ -112,6 +155,18 @@ defmodule Bench.E2E.Telemetry do
     end)
 
     %{name: name, config: config}
+  end
+
+  defp stages_to_attach do
+    case System.get_env("APPLIER_PROFILE") do
+      "control" ->
+        Enum.reject(@stages, fn {_path, key, _lat, _evt} ->
+          key in @applier_breakdown_keys
+        end)
+
+      _ ->
+        @stages
+    end
   end
 
   @doc false

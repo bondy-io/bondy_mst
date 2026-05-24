@@ -179,7 +179,14 @@ normalise_dir(Dir) when is_list(Dir)   -> Dir.
 
 
 default_book_opts(Dir) ->
+    %% `head_only=with_lookup` enables `book_mput/2` (atomic batched
+    %% writes) and `book_headonly/4` (ledger-only point reads) — both
+    %% required by `bondy_oplog_projection_leveled` (PR-PS-15b).
+    %% Per the leveled head_only contract, `book_get` and `book_put`
+    %% are NOT supported once this flag is on; the adapter uses
+    %% `book_headonly` + `book_mput` exclusively.
     [{root_path, Dir},
      {cache_size, 2000},
      {max_journalsize, 100_000_000},
-     {sync_strategy, none}].
+     {sync_strategy, none},
+     {head_only, with_lookup}].

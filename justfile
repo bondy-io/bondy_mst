@@ -163,3 +163,346 @@ bench-open:
 bench-clean:
     rm -rf {{output_dir}}
     rm -rf {{bench_dir}}/_build {{bench_dir}}/deps
+
+# Wipe generated jepsen artefacts (leiningen + rebar3 build + leiningen
+# test scratch). Preserves:
+#   - `jepsen/store_runs/` — manually-archived run outputs
+#   - `jepsen/bondy_mst_jepsen/_checkouts/` — rebar3 dev-mode local-dep links
+#   - `jepsen/docker/shared/jepsen-bot{,.pub}` — SSH keys, NEVER delete
+#
+# Total reclaim is ~165MB (the rebar3 `_build` dominates at ~145MB).
+jepsen-clean:
+    rm -rf {{justfile_directory()}}/jepsen/jepsen.bondymst/target
+    rm -rf {{justfile_directory()}}/jepsen/jepsen.bondymst/store
+    rm -rf {{justfile_directory()}}/jepsen/bondy_mst_jepsen/_build
+
+# Wipe ALL generated artefacts across bench + jepsen, plus the
+# `/tmp/bondy_mst_*` test scratch (WAL/leveled dirs can accumulate
+# to several GB across test runs — see the project-wide standing
+# rule on cleaning /tmp after tests).
+#
+# Does NOT touch `jepsen/store_runs/` (archived runs), the rebar3
+# top-level `_build`, or any committed file.
+clean: bench-clean jepsen-clean
+    rm -rf /tmp/bondy_mst_*
+
+# -----------------------------------------------------------------------------
+# Fly.io Linux bench substrate (pack-store QA #14).
+#
+# See `bench/fly/README.md` for the operator runbook and
+# `_design/latest/PACK_STORE_WRITE_PATH_FLOOR_BENCH_PLAN.md` §10 for
+# the bench plan context.
+#
+# fly.toml lives at the repo root because flyctl resolves the build
+# context relative to its location, and the Dockerfile's `COPY .`
+# needs the repo source. All other Fly assets stay under bench/fly/.
+# Recipes invoke `fly` from the repo root with no `--config` flag —
+# fly auto-discovers fly.toml in cwd.
+#
+# Cost-control rule: always `just bench-fly-down` when you're done.
+# `bench-fly-bench-all` leaves the VM running so you can re-run
+# individual layers; call `bench-fly-down` after.
+# -----------------------------------------------------------------------------
+
+# Local Dockerfile validation via docker buildx (~3-5 min, needs Docker Desktop).
+# NOTE: On Apple Silicon, the linux/amd64 emulation under QEMU has a known
+# bug that can segfault during Elixir compilation of certain hex deps
+# (jason, benchee, etc). The build will get through `rebar3 compile` +
+# NIFs + `mix deps.get` cleanly, then crash at `mix compile`. Fly's
+# remote builder runs on native amd64 hardware and is not affected — if
+# this fails locally past `mix deps.get`, deploy to Fly directly to
+# validate the rest.
+bench-fly-build-local:
+    docker buildx build --platform linux/amd64 \
+      -f bench/fly/Dockerfile -t bondy-mst-bench:local .
+
+# First-time setup: create app + volume + initial deploy (interactive).
+#
+# App is created in the Leapsight org (`--org leapsight`). Fly app
+# names are globally unique — if `bondy-mst-bench` already exists in
+# another org (e.g. a prior `personal` deploy) the create will fail.
+# Run `just bench-fly-destroy` on the old app first, or pick a fresh
+# name here.
+bench-fly-init:
+    fly apps create bondy-mst-bench --org leapsight
+    fly volumes create bench_data --size 10 --region lhr --app bondy-mst-bench
+    just bench-fly-deploy
+
+# Build + deploy the image to Fly (remote build, preserves volume cache).
+bench-fly-deploy:
+    fly deploy --remote-only
+
+# Start the VM (idempotent, no-op if already running).
+bench-fly-up:
+    fly machine start
+
+# Interactive ssh into the VM (auto-starts if stopped).
+bench-fly-shell:
+    fly ssh console -C "bash -c 'cd /opt/bondy_mst && exec bash'"
+
+# Run a single bench script on the VM, tee output to /data/results/. Example: `just bench-fly-run profile_syscalls`.
+#
+# `\$(...)` escapes the local justfile shell so the command substitution
+# runs on the VM, not locally. Same for `\$ts` etc in the recipes below.
+bench-fly-run name:
+    fly ssh console -C \
+      "bash -c 'mkdir -p /data/results && cd /opt/bondy_mst && just bench-one {{name}} 2>&1 | tee /data/results/{{name}}_\$(date +%Y%m%d_%H%M%S).txt'"
+
+# Run all four QA #14 bench layers in sequence on the VM (tees each to /data/results/).
+bench-fly-bench-all:
+    fly ssh console -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        echo \"=== Layer 1 — syscall isolation ===\" | tee /data/results/run_\$ts.log; \
+        just bench-one profile_syscalls    2>&1 | tee /data/results/layer1_syscalls_\$ts.txt; \
+        echo \"=== Layer 2 — single-put microbench ===\" | tee -a /data/results/run_\$ts.log; \
+        just bench-one profile_pack_one_put 2>&1 | tee /data/results/layer2_pack_one_put_\$ts.txt; \
+        echo \"=== Layer 3a — sustained pack-put ===\" | tee -a /data/results/run_\$ts.log; \
+        just bench-one mst_pack_put         2>&1 | tee /data/results/layer3a_mst_pack_put_\$ts.txt; \
+        echo \"=== Layer 3b — e2e pipeline (30s/scenario) ===\" | tee -a /data/results/run_\$ts.log; \
+        just bench-e2e 30                   2>&1 | tee /data/results/layer3b_e2e_\$ts.txt; \
+        echo \"All layers complete. Results in /data/results/*_\$ts.txt\"'"
+
+# Applier pipeline residual profiling sweep on the VM (Run A + Run B).
+#
+# Drives the e2e bench against leveled-only twice — Run A with full
+# per-stage applier telemetry attached, Run B with the per-stage
+# handlers detached (control). Tees both to /data/results/applier_profile_*.
+#
+# Erlang-side `telemetry:execute/3` calls in `apply_batch/2` fire in
+# both runs; only the bench-side handler attachment differs. The
+# delta isolates bench collection overhead from the always-paid
+# Erlang-side `monotonic_time` cost.
+#
+# Run C (fprof on shard-0 applier) is a follow-up that needs its own
+# `applier_fprof.exs` driver — not yet implemented.
+#
+# See `_design/latest/APPLIER_PIPELINE_RESIDUAL_PLAN.md` §4.
+bench-fly-applier-profile duration="30":
+    fly ssh console -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        echo \"=== Run A — full per-stage applier telemetry ===\" | tee /data/results/applier_profile_run_\$ts.log; \
+        APPLIER_PROFILE=full \
+          just bench-e2e {{duration}} 4 per_write 1 false leveled \
+            2>&1 | tee /data/results/applier_profile_runA_full_\$ts.txt; \
+        echo \"=== Run B — control (per-stage handlers detached) ===\" | tee -a /data/results/applier_profile_run_\$ts.log; \
+        APPLIER_PROFILE=control \
+          just bench-e2e {{duration}} 4 per_write 1 false leveled \
+            2>&1 | tee /data/results/applier_profile_runB_control_\$ts.txt; \
+        echo \"Done. Results in /data/results/applier_profile_*_\$ts.txt\"'"
+
+# Long stability run on a single scenario (Run A only, multiple reps).
+#
+# Drives the e2e bench N reps back-to-back with full instrumentation,
+# filtered to ONE scenario via SCENARIOS env var. Use to:
+#   * smooth Firecracker burst-credit / noisy-neighbour variance
+#   * confirm per-stage µs/event is stable across reps before picking
+#     a mitigation
+#   * burn through the volume's burst IOPS to land at steady-state
+#
+# Defaults: 3 reps × 120s = 6 min per scenario. Tees each rep to its
+# own file so you can compare them post-hoc.
+#
+# `scenario` matches by name prefix — `write_only` matches
+# `write_only_w4_leveled`. Pass `write_only`, `mixed`,
+# `concurrent_rw`, or `read_only`.
+#
+# Examples:
+#   just bench-fly-applier-profile-long
+#   just bench-fly-applier-profile-long mixed 180 5
+#
+# See `_design/latest/APPLIER_PIPELINE_RESIDUAL_PLAN.md` §4 (longer-run
+# follow-up after the initial Run A surfaced substrate-noise issues).
+bench-fly-applier-profile-long scenario="write_only" duration="120" reps="3":
+    fly ssh console -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        echo \"=== Long stability run — {{scenario}}, {{reps}} reps × {{duration}}s ===\" \
+          | tee /data/results/applier_long_{{scenario}}_\$ts.log; \
+        for rep in \$(seq 1 {{reps}}); do \
+          echo \"--- Rep \$rep/{{reps}} ---\" | tee -a /data/results/applier_long_{{scenario}}_\$ts.log; \
+          APPLIER_PROFILE=full SCENARIOS={{scenario}} \
+            just bench-e2e {{duration}} 4 per_write 1 false leveled \
+              2>&1 | tee /data/results/applier_long_{{scenario}}_rep\${rep}_\$ts.txt; \
+        done; \
+        echo \"Done. Results in /data/results/applier_long_{{scenario}}_rep*_\$ts.txt\" \
+          | tee -a /data/results/applier_long_{{scenario}}_\$ts.log'"
+
+# Run vmstat/iostat/strace companion data collection in a second terminal during a layer-3 bench.
+bench-fly-companion seconds="60":
+    fly ssh console -C \
+      "bash -c 'mkdir -p /data/results; ts=\$(date +%Y%m%d_%H%M%S); \
+        vmstat 1 {{seconds}} > /data/results/vmstat_\$ts.txt & \
+        iostat -x 1 {{seconds}} > /data/results/iostat_\$ts.txt & \
+        beam_pid=\$(pgrep -f beam.smp || true); \
+        if [ -n \"\$beam_pid\" ]; then \
+          strace -c -p \"\$beam_pid\" 2> /data/results/strace_\$ts.txt & \
+          sleep 10; kill %3 2>/dev/null || true; \
+        else \
+          echo \"no BEAM running — start a bench layer first\" >&2; \
+        fi; \
+        wait'"
+
+# Pull /data/results from the VM into a fresh local dir. Default is timestamped
+# under ./fly-bench-results-<ts>. Override `dest=` to pick a specific name.
+#
+# Tarballs the results on the VM, sftp's the single tar file, untars locally.
+# Avoids `fly ssh sftp get -r`'s "won't overwrite" + "won't auto-start machine"
+# behaviour. `fly ssh console` auto-starts the machine if it's stopped.
+bench-fly-results dest="":
+    #!/usr/bin/env bash
+    set -eu
+    dest='{{dest}}'
+    if [ -z "$dest" ]; then
+      dest="./fly-bench-results-$(date +%Y%m%d_%H%M%S)"
+    fi
+    if [ -e "$dest" ]; then
+      echo "destination '$dest' already exists — pick another or remove it first" >&2
+      exit 1
+    fi
+    mkdir -p "$dest"
+    remote_tar="/tmp/fly-bench-results-$$.tgz"
+    echo "tarring /data/results on the VM..."
+    fly ssh console -C "bash -c 'tar czf $remote_tar -C /data results'"
+    local_tar="$dest/_fetch.tgz"
+    echo "sftp'ing $remote_tar → $local_tar"
+    fly ssh sftp get "$remote_tar" > "$local_tar"
+    echo "extracting → $dest"
+    tar xzf "$local_tar" -C "$dest" --strip-components=1
+    rm -f "$local_tar"
+    fly ssh console -C "bash -c 'rm -f $remote_tar'" || true
+    echo "done: $dest"
+
+# Tail the VM's logs (boot, entrypoint, stdout). Useful for debugging deploy failures.
+bench-fly-logs:
+    fly logs
+
+# Stop the VM (idle cost drops to volume-only, ~$1.50/mo for 10 GB).
+bench-fly-down:
+    fly machine stop
+
+# DESTRUCTIVE — destroys the app AND its volume (results lost forever). Pull results first.
+bench-fly-destroy:
+    @echo "This will destroy the bondy-mst-bench app and its volume."
+    @echo "Volume data (including /data/results) will be PERMANENTLY LOST."
+    @echo "Pull results first with: just bench-fly-results"
+    @echo ""
+    @read -p "Type 'destroy' to confirm: " confirm && \
+      [ "$confirm" = "destroy" ] || (echo "aborted"; exit 1)
+    fly apps destroy bondy-mst-bench --yes
+
+# -----------------------------------------------------------------------------
+# Fly.io Linux bench substrate — performance-8x variant.
+#
+# Parallel to the bench-fly-* recipes above. Uses fly-8x.toml (perf-8x
+# VM + 40 GB volume in the Leapsight org) instead of fly.toml (perf-2x
+# + 10 GB volume).
+#
+# Purpose: distinguish substrate-limited from code-limited throughput.
+# perf-2x is shared-CPU on a Firecracker slot with a small burst-IOPS
+# budget; perf-8x is dedicated-CPU with a much larger budget. If
+# applier ops/s scales meaningfully on perf-8x then we're substrate-
+# bound on perf-2x; if it doesn't, the bottleneck is in our code
+# (leveled / applier / WAL) and the next investigation should focus
+# there.
+#
+# Every recipe passes `--config fly-8x.toml` explicitly — flyctl only
+# auto-discovers `fly.toml`. The app name `bondy-mst-bench-8x` is
+# separate so the perf-2x app can coexist (Fly app names are
+# globally unique).
+#
+# Cost: ~$0.85 per 2h bench run + ~$6/mo standing volume.
+# Always `just bench-fly-8x-down` after a session.
+# -----------------------------------------------------------------------------
+
+# First-time setup: create perf-8x app + 40 GB volume + initial deploy.
+bench-fly-8x-init:
+    fly apps create bondy-mst-bench-8x --org leapsight
+    fly volumes create bench_data_8x --size 40 --region lhr --app bondy-mst-bench-8x
+    just bench-fly-8x-deploy
+
+# Build + deploy the image to the perf-8x app (remote build).
+bench-fly-8x-deploy:
+    fly deploy --config fly-8x.toml --remote-only
+
+# Start the perf-8x VM (idempotent).
+bench-fly-8x-up:
+    fly machine start --config fly-8x.toml
+
+# Interactive ssh into the perf-8x VM (auto-starts if stopped).
+bench-fly-8x-shell:
+    fly ssh console --config fly-8x.toml -C "bash -c 'cd /opt/bondy_mst && exec bash'"
+
+# Long stability run on perf-8x — same shape as bench-fly-applier-profile-long
+# but against the dedicated-CPU app. Direct apples-to-apples comparison
+# with the perf-2x results in /Users/aramallo/Work/Bondy/bondy_mst/results.
+#
+# `fsync` arg picks the WAL fsync mode: `per_write` (fsync after every
+# event — gives 1-2 event batches at the applier) or `batched` (writers
+# buffer events between fsyncs — applier picks up bigger batches).
+# Result filenames embed the fsync mode so per_write + batched runs
+# don't clobber each other.
+#
+# Defaults: 3 reps × 120s of write_only with per_write fsync. Override:
+#   just bench-fly-8x-applier-profile-long mixed 180 5 per_write
+#   just bench-fly-8x-applier-profile-long write_only 120 3 batched
+bench-fly-8x-applier-profile-long scenario="write_only" duration="120" reps="3" fsync="per_write":
+    fly ssh console --config fly-8x.toml -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        echo \"=== perf-8x long stability run — {{scenario}} ({{fsync}}), {{reps}} reps × {{duration}}s ===\" \
+          | tee /data/results/applier_long_8x_{{scenario}}_{{fsync}}_\$ts.log; \
+        for rep in \$(seq 1 {{reps}}); do \
+          echo \"--- Rep \$rep/{{reps}} ---\" | tee -a /data/results/applier_long_8x_{{scenario}}_{{fsync}}_\$ts.log; \
+          APPLIER_PROFILE=full SCENARIOS={{scenario}} \
+            just bench-e2e {{duration}} 4 {{fsync}} 1 false leveled \
+              2>&1 | tee /data/results/applier_long_8x_{{scenario}}_{{fsync}}_rep\${rep}_\$ts.txt; \
+        done; \
+        echo \"Done. Results in /data/results/applier_long_8x_{{scenario}}_{{fsync}}_rep*_\$ts.txt\" \
+          | tee -a /data/results/applier_long_8x_{{scenario}}_{{fsync}}_\$ts.log'"
+
+# Pull /data/results from the perf-8x VM into a fresh local dir.
+# Same pattern as bench-fly-results — tarball-then-sftp to dodge
+# `sftp get -r`'s won't-overwrite + won't-auto-start behaviour.
+bench-fly-8x-results dest="":
+    #!/usr/bin/env bash
+    set -eu
+    dest='{{dest}}'
+    if [ -z "$dest" ]; then
+      dest="./fly-bench-results-8x-$(date +%Y%m%d_%H%M%S)"
+    fi
+    if [ -e "$dest" ]; then
+      echo "destination '$dest' already exists — pick another or remove it first" >&2
+      exit 1
+    fi
+    mkdir -p "$dest"
+    remote_tar="/tmp/fly-bench-results-8x-$$.tgz"
+    echo "tarring /data/results on the perf-8x VM..."
+    fly ssh console --config fly-8x.toml -C "bash -c 'tar czf $remote_tar -C /data results'"
+    local_tar="$dest/_fetch.tgz"
+    echo "sftp'ing $remote_tar → $local_tar"
+    fly ssh sftp get --config fly-8x.toml "$remote_tar" > "$local_tar"
+    echo "extracting → $dest"
+    tar xzf "$local_tar" -C "$dest" --strip-components=1
+    rm -f "$local_tar"
+    fly ssh console --config fly-8x.toml -C "bash -c 'rm -f $remote_tar'" || true
+    echo "done: $dest"
+
+# Tail the perf-8x VM's logs.
+bench-fly-8x-logs:
+    fly logs --config fly-8x.toml
+
+# Stop the perf-8x VM (idle cost drops to volume-only, ~$6/mo for 40 GB).
+bench-fly-8x-down:
+    fly machine stop --config fly-8x.toml
+
+# DESTRUCTIVE — destroys the perf-8x app AND its 40 GB volume. Pull results first.
+bench-fly-8x-destroy:
+    @echo "This will destroy the bondy-mst-bench-8x app and its 40 GB volume."
+    @echo "Volume data (including /data/results) will be PERMANENTLY LOST."
+    @echo "Pull results first with: just bench-fly-8x-results"
+    @echo ""
+    @read -p "Type 'destroy' to confirm: " confirm && \
+      [ "$confirm" = "destroy" ] || (echo "aborted"; exit 1)
+    fly apps destroy bondy-mst-bench-8x --yes

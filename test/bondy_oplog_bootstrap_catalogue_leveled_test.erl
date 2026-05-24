@@ -47,8 +47,16 @@ leveled_bootstrap_test_() ->
 fresh_replica_bootstraps_via_leveled() ->
     Dir1 = make_tempdir(),
     Dir2 = make_tempdir(),
-    {ok, B1} = leveled_bookie:book_start(Dir1, 2000, 100_000_000, none),
-    {ok, B2} = leveled_bookie:book_start(Dir2, 2000, 100_000_000, none),
+    %% head_only=with_lookup required by bondy_oplog_projection_leveled (PR-PS-15b).
+    BookOpts = fun(D) ->
+        [{root_path, D},
+         {cache_size, 2000},
+         {max_journalsize, 100_000_000},
+         {sync_strategy, none},
+         {head_only, with_lookup}]
+    end,
+    {ok, B1} = leveled_bookie:book_start(BookOpts(Dir1)),
+    {ok, B2} = leveled_bookie:book_start(BookOpts(Dir2)),
     try
         {Peer,  PeerEntry}  = setup_instance_with_leveled(B1),
         {Local, LocalEntry} = setup_instance_with_leveled(B2),

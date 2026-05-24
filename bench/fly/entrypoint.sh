@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Fly machine boot — wire the persistent volume into the paths the
-# bench tooling and the pack-store WAL artefacts expect, then hand
-# off to whatever the container's CMD is (usually `tail -f /dev/null`
-# to keep the VM alive for `fly ssh console`).
+# bench tooling expects, then hand off to the container's CMD
+# (`tail -f /dev/null` to keep the VM alive for `fly ssh console`).
+#
+# We persist /tmp + /data/results on the volume because they're
+# inputs/outputs (bench artefacts under /tmp; bench output under
+# /data/results) that should survive across machine restarts.
+#
+# We deliberately do NOT symlink _build (rebar3 or mix) onto the
+# volume:
+#   - Mix uses relative symlinks for `_build/<env>/lib/<dep>/priv`
+#     that point to `../../../../deps/<dep>/priv`. With a _build
+#     volume symlink, that relative path resolves to
+#     `/data/_build/bench/deps/...` — which does not exist (deps
+#     live at /opt/bondy_mst/bench/deps/). Result: every benchee_html
+#     report fails with "could not read priv/assets/.../*.css".
+#   - rebar3 _build doesn't have that bug but doesn't gain anything
+#     from volume persistence either — Fly's auto-stop preserves
+#     the rootfs, so _build survives stop/start cycles. Only a
+#     `fly deploy` wipes it, at which point we want a fresh compile
+#     against the new source anyway.
 # =============================================================================
 
 set -euo pipefail
@@ -11,7 +28,6 @@ set -euo pipefail
 VOLUME_ROOT=/data
 
 mkdir -p "${VOLUME_ROOT}/tmp"
-mkdir -p "${VOLUME_ROOT}/_build"
 mkdir -p "${VOLUME_ROOT}/results"
 
 # Bench artefacts (WAL segments, leveled stores, pack stores) land
@@ -22,32 +38,6 @@ mkdir -p "${VOLUME_ROOT}/results"
 if [ ! -L /tmp ] || [ "$(readlink /tmp)" != "${VOLUME_ROOT}/tmp" ]; then
     rm -rf /tmp
     ln -s "${VOLUME_ROOT}/tmp" /tmp
-fi
-
-# rebar3 _build lives on the volume so a `rebar3 compile` after a
-# `git pull` doesn't re-do work on every machine restart.
-if [ -d /opt/bondy_mst/_build ] && [ ! -L /opt/bondy_mst/_build ]; then
-    # First boot — image baked _build into the layer; move it to
-    # the volume so subsequent boots reuse it.
-    if [ ! -d "${VOLUME_ROOT}/_build/default" ]; then
-        mv /opt/bondy_mst/_build/* "${VOLUME_ROOT}/_build/" 2>/dev/null || true
-    fi
-    rm -rf /opt/bondy_mst/_build
-fi
-if [ ! -L /opt/bondy_mst/_build ]; then
-    ln -s "${VOLUME_ROOT}/_build" /opt/bondy_mst/_build
-fi
-
-# Bench's Mix _build is independent of rebar3's — same treatment.
-if [ -d /opt/bondy_mst/bench/_build ] && [ ! -L /opt/bondy_mst/bench/_build ]; then
-    if [ ! -d "${VOLUME_ROOT}/_build/bench" ]; then
-        mkdir -p "${VOLUME_ROOT}/_build/bench"
-        mv /opt/bondy_mst/bench/_build/* "${VOLUME_ROOT}/_build/bench/" 2>/dev/null || true
-    fi
-    rm -rf /opt/bondy_mst/bench/_build
-fi
-if [ ! -L /opt/bondy_mst/bench/_build ]; then
-    ln -s "${VOLUME_ROOT}/_build/bench" /opt/bondy_mst/bench/_build
 fi
 
 exec "$@"

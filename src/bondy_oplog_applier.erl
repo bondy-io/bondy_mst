@@ -1024,7 +1024,23 @@ drain_loop_step(#state{iter = Iter} = State0) ->
 %% rejected. Subsequent applier passes do not retry rejected events
 %% (replay-from-beginning would just re-fire the same failure).
 apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch) ->
+    %% Per-stage timing. Five stages emit `duration_us` + `count`
+    %% under `[bondy_oplog, applier, batch_<stage>]` so the bench
+    %% harness can compute µs/event-spent-in-this-stage and isolate
+    %% which sub-path dominates the per-shard throughput floor. See
+    %% `_design/latest/APPLIER_PIPELINE_RESIDUAL_PLAN.md` §3.1. The
+    %% per-call overhead is ~500ns × 5 stages = ~2.5µs per batch,
+    %% well under the <2% threshold for batches with ≥1 event of
+    %% real work (pack-store puts are 100-1000µs each).
+    BatchSize = length(Batch),
+    VerifyT0 = erlang:monotonic_time(microsecond),
     {Verified, Rejected} = verify_batch(State, Batch, [], []),
+    telemetry:execute(
+        [bondy_oplog, applier, batch_verify],
+        #{duration_us => erlang:monotonic_time(microsecond) - VerifyT0,
+          count       => BatchSize},
+        #{instance_id => Id}
+    ),
     RejectedCount = length(Rejected),
     case Rejected of
         [] -> ok;
@@ -1061,9 +1077,34 @@ apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch)
                 %% reorder only costs the within-batch overlap, which
                 %% is dominated by the projection write anyway.
                 {CellEvents, FoldEvents} = partition_by_op(Verified),
+
+                FoldT0 = erlang:monotonic_time(microsecond),
                 S1 = apply_fold_batch(State, FoldEvents),
+                telemetry:execute(
+                    [bondy_oplog, applier, batch_fold],
+                    #{duration_us => erlang:monotonic_time(microsecond) - FoldT0,
+                      count       => length(FoldEvents)},
+                    #{instance_id => Id}
+                ),
+
+                CellT0 = erlang:monotonic_time(microsecond),
                 S2 = apply_cell_batch(S1, CellEvents),
+                telemetry:execute(
+                    [bondy_oplog, applier, batch_cell_apply],
+                    #{duration_us => erlang:monotonic_time(microsecond) - CellT0,
+                      count       => length(CellEvents)},
+                    #{instance_id => Id}
+                ),
+
+                PublishT0 = erlang:monotonic_time(microsecond),
                 ok = publish_batch(S2, Verified),
+                telemetry:execute(
+                    [bondy_oplog, applier, batch_publish],
+                    #{duration_us => erlang:monotonic_time(microsecond) - PublishT0,
+                      count       => VerifiedCount},
+                    #{instance_id => Id}
+                ),
+
                 %% Demand-based dispatch: bump the shared atomic
                 %% BEFORE casting. The instance decrements after it
                 %% handles the cast, and `drain_loop/1` checks this
@@ -1072,10 +1113,17 @@ apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch)
                 %% dispatches the batch it just verified, because
                 %% the verification already happened. The next
                 %% iteration's check is what gates further reads.
+                InstallT0 = erlang:monotonic_time(microsecond),
                 ok = reserve_install_slot(State),
                 gen_server:cast(
                     InstancePid,
                     {install_local_batch, Verified}
+                ),
+                telemetry:execute(
+                    [bondy_oplog, applier, batch_install_cast],
+                    #{duration_us => erlang:monotonic_time(microsecond) - InstallT0,
+                      count       => VerifiedCount},
+                    #{instance_id => Id}
                 ),
                 S2
         end,
@@ -1172,39 +1220,125 @@ apply_cell_batch(#state{cell_apply_ctx = Ctx,
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
     CacheHandle  = maps:get(cache_handle,  Ctx, undefined),
     HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
-    lists:foreach(
-        fun(Event) ->
+
+    %% PR-PS-15b: collect all per-event writes into a single
+    %% `Adapter:put_batch/2` call.
+    %%
+    %% Correctness: when two events in the batch target the same
+    %% `{Bucket, Key}`, the second must observe the first's write.
+    %% We thread a `LocalWrites :: #{{Bucket, Key} => Frame}` shadow
+    %% through the fold so the per-event read path checks the local
+    %% map before falling back to `Adapter:get/3`. After the fold,
+    %% we issue ONE `put_batch` with the deduped {Bucket, Key, Frame}
+    %% list (last write wins per key — consistent with the previous
+    %% sequential-per-key semantics).
+    {LocalWrites, MaxHlc} = lists:foldl(
+        fun(Event, {WAcc, HlcAcc}) ->
             case bondy_oplog_event:op(Event) of
                 {cell_apply, Bucket, Key, FoldEvent} ->
                     Meta = bondy_oplog_event:key(Event),
-                    apply_one_cell(Id, Adapter, Handle, Fold,
-                                   CacheAdapter, CacheHandle,
-                                   HighWaterRef,
-                                   Bucket, Key, FoldEvent, Meta);
+                    case compute_one_cell(Id, Adapter, Handle, Fold,
+                                          WAcc, Bucket, Key,
+                                          FoldEvent, Meta) of
+                        {ok, NewFrame, NewHlc} ->
+                            WAcc1 = WAcc#{{Bucket, Key} => NewFrame},
+                            {WAcc1, max_hlc(HlcAcc, NewHlc)};
+                        skip ->
+                            {WAcc, HlcAcc}
+                    end;
                 _ ->
-                    ok
+                    {WAcc, HlcAcc}
             end
         end,
+        {#{}, undefined},
         Events
     ),
+
+    case map_size(LocalWrites) of
+        0 ->
+            ok;
+        _ ->
+            PutT0 = erlang:monotonic_time(microsecond),
+            Entries = [{B, K, F} || {{B, K}, F} <- maps:to_list(LocalWrites)],
+            PutResult = Adapter:put_batch(Handle, Entries),
+            telemetry:execute(
+                [bondy_oplog, applier, batch_cell_put],
+                #{duration_us => erlang:monotonic_time(microsecond) - PutT0,
+                  count       => length(Entries)},
+                #{instance_id => Id}
+            ),
+            case PutResult of
+                ok ->
+                    %% Cache invalidate per unique key (dedup via
+                    %% the LocalWrites map's key set, not the Inval
+                    %% list which may have duplicates).
+                    maps:foreach(
+                        fun({B, K}, _F) ->
+                            invalidate_cache(CacheAdapter, CacheHandle, B, K)
+                        end,
+                        LocalWrites
+                    ),
+                    case MaxHlc of
+                        undefined -> ok;
+                        _         -> advance_high_water(HighWaterRef, MaxHlc)
+                    end;
+                {error, Reason} ->
+                    ?LOG_WARNING(#{
+                        description =>
+                            "bondy_oplog_applier projection batch write "
+                            "failed; the cells will be re-applied on the "
+                            "next replay of these events",
+                        instance_id => Id,
+                        count => map_size(LocalWrites),
+                        reason => Reason
+                    }),
+                    ok
+            end
+    end,
     State.
 
 %% @private
-apply_one_cell(Id, Adapter, Handle, Fold,
-               CacheAdapter, CacheHandle,
-               HighWaterRef,
-               Bucket, Key, FoldEvent, Meta) ->
+%% Per-event compute (read + apply + encode). Returns the new frame +
+%% HLC to the batch caller, which collects and writes them all at once.
+%%
+%% Reads first consult `LocalWrites` so in-batch updates to the same
+%% `{Bucket, Key}` see each other (the substrate has not been written
+%% yet at this point). Then falls back to `Adapter:get/3`.
+%%
+%% Per-event telemetry boundaries `cell_read` + `cell_apply_event`
+%% remain (each cell still pays the read + compute cost). The
+%% PR-PS-15a `cell_put` and `cell_side_effects` events are GONE in
+%% PR-PS-15b — the put + side-effects now happen once per batch and
+%% are measured by `batch_cell_put` in `apply_cell_batch/2`.
+compute_one_cell(Id, Adapter, Handle, Fold, LocalWrites, Bucket, Key,
+                 FoldEvent, Meta) ->
     try
+        ReadT0 = erlang:monotonic_time(microsecond),
         {OldState, OldValueOpt} =
-            case Adapter:get(Handle, Bucket, Key) of
-                not_found ->
-                    {bondy_oplog_fold:initial_value(Fold), undefined};
-                {ok, OldFrame} ->
-                    {_PrevHlc, OldStateBytes, OldValueBytes} =
-                        bondy_oplog_cell_frame:decode_full(OldFrame),
-                    {bondy_oplog_fold:decode_state(Fold, OldStateBytes),
-                     OldValueBytes}
+            case maps:get({Bucket, Key}, LocalWrites, undefined) of
+                undefined ->
+                    case Adapter:get(Handle, Bucket, Key) of
+                        not_found ->
+                            {bondy_oplog_fold:initial_value(Fold), undefined};
+                        {ok, OldFrame} ->
+                            {_PrevHlc, OldStateBytes, OldValueBytes} =
+                                bondy_oplog_cell_frame:decode_full(OldFrame),
+                            {bondy_oplog_fold:decode_state(Fold, OldStateBytes),
+                             OldValueBytes}
+                    end;
+                LocalFrame ->
+                    {_PrevHlc, LStateBytes, LValueBytes} =
+                        bondy_oplog_cell_frame:decode_full(LocalFrame),
+                    {bondy_oplog_fold:decode_state(Fold, LStateBytes),
+                     LValueBytes}
             end,
+        telemetry:execute(
+            [bondy_oplog, applier, cell_read],
+            #{duration_us => erlang:monotonic_time(microsecond) - ReadT0},
+            #{instance_id => Id}
+        ),
+
+        ApplyT0 = erlang:monotonic_time(microsecond),
         {NewState, Delta} =
             bondy_oplog_fold:apply_event(Fold, OldState, FoldEvent, Meta),
         Hlc = bondy_oplog_fold:hlc(Fold, NewState),
@@ -1214,30 +1348,18 @@ apply_one_cell(Id, Adapter, Handle, Fold,
             Hlc, NewStateBytes, NewValueBytes,
             bondy_oplog_fold:value_equals_state(Fold)
         ),
-        case Adapter:put_batch(Handle, [{Bucket, Key, NewFrame}]) of
-            ok ->
-                invalidate_cache(CacheAdapter, CacheHandle, Bucket, Key),
-                advance_high_water(HighWaterRef, Hlc),
-                ok;
-            {error, Reason} ->
-                ?LOG_WARNING(#{
-                    description =>
-                        "bondy_oplog_applier projection write failed; "
-                        "the cell will be re-applied on the next replay "
-                        "of this event",
-                    instance_id => Id,
-                    bucket => Bucket,
-                    cell_key => Key,
-                    reason => Reason
-                }),
-                ok
-        end
+        telemetry:execute(
+            [bondy_oplog, applier, cell_apply_event],
+            #{duration_us => erlang:monotonic_time(microsecond) - ApplyT0},
+            #{instance_id => Id}
+        ),
+        {ok, NewFrame, Hlc}
     catch
         C:R:S ->
             ?LOG_ERROR(#{
                 description =>
                     "bondy_oplog_applier cell_apply raised; the cell "
-                    "has been skipped. Subtree continues to drain.",
+                    "has been skipped. Batch continues with remaining cells.",
                 instance_id => Id,
                 bucket => Bucket,
                 cell_key => Key,
@@ -1246,8 +1368,16 @@ apply_one_cell(Id, Adapter, Handle, Fold,
                 reason => R,
                 stacktrace => S
             }),
-            ok
+            skip
     end.
+
+%% @private
+%% Tracks the maximum HLC seen across a batch so the per-shard
+%% high-water mark can be advanced once at the end instead of once
+%% per cell event.
+max_hlc(undefined, Hlc) -> Hlc;
+max_hlc(A, B) when A >= B -> A;
+max_hlc(_, B) -> B.
 
 %% @private
 %% Re-fold the `cell_apply` events that landed in the MST since the
@@ -1327,30 +1457,67 @@ diff_pairs(MST, LastRoot, Id) ->
 
 %% @private
 %% Walks the `{Key, Value}` pairs from the MST (or its diff) and
-%% dispatches every `cell_apply` op through `apply_one_cell/11`.
+%% dispatches every `cell_apply` op through the batched compute path.
 %% Non-cell ops are skipped here — the per-instance fold owns them and
 %% has already seen them via the WAL drain.
+%%
+%% PR-PS-15b: same collect-then-batch shape as `apply_cell_batch/2`.
+%% Per-key shadow map preserves in-batch read-your-own-writes when
+%% two pairs target the same `{Bucket, Key}`.
 apply_cell_pairs(Ctx, Id, Pairs) ->
     #{adapter := Adapter, handle := Handle, fold_module := Fold} = Ctx,
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
     CacheHandle  = maps:get(cache_handle,  Ctx, undefined),
     HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
     try
-        lists:foldl(
+        {LocalWrites, MaxHlc, N} = lists:foldl(
             fun
                 ({MstKey, {{cell_apply, Bucket, CellKey, FoldEvent},
-                           _Meta, _Prev, _Sig}}, N) ->
-                    apply_one_cell(Id, Adapter, Handle, Fold,
-                                   CacheAdapter, CacheHandle,
-                                   HighWaterRef,
-                                   Bucket, CellKey, FoldEvent, MstKey),
-                    N + 1;
-                (_, N) ->
-                    N
+                           _Meta, _Prev, _Sig}}, {WAcc, HlcAcc, NAcc}) ->
+                    case compute_one_cell(Id, Adapter, Handle, Fold,
+                                          WAcc, Bucket, CellKey,
+                                          FoldEvent, MstKey) of
+                        {ok, NewFrame, NewHlc} ->
+                            WAcc1 = WAcc#{{Bucket, CellKey} => NewFrame},
+                            {WAcc1, max_hlc(HlcAcc, NewHlc), NAcc + 1};
+                        skip ->
+                            {WAcc, HlcAcc, NAcc}
+                    end;
+                (_, Acc) ->
+                    Acc
             end,
-            0,
+            {#{}, undefined, 0},
             Pairs
-        )
+        ),
+        case map_size(LocalWrites) of
+            0 -> ok;
+            _ ->
+                Entries = [{B, K, F} || {{B, K}, F} <- maps:to_list(LocalWrites)],
+                case Adapter:put_batch(Handle, Entries) of
+                    ok ->
+                        maps:foreach(
+                            fun({B, K}, _F) ->
+                                invalidate_cache(CacheAdapter, CacheHandle, B, K)
+                            end,
+                            LocalWrites
+                        ),
+                        case MaxHlc of
+                            undefined -> ok;
+                            _ -> advance_high_water(HighWaterRef, MaxHlc)
+                        end;
+                    {error, Reason} ->
+                        ?LOG_WARNING(#{
+                            description =>
+                                "bondy_oplog_applier replay batch write "
+                                "failed; the cells will be re-applied on "
+                                "the next sync tick",
+                            instance_id => Id,
+                            count => map_size(LocalWrites),
+                            reason => Reason
+                        })
+                end
+        end,
+        N
     catch
         C:R:S ->
             ?LOG_WARNING(#{

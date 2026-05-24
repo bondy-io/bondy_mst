@@ -1,10 +1,16 @@
+# Used by the bench/fly/ Fly.io substrate (and any future container
+# build). Patterns are relative to the repo root, which is the build
+# context. See `bench/fly/Dockerfile` + `bench/fly/fly.toml`.
+
 # Build artefacts — rebuilt inside the image; volume re-binds the
 # real ones at boot time.
+#
+# NOTE: bench/lib/ is SOURCE (the `Bench` support module used by
+# every bench script), not an artefact. Must NOT be excluded.
 _build/
 bench/_build/
 bench/_output/
 bench/deps/
-bench/lib/
 
 # Test artefacts — never want in the image.
 /tmp/

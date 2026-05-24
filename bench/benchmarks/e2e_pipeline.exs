@@ -142,7 +142,11 @@ open_projection = fn
         {:root_path, String.to_charlist(dir)},
         {:max_journalsize, 1_000_000_000},
         {:cache_size, 2_000},
-        {:sync_strategy, :none}
+        {:sync_strategy, :none},
+        # head_only=with_lookup required by bondy_oplog_projection_leveled
+        # (PR-PS-15b). Enables book_mput (atomic batched writes) and
+        # book_headonly (ledger-only point reads).
+        {:head_only, :with_lookup}
       ])
 
     {:ok, ph} =
@@ -458,6 +462,39 @@ scenarios = [
     "writer" => %{count: writers, op: write_op}
   }}
 ]
+
+# Optional SCENARIOS env filter — comma-separated name prefixes.
+# `SCENARIOS=write_only` keeps just write_only. `SCENARIOS=write_only,mixed`
+# keeps both. Empty / unset = all four scenarios (default behaviour).
+# Used by the applier-pipeline-residual stability runs that want to
+# isolate one scenario for long-duration variance assessment.
+scenarios =
+  case System.get_env("SCENARIOS") do
+    nil ->
+      scenarios
+
+    "" ->
+      scenarios
+
+    csv ->
+      prefixes =
+        csv
+        |> String.split(",")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+
+      filtered =
+        Enum.filter(scenarios, fn {base_name, _} ->
+          Enum.any?(prefixes, fn p -> String.starts_with?(base_name, p) end)
+        end)
+
+      if filtered == [] do
+        raise "SCENARIOS=#{csv} matched no scenarios (available: " <>
+                Enum.map_join(scenarios, ", ", fn {n, _} -> n end) <> ")"
+      end
+
+      filtered
+  end
 
 runs =
   for backend <- backends,

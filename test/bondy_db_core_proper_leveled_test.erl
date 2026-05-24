@@ -152,7 +152,15 @@ with_shard(Fn) ->
 
 start_shard(NS, Index, Shard, ShardCount) ->
     Dir = make_tempdir(),
-    {ok, Bookie} = leveled_bookie:book_start(Dir, 2000, 100_000_000, none),
+    %% head_only=with_lookup required by bondy_oplog_projection_leveled
+    %% (PR-PS-15b); use the proplist form to add it.
+    {ok, Bookie} = leveled_bookie:book_start(
+        [{root_path, Dir},
+         {cache_size, 2000},
+         {max_journalsize, 100_000_000},
+         {sync_strategy, none},
+         {head_only, with_lookup}]
+    ),
     {ok, CH} = ?CACHE_MOD:init(NS, Index, Shard, #{}),
     %% Bucket is a call-time parameter; the leveled projection adapter's
     %% handle only carries the Bookie pid.

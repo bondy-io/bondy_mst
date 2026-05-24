@@ -61,12 +61,20 @@ adapter_test_() ->
 %% =============================================================================
 
 setup() ->
-    %% Per-test fresh Bookie in a fresh temp directory. The leveled
-    %% tag hooks are wired here so the adapter can use `?BONDY_FOLD_TAG`
-    %% without depending on `bondy_mst_app:start/2`.
+    %% Per-test fresh Bookie in a fresh temp directory. The adapter
+    %% (PR-PS-15b) uses head_only mode with the built-in ?HEAD_TAG;
+    %% the custom leveled-tag extractor is no longer required on the
+    %% write path but `install/0` is left in place because it's a
+    %% global env-var set and harmless when head_only is enabled.
     ok = bondy_oplog_leveled_tag:install(),
     Dir = make_tempdir(),
-    {ok, Pid} = leveled_bookie:book_start(Dir, 2000, 100_000_000, none),
+    {ok, Pid} = leveled_bookie:book_start(
+        [{root_path, Dir},
+         {cache_size, 2000},
+         {max_journalsize, 100_000_000},
+         {sync_strategy, none},
+         {head_only, with_lookup}]
+    ),
     {Pid, Dir}.
 
 cleanup({Pid, Dir}) ->

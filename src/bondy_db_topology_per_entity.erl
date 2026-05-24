@@ -220,10 +220,15 @@ default_book_opts(Dir) ->
     %% Mirrors the parameters the adapter eunit + PropEr suites use; the
     %% defaults are tuned for fast tests, not for production. Production
     %% deployments should override `book_opts_fun` in `topology_opts`.
+    %% `head_only=with_lookup` required by `bondy_oplog_projection_leveled`
+    %% (PR-PS-15b) — enables `book_mput/2` + `book_headonly/4`. See
+    %% `bondy_db_topology_single_bookie:default_book_opts/1` for the
+    %% rationale.
     [{root_path, Dir},
      {cache_size, 2000},
      {max_journalsize, 100_000_000},
-     {sync_strategy, none}].
+     {sync_strategy, none},
+     {head_only, with_lookup}].
 
 
 stop_bookie_safe(Bookie) when is_pid(Bookie) ->

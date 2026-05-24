@@ -1,84 +1,56 @@
 # =============================================================================
 # bondy_mst — Linux bench substrate for Fly.io
 #
-# Long-lived SSH-only Debian 12 image with:
-#   - kerl-built OTP 28
-#   - Elixir 1.18 (compatible with OTP 28)
-#   - rebar3 + mix + just
-#   - sysstat (iostat, vmstat), strace, procps — the companion-data
-#     tools the bench plan §4 calls for
-#   - The bondy_mst repo pre-compiled under both rebar3 and mix so
-#     the first ssh session doesn't pay compile cost
+# Long-lived SSH-only Debian 12 image built on the community
+# `hexpm/elixir` image which bundles a tested OTP + Elixir pair.
+# Adds rebar3 + just + sysstat/strace/procps for the bench plan
+# §4 companion-data tools, and pre-compiles the project under
+# both rebar3 and mix so the first ssh session lands at usable
+# speed.
+#
+# Why hexpm/elixir vs the bare official `erlang:28`: the bench
+# harness under `bench/` is an Elixir Mix project, so we need both
+# toolchains anyway; hexpm/elixir bakes them in together. Why
+# hexpm/elixir vs kerl-built OTP: ~10 min faster cold builds, and
+# the community image carries security patches and OTP releases
+# without us tracking them. The "minimal OTP build" win from kerl
+# (no observer/wx/odbc) is irrelevant on a 4 GB bench VM.
 #
 # See `bench/fly/README.md` for the operator runbook and
-# `_design/latest/PACK_STORE_WRITE_PATH_FLOOR_BENCH_PLAN.md` §10 for
-# the QA #14 execution context.
+# `_design/latest/PACK_STORE_WRITE_PATH_FLOOR_BENCH_PLAN.md` §10
+# for the QA #14 execution context.
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# Stage 1 — OTP build
+# OTP 28 + Elixir 1.18.4 on Debian 12 (bookworm) slim.
 #
-# The kerl build is the slowest part of the image (~5-10 min cold).
-# We bake it into a dedicated stage so changes to project source
-# don't bust the OTP layer cache.
-# -----------------------------------------------------------------------------
-FROM debian:12-slim AS otp-builder
+# `hexpm/elixir` tag format is
+# `<elixir>-erlang-<otp>-<os>-<os_version>[-slim]`. Rolling tags
+# (no date snapshot) are used here because we re-pin via the
+# Fly.io substrate doc whenever production OTP is fixed; if you
+# need fully reproducible image bytes, pin to a dated snapshot
+# tag from https://hub.docker.com/r/hexpm/elixir/tags.
+FROM hexpm/elixir:1.18.4-erlang-28.0-debian-bookworm-20260518-slim
 
-ARG OTP_VERSION=28.0
-ARG KERL_VERSION=4.4.0
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        autoconf \
-        m4 \
-        libncurses5-dev \
-        libssl-dev \
-        libodbc1 \
-        unixodbc-dev \
-        curl \
-        ca-certificates \
-        git \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl -fsSL -o /usr/local/bin/kerl \
-        https://raw.githubusercontent.com/kerl/kerl/${KERL_VERSION}/kerl \
-    && chmod +x /usr/local/bin/kerl
-
-# kerl options pinned for a minimal OTP build matching production:
-# HiPE off (deprecated), wx/odbc off (not used), docs off (not needed
-# in the bench substrate).
-ENV KERL_CONFIGURE_OPTIONS="--disable-hipe --without-wx --without-odbc --without-debugger --without-observer --without-et --disable-silent-rules"
-
-RUN kerl build ${OTP_VERSION} ${OTP_VERSION} \
-    && kerl install ${OTP_VERSION} /opt/otp/${OTP_VERSION} \
-    && kerl cleanup ${OTP_VERSION}
-
-# -----------------------------------------------------------------------------
-# Stage 2 — runtime image
-# -----------------------------------------------------------------------------
-FROM debian:12-slim
-
-ARG OTP_VERSION=28.0
-ARG ELIXIR_VERSION=1.18.4
 ARG REBAR3_VERSION=3.24.0
 ARG JUST_VERSION=1.36.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    PATH=/opt/otp/${OTP_VERSION}/bin:/opt/elixir/bin:/usr/local/bin:/usr/bin:/bin
+    LC_ALL=C.UTF-8
 
-# Runtime + bench companion tools. The bench plan §4 calls for
-# iostat (sysstat), vmstat (procps), strace explicitly.
+# Runtime + bench companion tools.
+#   - sysstat / procps / strace: bench plan §4 explicitly calls
+#     for `iostat`, `vmstat`, `strace`.
+#   - build-essential: the project ships NIFs (lz4, ezstd via
+#     `c_src/lz4.c` and friends) that `rebar3 compile` builds
+#     from source. Without `cc` the compile step fails. Also lets
+#     operators recompile after `git pull` without reaching for
+#     a separate dev image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
         ca-certificates \
         curl \
         git \
-        libncurses6 \
-        libssl3 \
-        libodbc1 \
         procps \
         strace \
         sysstat \
@@ -87,17 +59,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Pull the OTP install from stage 1.
-COPY --from=otp-builder /opt/otp /opt/otp
-
-# Elixir — match OTP 28. Elixir 1.18+ added OTP 28 support.
-RUN mkdir -p /opt/elixir \
-    && curl -fsSL -o /tmp/elixir.zip \
-        https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-28.zip \
-    && unzip -q /tmp/elixir.zip -d /opt/elixir \
-    && rm /tmp/elixir.zip
-
-# rebar3 binary (pinned).
+# rebar3 binary (pinned). hexpm/elixir ships its own rebar3 via
+# `mix local.rebar`, but we want a project-level pinned version
+# for `rebar3 compile` from the shell.
 RUN curl -fsSL -o /usr/local/bin/rebar3 \
         https://github.com/erlang/rebar3/releases/download/${REBAR3_VERSION}/rebar3 \
     && chmod +x /usr/local/bin/rebar3
@@ -120,10 +84,14 @@ RUN mix local.hex --force \
 WORKDIR /opt/bondy_mst
 COPY . /opt/bondy_mst
 
-# Pre-fetch Erlang and Elixir deps. Pre-compile rebar3 default
-# profile (production build) and the bench Mix project so first
-# ssh starts at usable speed.
+# Pre-fetch Erlang and Elixir deps. Pre-compile:
+#   - rebar3 default profile (production build)
+#   - rebar3 bench profile (adds extra backends bench wants to compare,
+#     e.g. leveled; Bench.setup/0 in bench/lib/bench.ex skips its own
+#     runtime compile when `_build/bench/lib/` already exists)
+#   - bench Mix project (Bench module + bench/lib/* support code)
 RUN rebar3 compile \
+    && rebar3 as bench compile \
     && cd bench && mix deps.get && mix compile
 
 # Entrypoint:
