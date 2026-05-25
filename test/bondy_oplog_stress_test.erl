@@ -31,7 +31,7 @@ stress_test_() ->
     %% real regression.
     {setup, fun setup/0, fun cleanup/1, [
         {timeout, 180, fun convergence_under_random_interleaving/0},
-        {timeout, 180, fun convergence_with_file_snapshot_store/0},
+        {timeout, 180, fun convergence_with_file_compaction_checkpoint/0},
         {timeout, 180, fun hlc_seeds_from_persisted_watermark/0}
     ]}.
 
@@ -89,7 +89,7 @@ run_one(N) ->
 
 %% File-backed snapshot store smoke test: compact, stop, restart with
 %% same path, verify snapshot survives.
-convergence_with_file_snapshot_store() ->
+convergence_with_file_compaction_checkpoint() ->
     Suffix = integer_to_list(os:system_time(microsecond)),
     Tmp = filename:join(
         <<"/tmp">>,
@@ -99,8 +99,8 @@ convergence_with_file_snapshot_store() ->
     Id = list_to_binary("file_" ++ Suffix),
     Opts = #{
         crdt_module => bondy_oplog_test_counter,
-        snapshot_store => bondy_oplog_snapshot_store_file,
-        snapshot_store_opts => #{path => Tmp},
+        compaction_checkpoint => bondy_oplog_compaction_checkpoint_file,
+        compaction_checkpoint_opts => #{path => Tmp},
         origin => bondy_oplog_origin:new()
     },
     {ok, _} = bondy_oplog:start_instance(Id, Opts),
@@ -114,12 +114,12 @@ convergence_with_file_snapshot_store() ->
     bondy_oplog_peer_state:sync(),
     {ok, {compacted, _, EventCount}} = bondy_oplog:compact(Id),
     ?assertEqual(3, EventCount),
-    {ok, _, S1} = bondy_oplog:snapshot(Id),
+    {ok, _, S1} = bondy_oplog:compaction_checkpoint(Id),
     ?assertEqual(3, S1),
     %% Stop the instance and re-open against the same path.
     ok = bondy_oplog:stop_instance(Id),
     {ok, _} = bondy_oplog:start_instance(Id, Opts),
-    {ok, _, S2} = bondy_oplog:snapshot(Id),
+    {ok, _, S2} = bondy_oplog:compaction_checkpoint(Id),
     ?assertEqual(S1, S2),
     %% Watermark is also recovered.
     ?assertNotEqual(
@@ -145,8 +145,8 @@ hlc_seeds_from_persisted_watermark() ->
     Origin = bondy_oplog_origin:new(),
     Opts = #{
         crdt_module => bondy_oplog_test_counter,
-        snapshot_store => bondy_oplog_snapshot_store_file,
-        snapshot_store_opts => #{path => Tmp},
+        compaction_checkpoint => bondy_oplog_compaction_checkpoint_file,
+        compaction_checkpoint_opts => #{path => Tmp},
         origin => Origin
     },
     {ok, _} = bondy_oplog:start_instance(Id, Opts),

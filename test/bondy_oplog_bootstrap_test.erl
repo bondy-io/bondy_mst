@@ -55,8 +55,8 @@ bootstrap_from_peer_with_snapshot() ->
     {ok, _} = bondy_oplog:bootstrap(A, B),
     ?assertEqual(BValue, bondy_oplog:query(A, value)),
     %% A's snapshot watermark should equal B's snapshot watermark.
-    {ok, WA, _} = bondy_oplog:snapshot(A),
-    {ok, WB, _} = bondy_oplog:snapshot(B),
+    {ok, WA, _} = bondy_oplog:compaction_checkpoint(A),
+    {ok, WB, _} = bondy_oplog:compaction_checkpoint(B),
     ?assertEqual(WA, WB),
     %% A's live MST should only have the 3 post-snapshot events.
     ?assertEqual(3, bondy_oplog:size(A)),
@@ -73,7 +73,7 @@ bootstrap_from_peer_without_snapshot() ->
         bondy_oplog:query(A, value)
     ),
     %% No snapshot was installed.
-    ?assertEqual(not_found, bondy_oplog:snapshot(A)),
+    ?assertEqual(not_found, bondy_oplog:compaction_checkpoint(A)),
     %% A's MST has the 5 live events.
     ?assertEqual(5, bondy_oplog:size(A)),
     ok.

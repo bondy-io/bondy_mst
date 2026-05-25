@@ -66,7 +66,9 @@ do_request(PeerInstance, {get_pages, Hashes}) ->
         end,
     {ok, bondy_oplog_instance:get_pages(PeerInstance, HashList)};
 do_request(PeerInstance, get_snapshot) ->
-    case bondy_oplog_instance:snapshot(PeerInstance) of
+    %% Wire-protocol message name is preserved (transport ABI);
+    %% internally we route to the renamed compaction_checkpoint API.
+    case bondy_oplog_instance:compaction_checkpoint(PeerInstance) of
         not_found -> {ok, no_snapshot};
         {ok, W, S} -> {ok, W, S}
     end;

@@ -26,7 +26,7 @@ Everywhere else in the architecture documentation we talk about
 Pictured over time, an instance looks like this:
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph T0["t=0 fresh instance"]
         S0["snapshot=∅"]
         M0["MST: e1 .. e_n<br/>live"]

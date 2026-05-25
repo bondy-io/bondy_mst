@@ -3,20 +3,21 @@
 %% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
 
--module(bondy_oplog_snapshot_store_ets).
--behaviour(bondy_oplog_snapshot_store).
+-module(bondy_oplog_compaction_checkpoint_ets).
+-behaviour(bondy_oplog_compaction_checkpoint).
 
 -include("bondy_mst.hrl").
 -include("bondy_oplog.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
-In-memory snapshot store backed by a per-instance ETS table.
+In-memory compaction checkpoint backed by a per-instance ETS table.
 
-Default implementation. Suitable for tests and ephemeral instances.
-For durable snapshots, consumers should plug a different module that
-implements the `bondy_oplog_snapshot_store` behaviour
-(DETS, leveled, RocksDB, S3, etc.).
+Suitable for tests and ephemeral instances where rebuild cost on
+restart is acceptable. For durable single-node deployments, use
+`bondy_oplog_compaction_checkpoint_file`. For other durability
+characteristics, implement the
+`bondy_oplog_compaction_checkpoint` behaviour directly.
 """).
 
 -record(state, {
@@ -25,13 +26,13 @@ implements the `bondy_oplog_snapshot_store` behaviour
 }).
 
 -export([init/2]).
--export([put_snapshot/3]).
--export([get_snapshot/1]).
+-export([put_checkpoint/3]).
+-export([get_checkpoint/1]).
 -export([current_watermark/1]).
 -export([close/1]).
 
 %% =============================================================================
-%% bondy_oplog_snapshot_store CALLBACKS
+%% bondy_oplog_compaction_checkpoint CALLBACKS
 %% =============================================================================
 
 init(InstanceId, _Opts) when is_binary(InstanceId) ->
@@ -40,20 +41,20 @@ init(InstanceId, _Opts) when is_binary(InstanceId) ->
     ]),
     {ok, #state{instance_id = InstanceId, tab = Tab}}.
 
-put_snapshot(#state{tab = Tab}, Watermark, Snapshot) ->
-    %% Single-row policy: overwrite any prior snapshot.
-    true = ets:insert(Tab, {snapshot, Watermark, Snapshot}),
+put_checkpoint(#state{tab = Tab}, Watermark, Checkpoint) ->
+    %% Single-row policy: overwrite any prior checkpoint.
+    true = ets:insert(Tab, {checkpoint, Watermark, Checkpoint}),
     ok.
 
-get_snapshot(#state{tab = Tab}) ->
-    case ets:lookup(Tab, snapshot) of
-        [{snapshot, W, S}] -> {ok, W, S};
+get_checkpoint(#state{tab = Tab}) ->
+    case ets:lookup(Tab, checkpoint) of
+        [{checkpoint, W, S}] -> {ok, W, S};
         [] -> not_found
     end.
 
 current_watermark(#state{tab = Tab}) ->
-    case ets:lookup(Tab, snapshot) of
-        [{snapshot, W, _}] -> W;
+    case ets:lookup(Tab, checkpoint) of
+        [{checkpoint, W, _}] -> W;
         [] -> undefined
     end.
 

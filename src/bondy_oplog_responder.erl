@@ -143,7 +143,10 @@ dispatch(InstanceId, get_snapshot) when is_binary(InstanceId) ->
             {error, {instance_not_running, InstanceId}};
         _Pid ->
             _ = bondy_oplog_instance:await_apply(InstanceId),
-            case bondy_oplog_instance:snapshot(InstanceId) of
+            %% Wire-protocol message `get_snapshot` is preserved
+            %% (transport ABI). Internally it routes to the renamed
+            %% compaction_checkpoint API.
+            case bondy_oplog_instance:compaction_checkpoint(InstanceId) of
                 not_found -> {ok, no_snapshot};
                 {ok, W, S} -> {ok, W, S}
             end

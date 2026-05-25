@@ -84,13 +84,14 @@ without protocol changes.
     %% default.
     fold_opts :: map(),
     crdt_module :: module() | undefined,
-    snapshot_store :: module(),
-    snapshot_state :: term(),
+    compaction_checkpoint :: module(),
+    compaction_checkpoint_state :: term(),
     watermark :: undefined | bondy_oplog_event:event_key(),
-    %% Cached `{Watermark, Snapshot}` from the snapshot store so the
-    %% registry can publish it without re-reading the store on every
-    %% mutation. Refreshed on init, compact, and load_snapshot.
-    cached_snapshot :: undefined | {bondy_oplog_event:event_key(), term()},
+    %% Cached `{Watermark, Checkpoint}` from the compaction checkpoint
+    %% store so the registry can publish it without re-reading the
+    %% store on every mutation. Refreshed on init, compact, and
+    %% load_snapshot.
+    cached_checkpoint :: undefined | {bondy_oplog_event:event_key(), term()},
     max_working_set :: pos_integer() | infinity,
     %% Cached size of the live MST (avoids a fold per append). Updated
     %% on every state-mutating handle_call.
@@ -202,8 +203,8 @@ without protocol changes.
     %% fold-module-specific; defaults to `#{}`.
     fold_opts => map(),
     crdt_module => module(),
-    snapshot_store => module(),
-    snapshot_store_opts => map(),
+    compaction_checkpoint => module(),
+    compaction_checkpoint_opts => map(),
     max_working_set => pos_integer() | infinity,
     %% Overlay backpressure caps. Either threshold triggers
     %% `{error, backpressure}` from `append/2,3` and `append_many/2`.
@@ -282,7 +283,7 @@ without protocol changes.
 %% GC / compaction API
 -export([current_watermark/1]).
 -export([crdt_module/1]).
--export([snapshot/1]).
+-export([compaction_checkpoint/1]).
 -export([compact/2]).
 
 %% Bootstrap
@@ -1103,20 +1104,20 @@ crdt_module(Target) ->
     gen_server:call(target(Target), crdt_module).
 
 ?DOC("""
-Returns `{ok, Watermark, Snapshot}` for the latest persisted snapshot,
-or `not_found` if no compaction has run yet.
+Returns `{ok, Watermark, Checkpoint}` for the latest persisted
+compaction checkpoint, or `not_found` if no compaction has run yet.
 """).
--spec snapshot(instance_id() | pid()) ->
+-spec compaction_checkpoint(instance_id() | pid()) ->
     {ok, bondy_oplog_event:event_key(), term()} | not_found.
 
-snapshot(Target) when is_binary(Target) ->
+compaction_checkpoint(Target) when is_binary(Target) ->
     case bondy_oplog_registry:lookup(Target) of
         not_found -> error({noproc, {?MODULE, Target}});
         {ok, #{snapshot := undefined}} -> not_found;
         {ok, #{snapshot := {W, S}}} -> {ok, W, S}
     end;
-snapshot(Target) ->
-    gen_server:call(target(Target), get_snapshot).
+compaction_checkpoint(Target) ->
+    gen_server:call(target(Target), get_compaction_checkpoint).
 
 ?DOC("""
 Runs one compaction cycle inside the instance gen_server.
@@ -1151,7 +1152,7 @@ Used by `bondy_oplog_sync_session:bootstrap/3` when a fresh
 or far-behind replica joins a long-running cluster.
 
 NOTE: not transactional with respect to a VM crash between
-`put_snapshot` and the MST truncate. On the next start, events ≤ the
+`put_checkpoint` and the MST truncate. On the next start, events ≤ the
 persisted watermark are filtered out at sync/append time, so the
 transient overlap is self-correcting.
 
@@ -1461,28 +1462,36 @@ init({InstanceId, Opts}) ->
             ok
     end,
     MST = open_mst(InstanceId, Backend, MergeMod, Opts),
-    %% Stage 5: snapshot store + watermark recovery.
-    SnapshotMod = maps:get(
-        snapshot_store,
-        Opts,
-        bondy_oplog_snapshot_store_ets
+    %% Stage 5: compaction checkpoint + watermark recovery.
+    %% Default backend resolution: prefer the file backend when the
+    %% instance has any durable storage configured (`storage_path` or
+    %% an explicit `compaction_checkpoint_opts.path`); otherwise fall
+    %% back to ETS for ephemeral instances. A caller passing
+    %% `compaction_checkpoint` explicitly always wins.
+    CkptOpts0 = maps:get(compaction_checkpoint_opts, Opts, #{}),
+    {CkptMod, CkptOpts} = resolve_checkpoint_backend(
+        InstanceId, Opts, CkptOpts0
     ),
-    {ok, SnapshotState} = SnapshotMod:init(
-        InstanceId, maps:get(snapshot_store_opts, Opts, #{})
-    ),
-    Watermark = SnapshotMod:current_watermark(SnapshotState),
-    CachedSnapshot =
-        case SnapshotMod:get_snapshot(SnapshotState) of
-            {ok, W0, S0} -> {W0, S0};
-            not_found -> undefined
+    {ok, CkptState} = CkptMod:init(InstanceId, CkptOpts),
+    %% Single read covers both: the checkpoint envelope carries the
+    %% watermark, so calling current_watermark/1 first is redundant
+    %% and (on a durable backend) a wasted disk read.
+    {Watermark, CachedCheckpoint} =
+        case CkptMod:get_checkpoint(CkptState) of
+            {ok, W0, S0} ->
+                {W0, {W0, S0}};
+            not_found ->
+                {undefined, undefined};
+            {error, CkptErr} ->
+                error({compaction_checkpoint_corrupted, InstanceId, CkptErr})
         end,
     CrdtMod = maps:get(crdt_module, Opts, undefined),
     %% Seed HLC from the highest persisted event key, so a restart with
     %% a durable backend doesn't issue keys below the previous high
     %% water mark. Sources, in order of precedence:
     %%   1. The MST's max event key (live events past the watermark).
-    %%   2. The snapshot's compaction watermark.
-    %% Fresh instances (ETS backend, no snapshot) leave the HLC at 0.
+    %%   2. The compaction checkpoint's watermark.
+    %% Fresh instances (ETS backend, no checkpoint) leave the HLC at 0.
     LiveSize = compute_live_size(MST),
     LastMSTKey =
         case bondy_mst:last(MST) of
@@ -1538,10 +1547,10 @@ init({InstanceId, Opts}) ->
         fold_module = FoldMod,
         fold_opts = FoldOpts,
         crdt_module = CrdtMod,
-        snapshot_store = SnapshotMod,
-        snapshot_state = SnapshotState,
+        compaction_checkpoint = CkptMod,
+        compaction_checkpoint_state = CkptState,
         watermark = Watermark,
-        cached_snapshot = CachedSnapshot,
+        cached_checkpoint = CachedCheckpoint,
         max_working_set = maps:get(max_working_set, Opts, infinity),
         live_size = LiveSize,
         last_event_key = LastMSTKey,
@@ -1681,7 +1690,7 @@ published_fingerprint(#state{} = S) ->
     {
         S#state.mst,
         S#state.watermark,
-        S#state.cached_snapshot,
+        S#state.cached_checkpoint,
         S#state.crdt_module,
         S#state.fold_module,
         S#state.fold_opts,
@@ -1991,9 +2000,9 @@ do_handle_call(current_watermark, _From, State) ->
     {reply, State#state.watermark, State};
 do_handle_call(crdt_module, _From, State) ->
     {reply, State#state.crdt_module, State};
-do_handle_call(get_snapshot, _From, State) ->
-    Reply = (State#state.snapshot_store):get_snapshot(
-        State#state.snapshot_state
+do_handle_call(get_compaction_checkpoint, _From, State) ->
+    Reply = (State#state.compaction_checkpoint):get_checkpoint(
+        State#state.compaction_checkpoint_state
     ),
     {reply, Reply, State};
 do_handle_call({compact, PeerRoots}, From, State) ->
@@ -2077,8 +2086,8 @@ handle_info(_Info, State) ->
 
 terminate(_Reason, #state{
     mst = MST,
-    snapshot_store = SnapMod,
-    snapshot_state = SnapState,
+    compaction_checkpoint = CkptMod,
+    compaction_checkpoint_state = CkptState,
     overlay = Overlay
 }) ->
     %% Leave the registry row in place so that on a one_for_all subtree
@@ -2086,7 +2095,7 @@ terminate(_Reason, #state{
     %% `instance_pid` field will be stale until the new instance
     %% gen_server's init runs and republishes; lock-free read paths
     %% use `is_process_alive/1` to detect that case.
-    _ = catch SnapMod:close(SnapState),
+    _ = catch CkptMod:close(CkptState),
     _ = catch bondy_mst:destroy(MST),
     %% Drop the overlay — it dies with the instance, no heir, no
     %% survival across subtree restart. The applier reads the tid
@@ -2829,9 +2838,9 @@ do_compact_async(#state{} = State, PeerRoots, From) ->
     %% present when the worker ran.
     MST = State#state.mst,
     Watermark0 = State#state.watermark,
-    SnapshotStore = State#state.snapshot_store,
-    SnapshotState = State#state.snapshot_state,
-    CachedSnapshot = State#state.cached_snapshot,
+    CkptMod = State#state.compaction_checkpoint,
+    CkptState = State#state.compaction_checkpoint_state,
+    CachedCheckpoint = State#state.cached_checkpoint,
     CrdtMod = State#state.crdt_module,
     InstanceId = State#state.instance_id,
     {Pid, _Ref} = spawn_monitor(fun() ->
@@ -2840,9 +2849,9 @@ do_compact_async(#state{} = State, PeerRoots, From) ->
             MST,
             Watermark0,
             PeerRoots,
-            SnapshotStore,
-            SnapshotState,
-            CachedSnapshot,
+            CkptMod,
+            CkptState,
+            CachedCheckpoint,
             CrdtMod
         ),
         gen_server:cast(Self, {compaction_done, self(), Result})
@@ -2857,9 +2866,9 @@ run_compaction_worker(
     MST,
     Watermark0,
     PeerRoots,
-    SnapshotStore,
-    SnapshotState,
-    CachedSnapshot,
+    CkptMod,
+    CkptState,
+    CachedCheckpoint,
     CrdtMod
 ) ->
     try
@@ -2873,21 +2882,21 @@ run_compaction_worker(
                 {ok, no_change};
             Frontier ->
                 Events = events_in_open_range(MST, Watermark0, Frontier),
-                BaseSnapshot =
-                    case CachedSnapshot of
+                BaseCheckpoint =
+                    case CachedCheckpoint of
                         undefined ->
-                            case SnapshotStore:get_snapshot(SnapshotState) of
+                            case CkptMod:get_checkpoint(CkptState) of
                                 {ok, _W, S} -> S;
                                 not_found -> CrdtMod:init()
                             end;
                         {_, S0} ->
                             S0
                     end,
-                NewSnapshot = CrdtMod:interpret_cog(Events, BaseSnapshot),
-                ok = SnapshotStore:put_snapshot(
-                    SnapshotState, Frontier, NewSnapshot
+                NewCheckpoint = CrdtMod:interpret_cog(Events, BaseCheckpoint),
+                ok = CkptMod:put_checkpoint(
+                    CkptState, Frontier, NewCheckpoint
                 ),
-                {ok, {compacted, Frontier, NewSnapshot, length(Events)}}
+                {ok, {compacted, Frontier, NewCheckpoint, length(Events)}}
         end
     catch
         Class:Reason:Stack ->
@@ -2940,7 +2949,7 @@ commit_compaction(
     State#state{compaction = undefined};
 commit_compaction(
     #state{compaction = #{from := From, started_at := Started}} = State,
-    {ok, {compacted, Frontier, NewSnapshot, EventCount}}
+    {ok, {compacted, Frontier, NewCheckpoint, EventCount}}
 ) ->
     MST1 = truncate_below_or_equal(State#state.mst, Frontier),
     _ = bondy_oplog_hlc:update(
@@ -2949,7 +2958,7 @@ commit_compaction(
     State1 = State#state{
         mst = MST1,
         watermark = Frontier,
-        cached_snapshot = {Frontier, NewSnapshot},
+        cached_checkpoint = {Frontier, NewCheckpoint},
         live_size = max(0, State#state.live_size - EventCount),
         compaction = undefined
     },
@@ -2991,10 +3000,10 @@ do_load_snapshot(State, NewWatermark, Snapshot) ->
 
 %% @private
 apply_loaded_snapshot(State, NewWatermark, Snapshot) ->
-    ok = (State#state.snapshot_store):put_snapshot(
-        State#state.snapshot_state, NewWatermark, Snapshot
+    ok = (State#state.compaction_checkpoint):put_checkpoint(
+        State#state.compaction_checkpoint_state, NewWatermark, Snapshot
     ),
-    %% Drop any live events that the new snapshot already covers.
+    %% Drop any live events that the new checkpoint already covers.
     MST1 = truncate_below_or_equal(State#state.mst, NewWatermark),
     LiveSize1 = compute_live_size(MST1),
     %% Advance HLC to keep future local appends above the watermark.
@@ -3004,7 +3013,7 @@ apply_loaded_snapshot(State, NewWatermark, Snapshot) ->
     State1 = State#state{
         mst = MST1,
         watermark = NewWatermark,
-        cached_snapshot = {NewWatermark, Snapshot},
+        cached_checkpoint = {NewWatermark, Snapshot},
         live_size = LiveSize1
     },
     {reply, {ok, NewWatermark}, State1}.
@@ -3127,6 +3136,61 @@ backend_opts(_, InstanceId, Opts) ->
     end.
 
 %% @private
+%% Resolve the compaction-checkpoint backend module + opts.
+%%
+%% Precedence:
+%%   1. Explicit `compaction_checkpoint` in Opts wins; checkpoint opts
+%%      are passed through unchanged.
+%%   2. Otherwise, if a `path` is set in `compaction_checkpoint_opts`
+%%      OR `storage_path` is set on the instance, default to the file
+%%      backend, deriving `path` from `storage_path` (via
+%%      `path_strategy`) when not explicit.
+%%   3. Otherwise default to the in-memory ETS backend (ephemeral).
+%%
+%% Path derivation when deriving from `storage_path`: the
+%% `path_strategy` returns the per-instance dir (terminates in
+%% `<InstanceId>`); the file backend then appends `<InstanceId>` again.
+%% Pass the parent (the shard dir) so the final file lands at
+%% `<storage_path>/<shard>/<InstanceId>/checkpoint.etf` alongside the
+%% other per-instance artefacts (WAL, MST, projection).
+resolve_checkpoint_backend(InstanceId, Opts, CkptOpts) ->
+    case maps:find(compaction_checkpoint, Opts) of
+        {ok, Mod} ->
+            {Mod, CkptOpts};
+        error ->
+            case maps:is_key(path, CkptOpts) of
+                true ->
+                    {bondy_oplog_compaction_checkpoint_file, CkptOpts};
+                false ->
+                    case maps:find(storage_path, Opts) of
+                        {ok, BaseDir} ->
+                            Strategy = maps:get(
+                                path_strategy,
+                                Opts,
+                                bondy_oplog_path_sharded
+                            ),
+                            InstanceDir = Strategy:storage_path(
+                                InstanceId, BaseDir
+                            ),
+                            ShardDir = filename:dirname(InstanceDir),
+                            {
+                                bondy_oplog_compaction_checkpoint_file,
+                                CkptOpts#{
+                                    path => unicode:characters_to_binary(
+                                        ShardDir
+                                    )
+                                }
+                            };
+                        error ->
+                            {
+                                bondy_oplog_compaction_checkpoint_ets,
+                                CkptOpts
+                            }
+                    end
+            end
+    end.
+
+%% @private
 %% Publishes the current state's read-relevant fields to the registry.
 %% Called after every state-mutating handle_call so that lock-free
 %% read paths see fresh data without round-tripping the gen_server.
@@ -3137,7 +3201,7 @@ publish(#state{} = State) ->
         origin => State#state.origin,
         mst => State#state.mst,
         watermark => State#state.watermark,
-        snapshot => State#state.cached_snapshot,
+        snapshot => State#state.cached_checkpoint,
         crdt_module => State#state.crdt_module,
         fold_module => State#state.fold_module,
         fold_opts => State#state.fold_opts,

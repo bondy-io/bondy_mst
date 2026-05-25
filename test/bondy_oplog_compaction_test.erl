@@ -98,7 +98,7 @@ snapshot_state_is_correct() ->
     {ok, _} = bondy_oplog:sync(B, A),
     bondy_oplog_peer_state:sync(),
     {ok, {compacted, _, _}} = bondy_oplog:compact(A),
-    {ok, _W, S} = bondy_oplog:snapshot(A),
+    {ok, _W, S} = bondy_oplog:compaction_checkpoint(A),
     ?assertEqual(10, S).
 
 query_after_compact_returns_consistent_value() ->
@@ -151,7 +151,7 @@ watermark_filter_drops_old_remote_events() ->
     {ok, _} = bondy_oplog:sync(A, B),
     ?assertEqual(0, bondy_oplog:size(A)),
     %% Snapshot value unchanged.
-    {ok, _, S} = bondy_oplog:snapshot(A),
+    {ok, _, S} = bondy_oplog:compaction_checkpoint(A),
     ?assertEqual(10, S).
 
 deterministic_snapshot_across_replicas() ->
@@ -163,8 +163,8 @@ deterministic_snapshot_across_replicas() ->
     bondy_oplog_peer_state:sync(),
     {ok, {compacted, _, _}} = bondy_oplog:compact(A),
     {ok, {compacted, _, _}} = bondy_oplog:compact(B),
-    {ok, WA, SA} = bondy_oplog:snapshot(A),
-    {ok, WB, SB} = bondy_oplog:snapshot(B),
+    {ok, WA, SA} = bondy_oplog:compaction_checkpoint(A),
+    {ok, WB, SB} = bondy_oplog:compaction_checkpoint(B),
     ?assertEqual(WA, WB),
     ?assertEqual(SA, SB).
 

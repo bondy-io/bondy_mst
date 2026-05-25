@@ -105,7 +105,7 @@ Per-instance event operations pass through to
 %% GC / queries
 -export([compact/1]).
 -export([current_watermark/1]).
--export([snapshot/1]).
+-export([compaction_checkpoint/1]).
 -export([query/2]).
 -export([query_stable/2]).
 -export([retention_advice/1, retention_advice/2]).
@@ -523,11 +523,11 @@ compact(InstanceId) ->
 current_watermark(InstanceId) ->
     bondy_oplog_instance:current_watermark(InstanceId).
 
--spec snapshot(instance_id()) ->
+-spec compaction_checkpoint(instance_id()) ->
     {ok, bondy_oplog_event:event_key(), term()} | not_found.
 
-snapshot(InstanceId) ->
-    bondy_oplog_instance:snapshot(InstanceId).
+compaction_checkpoint(InstanceId) ->
+    bondy_oplog_instance:compaction_checkpoint(InstanceId).
 
 ?DOC("""
 Hot query: snapshot + live events. See
@@ -629,7 +629,7 @@ retention_advice(InstanceId, Opts) when
             {error, instance_not_running};
         WalPid when is_pid(WalPid) ->
             WalInfo = bondy_oplog_wal:info(WalPid),
-            Snapshot = ?MODULE:snapshot(InstanceId),
+            Snapshot = ?MODULE:compaction_checkpoint(InstanceId),
             Inputs = build_inputs(WalInfo, Snapshot, BootstrapConsumers),
             {ok, retention_decision(Inputs)}
     end.
