@@ -177,7 +177,19 @@
         (if (not= "" (try
                        (c/exec :pgrep :beam)
                        (catch RuntimeException _ "")))
-          (c/exec* env-variables binary "stop")
+          (do
+            ;; PR-J4 audit: dump WAL + MST state to a per-node ETF
+            ;; under log-dir BEFORE stopping the daemon so the on-disk
+            ;; state at heal-time is captured. `release eval` returns
+            ;; the result printed; failures here are non-fatal (don't
+            ;; block the teardown).
+            (try
+              (c/exec* env-variables binary "eval"
+                       "'bondy_mst_jepsen_audit:dump_all().'")
+              (info node "audit dump_all completed")
+              (catch Exception e
+                (info node "audit dump_all failed:" (.getMessage e))))
+            (c/exec* env-variables binary "stop"))
           (info node "bondy_mst already stopped"))))
 
     db/LogFiles

@@ -83,10 +83,17 @@ handle_post(Req, KeyVals) ->
             Key   = cowboy_req:binding(key,   Req),
             Value = proplists:get_value(<<"value">>, KeyVals, <<>>),
             Hlc   = bondy_db:tick(Table),
-            Dot   = next_dot(),
+            {Origin, Seq} = Dot = next_dot(),
             case bondy_db:apply(Table, Realm, Key,
                                 {add, Hlc, Value, Dot}) of
                 ok ->
+                    %% PR-J4 audit: record (value -> hlc) on ack so a
+                    %% lost Jepsen value can be traced back to its HLC
+                    %% across the scraped node logs.
+                    TableBin = cowboy_req:binding(table, Req),
+                    _ = bondy_mst_jepsen_audit:log_post_ack(
+                        Value, Hlc, Origin, Seq, TableBin
+                    ),
                     {ok, 200, hlc_headers(Hlc), <<>>};
                 {error, _} = E ->
                     {error, E}

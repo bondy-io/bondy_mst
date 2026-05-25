@@ -20,6 +20,9 @@ start(_StartType, _StartArgs) ->
         node        => node(),
         peers       => application:get_env(bondy_mst_jepsen, peers, [])
     }),
+    %% Attach PR-J4 audit telemetry handler before anything is running
+    %% so the first applier batch is observed.
+    _ = bondy_mst_jepsen_audit:attach(),
     bondy_mst_jepsen_sup:start_link().
 
 stop(_State) ->

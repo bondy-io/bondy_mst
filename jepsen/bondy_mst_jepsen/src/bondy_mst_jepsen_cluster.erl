@@ -104,11 +104,46 @@ init([]) ->
     %% across all 10 tables (16 Bookies per node, not 10×16=160). Each
     %% table sees the same set of shards; the bucket per Bookie
     %% disambiguates entity types.
+    %% Anchor the WAL + MST + compaction-checkpoint under `DataDir` so
+    %% they survive kill -9 + restart. Without this, the per-instance
+    %% WAL falls back to `/tmp/bondy_oplog_wal/<os_pid>/<InstanceId>`,
+    %% which changes path on every BEAM restart — silently abandoning
+    %% all prior fsynced WAL frames. That is the root cause of the
+    %% residual Jepsen combined-nemesis flake (PR-J4): an acked event
+    %% lands in `/tmp/bondy_oplog_wal/<OLD_PID>/...`, the kill spawns a
+    %% new BEAM with a new os_pid, the new writer looks at
+    %% `/tmp/bondy_oplog_wal/<NEW_PID>/...` (empty), and the event is
+    %% lost despite per_write fsync.
+    OplogStoragePath = unicode:characters_to_binary(
+        filename:join(DataDir, "oplog")
+    ),
     {ok, Db} = bondy_db:open(DbName, #{
-        topology      => bondy_db_topology_shared_shards,
-        topology_opts => #{sup => LeveledSup, dir => DataDir},
-        shard_count   => ShardCount,
-        fold_module   => FoldModule
+        topology            => bondy_db_topology_shared_shards,
+        topology_opts       => #{sup => LeveledSup, dir => DataDir},
+        shard_count         => ShardCount,
+        fold_module         => FoldModule,
+        oplog_instance_opts => #{
+            storage_path => OplogStoragePath,
+            %% Without `seed => true`, an instance with `storage_path`
+            %% set boots in `pre_bootstrap` lifecycle and holds appends
+            %% until a peer ships a catalogue snapshot. Every Jepsen
+            %% node starts as a seed: there is no operator-driven
+            %% bootstrap step in this harness.
+            seed         => true,
+            %% Deterministic per-node origin so kill -9 + restart
+            %% recovers its own WAL instead of crashing with
+            %% `{orphan_segment, origin_mismatch}`. The default
+            %% `bondy_oplog_origin:default/0` mints a fresh random
+            %% 16-byte id per BEAM start — designed so that a kill
+            %% looks like a new replica to the cluster. That's the
+            %% wrong choice under Jepsen's kill-restart nemesis: the
+            %% on-disk WAL header carries the *prior* origin, and the
+            %% recovery's `bondy_oplog_wal_segment:verify/3` rejects
+            %% it as orphan. Pin the origin to `sha256(node())`'s
+            %% first 16 bytes so every restart of the same node
+            %% recovers cleanly.
+            origin       => stable_origin()
+        }
     }),
     Tables = lists:foldl(
         fun(Name, Acc) ->
@@ -188,6 +223,14 @@ terminate(_Reason, #state{db = Db, tables = Tables}) ->
 
 env(Key, Default) ->
     application:get_env(bondy_mst_jepsen, Key, Default).
+
+%% First 16 bytes of `sha256(node())`. Deterministic per node name —
+%% kill -9 + restart on the same node yields the same origin, which
+%% lets the WAL recovery accept its own segments after restart.
+stable_origin() ->
+    Hash = crypto:hash(sha256, atom_to_binary(node(), utf8)),
+    <<Origin:16/binary, _/binary>> = Hash,
+    Origin.
 
 any_table() ->
     case tables() of
