@@ -55,9 +55,12 @@ handle_get(Req) ->
             Realm = cowboy_req:binding(realm, Req),
             Key   = cowboy_req:binding(key,   Req),
             case bondy_db:read(Table, Realm, Key) of
-                {ok, #{live := Live, hlc := Hlc}, _Hlc} ->
-                    Body = encode_members(maps:keys(Live)),
-                    {ok, 200, hlc_headers(Hlc), Body};
+                {ok, Members, Hlc} when is_list(Members) ->
+                    %% PR-2 step 2 (2026-05-21): `bondy_db:read/3` now
+                    %% returns the **value** (orset → ordset of element
+                    %% binaries), not the underlying fold state. Encode
+                    %% as a space-separated list for the Jepsen client.
+                    {ok, 200, hlc_headers(Hlc), encode_members(Members)};
                 {ok, undefined, Hlc} ->
                     {ok, 200, hlc_headers(Hlc), <<>>};
                 not_found ->

@@ -37,10 +37,12 @@ handle_get(Req) ->
             Realm = cowboy_req:binding(realm, Req),
             Key   = cowboy_req:binding(key,   Req),
             case bondy_db:read(Table, Realm, Key) of
-                {ok, {set, Value, Hlc}, _Hlc} ->
+                %% PR-2 step 2 (2026-05-21): `bondy_db:read/3` now
+                %% returns the **value** via the fold's `to_value/1`,
+                %% not the underlying state. For `lww_register` that
+                %% is `binary() | undefined`.
+                {ok, Value, Hlc} when is_binary(Value) ->
                     {ok, 200, hlc_headers(Hlc), Value};
-                {ok, {cleared, Hlc}, _Hlc} ->
-                    {ok, 200, hlc_headers(Hlc), <<>>};
                 {ok, undefined, Hlc} ->
                     {ok, 200, hlc_headers(Hlc), <<>>};
                 not_found ->
@@ -87,11 +89,12 @@ do_cas(Table, Realm, Key, Expected, New) ->
     %% whether the resulting history is linearizable.
     Current =
         case bondy_db:read(Table, Realm, Key) of
-            {ok, {set, V, _}, _} -> V;
-            {ok, {cleared, _}, _} -> <<>>;
-            not_found            -> <<>>;
-            {ok, undefined, _}   -> <<>>;
-            {error, _} = ReadErr -> ReadErr
+            %% PR-2 step 2: `bondy_db:read/3` returns the fold's value
+            %% (`binary() | undefined` for `lww_register`).
+            {ok, V, _} when is_binary(V) -> V;
+            {ok, undefined, _}           -> <<>>;
+            not_found                    -> <<>>;
+            {error, _} = ReadErr         -> ReadErr
         end,
     case Current of
         {error, _} = E ->

@@ -225,7 +225,7 @@ bench-fly-build-local:
 # name here.
 bench-fly-init:
     fly apps create bondy-mst-bench --org leapsight
-    fly volumes create bench_data --size 10 --region lhr --app bondy-mst-bench
+    fly volumes create bench_data --size 10 --region lhr --app bondy-mst-bench --yes
     just bench-fly-deploy
 
 # Build + deploy the image to Fly (remote build, preserves volume cache).
@@ -363,14 +363,18 @@ bench-fly-results dest="":
     fi
     mkdir -p "$dest"
     remote_tar="/tmp/fly-bench-results-$$.tgz"
+    local_tar_basename="fly-bench-results-fetch-$$.tgz"
     echo "tarring /data/results on the VM..."
     fly ssh console -C "bash -c 'tar czf $remote_tar -C /data results'"
-    local_tar="$dest/_fetch.tgz"
-    echo "sftp'ing $remote_tar → $local_tar"
-    fly ssh sftp get "$remote_tar" > "$local_tar"
+    # `fly ssh sftp get` writes to the CWD with the basename of the
+    # remote path; it does not honour stdout redirects. Drive it from
+    # inside `$dest` and rename the result.
+    echo "sftp'ing $remote_tar → $dest/_fetch.tgz"
+    ( cd "$dest" && fly ssh sftp get "$remote_tar" )
+    mv "$dest/$(basename "$remote_tar")" "$dest/_fetch.tgz"
     echo "extracting → $dest"
-    tar xzf "$local_tar" -C "$dest" --strip-components=1
-    rm -f "$local_tar"
+    tar xzf "$dest/_fetch.tgz" -C "$dest" --strip-components=1
+    rm -f "$dest/_fetch.tgz"
     fly ssh console -C "bash -c 'rm -f $remote_tar'" || true
     echo "done: $dest"
 
@@ -379,8 +383,19 @@ bench-fly-logs:
     fly logs
 
 # Stop the VM (idle cost drops to volume-only, ~$1.50/mo for 10 GB).
+# `fly machine stop` without args is interactive; fan out across all
+# of the app's machines (usually one) so the recipe works unattended.
 bench-fly-down:
-    fly machine stop
+    #!/usr/bin/env bash
+    set -eu
+    ids=$(fly machines list --json | jq -r '.[].id')
+    if [ -z "$ids" ]; then
+      echo "no machines to stop"; exit 0
+    fi
+    for id in $ids; do
+      echo "stopping $id..."
+      fly machines stop "$id"
+    done
 
 # DESTRUCTIVE — destroys the app AND its volume (results lost forever). Pull results first.
 bench-fly-destroy:
@@ -419,7 +434,7 @@ bench-fly-destroy:
 # First-time setup: create perf-8x app + 40 GB volume + initial deploy.
 bench-fly-8x-init:
     fly apps create bondy-mst-bench-8x --org leapsight
-    fly volumes create bench_data_8x --size 40 --region lhr --app bondy-mst-bench-8x
+    fly volumes create bench_data_8x --size 40 --region lhr --app bondy-mst-bench-8x --yes
     just bench-fly-8x-deploy
 
 # Build + deploy the image to the perf-8x app (remote build).
