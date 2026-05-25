@@ -7,6 +7,7 @@
 
 -behaviour(supervisor).
 
+-include_lib("kernel/include/logger.hrl").
 -include("bondy_mst.hrl").
 -include("bondy_oplog.hrl").
 
@@ -97,7 +98,20 @@ scrubber_pid(SupPid) when is_pid(SupPid) ->
 %% supervisor CALLBACKS
 %% =============================================================================
 
-init({InstanceId, Opts}) ->
+init({InstanceId, Opts0}) ->
+    %% Resolve origin once and inject it into the opts so every child
+    %% (instance gen_server + WAL writer) sees the same value. When
+    %% `storage_path` is set and no explicit `origin` was provided, the
+    %% origin is loaded from disk (or generated and persisted on first
+    %% boot) so kill -9 + restart recovers the WAL instead of crashing
+    %% with `{orphan_segment, origin_mismatch}`.
+    Opts = resolve_origin_opt(InstanceId, Opts0),
+    %% Emit a one-shot warning when the WAL is about to be parked under
+    %% the /tmp/<os_pid>/ default — that path changes across BEAM
+    %% restarts and silently abandons fsynced frames. The supervisor is
+    %% the natural place to surface this: it's the single point where
+    %% both the WAL path and the persistence intent are known.
+    ok = maybe_warn_default_wal_path(InstanceId, Opts),
     SupFlags = #{
         strategy => one_for_all,
         intensity => 5,
@@ -177,6 +191,10 @@ wal_opts(InstanceId, Opts) ->
         ],
         Opts
     ),
+    %% `origin` is pre-populated by `resolve_origin_opt/2` at supervisor
+    %% init so the WAL writer and the instance gen_server see the same
+    %% value. The `default/0` fallback here only covers callers that
+    %% bypass the supervisor (tests building wal_opts directly).
     Origin = maps:get(origin, Opts, bondy_oplog_origin:default()),
     Dir = wal_base_dir(InstanceId, Opts),
     Base0#{dir => Dir, origin => Origin}.
@@ -253,3 +271,86 @@ applier_opts(InstanceId, Opts) ->
 scrubber_opts(InstanceId, Opts) ->
     Scrubber0 = maps:get(scrubber, Opts, #{}),
     Scrubber0#{instance_id => InstanceId}.
+
+%% @private
+%% Resolve the `origin` opt and inject it into the opts map so every
+%% downstream child (instance gen_server, WAL writer, applier) reads
+%% the same value. Precedence:
+%%   1. Caller-provided `origin` wins.
+%%   2. Otherwise, if `storage_path` is set, load (or create + persist)
+%%      the origin under that path so it survives BEAM restarts.
+%%   3. Otherwise, fall back to the per-VM ephemeral default — same
+%%      behaviour as pre-change for tests and ephemeral instances.
+%%
+%% The on-disk path is `<storage_path-for-instance>/origin` (i.e.,
+%% alongside the `wal/` subdir, not inside it), so the WAL recovery's
+%% directory scans don't see it.
+resolve_origin_opt(InstanceId, Opts) ->
+    case maps:is_key(origin, Opts) of
+        true ->
+            Opts;
+        false ->
+            Origin =
+                case origin_persist_path(InstanceId, Opts) of
+                    undefined ->
+                        bondy_oplog_origin:default();
+                    Path ->
+                        bondy_oplog_origin:load_or_create(Path)
+                end,
+            Opts#{origin => Origin}
+    end.
+
+%% @private
+%% Return the on-disk path the origin should be persisted to, or
+%% `undefined` when no durable storage is configured. Mirrors the
+%% per-instance dir derivation used by `wal_base_dir/2`.
+origin_persist_path(InstanceId, Opts) ->
+    case maps:find(storage_path, Opts) of
+        {ok, BaseDir} ->
+            Strategy = maps:get(
+                path_strategy, Opts, bondy_oplog_path_sharded
+            ),
+            Base = Strategy:storage_path(InstanceId, BaseDir),
+            filename:join(
+                unicode:characters_to_binary(Base), <<"origin">>
+            );
+        error ->
+            undefined
+    end.
+
+%% @private
+%% Loud warning when an instance is starting with no durable storage
+%% configured for the WAL. The default tmp path is namespaced by
+%% `os:getpid()` so a fresh BEAM run never sees prior segments — that
+%% is intentional test-isolation behaviour but a footgun under any
+%% kill-restart scenario (Jepsen, systemd-restart, OOM-killer).
+%%
+%% No dedup needed: `bondy_oplog_instance_sup:init/1` runs once per
+%% `bondy_oplog:start_instance/2` call (the parent is
+%% `simple_one_for_one`, so each instance is a fresh child). The
+%% supervisor's own `intensity` governs child restarts within an
+%% instance but does not re-invoke init/1. Tests run with
+%% `logger_level = error`, so this is silent in the eunit suite.
+%%
+%% Avoiding `persistent_term` for dedup is deliberate: every
+%% `persistent_term:put/2` triggers a global GC scan of every process
+%% on the node — fine for write-once-per-VM constants, the wrong
+%% substrate for per-instance lifecycle events.
+maybe_warn_default_wal_path(InstanceId, Opts) ->
+    HasWalDir       = maps:is_key(wal_dir, Opts),
+    HasStoragePath  = maps:is_key(storage_path, Opts),
+    case HasWalDir orelse HasStoragePath of
+        true ->
+            ok;
+        false ->
+            ?LOG_WARNING(#{
+                description =>
+                    "WAL falling back to ephemeral tmp path; fsynced "
+                    "frames will be abandoned on BEAM restart (the "
+                    "path includes os:getpid() for test isolation). "
+                    "Configure `storage_path` or `wal_dir` for "
+                    "durable instances.",
+                instance_id => InstanceId
+            }),
+            ok
+    end.
