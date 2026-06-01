@@ -2156,7 +2156,20 @@ notify_committed_segment(InstanceId, WalPid, Seg) ->
 await_or_idle(#state{iter = Iter, wal_pid = WalPid,
                      poll_interval_ms = PollMs}) ->
     {Seg, Off} = bondy_oplog_wal_reader:position(Iter),
-    case bondy_oplog_wal:await_durable(WalPid, {Seg, Off},
+    %% Wait for the durable position to advance *strictly past* our
+    %% current read offset — i.e. for genuinely new data. Awaiting
+    %% `{Seg, Off}` itself is satisfied immediately whenever we are
+    %% caught up: the next-to-read byte is already durable (always so
+    %% in `per_write` mode, where head ≡ durable), so `await_durable/3`
+    %% replies `ok` at once and the `handle_info(drain)` self-reschedule
+    %% (`self() ! drain`) becomes a busy spin — one fully-spinning
+    %% applier per instance. Awaiting `{Seg, Off + 1}` parks the applier
+    %% until the next append makes byte `Off` durable (or the
+    %% `?AWAIT_DURABLE_TIMEOUT_MS` backstop fires), matching this
+    %% function's contract ("advances past the reader's current
+    %% offset"). A segment rollover satisfies the waiter too, since
+    %% `{Seg, Off + 1} =< {Seg + 1, _}`.
+    case bondy_oplog_wal:await_durable(WalPid, {Seg, Off + 1},
                                        ?AWAIT_DURABLE_TIMEOUT_MS) of
         ok -> ok;
         {error, timeout} -> ok;
