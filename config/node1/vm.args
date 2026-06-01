@@ -1,0 +1,15 @@
+## node1 of the bondy_db 3-node demo cluster.
+## The shared cookie lets node1/node2/node3 connect over disterl.
+
+-name node1@127.0.0.1
+-setcookie bondy_db_demo
+
++P 1048576
++Q 1048576
+
+## Distribution listen-port window. Three nodes on one host each grab
+## a free port in this range; EPMD maps node name -> port.
+-kernel inet_dist_listen_min 25000
+-kernel inet_dist_listen_max 25099
+
+-kernel shell_history enabled

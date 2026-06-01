@@ -1,0 +1,13 @@
+## node3 of the bondy_db 3-node demo cluster.
+## The shared cookie lets node1/node2/node3 connect over disterl.
+
+-name node3@127.0.0.1
+-setcookie bondy_db_demo
+
++P 1048576
++Q 1048576
+
+-kernel inet_dist_listen_min 25000
+-kernel inet_dist_listen_max 25099
+
+-kernel shell_history enabled

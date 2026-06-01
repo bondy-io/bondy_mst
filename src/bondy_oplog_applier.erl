@@ -237,7 +237,13 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% compatibility — the instance's publish is idempotent and will
     %% catch up by the next backstop tick. See
     %% `_design/catalogue_expansion_plan.md` §2.
-    lifecycle :: bondy_oplog_bootstrap_lifecycle:handle() | undefined
+    lifecycle :: bondy_oplog_bootstrap_lifecycle:handle() | undefined,
+    %% Monitor reference of the parked idle-wait helper process (see
+    %% `arm_idle_waiter/1`). `undefined` when the applier is actively
+    %% draining or about to. The helper blocks on the WAL's
+    %% `await_durable/3`; its monitor `DOWN` wakes the applier to
+    %% re-drain. Event-driven replacement for the historical busy poll.
+    idle_waiter = undefined :: undefined | reference()
 }).
 
 -type shard_key()   :: {atom(), atom(), non_neg_integer()}.
@@ -778,12 +784,22 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info(drain, State0) ->
-    case drain_loop(State0) of
-        {ok, State1} ->
-            ok = await_or_idle(State1),
-            self() ! drain,
-            {noreply, State1};
-        {paused, State1} ->
+    %% A fresh drain supersedes any parked idle waiter — cancel it so
+    %% waiter helpers don't accumulate across drains.
+    State1 = cancel_idle_waiter(State0),
+    case drain_loop(State1) of
+        {ok, State2} ->
+            %% Caught up. Park an async waiter on the WAL's durable
+            %% position instead of re-sending `drain` immediately (a
+            %% busy spin: the next-to-read byte is already durable in
+            %% `per_write` mode, so an inline `await_durable/3` returns
+            %% at once) or blocking the gen_server here (which would
+            %% stall the `replay_cell_events` cast and other messages
+            %% that cross-node sync depends on). The waiter fires the
+            %% instant a new frame becomes durable — immediate apply
+            %% latency, near-zero idle CPU, responsive mailbox.
+            {noreply, arm_idle_waiter(State2)};
+        {paused, State2} ->
             %% Hit the demand cap. Stay parked — the instance will
             %% send `drain_resume` once it processes a batch. The
             %% backstop timer is a defensive belt-and-braces in case
@@ -791,10 +807,21 @@ handle_info(drain, State0) ->
             %% increment and decrement); it costs ~one wake per
             %% second when fully gated and nothing when not.
             _ = erlang:send_after(1_000, self(), drain_backstop),
-            {noreply, State1#state{drain_deferred = true}};
-        {stop, Reason, State1} ->
-            {stop, Reason, State1}
+            {noreply, State2#state{drain_deferred = true}};
+        {stop, Reason, State2} ->
+            {stop, Reason, State2}
     end;
+handle_info({'DOWN', MRef, process, _Pid, _Reason},
+            #state{idle_waiter = MRef} = State) ->
+    %% Our parked idle waiter finished: the WAL's durable position
+    %% advanced past our read offset, the await timed out, or the WAL
+    %% errored. In every case the right response is to re-drain (if
+    %% nothing new is there we simply re-arm). Using the monitor `DOWN`
+    %% as the wakeup keeps the helper a pure side-effect-free blocker
+    %% (it sends no message of its own), so a crashed helper can never
+    %% wedge the applier.
+    self() ! drain,
+    {noreply, State#state{idle_waiter = undefined}};
 handle_info(drain_backstop, #state{drain_deferred = true} = State) ->
     %% Defensive re-arm in case `drain_resume` was missed. If the cap
     %% is still saturated, `drain_loop` returns `{paused, _}` again
@@ -2147,40 +2174,53 @@ notify_committed_segment(InstanceId, WalPid, Seg) ->
     end.
 
 %% @private
-%% Block (briefly) until the WAL's durable position advances past the
-%% reader's current offset, or the inner timeout fires. The applier's
-%% main loop schedules an immediate re-drain after this returns; the
-%% `poll_interval_ms` is only used as a backstop if `await_durable/3`
-%% replies sooner than the inner timeout (which shouldn't normally
-%% happen but is bounded here defensively).
-await_or_idle(#state{iter = Iter, wal_pid = WalPid,
-                     poll_interval_ms = PollMs}) ->
+%% Park an async waiter on the WAL's durable position. Spawns a
+%% monitored helper that blocks in `bondy_oplog_wal:await_durable/3`
+%% until the durable position advances *strictly past* the reader's
+%% current offset (i.e. a new frame becomes durable) or
+%% `?AWAIT_DURABLE_TIMEOUT_MS` elapses, then exits. The helper's
+%% monitor `DOWN` is the applier's wakeup signal (see
+%% `handle_info({'DOWN', ...})`).
+%%
+%% Why a helper rather than calling `await_durable/3` inline:
+%% `await_durable/3` is a blocking `gen_server:call`. Calling it from
+%% the applier's own `handle_info(drain)` would make the applier
+%% unresponsive to every other message — notably the
+%% `replay_cell_events` cast that cross-node sync uses to fold synced
+%% events into the projection — for the duration of the wait. The
+%% helper isolates the block; the applier returns immediately and its
+%% mailbox keeps flowing.
+%%
+%% Why `{Seg, Off + 1}` and not `{Seg, Off}`: the reader's current
+%% position is the next-to-read byte, which is already durable whenever
+%% we are caught up (always so in `per_write` mode, where head ≡
+%% durable). Awaiting `{Seg, Off}` is satisfied instantly and the
+%% helper would exit immediately, spinning. `{Seg, Off + 1}` waits for
+%% genuinely new data. A segment rollover satisfies it too, since
+%% `{Seg, Off + 1} =< {Seg + 1, _}`.
+arm_idle_waiter(#state{idle_waiter = Ref} = State) when is_reference(Ref) ->
+    %% Already parked — don't spawn a second helper.
+    State;
+arm_idle_waiter(#state{iter = Iter, wal_pid = WalPid} = State) ->
     {Seg, Off} = bondy_oplog_wal_reader:position(Iter),
-    %% Wait for the durable position to advance *strictly past* our
-    %% current read offset — i.e. for genuinely new data. Awaiting
-    %% `{Seg, Off}` itself is satisfied immediately whenever we are
-    %% caught up: the next-to-read byte is already durable (always so
-    %% in `per_write` mode, where head ≡ durable), so `await_durable/3`
-    %% replies `ok` at once and the `handle_info(drain)` self-reschedule
-    %% (`self() ! drain`) becomes a busy spin — one fully-spinning
-    %% applier per instance. Awaiting `{Seg, Off + 1}` parks the applier
-    %% until the next append makes byte `Off` durable (or the
-    %% `?AWAIT_DURABLE_TIMEOUT_MS` backstop fires), matching this
-    %% function's contract ("advances past the reader's current
-    %% offset"). A segment rollover satisfies the waiter too, since
-    %% `{Seg, Off + 1} =< {Seg + 1, _}`.
-    case bondy_oplog_wal:await_durable(WalPid, {Seg, Off + 1},
-                                       ?AWAIT_DURABLE_TIMEOUT_MS) of
-        ok -> ok;
-        {error, timeout} -> ok;
-        {error, _} ->
-            %% Defensive: any other error from `await_durable/3` is a
-            %% WAL-level failure that the next `next/1` will surface
-            %% on its own. Fall back to a short sleep so we don't burn
-            %% CPU re-asking immediately.
-            timer:sleep(PollMs)
-    end,
-    ok.
+    {_Pid, MRef} = spawn_monitor(fun() ->
+        _ = bondy_oplog_wal:await_durable(
+            WalPid, {Seg, Off + 1}, ?AWAIT_DURABLE_TIMEOUT_MS
+        )
+    end),
+    State#state{idle_waiter = MRef}.
+
+%% @private
+%% Drop a parked idle waiter (if any). The orphaned helper is harmless:
+%% it is blocked in `await_durable/3` and self-terminates within
+%% `?AWAIT_DURABLE_TIMEOUT_MS`; `demonitor(_, [flush])` discards its
+%% now-irrelevant `DOWN` so the next `handle_info({'DOWN', ...})` clause
+%% won't match a stale reference.
+cancel_idle_waiter(#state{idle_waiter = undefined} = State) ->
+    State;
+cancel_idle_waiter(#state{idle_waiter = MRef} = State) ->
+    _ = erlang:demonitor(MRef, [flush]),
+    State#state{idle_waiter = undefined}.
 
 %% @private
 %% Validate the substrate-wiring opts at init/1. Both hooks are opt-in;

@@ -1,0 +1,38 @@
+%% =============================================================================
+%% SPDX-FileCopyrightText: 2023 - 2026 Leapsight
+%% SPDX-License-Identifier: Apache-2.0
+%% =============================================================================
+%%
+%% In-tree example app that boots a single `bondy_db` DB with three
+%% sharded tables and wires the sync scheduler for a closed 3-node
+%% disterl cluster (node1/node2/node3). It is NOT part of the
+%% `bondy_mst` library build — it is only compiled and packaged when a
+%% `nodeN` release profile is active (see the root `rebar.config`).
+
+{application, bondy_db_demo,
+ [{description, "bondy_db 3-node REPL demo wiring"},
+  {vsn, "0.1.0"},
+  {registered, [bondy_db_demo_sup, bondy_db_demo_cluster]},
+  {mod, {bondy_db_demo_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    crypto,
+    bondy_mst
+   ]},
+  {env, [
+    %% Overridden per node by config/nodeN/sys.config.
+    {db_name, demo},
+    {tables, [
+        {users,    lww_register},
+        {counters, pn_counter},
+        {tags,     g_set}
+    ]},
+    {shard_count, 8},
+    {data_dir, "/tmp/bondy_db_demo"},
+    {nodes, ['node1@127.0.0.1', 'node2@127.0.0.1', 'node3@127.0.0.1']}
+  ]},
+  {modules, []},
+  {licenses, ["Apache-2.0"]},
+  {links, []}
+ ]}.
