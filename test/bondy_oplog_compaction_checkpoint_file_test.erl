@@ -29,10 +29,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp",
-         io_lib:format("bondy_oplog_ckpt_file_test_~p_~p",
-                       [erlang:system_time(microsecond),
-                        erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_ckpt_file_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -44,12 +50,17 @@ rmrf(Dir) ->
 
 with_state(Fun) ->
     Dir = mktemp_dir(),
-    Id = list_to_binary(io_lib:format("inst_~p",
-                                      [erlang:unique_integer([positive])])),
+    Id = list_to_binary(
+        io_lib:format(
+            "inst_~p",
+            [erlang:unique_integer([positive])]
+        )
+    ),
     {ok, S} = bondy_oplog_compaction_checkpoint_file:init(
         Id, #{path => Dir}
     ),
-    try Fun(S, Dir, Id)
+    try
+        Fun(S, Dir, Id)
     after
         ok = bondy_oplog_compaction_checkpoint_file:close(S),
         rmrf(Dir)
@@ -162,8 +173,8 @@ corrupted_truncated_file_returns_error_test() ->
 corrupted_garbage_bytes_returns_error_test() ->
     with_state(fun(S, Dir, Id) ->
         ok = bondy_oplog_compaction_checkpoint_file:put_checkpoint(
-                S, mk_watermark(1, 1), payload
-            ),
+            S, mk_watermark(1, 1), payload
+        ),
         Path = checkpoint_path(Dir, Id),
         ok = file:write_file(Path, <<"this is not a valid ETF binary at all">>),
         ?assertMatch(
@@ -175,8 +186,8 @@ corrupted_garbage_bytes_returns_error_test() ->
 corrupted_empty_file_returns_error_test() ->
     with_state(fun(S, Dir, Id) ->
         ok = bondy_oplog_compaction_checkpoint_file:put_checkpoint(
-                S, mk_watermark(1, 1), payload
-            ),
+            S, mk_watermark(1, 1), payload
+        ),
         Path = checkpoint_path(Dir, Id),
         ok = file:write_file(Path, <<>>),
         ?assertMatch(
@@ -225,26 +236,30 @@ init_missing_path_returns_error_test() ->
 %% fixture so a bare `eunit:test/1` of this module still works.
 instance_init_test_() ->
     {setup,
-     fun() ->
-         {ok, _} = application:ensure_all_started(bondy_mst),
-         bondy_oplog_sync_scheduler:set_dispatch(undefined),
-         bondy_oplog_gc_scheduler:set_trigger(undefined),
-         ok
-     end,
-     fun(_) ->
-         [bondy_oplog:stop_instance(I)
-          || I <- bondy_oplog:list_instances()],
-         ok
-     end,
-     [{timeout, 60, fun instance_init_fails_loudly_on_corrupt_checkpoint/0}]}.
+        fun() ->
+            {ok, _} = application:ensure_all_started(bondy_mst),
+            bondy_oplog_sync_scheduler:set_dispatch(undefined),
+            bondy_oplog_gc_scheduler:set_trigger(undefined),
+            ok
+        end,
+        fun(_) ->
+            [
+                bondy_oplog:stop_instance(I)
+             || I <- bondy_oplog:list_instances()
+            ],
+            ok
+        end,
+        [{timeout, 60, fun instance_init_fails_loudly_on_corrupt_checkpoint/0}]}.
 
 instance_init_fails_loudly_on_corrupt_checkpoint() ->
     %% If the checkpoint file is unreadable, the instance refuses to
     %% start (rather than silently rebuilding from a partial state).
     %% The operator can then restore from backup.
     Suffix = integer_to_list(os:system_time(microsecond)),
-    Tmp = filename:join(<<"/tmp">>,
-                        list_to_binary("bondy_oplog_corrupt_" ++ Suffix)),
+    Tmp = filename:join(
+        <<"/tmp">>,
+        list_to_binary("bondy_oplog_corrupt_" ++ Suffix)
+    ),
     ok = filelib:ensure_path(Tmp),
     Id = list_to_binary("corrupt_" ++ Suffix),
     Opts = #{
@@ -294,29 +309,33 @@ contains_corruption_marker(Term) ->
 
 default_test_() ->
     {setup,
-     fun() ->
-         {ok, _} = application:ensure_all_started(bondy_mst),
-         bondy_oplog_sync_scheduler:set_dispatch(undefined),
-         bondy_oplog_gc_scheduler:set_trigger(undefined),
-         ok
-     end,
-     fun(_) ->
-         [bondy_oplog:stop_instance(I)
-          || I <- bondy_oplog:list_instances()],
-         ok
-     end,
-     [
-        {timeout, 60, fun default_file_when_storage_path/0},
-        {timeout, 60, fun default_ets_when_ephemeral/0},
-        {timeout, 60, fun checkpoint_persists_via_default/0}
-     ]}.
+        fun() ->
+            {ok, _} = application:ensure_all_started(bondy_mst),
+            bondy_oplog_sync_scheduler:set_dispatch(undefined),
+            bondy_oplog_gc_scheduler:set_trigger(undefined),
+            ok
+        end,
+        fun(_) ->
+            [
+                bondy_oplog:stop_instance(I)
+             || I <- bondy_oplog:list_instances()
+            ],
+            ok
+        end,
+        [
+            {timeout, 60, fun default_file_when_storage_path/0},
+            {timeout, 60, fun default_ets_when_ephemeral/0},
+            {timeout, 60, fun checkpoint_persists_via_default/0}
+        ]}.
 
 %% With `storage_path`, the instance picks the file backend by default
 %% and writes the checkpoint under the sharded per-instance dir.
 default_file_when_storage_path() ->
     Suffix = integer_to_list(os:system_time(microsecond)),
-    Tmp = filename:join(<<"/tmp">>,
-                        list_to_binary("bondy_oplog_def_fp_" ++ Suffix)),
+    Tmp = filename:join(
+        <<"/tmp">>,
+        list_to_binary("bondy_oplog_def_fp_" ++ Suffix)
+    ),
     ok = filelib:ensure_path(Tmp),
     Id = list_to_binary("def_fp_" ++ Suffix),
     Opts = #{
@@ -375,8 +394,10 @@ default_ets_when_ephemeral() ->
 %% restart even though the caller didn't ask for a file backend.
 checkpoint_persists_via_default() ->
     Suffix = integer_to_list(os:system_time(microsecond)),
-    Tmp = filename:join(<<"/tmp">>,
-                        list_to_binary("bondy_oplog_def_p_" ++ Suffix)),
+    Tmp = filename:join(
+        <<"/tmp">>,
+        list_to_binary("bondy_oplog_def_p_" ++ Suffix)
+    ),
     ok = filelib:ensure_path(Tmp),
     Id = list_to_binary("def_p_" ++ Suffix),
     Opts = #{

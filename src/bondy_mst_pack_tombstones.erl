@@ -89,11 +89,11 @@ mode).
 
 -export_type([read_error/0]).
 
--define(MAGIC,         ?BONDY_MST_PACK_TOMBSTONES_MAGIC).
--define(VERSION,       ?BONDY_MST_PACK_TOMBSTONES_VERSION).
--define(HEADER_BYTES,  ?BONDY_MST_PACK_TOMBSTONES_HEADER_BYTES).
+-define(MAGIC, ?BONDY_MST_PACK_TOMBSTONES_MAGIC).
+-define(VERSION, ?BONDY_MST_PACK_TOMBSTONES_VERSION).
+-define(HEADER_BYTES, ?BONDY_MST_PACK_TOMBSTONES_HEADER_BYTES).
 -define(TRAILER_BYTES, ?BONDY_MST_PACK_TOMBSTONES_TRAILER_BYTES).
--define(HASH_LEN,      ?BONDY_MST_PACK_HASH_BYTES).
+-define(HASH_LEN, ?BONDY_MST_PACK_HASH_BYTES).
 
 %% =============================================================================
 %% API — paths
@@ -194,7 +194,7 @@ encode(Set) ->
         Count:32/big-unsigned,
         ?HASH_LEN:32/big-unsigned
     >>,
-    Body = << <<H/binary>> || H <- Hashes, byte_size(H) =:= ?HASH_LEN >>,
+    Body = <<<<H/binary>> || H <- Hashes, byte_size(H) =:= ?HASH_LEN>>,
     HeaderAndBody = <<Header/binary, Body/binary>>,
     Trailer = crypto:hash(sha256, HeaderAndBody),
     <<HeaderAndBody/binary, Trailer/binary>>.
@@ -207,7 +207,7 @@ Decodes a binary into a tombstone set. Returns the decoded
 
 decode(Bin) when byte_size(Bin) < ?HEADER_BYTES + ?TRAILER_BYTES ->
     case byte_size(Bin) < ?HEADER_BYTES of
-        true  -> {error, truncated_header};
+        true -> {error, truncated_header};
         false -> {error, truncated_trailer}
     end;
 decode(Bin) ->
@@ -225,12 +225,10 @@ decode(Bin) ->
 %% =============================================================================
 
 %% @private
-decode_verified(<<?MAGIC:32/big-unsigned,
-                  Version:8,
-                  _Reserved:24,
-                  Count:32/big-unsigned,
-                  HashLen:32/big-unsigned,
-                  Rest/binary>>) ->
+decode_verified(
+    <<?MAGIC:32/big-unsigned, Version:8, _Reserved:24, Count:32/big-unsigned,
+        HashLen:32/big-unsigned, Rest/binary>>
+) ->
     case Version =:= ?VERSION of
         false ->
             {error, {bad_version, Version}};
@@ -248,7 +246,10 @@ decode_verified(_) ->
 %% @private
 decode_hashes(Count, HashLen, Body) when byte_size(Body) =:= Count * HashLen ->
     Hashes =
-        [binary:part(Body, I * HashLen, HashLen) || I <- lists:seq(0, Count - 1)],
+        [
+            binary:part(Body, I * HashLen, HashLen)
+         || I <- lists:seq(0, Count - 1)
+        ],
     {ok, sets:from_list(Hashes, [{version, 2}])};
 decode_hashes(Count, _HashLen, _Body) ->
     {error, {bad_count, Count}}.

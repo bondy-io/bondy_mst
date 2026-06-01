@@ -78,9 +78,9 @@ See `bondy_oplog_cache_adapter` for the orthogonal read-cache surface.
     range_opts/0
 ]).
 
--type handle()       :: any().
--type bucket()       :: term().
--type range_opts()   :: #{
+-type handle() :: any().
+-type bucket() :: term().
+-type range_opts() :: #{
     limit => pos_integer(),
     direction => asc | desc,
     atom() => term()
@@ -113,8 +113,9 @@ See `bondy_oplog_cache_adapter` for the orthogonal read-cache surface.
     Low :: term(),
     High :: term(),
     Opts :: range_opts()
-) -> {ok, [{Key :: term(), Frame :: binary()}]}
-   | {error, term()}.
+) ->
+    {ok, [{Key :: term(), Frame :: binary()}]}
+    | {error, term()}.
 
 -callback delete(handle(), bucket(), Key :: term()) -> ok.
 

@@ -28,9 +28,11 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(NS, Index, 0)
+    [
+        bondy_db_core_registry:unregister(NS, Index, 0)
      || #{key := {NS, Index, _}} <-
-            [entry_to_map(E) || E <- bondy_db_core_registry:list()]],
+            [entry_to_map(E) || E <- bondy_db_core_registry:list()]
+    ],
     ok.
 
 ae_bump_test_() ->
@@ -43,7 +45,6 @@ ae_bump_test_() ->
         fun missing_target_is_tolerated/0,
         fun top_level_ae_targets_wires_applier_and_ae/0
     ]}.
-
 
 %% =============================================================================
 %% Tests
@@ -62,7 +63,6 @@ no_ae_targets_does_not_bump() ->
     After = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assertEqual(Before, After),
     cleanup_ns(NS).
-
 
 successful_sync_bumps_targets() ->
     %% Only the puller (A) has an `ae_targets` opt, so the only path
@@ -84,7 +84,6 @@ successful_sync_bumps_targets() ->
     ?assert(After > Before),
     cleanup_ns(NS).
 
-
 bump_shares_now_across_targets() ->
     NS = mk_ns(),
     ok = register_shard(NS, primary, 0),
@@ -101,7 +100,6 @@ bump_shares_now_across_targets() ->
     ?assertEqual(P, Q),
     ?assert(P > sentinel()),
     cleanup_ns(NS).
-
 
 no_op_sync_against_empty_peer_still_bumps() ->
     %% A "fully converged" sync (peer has nothing new) still returns
@@ -131,7 +129,6 @@ no_op_sync_against_empty_peer_still_bumps() ->
     ?assert(After > Before),
     cleanup_ns(NS).
 
-
 failed_sync_does_not_bump() ->
     %% A sync against a non-existent peer fails. `maybe_record/4` is
     %% only called with `{ok, _}` so a failed round must not bump.
@@ -148,7 +145,6 @@ failed_sync_does_not_bump() ->
     After = bondy_db_core_registry:last_ae_at(NS, primary, 0),
     ?assertEqual(Before, After),
     cleanup_ns(NS).
-
 
 missing_target_is_tolerated() ->
     NS = mk_ns(),
@@ -168,7 +164,6 @@ missing_target_is_tolerated() ->
     ),
     cleanup_ns(NS).
 
-
 top_level_ae_targets_wires_applier_and_ae() ->
     %% Single top-level `ae_targets` opt should drive BOTH the applier's
     %% per-commit bump (item 6) AND the sync session's per-round bump
@@ -184,8 +179,10 @@ top_level_ae_targets_wires_applier_and_ae() ->
         applier => #{commit_every => 1}
     }),
     {ok, _} = bondy_oplog:start_instance(B, opts_for(NS, Targets)),
-    ?assertEqual(sentinel(),
-                 bondy_db_core_registry:last_ae_at(NS, primary, 0)),
+    ?assertEqual(
+        sentinel(),
+        bondy_db_core_registry:last_ae_at(NS, primary, 0)
+    ),
     %% Applier-side bump on first commit.
     _ = bondy_oplog:append(A, hello),
     _ = wait_for_ae_advance(NS, primary, 0, sentinel()),
@@ -198,7 +195,6 @@ top_level_ae_targets_wires_applier_and_ae() ->
     ?assert(After >= Mid),
     cleanup_ns(NS).
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
@@ -206,54 +202,52 @@ top_level_ae_targets_wires_applier_and_ae() ->
 mk_inst() ->
     list_to_binary(
         "sync_ae_" ++
-        integer_to_list(erlang:unique_integer([positive, monotonic]))
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
     ).
-
 
 mk_ns() ->
     binary_to_atom(
         list_to_binary(
             "ns_ae_" ++
-            integer_to_list(erlang:unique_integer([positive, monotonic]))
+                integer_to_list(erlang:unique_integer([positive, monotonic]))
         ),
         utf8
     ).
-
 
 opts_for(_NS, []) ->
     originated_opts();
 opts_for(_NS, Targets) ->
     (originated_opts())#{ae_targets => Targets}.
 
-
 originated_opts() ->
     #{origin => bondy_oplog_origin:new()}.
 
-
 register_shard(NS, Index, Shard) ->
     bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => undefined,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => undefined,
         projection_adapter => bondy_oplog_projection_adapter,
-        projection_handle  => undefined,
-        fold_module        => lww_register,
-        overlay            => disabled
+        projection_handle => undefined,
+        fold_module => lww_register,
+        overlay => disabled
     }).
 
-
 cleanup_ns(NS) ->
-    Entries = [E || E <- bondy_db_core_registry:list(),
-                    element(1, bondy_db_core_registry:entry_key(E)) =:= NS],
-    [bondy_db_core_registry:unregister(N, I, S)
+    Entries = [
+        E
+     || E <- bondy_db_core_registry:list(),
+        element(1, bondy_db_core_registry:entry_key(E)) =:= NS
+    ],
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- Entries,
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
-
 
 sentinel() ->
     -(1 bsl 62).
-
 
 wait_for_ae_advance(NS, Index, Shard, Baseline) ->
     wait_for_ae_advance(NS, Index, Shard, Baseline, 1000).
@@ -267,14 +261,19 @@ wait_for_ae_advance_loop(NS, Index, Shard, Baseline, Deadline) ->
         V when V > Baseline -> V;
         _ ->
             case erlang:monotonic_time(millisecond) >= Deadline of
-                true  -> erlang:error({ae_did_not_advance, NS, Index, Shard});
+                true ->
+                    erlang:error({ae_did_not_advance, NS, Index, Shard});
                 false ->
                     timer:sleep(5),
-                    wait_for_ae_advance_loop(NS, Index, Shard, Baseline,
-                                             Deadline)
+                    wait_for_ae_advance_loop(
+                        NS,
+                        Index,
+                        Shard,
+                        Baseline,
+                        Deadline
+                    )
             end
     end.
-
 
 entry_to_map(E) ->
     #{key => bondy_db_core_registry:entry_key(E)}.

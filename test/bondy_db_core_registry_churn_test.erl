@@ -17,9 +17,9 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(STEPS,        200).
--define(NS_POOL,      4).
--define(OWNER_POOL,   3).
+-define(STEPS, 200).
+-define(NS_POOL, 4).
+-define(OWNER_POOL, 3).
 
 churn_test_() ->
     {timeout, 60, [
@@ -33,9 +33,13 @@ setup() ->
     %% Use a separate NS per pool slot to avoid colliding with other
     %% test modules running in the same suite.
     Suffix = integer_to_list(erlang:unique_integer([positive, monotonic])),
-    Namespaces = [list_to_atom("mst_db_churn_" ++ Suffix ++ "_" ++
-                               integer_to_list(N))
-                  || N <- lists:seq(0, ?NS_POOL - 1)],
+    Namespaces = [
+        list_to_atom(
+            "mst_db_churn_" ++ Suffix ++ "_" ++
+                integer_to_list(N)
+        )
+     || N <- lists:seq(0, ?NS_POOL - 1)
+    ],
     Namespaces.
 
 cleanup(Namespaces) ->
@@ -58,8 +62,10 @@ churn_invariants_hold() ->
         run_steps(?STEPS, Namespaces, Owners)
     after
         [exit(P, kill) || P <- Owners],
-        [catch bondy_db_core_registry:unregister(NS, primary, 0)
-         || NS <- Namespaces],
+        [
+            catch bondy_db_core_registry:unregister(NS, primary, 0)
+         || NS <- Namespaces
+        ],
         %% Sync registry to absorb every pending DOWN before the next
         %% test starts.
         _ = sys:get_state(bondy_db_core_registry)
@@ -83,7 +89,7 @@ pick_action() ->
     case rand:uniform(10) of
         N when N =< 5 -> register;
         N when N =< 8 -> unregister;
-        _             -> kill_owner
+        _ -> kill_owner
     end.
 
 pick(List) ->
@@ -93,7 +99,10 @@ perform(register, NS, Owner) when is_pid(Owner) ->
     case erlang:is_process_alive(Owner) of
         true ->
             Owner ! {register, NS, primary, 0, self()},
-            receive {registered, NS} -> ok after 1_000 -> ok end;
+            receive
+                {registered, NS} -> ok
+            after 1_000 -> ok
+            end;
         false ->
             ok
     end;
@@ -101,13 +110,13 @@ perform(unregister, NS, _Owner) ->
     ok = bondy_db_core_registry:unregister(NS, primary, 0);
 perform(kill_owner, _NS, Owner) when is_pid(Owner) ->
     case erlang:is_process_alive(Owner) of
-        true  -> exit(Owner, kill);
+        true -> exit(Owner, kill);
         false -> ok
     end.
 
 revive_if_dead(Pid) ->
     case erlang:is_process_alive(Pid) of
-        true  -> Pid;
+        true -> Pid;
         false -> spawn_owner()
     end.
 
@@ -143,9 +152,13 @@ owner_loop() ->
 
 setup_namespaces() ->
     Suffix = integer_to_list(erlang:unique_integer([positive, monotonic])),
-    [list_to_atom("mst_db_churn_step_" ++ Suffix ++ "_" ++
-                  integer_to_list(N))
-     || N <- lists:seq(0, ?NS_POOL - 1)].
+    [
+        list_to_atom(
+            "mst_db_churn_step_" ++ Suffix ++ "_" ++
+                integer_to_list(N)
+        )
+     || N <- lists:seq(0, ?NS_POOL - 1)
+    ].
 
 assert_invariants() ->
     %% Atomic snapshot: ETS rows and the two maps come from the same
@@ -154,7 +167,7 @@ assert_invariants() ->
     %% handlers and unregister calls — the snapshot would say "Key is
     %% tracked" while the live ETS had already cleared the row.
     #{
-        entries    := Entries,
+        entries := Entries,
         mon_to_key := MonToKey,
         key_to_mon := KeyToMon
     } = bondy_db_core_registry:snapshot_for_invariants(),

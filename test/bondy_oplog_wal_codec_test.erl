@@ -47,18 +47,26 @@ static_key(Salt) ->
 
 none_passes_body_through_test() ->
     Body = <<"hello, wal">>,
-    ?assertEqual({0, Body},
-                 bondy_oplog_wal_codec:encode_body(
-                     Body, #{body_compression => none})).
+    ?assertEqual(
+        {0, Body},
+        bondy_oplog_wal_codec:encode_body(
+            Body, #{body_compression => none}
+        )
+    ).
 
 below_threshold_passes_through_test() ->
     %% A 100-byte body with `min_bytes = 256` is below the threshold;
     %% the codec must short-circuit even though zlib is enabled.
     Body = crypto:strong_rand_bytes(100),
-    ?assertEqual({0, Body},
-                 bondy_oplog_wal_codec:encode_body(
-                     Body, #{body_compression => zlib,
-                             body_compression_min_bytes => 256})).
+    ?assertEqual(
+        {0, Body},
+        bondy_oplog_wal_codec:encode_body(
+            Body, #{
+                body_compression => zlib,
+                body_compression_min_bytes => 256
+            }
+        )
+    ).
 
 compressible_body_actually_compresses_test() ->
     %% A highly redundant body must compress: the codec emits the
@@ -67,8 +75,11 @@ compressible_body_actually_compresses_test() ->
     Body = binary:copy(<<"ABCD">>, 1024),
     {Flags, Encoded} =
         bondy_oplog_wal_codec:encode_body(
-            Body, #{body_compression => zlib,
-                    body_compression_min_bytes => 1}),
+            Body, #{
+                body_compression => zlib,
+                body_compression_min_bytes => 1
+            }
+        ),
     ?assertEqual(?FLAG, Flags),
     ?assert(iolist_size(Encoded) < byte_size(Body)),
     %% First byte is the algorithm id (1 = zlib).
@@ -82,8 +93,11 @@ incompressible_body_falls_back_to_raw_test() ->
     Body = crypto:strong_rand_bytes(4096),
     {Flags, Encoded} =
         bondy_oplog_wal_codec:encode_body(
-            Body, #{body_compression => zlib,
-                    body_compression_min_bytes => 1}),
+            Body, #{
+                body_compression => zlib,
+                body_compression_min_bytes => 1
+            }
+        ),
     ?assertEqual(0, Flags),
     ?assertEqual(Body, Encoded).
 
@@ -91,20 +105,28 @@ roundtrip_compressible_test() ->
     Body = binary:copy(<<"hello, ">>, 2048),
     {Flags, Encoded} =
         bondy_oplog_wal_codec:encode_body(
-            Body, #{body_compression => zlib,
-                    body_compression_min_bytes => 1}),
+            Body, #{
+                body_compression => zlib,
+                body_compression_min_bytes => 1
+            }
+        ),
     EncodedBin = iolist_to_binary(Encoded),
-    ?assertEqual({ok, Body},
-                 bondy_oplog_wal_codec:decode_body(EncodedBin, Flags)).
+    ?assertEqual(
+        {ok, Body},
+        bondy_oplog_wal_codec:decode_body(EncodedBin, Flags)
+    ).
 
 roundtrip_uncompressed_test() ->
     Body = <<"plain bytes">>,
     {Flags, Encoded} =
         bondy_oplog_wal_codec:encode_body(
-            Body, #{body_compression => none}),
+            Body, #{body_compression => none}
+        ),
     EncodedBin = iolist_to_binary(Encoded),
-    ?assertEqual({ok, Body},
-                 bondy_oplog_wal_codec:decode_body(EncodedBin, Flags)).
+    ?assertEqual(
+        {ok, Body},
+        bondy_oplog_wal_codec:decode_body(EncodedBin, Flags)
+    ).
 
 %% =============================================================================
 %% Decode error surfaces
@@ -113,21 +135,27 @@ roundtrip_uncompressed_test() ->
 decode_unknown_algorithm_test() ->
     %% Flag claims compressed, algorithm byte is 99 — unknown.
     Bad = <<99:8, 1, 2, 3>>,
-    ?assertEqual({error, {unknown_codec, 99}},
-                 bondy_oplog_wal_codec:decode_body(Bad, ?FLAG)).
+    ?assertEqual(
+        {error, {unknown_codec, 99}},
+        bondy_oplog_wal_codec:decode_body(Bad, ?FLAG)
+    ).
 
 decode_truncated_envelope_test() ->
     %% Flag is set but the body is empty — there isn't even an
     %% algorithm byte. Must surface as a typed error, not a crash.
-    ?assertEqual({error, truncated_envelope},
-                 bondy_oplog_wal_codec:decode_body(<<>>, ?FLAG)).
+    ?assertEqual(
+        {error, truncated_envelope},
+        bondy_oplog_wal_codec:decode_body(<<>>, ?FLAG)
+    ).
 
 decode_corrupted_compressed_body_test() ->
     %% Valid algorithm byte, garbage payload. Decompression fails;
     %% codec returns `decompress_failed`, not an exception.
     Bad = <<?BONDY_OPLOG_WAL_CODEC_ALGO_ZLIB:8, "not actually zlib">>,
-    ?assertEqual({error, decompress_failed},
-                 bondy_oplog_wal_codec:decode_body(Bad, ?FLAG)).
+    ?assertEqual(
+        {error, decompress_failed},
+        bondy_oplog_wal_codec:decode_body(Bad, ?FLAG)
+    ).
 
 %% =============================================================================
 %% Startup validation
@@ -140,12 +168,16 @@ validate_zlib_ok_test() ->
     ?assertEqual(ok, bondy_oplog_wal_codec:validate_algorithm(zlib)).
 
 validate_lz4_unsupported_test() ->
-    ?assertEqual({error, {unsupported_codec, lz4}},
-                 bondy_oplog_wal_codec:validate_algorithm(lz4)).
+    ?assertEqual(
+        {error, {unsupported_codec, lz4}},
+        bondy_oplog_wal_codec:validate_algorithm(lz4)
+    ).
 
 validate_invalid_value_test() ->
-    ?assertEqual({error, {invalid_opt, body_compression, snappy}},
-                 bondy_oplog_wal_codec:validate_algorithm(snappy)).
+    ?assertEqual(
+        {error, {invalid_opt, body_compression, snappy}},
+        bondy_oplog_wal_codec:validate_algorithm(snappy)
+    ).
 
 %% =============================================================================
 %% Telemetry surface
@@ -153,24 +185,26 @@ validate_invalid_value_test() ->
 
 telemetry_test_() ->
     {setup,
-     fun() ->
-         {ok, _} = application:ensure_all_started(telemetry),
-         ok
-     end,
-     fun(_) -> ok end,
-     [
-         {timeout, 5, fun compress_telemetry_emits_with_metadata/0},
-         {timeout, 5, fun decompress_telemetry_emits/0},
-         {timeout, 5, fun no_event_for_noop/0}
-     ]}.
+        fun() ->
+            {ok, _} = application:ensure_all_started(telemetry),
+            ok
+        end,
+        fun(_) -> ok end, [
+            {timeout, 5, fun compress_telemetry_emits_with_metadata/0},
+            {timeout, 5, fun decompress_telemetry_emits/0},
+            {timeout, 5, fun no_event_for_noop/0}
+        ]}.
 
 compress_telemetry_emits_with_metadata() ->
     Ref = attach([bondy_oplog, wal, codec, compress], compress),
     Body = binary:copy(<<"ABCD">>, 1024),
     {?FLAG, _} = bondy_oplog_wal_codec:encode_body(
-        Body, #{body_compression => zlib,
-                body_compression_min_bytes => 1,
-                instance_id => <<"codec-test">>}),
+        Body, #{
+            body_compression => zlib,
+            body_compression_min_bytes => 1,
+            instance_id => <<"codec-test">>
+        }
+    ),
     {M, Md} = receive_event(compress, 1000),
     detach(Ref),
     ?assertMatch(#{input_bytes := _, output_bytes := _, duration_us := _}, M),
@@ -182,12 +216,17 @@ compress_telemetry_emits_with_metadata() ->
 decompress_telemetry_emits() ->
     Body = binary:copy(<<"zzz">>, 2048),
     {Flags, Encoded} = bondy_oplog_wal_codec:encode_body(
-        Body, #{body_compression => zlib,
-                body_compression_min_bytes => 1}),
+        Body, #{
+            body_compression => zlib,
+            body_compression_min_bytes => 1
+        }
+    ),
     Ref = attach([bondy_oplog, wal, codec, decompress], decompress),
     {ok, _} = bondy_oplog_wal_codec:decode_body(
-        iolist_to_binary(Encoded), Flags,
-        #{instance_id => <<"codec-test">>}),
+        iolist_to_binary(Encoded),
+        Flags,
+        #{instance_id => <<"codec-test">>}
+    ),
     {M, Md} = receive_event(decompress, 1000),
     detach(Ref),
     ?assertEqual(byte_size(Body), maps:get(output_bytes, M)),
@@ -197,9 +236,12 @@ no_event_for_noop() ->
     Ref = attach([bondy_oplog, wal, codec, compress], compress_noop),
     %% Below threshold → no-op.
     {0, _} = bondy_oplog_wal_codec:encode_body(
-        <<"tiny">>, #{body_compression => zlib,
-                       body_compression_min_bytes => 256,
-                       instance_id => <<"x">>}),
+        <<"tiny">>, #{
+            body_compression => zlib,
+            body_compression_min_bytes => 256,
+            instance_id => <<"x">>
+        }
+    ),
     timer:sleep(20),
     detach(Ref),
     ?assertEqual(no_event, drain(compress_noop)).
@@ -210,28 +252,33 @@ no_event_for_noop() ->
 
 end_to_end_test_() ->
     {setup,
-     fun() ->
-         {ok, _} = application:ensure_all_started(telemetry),
-         ok
-     end,
-     fun(_) -> ok end,
-     [
-         {timeout, 15, fun writer_with_compression_roundtrips/0},
-         {timeout, 15, fun writer_without_compression_still_works/0}
-     ]}.
+        fun() ->
+            {ok, _} = application:ensure_all_started(telemetry),
+            ok
+        end,
+        fun(_) -> ok end, [
+            {timeout, 15, fun writer_with_compression_roundtrips/0},
+            {timeout, 15, fun writer_without_compression_still_works/0}
+        ]}.
 
 writer_with_compression_roundtrips() ->
     Id = instance_id(),
     Dir = mktemp_dir(),
-    Opts = #{dir => Dir, origin => origin(),
-             body_compression => zlib,
-             body_compression_min_bytes => 1,
-             retention_sweep_interval => 24 * 60 * 60 * 1000},
+    Opts = #{
+        dir => Dir,
+        origin => origin(),
+        body_compression => zlib,
+        body_compression_min_bytes => 1,
+        retention_sweep_interval => 24 * 60 * 60 * 1000
+    },
     {ok, Wal} = bondy_oplog_wal:start_link(Id, Opts),
     HLC = bondy_oplog_hlc:new(),
     %% Append a very compressible batch — bodies should shrink after
     %% the codec runs.
-    Events = [mk_event(bondy_oplog_hlc:now(HLC), Seq) || Seq <- lists:seq(0, 9)],
+    Events = [
+        mk_event(bondy_oplog_hlc:now(HLC), Seq)
+     || Seq <- lists:seq(0, 9)
+    ],
     {ok, _Acks} = bondy_oplog_wal:append_batch(Wal, Events),
     %% Open a reader and read the batch back. It must be byte-for-byte
     %% identical to what we appended — i.e. decompression actually
@@ -245,12 +292,18 @@ writer_with_compression_roundtrips() ->
 writer_without_compression_still_works() ->
     Id = instance_id(),
     Dir = mktemp_dir(),
-    Opts = #{dir => Dir, origin => origin(),
-             body_compression => none,
-             retention_sweep_interval => 24 * 60 * 60 * 1000},
+    Opts = #{
+        dir => Dir,
+        origin => origin(),
+        body_compression => none,
+        retention_sweep_interval => 24 * 60 * 60 * 1000
+    },
     {ok, Wal} = bondy_oplog_wal:start_link(Id, Opts),
     HLC = bondy_oplog_hlc:new(),
-    Events = [mk_event(bondy_oplog_hlc:now(HLC), Seq) || Seq <- lists:seq(0, 4)],
+    Events = [
+        mk_event(bondy_oplog_hlc:now(HLC), Seq)
+     || Seq <- lists:seq(0, 4)
+    ],
     {ok, _Acks} = bondy_oplog_wal:append_batch(Wal, Events),
     {ok, Iter0} = bondy_oplog_wal_reader:open(Wal, beginning),
     {ok, Batch, _Hlcs, _Pos, _Iter1} = bondy_oplog_wal_reader:next(Iter0),
@@ -264,25 +317,24 @@ writer_without_compression_still_works() ->
 
 encryption_test_() ->
     {setup,
-     fun() ->
-         {ok, _} = application:ensure_all_started(telemetry),
-         ok
-     end,
-     fun(_) -> ok end,
-     [
-         {timeout, 5, fun encrypt_only_roundtrip/0},
-         {timeout, 5, fun compress_then_encrypt_roundtrip/0},
-         {timeout, 5, fun encrypt_sets_flag_and_envelope_header/0},
-         {timeout, 5, fun iv_unique_per_frame/0},
-         {timeout, 5, fun tag_mismatch_returns_decrypt_failed/0},
-         {timeout, 5, fun missing_key_returns_missing_key/0},
-         {timeout, 5, fun unknown_cipher_id_returns_typed_error/0},
-         {timeout, 5, fun truncated_encryption_envelope/0},
-         {timeout, 5, fun decrypt_without_registry_returns_missing_key/0},
-         {timeout, 5, fun validate_encryption_paths/0},
-         {timeout, 5, fun encrypt_telemetry_emits/0},
-         {timeout, 5, fun decrypt_tag_failure_emits_telemetry/0}
-     ]}.
+        fun() ->
+            {ok, _} = application:ensure_all_started(telemetry),
+            ok
+        end,
+        fun(_) -> ok end, [
+            {timeout, 5, fun encrypt_only_roundtrip/0},
+            {timeout, 5, fun compress_then_encrypt_roundtrip/0},
+            {timeout, 5, fun encrypt_sets_flag_and_envelope_header/0},
+            {timeout, 5, fun iv_unique_per_frame/0},
+            {timeout, 5, fun tag_mismatch_returns_decrypt_failed/0},
+            {timeout, 5, fun missing_key_returns_missing_key/0},
+            {timeout, 5, fun unknown_cipher_id_returns_typed_error/0},
+            {timeout, 5, fun truncated_encryption_envelope/0},
+            {timeout, 5, fun decrypt_without_registry_returns_missing_key/0},
+            {timeout, 5, fun validate_encryption_paths/0},
+            {timeout, 5, fun encrypt_telemetry_emits/0},
+            {timeout, 5, fun decrypt_tag_failure_emits_telemetry/0}
+        ]}.
 
 encrypt_only_roundtrip() ->
     Body = <<"hello, encrypted wal">>,
@@ -291,21 +343,27 @@ encrypt_only_roundtrip() ->
     ?assertEqual(?EFLAG, Flags),
     EncodedBin = iolist_to_binary(Encoded),
     ?assertNotEqual(Body, EncodedBin),
-    ?assertEqual({ok, Body},
-                 bondy_oplog_wal_codec:decode_body(EncodedBin, Flags, Opts)).
+    ?assertEqual(
+        {ok, Body},
+        bondy_oplog_wal_codec:decode_body(EncodedBin, Flags, Opts)
+    ).
 
 compress_then_encrypt_roundtrip() ->
     %% A body large enough that compression is meaningful; we expect
     %% both flag bits to be set and the round-trip to be the identity.
     Body = binary:copy(<<"compressible payload ">>, 256),
-    Opts = #{body_compression => zlib,
-             body_compression_min_bytes => 1,
-             body_encryption => {enabled, ?MODULE}},
+    Opts = #{
+        body_compression => zlib,
+        body_compression_min_bytes => 1,
+        body_encryption => {enabled, ?MODULE}
+    },
     {Flags, Encoded} = bondy_oplog_wal_codec:encode_body(Body, Opts),
     ?assertEqual(?FLAG bor ?EFLAG, Flags),
     EncodedBin = iolist_to_binary(Encoded),
-    ?assertEqual({ok, Body},
-                 bondy_oplog_wal_codec:decode_body(EncodedBin, Flags, Opts)).
+    ?assertEqual(
+        {ok, Body},
+        bondy_oplog_wal_codec:decode_body(EncodedBin, Flags, Opts)
+    ).
 
 encrypt_sets_flag_and_envelope_header() ->
     Body = <<"x">>,
@@ -315,7 +373,7 @@ encrypt_sets_flag_and_envelope_header() ->
     EncodedBin = iolist_to_binary(Encoded),
     %% First byte must be the AES-256-GCM cipher id.
     <<Algo:8, KeyId:16/big-unsigned, IV:12/binary, Tag:16/binary,
-      _Ciphertext/binary>> = EncodedBin,
+        _Ciphertext/binary>> = EncodedBin,
     ?assertEqual(?BONDY_OPLOG_WAL_CODEC_CIPHER_AES_256_GCM, Algo),
     ?assertEqual(1, KeyId),
     ?assertEqual(12, byte_size(IV)),
@@ -344,9 +402,12 @@ tag_mismatch_returns_decrypt_failed() ->
     %% Bit-flip the first ciphertext byte at offset 31.
     <<Pre:31/binary, B, Post/binary>> = Bin,
     Corrupted = <<Pre/binary, (B bxor 16#01), Post/binary>>,
-    ?assertEqual({error, decrypt_failed},
-                 bondy_oplog_wal_codec:decode_body(
-                     Corrupted, ?EFLAG, Opts)).
+    ?assertEqual(
+        {error, decrypt_failed},
+        bondy_oplog_wal_codec:decode_body(
+            Corrupted, ?EFLAG, Opts
+        )
+    ).
 
 missing_key_returns_missing_key() ->
     %% Forge an envelope with KeyId=42 (not present in the stub
@@ -354,25 +415,36 @@ missing_key_returns_missing_key() ->
     IV = crypto:strong_rand_bytes(12),
     Tag = <<0:128>>,
     Body = <<"unreachable">>,
-    Forged = <<?BONDY_OPLOG_WAL_CODEC_CIPHER_AES_256_GCM:8,
-               42:16/big-unsigned, IV/binary, Tag/binary, Body/binary>>,
+    Forged =
+        <<?BONDY_OPLOG_WAL_CODEC_CIPHER_AES_256_GCM:8, 42:16/big-unsigned,
+            IV/binary, Tag/binary, Body/binary>>,
     Opts = #{body_encryption => {enabled, ?MODULE}},
-    ?assertEqual({error, {missing_key, 42}},
-                 bondy_oplog_wal_codec:decode_body(Forged, ?EFLAG, Opts)).
+    ?assertEqual(
+        {error, {missing_key, 42}},
+        bondy_oplog_wal_codec:decode_body(Forged, ?EFLAG, Opts)
+    ).
 
 unknown_cipher_id_returns_typed_error() ->
     Forged = <<99:8, 0:16, 0:96, 0:128, "data">>,
-    ?assertEqual({error, {unknown_cipher, 99}},
-                 bondy_oplog_wal_codec:decode_body(
-                     Forged, ?EFLAG,
-                     #{body_encryption => {enabled, ?MODULE}})).
+    ?assertEqual(
+        {error, {unknown_cipher, 99}},
+        bondy_oplog_wal_codec:decode_body(
+            Forged,
+            ?EFLAG,
+            #{body_encryption => {enabled, ?MODULE}}
+        )
+    ).
 
 truncated_encryption_envelope() ->
     %% Less than 31 bytes — there isn't even a full envelope header.
-    ?assertEqual({error, truncated_envelope},
-                 bondy_oplog_wal_codec:decode_body(
-                     <<1, 0, 0>>, ?EFLAG,
-                     #{body_encryption => {enabled, ?MODULE}})).
+    ?assertEqual(
+        {error, truncated_envelope},
+        bondy_oplog_wal_codec:decode_body(
+            <<1, 0, 0>>,
+            ?EFLAG,
+            #{body_encryption => {enabled, ?MODULE}}
+        )
+    ).
 
 decrypt_without_registry_returns_missing_key() ->
     %% Encrypt with the stub registry, attempt to decrypt with the
@@ -383,27 +455,42 @@ decrypt_without_registry_returns_missing_key() ->
     Opts = #{body_encryption => {enabled, ?MODULE}},
     {?EFLAG, Encoded} = bondy_oplog_wal_codec:encode_body(Body, Opts),
     EncodedBin = iolist_to_binary(Encoded),
-    ?assertMatch({error, {missing_key, _}},
-                 bondy_oplog_wal_codec:decode_body(EncodedBin, ?EFLAG, #{})).
+    ?assertMatch(
+        {error, {missing_key, _}},
+        bondy_oplog_wal_codec:decode_body(EncodedBin, ?EFLAG, #{})
+    ).
 
 validate_encryption_paths() ->
-    ?assertEqual(ok,
-                 bondy_oplog_wal_codec:validate_encryption(disabled)),
-    ?assertEqual(ok,
-                 bondy_oplog_wal_codec:validate_encryption(
-                     {enabled, ?MODULE})),
-    ?assertMatch({error, {key_registry_unloadable, _}},
-                 bondy_oplog_wal_codec:validate_encryption(
-                     {enabled, no_such_module_anywhere})),
-    ?assertMatch({error, {invalid_opt, body_encryption, _}},
-                 bondy_oplog_wal_codec:validate_encryption(
-                     {bogus, ?MODULE})).
+    ?assertEqual(
+        ok,
+        bondy_oplog_wal_codec:validate_encryption(disabled)
+    ),
+    ?assertEqual(
+        ok,
+        bondy_oplog_wal_codec:validate_encryption(
+            {enabled, ?MODULE}
+        )
+    ),
+    ?assertMatch(
+        {error, {key_registry_unloadable, _}},
+        bondy_oplog_wal_codec:validate_encryption(
+            {enabled, no_such_module_anywhere}
+        )
+    ),
+    ?assertMatch(
+        {error, {invalid_opt, body_encryption, _}},
+        bondy_oplog_wal_codec:validate_encryption(
+            {bogus, ?MODULE}
+        )
+    ).
 
 encrypt_telemetry_emits() ->
     Ref = attach([bondy_oplog, wal, codec, encrypt], encrypt),
     Body = <<"payload">>,
-    Opts = #{body_encryption => {enabled, ?MODULE},
-             instance_id => <<"codec-test">>},
+    Opts = #{
+        body_encryption => {enabled, ?MODULE},
+        instance_id => <<"codec-test">>
+    },
     {?EFLAG, _} = bondy_oplog_wal_codec:encode_body(Body, Opts),
     {M, Md} = receive_event(encrypt, 1000),
     detach(Ref),
@@ -415,8 +502,10 @@ encrypt_telemetry_emits() ->
 
 decrypt_tag_failure_emits_telemetry() ->
     Body = <<"oops">>,
-    Opts = #{body_encryption => {enabled, ?MODULE},
-             instance_id => <<"codec-test">>},
+    Opts = #{
+        body_encryption => {enabled, ?MODULE},
+        instance_id => <<"codec-test">>
+    },
     {?EFLAG, Encoded} = bondy_oplog_wal_codec:encode_body(Body, Opts),
     Bin = iolist_to_binary(Encoded),
     <<Pre:31/binary, B, Post/binary>> = Bin,
@@ -434,26 +523,30 @@ decrypt_tag_failure_emits_telemetry() ->
 
 end_to_end_encryption_test_() ->
     {setup,
-     fun() ->
-         {ok, _} = application:ensure_all_started(telemetry),
-         ok
-     end,
-     fun(_) -> ok end,
-     [
-         {timeout, 15, fun encrypted_writer_roundtrips/0},
-         {timeout, 15, fun encrypted_compressed_writer_roundtrips/0}
-     ]}.
+        fun() ->
+            {ok, _} = application:ensure_all_started(telemetry),
+            ok
+        end,
+        fun(_) -> ok end, [
+            {timeout, 15, fun encrypted_writer_roundtrips/0},
+            {timeout, 15, fun encrypted_compressed_writer_roundtrips/0}
+        ]}.
 
 encrypted_writer_roundtrips() ->
     Id = instance_id(),
     Dir = mktemp_dir(),
-    Opts = #{dir => Dir, origin => origin(),
-             body_encryption => {enabled, ?MODULE},
-             retention_sweep_interval => 24 * 60 * 60 * 1000},
+    Opts = #{
+        dir => Dir,
+        origin => origin(),
+        body_encryption => {enabled, ?MODULE},
+        retention_sweep_interval => 24 * 60 * 60 * 1000
+    },
     {ok, Wal} = bondy_oplog_wal:start_link(Id, Opts),
     HLC = bondy_oplog_hlc:new(),
-    Events = [mk_event(bondy_oplog_hlc:now(HLC), Seq)
-              || Seq <- lists:seq(0, 4)],
+    Events = [
+        mk_event(bondy_oplog_hlc:now(HLC), Seq)
+     || Seq <- lists:seq(0, 4)
+    ],
     {ok, _Acks} = bondy_oplog_wal:append_batch(Wal, Events),
     {ok, Iter0} = bondy_oplog_wal_reader:open(Wal, beginning),
     {ok, Batch, _Hlcs, _Pos, _Iter1} = bondy_oplog_wal_reader:next(Iter0),
@@ -464,15 +557,20 @@ encrypted_writer_roundtrips() ->
 encrypted_compressed_writer_roundtrips() ->
     Id = instance_id(),
     Dir = mktemp_dir(),
-    Opts = #{dir => Dir, origin => origin(),
-             body_compression => zlib,
-             body_compression_min_bytes => 1,
-             body_encryption => {enabled, ?MODULE},
-             retention_sweep_interval => 24 * 60 * 60 * 1000},
+    Opts = #{
+        dir => Dir,
+        origin => origin(),
+        body_compression => zlib,
+        body_compression_min_bytes => 1,
+        body_encryption => {enabled, ?MODULE},
+        retention_sweep_interval => 24 * 60 * 60 * 1000
+    },
     {ok, Wal} = bondy_oplog_wal:start_link(Id, Opts),
     HLC = bondy_oplog_hlc:new(),
-    Events = [mk_event(bondy_oplog_hlc:now(HLC), Seq)
-              || Seq <- lists:seq(0, 9)],
+    Events = [
+        mk_event(bondy_oplog_hlc:now(HLC), Seq)
+     || Seq <- lists:seq(0, 9)
+    ],
     {ok, _Acks} = bondy_oplog_wal:append_batch(Wal, Events),
     {ok, Iter0} = bondy_oplog_wal_reader:open(Wal, beginning),
     {ok, Batch, _Hlcs, _Pos, _Iter1} = bondy_oplog_wal_reader:next(Iter0),
@@ -507,15 +605,21 @@ receive_event(Tag, TimeoutMs) ->
     end.
 
 drain(Tag) ->
-    receive {codec_event, Tag, _, _} -> got_event
+    receive
+        {codec_event, Tag, _, _} -> got_event
     after 0 -> no_event
     end.
 
 instance_id() ->
     list_to_binary(
-        io_lib:format("codec-test-~p-~p",
-                      [erlang:system_time(microsecond),
-                       erlang:unique_integer([positive])])).
+        io_lib:format(
+            "codec-test-~p-~p",
+            [
+                erlang:system_time(microsecond),
+                erlang:unique_integer([positive])
+            ]
+        )
+    ).
 
 origin() ->
     <<1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16>>.
@@ -526,9 +630,16 @@ mk_event(Hlc, Seq) ->
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_codec_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_codec_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),

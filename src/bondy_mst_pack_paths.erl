@@ -97,5 +97,5 @@ pad(N) ->
     S = integer_to_list(N),
     case ?PACK_DIGITS - length(S) of
         Pad when Pad > 0 -> lists:duplicate(Pad, $0) ++ S;
-        _                -> S
+        _ -> S
     end.

@@ -33,9 +33,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_batch_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_batch_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -76,18 +83,23 @@ mk_event(Hlc, Seq) ->
 %% Build N events with strictly ascending HLCs sourced from `HLC`. Seq
 %% is `Base..Base+N-1`.
 mk_batch(HLC, Base, N) ->
-    [begin
-         Hlc = bondy_oplog_hlc:now(HLC),
-         mk_event(Hlc, Seq)
-     end
-     || Seq <- lists:seq(Base, Base + N - 1)].
+    [
+        begin
+            Hlc = bondy_oplog_hlc:now(HLC),
+            mk_event(Hlc, Seq)
+        end
+     || Seq <- lists:seq(Base, Base + N - 1)
+    ].
 
 expect_open_error(Expected, Fun) ->
     OldFlag = process_flag(trap_exit, true),
     try
         Got = Fun(),
         ?assertEqual({error, Expected}, Got),
-        receive {'EXIT', _, _} -> ok after 0 -> ok end
+        receive
+            {'EXIT', _, _} -> ok
+        after 0 -> ok
+        end
     after
         process_flag(trap_exit, OldFlag)
     end.
@@ -108,7 +120,7 @@ append_batch_returns_one_entry_per_event_test() ->
         %% HLCs in the entries match the events' HLCs in order.
         EventHlcs = [
             bondy_oplog_event:key_hlc(bondy_oplog_event:key(E))
-            || E <- Events
+         || E <- Events
         ],
         EntryHlcs = [H || {H, _} <- Entries],
         ?assertEqual(EventHlcs, EntryHlcs),
@@ -128,7 +140,9 @@ append_one_is_batch_of_one_test() ->
 
 empty_batch_rejected_test() ->
     with_wal(#{}, fun(Pid, _Dir) ->
-        ?assertEqual({error, empty_batch}, bondy_oplog_wal:append_batch(Pid, [])),
+        ?assertEqual(
+            {error, empty_batch}, bondy_oplog_wal:append_batch(Pid, [])
+        ),
         ok
     end).
 
@@ -159,8 +173,10 @@ non_monotonic_hlcs_rejected_test() ->
             bondy_oplog_wal:append_batch(Pid, [E1, E1])
         ),
         %% Writer still healthy.
-        ?assertMatch({ok, [{_, _}, {_, _}]},
-                     bondy_oplog_wal:append_batch(Pid, [E1, E2])),
+        ?assertMatch(
+            {ok, [{_, _}, {_, _}]},
+            bondy_oplog_wal:append_batch(Pid, [E1, E2])
+        ),
         ok
     end).
 
@@ -181,7 +197,7 @@ oversize_batch_rejected_test() ->
                 Key = bondy_oplog_event:key(Hlc, origin(), Seq),
                 bondy_oplog_event:new(Key, {op, Big}, undefined)
             end
-            || Seq <- lists:seq(1, 10)
+         || Seq <- lists:seq(1, 10)
         ],
         ?assertEqual(
             {error, batch_too_large},
@@ -207,12 +223,14 @@ pre_rotation_when_batch_does_not_fit_test() ->
         HLC = bondy_oplog_hlc:new(),
         Payload = binary:copy(<<"a">>, 256),
         MkBatch = fun(Base, N) ->
-            [begin
-                 Hlc = bondy_oplog_hlc:now(HLC),
-                 Key = bondy_oplog_event:key(Hlc, origin(), Seq),
-                 bondy_oplog_event:new(Key, {op, Payload}, undefined)
-             end
-             || Seq <- lists:seq(Base, Base + N - 1)]
+            [
+                begin
+                    Hlc = bondy_oplog_hlc:now(HLC),
+                    Key = bondy_oplog_event:key(Hlc, origin(), Seq),
+                    bondy_oplog_event:new(Key, {op, Payload}, undefined)
+                end
+             || Seq <- lists:seq(Base, Base + N - 1)
+            ]
         end,
         Batch1 = MkBatch(1, 30),
         {ok, [{_, {Seg1, Off1}} | _]} =

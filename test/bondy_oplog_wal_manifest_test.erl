@@ -14,9 +14,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_mfst_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_mfst_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -42,17 +49,26 @@ instance_id() -> <<"test-instance-mfst">>.
 
 new_and_read_back_test() ->
     with_dir(fun(Dir) ->
-        M0 = bondy_oplog_wal_manifest:new(instance_id(), 0,
-                                          [{min_segments, 2}]),
+        M0 = bondy_oplog_wal_manifest:new(
+            instance_id(),
+            0,
+            [{min_segments, 2}]
+        ),
         ok = bondy_oplog_wal_manifest:write(Dir, M0),
         {ok, M1} = bondy_oplog_wal_manifest:read(Dir),
-        ?assertEqual(instance_id(),
-                     bondy_oplog_wal_manifest:instance_id(M1)),
+        ?assertEqual(
+            instance_id(),
+            bondy_oplog_wal_manifest:instance_id(M1)
+        ),
         ?assertEqual(0, bondy_oplog_wal_manifest:current_segment(M1)),
-        ?assertEqual([{0, undefined}],
-                     bondy_oplog_wal_manifest:live_segments(M1)),
-        ?assertEqual([{min_segments, 2}],
-                     bondy_oplog_wal_manifest:retention(M1))
+        ?assertEqual(
+            [{0, undefined}],
+            bondy_oplog_wal_manifest:live_segments(M1)
+        ),
+        ?assertEqual(
+            [{min_segments, 2}],
+            bondy_oplog_wal_manifest:retention(M1)
+        )
     end).
 
 rotation_updates_live_segments_test() ->
@@ -62,8 +78,10 @@ rotation_updates_live_segments_test() ->
         ok = bondy_oplog_wal_manifest:write(Dir, M1),
         {ok, M2} = bondy_oplog_wal_manifest:read(Dir),
         ?assertEqual(1, bondy_oplog_wal_manifest:current_segment(M2)),
-        ?assertEqual([{0, 1000}, {1, undefined}],
-                     bondy_oplog_wal_manifest:live_segments(M2))
+        ?assertEqual(
+            [{0, 1000}, {1, undefined}],
+            bondy_oplog_wal_manifest:live_segments(M2)
+        )
     end).
 
 rotation_preserves_existing_first_hlc_test() ->
@@ -87,8 +105,10 @@ retention_sweep_replaces_live_segments_test() ->
         M3 = bondy_oplog_wal_manifest:with_deleted_through(M2, 0),
         ok = bondy_oplog_wal_manifest:write(Dir, M3),
         {ok, M4} = bondy_oplog_wal_manifest:read(Dir),
-        ?assertEqual([{1, undefined}],
-                     bondy_oplog_wal_manifest:live_segments(M4)),
+        ?assertEqual(
+            [{1, undefined}],
+            bondy_oplog_wal_manifest:live_segments(M4)
+        ),
         ?assertEqual(0, bondy_oplog_wal_manifest:deleted_through(M4))
     end).
 
@@ -100,8 +120,10 @@ write_creates_no_tmp_residue_on_success_test() ->
     with_dir(fun(Dir) ->
         M = bondy_oplog_wal_manifest:new(instance_id(), 0, []),
         ok = bondy_oplog_wal_manifest:write(Dir, M),
-        TmpPath = filename:join(Dir,
-                                ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME),
+        TmpPath = filename:join(
+            Dir,
+            ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME
+        ),
         ?assertEqual(false, filelib:is_regular(TmpPath))
     end).
 
@@ -115,8 +137,10 @@ write_overwrites_prior_manifest_test() ->
         ok = bondy_oplog_wal_manifest:write(Dir, M1),
         {ok, M2} = bondy_oplog_wal_manifest:read(Dir),
         ?assertEqual(1, bondy_oplog_wal_manifest:current_segment(M2)),
-        TmpPath = filename:join(Dir,
-                                ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME),
+        TmpPath = filename:join(
+            Dir,
+            ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME
+        ),
         ?assertEqual(false, filelib:is_regular(TmpPath))
     end).
 
@@ -129,8 +153,10 @@ crash_before_rename_recovers_test() ->
         M0 = bondy_oplog_wal_manifest:new(instance_id(), 0, []),
         ok = bondy_oplog_wal_manifest:write(Dir, M0),
         %% Inject a partial tmp file alongside the good manifest.
-        TmpPath = filename:join(Dir,
-                                ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME),
+        TmpPath = filename:join(
+            Dir,
+            ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME
+        ),
         ok = file:write_file(TmpPath, <<"partial garbage">>),
         {ok, M1} = bondy_oplog_wal_manifest:read(Dir),
         ?assertEqual(0, bondy_oplog_wal_manifest:current_segment(M1)),
@@ -161,36 +187,54 @@ read_missing_required_field_test() ->
     with_dir(fun(Dir) ->
         Path = filename:join(Dir, ?BONDY_OPLOG_WAL_MANIFEST_FILENAME),
         %% No instance_id field — required.
-        ok = file:write_file(Path,
-            <<"{manifest_version, 1}.\n"
-              "{current_segment, 0}.\n"
-              "{live_segments, [{0, undefined}]}.\n">>),
-        ?assertEqual({error, {missing_field, instance_id}},
-                     bondy_oplog_wal_manifest:read(Dir))
+        ok = file:write_file(
+            Path,
+            <<
+                "{manifest_version, 1}.\n"
+                "{current_segment, 0}.\n"
+                "{live_segments, [{0, undefined}]}.\n"
+            >>
+        ),
+        ?assertEqual(
+            {error, {missing_field, instance_id}},
+            bondy_oplog_wal_manifest:read(Dir)
+        )
     end).
 
 read_unsupported_version_test() ->
     with_dir(fun(Dir) ->
         Path = filename:join(Dir, ?BONDY_OPLOG_WAL_MANIFEST_FILENAME),
-        ok = file:write_file(Path,
-            <<"{manifest_version, 999}.\n"
-              "{instance_id, <<\"x\">>}.\n"
-              "{current_segment, 0}.\n"
-              "{live_segments, [{0, undefined}]}.\n">>),
-        ?assertEqual({error, {unsupported_manifest_version, 999}},
-                     bondy_oplog_wal_manifest:read(Dir))
+        ok = file:write_file(
+            Path,
+            <<
+                "{manifest_version, 999}.\n"
+                "{instance_id, <<\"x\">>}.\n"
+                "{current_segment, 0}.\n"
+                "{live_segments, [{0, undefined}]}.\n"
+            >>
+        ),
+        ?assertEqual(
+            {error, {unsupported_manifest_version, 999}},
+            bondy_oplog_wal_manifest:read(Dir)
+        )
     end).
 
 read_invalid_live_segments_test() ->
     with_dir(fun(Dir) ->
         Path = filename:join(Dir, ?BONDY_OPLOG_WAL_MANIFEST_FILENAME),
-        ok = file:write_file(Path,
-            <<"{manifest_version, 1}.\n"
-              "{instance_id, <<\"x\">>}.\n"
-              "{current_segment, 0}.\n"
-              "{live_segments, [{not_an_id, 1}]}.\n">>),
-        ?assertMatch({error, {invalid_live_segment, _}},
-                     bondy_oplog_wal_manifest:read(Dir))
+        ok = file:write_file(
+            Path,
+            <<
+                "{manifest_version, 1}.\n"
+                "{instance_id, <<\"x\">>}.\n"
+                "{current_segment, 0}.\n"
+                "{live_segments, [{not_an_id, 1}]}.\n"
+            >>
+        ),
+        ?assertMatch(
+            {error, {invalid_live_segment, _}},
+            bondy_oplog_wal_manifest:read(Dir)
+        )
     end).
 
 %% =============================================================================
@@ -200,12 +244,16 @@ read_invalid_live_segments_test() ->
 unknown_fields_are_ignored_test() ->
     with_dir(fun(Dir) ->
         Path = filename:join(Dir, ?BONDY_OPLOG_WAL_MANIFEST_FILENAME),
-        ok = file:write_file(Path,
-            <<"{manifest_version, 1}.\n"
-              "{instance_id, <<\"x\">>}.\n"
-              "{current_segment, 0}.\n"
-              "{live_segments, [{0, undefined}]}.\n"
-              "{some_future_field, [a, b, c]}.\n">>),
+        ok = file:write_file(
+            Path,
+            <<
+                "{manifest_version, 1}.\n"
+                "{instance_id, <<\"x\">>}.\n"
+                "{current_segment, 0}.\n"
+                "{live_segments, [{0, undefined}]}.\n"
+                "{some_future_field, [a, b, c]}.\n"
+            >>
+        ),
         {ok, M} = bondy_oplog_wal_manifest:read(Dir),
         ?assertEqual(<<"x">>, bondy_oplog_wal_manifest:instance_id(M))
     end).

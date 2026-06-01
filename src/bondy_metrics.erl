@@ -78,16 +78,16 @@ need a separate persistence layer.
 
 -record(state, {}).
 
--type name()    :: atom().
--type label()   :: map().
--type type()    :: counter | gauge.
--type spec()    :: #{
-    name  := name(),
+-type name() :: atom().
+-type label() :: map().
+-type type() :: counter | gauge.
+-type spec() :: #{
+    name := name(),
     label => label(),
     delta => integer(),
     value => integer()
 }.
--type entry()   :: #{type := type(), ref := counters:counters_ref()}.
+-type entry() :: #{type := type(), ref := counters:counters_ref()}.
 
 -export_type([name/0, label/0, type/0, spec/0]).
 
@@ -107,8 +107,14 @@ need a separate persistence layer.
 %% Management
 -export([delete/1]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 %% =============================================================================
 %% API
@@ -124,12 +130,10 @@ child_spec() ->
         modules => [?MODULE]
     }.
 
-
 -spec start_link() -> {ok, pid()} | {error, term()}.
 
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
-
 
 ?DOC("""
 Add to a counter. Default `delta` is `1`. Allocates on first touch.
@@ -142,9 +146,11 @@ already in use by a metric of a different type.
 counter(#{name := Name} = M) ->
     Label = maps:get(label, M, #{}),
     Delta = maps:get(delta, M, 1),
-    operate({Name, Label}, counter,
-            fun(Ref) -> counters:add(Ref, ?POS, Delta) end).
-
+    operate(
+        {Name, Label},
+        counter,
+        fun(Ref) -> counters:add(Ref, ?POS, Delta) end
+    ).
 
 ?DOC("""
 Write an absolute value to a gauge. Allocates on first touch.
@@ -156,9 +162,11 @@ already in use by a metric of a different type.
 
 gauge(#{name := Name, value := V} = M) when is_integer(V) ->
     Label = maps:get(label, M, #{}),
-    operate({Name, Label}, gauge,
-            fun(Ref) -> counters:put(Ref, ?POS, V) end).
-
+    operate(
+        {Name, Label},
+        gauge,
+        fun(Ref) -> counters:put(Ref, ?POS, V) end
+    ).
 
 ?DOC("""
 Read the current value of one (Name, Label) pair. Returns `undefined`
@@ -174,7 +182,6 @@ value(#{name := Name} = M) ->
         not_found -> undefined
     end.
 
-
 ?DOC("""
 Return `[{Label, Value}]` for every metric registered under `Name`.
 """).
@@ -184,18 +191,25 @@ with_name(Name) when is_atom(Name) ->
     MS = [{{{Name, '$1'}, '$2'}, [], [{{'$1', '$2'}}]}],
     [{L, read(Entry)} || {L, Entry} <- ets:select(?TAB, MS)].
 
-
 ?DOC("""
 Return every metric on the node, intended for exposition. Each row is
 `#{name, label, type, value}`.
 """).
--spec all() -> [#{name := name(), label := label(),
-                  type := type(), value := integer()}].
+-spec all() ->
+    [
+        #{
+            name := name(),
+            label := label(),
+            type := type(),
+            value := integer()
+        }
+    ].
 
 all() ->
-    [#{name => N, label => L, type => T, value => counters:get(R, ?POS)}
-     || {{N, L}, #{type := T, ref := R}} <- ets:tab2list(?TAB)].
-
+    [
+        #{name => N, label => L, type => T, value => counters:get(R, ?POS)}
+     || {{N, L}, #{type := T, ref := R}} <- ets:tab2list(?TAB)
+    ].
 
 ?DOC("""
 Metadata for one metric without reading the value. Useful when callers
@@ -207,7 +221,6 @@ want to inspect type without paying for the counters read.
 info(#{name := Name} = M) ->
     lookup_entry({Name, maps:get(label, M, #{})}).
 
-
 ?DOC("""
 Drop a metric. The row is removed from the registry and the underlying
 counters reference is GC'd. Subsequent `value/1` on the same name
@@ -218,7 +231,6 @@ returns `undefined` until the next write re-allocates.
 delete(#{name := Name} = M) ->
     Label = maps:get(label, M, #{}),
     gen_server:call(?SERVER, {delete, {Name, Label}}).
-
 
 %% =============================================================================
 %% gen_server callbacks
@@ -235,29 +247,23 @@ init([]) ->
     ]),
     {ok, #state{}}.
 
-
 handle_call({delete, Key}, _From, State) ->
     true = ets:delete(?TAB, Key),
     {reply, ok, State};
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
-
 handle_cast(_Msg, State) ->
     {noreply, State}.
-
 
 handle_info(_Info, State) ->
     {noreply, State}.
 
-
 terminate(_Reason, _State) ->
     ok.
 
-
 code_change(_, State, _) ->
     {ok, State}.
-
 
 %% =============================================================================
 %% PRIVATE
@@ -284,12 +290,10 @@ operate(Key, Type, Op) ->
             end
     end.
 
-
 lookup_entry(Key) ->
     case ets:lookup(?TAB, Key) of
         [{_, Entry}] -> {ok, Entry};
         [] -> not_found
     end.
-
 
 read(#{ref := Ref}) -> counters:get(Ref, ?POS).

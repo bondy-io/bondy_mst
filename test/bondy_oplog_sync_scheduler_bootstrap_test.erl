@@ -39,22 +39,21 @@ cleanup(_) ->
         bondy_oplog_peer_source_static, #{peers => []}
     ),
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
 
 scheduler_bootstrap_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {timeout, 10,
-         fun pre_bootstrap_catalogue_auto_bootstraps_from_first_peer/0},
-        {timeout, 10,
-         fun pre_bootstrap_single_crdt_auto_bootstraps/0},
-        {timeout, 10,
-         fun live_instance_fans_out_per_peer_syncs/0},
+            fun pre_bootstrap_catalogue_auto_bootstraps_from_first_peer/0},
+        {timeout, 10, fun pre_bootstrap_single_crdt_auto_bootstraps/0},
+        {timeout, 10, fun live_instance_fans_out_per_peer_syncs/0},
         fun empty_peers_is_a_noop/0
     ]}.
-
 
 pre_bootstrap_catalogue_auto_bootstraps_from_first_peer() ->
     BaseDir = test_dir(),
@@ -81,13 +80,12 @@ pre_bootstrap_catalogue_auto_bootstraps_from_first_peer() ->
     %% Verify the cell landed on Local.
     LocalEntry = registry_entry(Local),
     Adapter = bondy_db_core_registry:entry_projection_adapter(LocalEntry),
-    Handle  = bondy_db_core_registry:entry_projection_handle(LocalEntry),
+    Handle = bondy_db_core_registry:entry_projection_handle(LocalEntry),
     ?assertMatch({ok, _Frame}, Adapter:get(Handle, ?B, <<"k">>)),
 
     teardown(Peer),
     teardown(Local),
     file:del_dir_r(BaseDir).
-
 
 pre_bootstrap_single_crdt_auto_bootstraps() ->
     %% Asserts the *routing* decision rather than a full E2E bootstrap
@@ -102,7 +100,7 @@ pre_bootstrap_single_crdt_auto_bootstraps() ->
     Local = mk_id(),
     LocalPath = make_path(BaseDir, Local),
     {ok, _} = bondy_oplog:start_instance(Local, #{
-        crdt_module  => bondy_oplog_test_counter,
+        crdt_module => bondy_oplog_test_counter,
         storage_path => list_to_binary(LocalPath)
     }),
     ?assertEqual(pre_bootstrap, bondy_oplog_instance:lifecycle_state(Local)),
@@ -121,8 +119,10 @@ pre_bootstrap_single_crdt_auto_bootstraps() ->
         ),
         bondy_oplog_sync_scheduler:trigger(),
         receive
-            {bootstrap_dispatched, _M, #{instance_id := Local,
-                                         mode := single_crdt}} ->
+            {bootstrap_dispatched, _M, #{
+                instance_id := Local,
+                mode := single_crdt
+            }} ->
                 ok
         after 2000 ->
             error(no_single_crdt_dispatch)
@@ -132,7 +132,6 @@ pre_bootstrap_single_crdt_auto_bootstraps() ->
     end,
     bondy_oplog:stop_instance(Local),
     file:del_dir_r(BaseDir).
-
 
 live_instance_fans_out_per_peer_syncs() ->
     %% A `live` instance with multiple configured peers should result
@@ -171,7 +170,6 @@ live_instance_fans_out_per_peer_syncs() ->
     end,
     bondy_oplog:stop_instance(Inst).
 
-
 empty_peers_is_a_noop() ->
     %% Empty peer list — default_dispatch must return ok without any
     %% spawn / crash. Use the default dispatch (don't override).
@@ -195,47 +193,48 @@ setup_persistent(BaseDir, ExtraOpts) ->
     NS = ns_of(Id),
     {Cache, Proj} = register_shard(NS, primary, 0),
     Path = make_path(BaseDir, Id),
-    Opts = maps:merge(#{
-        fold_module => lww_register,
-        applier => #{
-            cell_apply_target => {NS, primary, 0}
+    Opts = maps:merge(
+        #{
+            fold_module => lww_register,
+            applier => #{
+                cell_apply_target => {NS, primary, 0}
+            },
+            storage_path => list_to_binary(Path)
         },
-        storage_path => list_to_binary(Path)
-    }, ExtraOpts),
+        ExtraOpts
+    ),
     {ok, _} = bondy_oplog:start_instance(Id, Opts),
     {Id, NS, Cache, Proj}.
-
 
 teardown(Id) ->
     bondy_oplog:stop_instance(Id),
     NS = ns_of(Id),
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
         {N, I, S} <- [bondy_db_core_registry:entry_key(E)],
-        N =:= NS],
+        N =:= NS
+    ],
     ok.
-
 
 register_shard(NS, Index, Shard) ->
     {ok, Cache} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
-    {ok, Proj}  = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
+    {ok, Proj} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => Cache,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => Cache,
         projection_adapter => bondy_oplog_projection_ets,
-        projection_handle  => Proj,
-        overlay            => disabled,
-        fold_module        => lww_register
+        projection_handle => Proj,
+        overlay => disabled,
+        fold_module => lww_register
     }),
     {Cache, Proj}.
-
 
 registry_entry(Id) ->
     NS = ns_of(Id),
     {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
     Entry.
-
 
 mk_id() ->
     iolist_to_binary([
@@ -243,14 +242,11 @@ mk_id() ->
         integer_to_binary(erlang:unique_integer([positive]))
     ]).
 
-
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
 
-
 barrier(Id) ->
     bondy_oplog:projection(Id).
-
 
 test_dir() ->
     Base = filename:join([
@@ -261,12 +257,10 @@ test_dir() ->
     ok = filelib:ensure_path(Base),
     Base.
 
-
 make_path(BaseDir, Id) ->
     Path = filename:join([BaseDir, binary_to_list(Id)]),
     ok = filelib:ensure_path(Path),
     Path.
-
 
 wait_for_live(Id, TimeoutMs) ->
     Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,

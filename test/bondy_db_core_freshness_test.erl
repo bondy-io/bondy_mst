@@ -202,13 +202,19 @@ owner_down_removes_registration() ->
             fold_module => lww_register
         }),
         Parent ! registered,
-        receive go_down -> ok end
+        receive
+            go_down -> ok
+        end
     end),
     Mon = erlang:monitor(process, Owner),
-    receive registered -> ok end,
+    receive
+        registered -> ok
+    end,
     ?assertMatch({ok, _}, bondy_db_core_registry:lookup(NS, primary, 0)),
     Owner ! go_down,
-    receive {'DOWN', Mon, process, Owner, _} -> ok end,
+    receive
+        {'DOWN', Mon, process, Owner, _} -> ok
+    end,
     %% Sync with the registry to let it process the DOWN.
     _ = sys:get_state(bondy_db_core_registry),
     ?assertEqual(not_found, bondy_db_core_registry:lookup(NS, primary, 0)).
@@ -220,10 +226,14 @@ explicit_owner_decouples_from_caller() ->
     Parent = self(),
     Owner = spawn(fun() ->
         Parent ! ready,
-        receive go_down -> ok end
+        receive
+            go_down -> ok
+        end
     end),
     OwnerMon = erlang:monitor(process, Owner),
-    receive ready -> ok end,
+    receive
+        ready -> ok
+    end,
     %% Register from the test process, with Owner as the registry's
     %% monitor target.
     {ok, CH} = bondy_oplog_cache_ets:init(NS, primary, 0, #{}),
@@ -243,7 +253,9 @@ explicit_owner_decouples_from_caller() ->
     ?assertMatch({ok, _}, bondy_db_core_registry:lookup(NS, primary, 0)),
     %% Kill Owner — the registry must tear the row down.
     Owner ! go_down,
-    receive {'DOWN', OwnerMon, process, Owner, _} -> ok end,
+    receive
+        {'DOWN', OwnerMon, process, Owner, _} -> ok
+    end,
     _ = sys:get_state(bondy_db_core_registry),
     ?assertEqual(not_found, bondy_db_core_registry:lookup(NS, primary, 0)),
     ok = bondy_oplog_cache_ets:close(CH),
@@ -276,7 +288,9 @@ registry_crash_loses_all_registrations() ->
     OldPid = whereis(bondy_db_core_registry),
     OldMon = erlang:monitor(process, OldPid),
     exit(OldPid, kill),
-    receive {'DOWN', OldMon, process, OldPid, killed} -> ok end,
+    receive
+        {'DOWN', OldMon, process, OldPid, killed} -> ok
+    end,
     %% Wait for the supervisor to restart the registry.
     ok = wait_for_registry_restart(OldPid, 50),
     %% Previously registered shard is gone — no recovery.
@@ -303,8 +317,12 @@ owner_down_does_not_call_adapter_close() ->
     Counter = bondy_oplog_cache_counting:new_counter(),
     Parent = self(),
     Owner = spawn(fun() ->
-        {ok, CH} = bondy_oplog_cache_counting:init(NS, primary, 0,
-                                                    #{counter => Counter}),
+        {ok, CH} = bondy_oplog_cache_counting:init(
+            NS,
+            primary,
+            0,
+            #{counter => Counter}
+        ),
         {ok, PH} = bondy_oplog_projection_ets:open(NS, primary, 0, #{}),
         OV = bondy_oplog_db_overlay:new(),
         ok = bondy_db_core_registry:register(NS, primary, 0, #{
@@ -317,13 +335,19 @@ owner_down_does_not_call_adapter_close() ->
             fold_module => lww_register
         }),
         Parent ! registered,
-        receive go_down -> ok end
+        receive
+            go_down -> ok
+        end
     end),
     Mon = erlang:monitor(process, Owner),
-    receive registered -> ok end,
+    receive
+        registered -> ok
+    end,
     ?assertEqual(0, bondy_oplog_cache_counting:close_count(Counter)),
     Owner ! go_down,
-    receive {'DOWN', Mon, process, Owner, _} -> ok end,
+    receive
+        {'DOWN', Mon, process, Owner, _} -> ok
+    end,
     _ = sys:get_state(bondy_db_core_registry),
     %% Row removed by the registry on DOWN.
     ?assertEqual(not_found, bondy_db_core_registry:lookup(NS, primary, 0)),
@@ -366,10 +390,14 @@ re_register_demonitors_previous_owner() ->
             fold_module => lww_register
         }),
         Parent ! registered1,
-        receive go_down -> ok end
+        receive
+            go_down -> ok
+        end
     end),
     Mon1 = erlang:monitor(process, Owner1),
-    receive registered1 -> ok end,
+    receive
+        registered1 -> ok
+    end,
     %% Re-register from this process (the test process). This must
     %% demonitor Owner1's reference so its exit no longer takes down
     %% the row.
@@ -386,7 +414,9 @@ re_register_demonitors_previous_owner() ->
         fold_module => lww_register
     }),
     Owner1 ! go_down,
-    receive {'DOWN', Mon1, process, Owner1, _} -> ok end,
+    receive
+        {'DOWN', Mon1, process, Owner1, _} -> ok
+    end,
     _ = sys:get_state(bondy_db_core_registry),
     %% Registration must still exist, owned by us.
     ?assertMatch({ok, _}, bondy_db_core_registry:lookup(NS, primary, 0)),
@@ -400,8 +430,10 @@ re_register_demonitors_previous_owner() ->
 %% =============================================================================
 
 mk_ns() ->
-    list_to_atom("mst_db_fresh_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
+    list_to_atom(
+        "mst_db_fresh_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 %% Generate keys until we find one that hashes to the wanted shard.
 find_key_for_shard(NS, Index, WantedShard) ->
@@ -429,12 +461,24 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
         overlay => OV,
         fold_module => Strategy
     }),
-    Setup = #{ns => NS, index => Index, shard => Shard,
-              cache_handle => CH, projection => PH, overlay => OV},
+    Setup = #{
+        ns => NS,
+        index => Index,
+        shard => Shard,
+        cache_handle => CH,
+        projection => PH,
+        overlay => OV
+    },
     {Setup, Setup}.
 
-teardown_shard(#{ns := NS, index := Index, shard := Shard,
-                 cache_handle := CH, projection := PH, overlay := OV}) ->
+teardown_shard(#{
+    ns := NS,
+    index := Index,
+    shard := Shard,
+    cache_handle := CH,
+    projection := PH,
+    overlay := OV
+}) ->
     ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),

@@ -61,15 +61,14 @@ hashing scheme stays in one place.
 -export_type([open_error/0]).
 
 -type ctx() :: #{
-    instance_id   := binary(),
+    instance_id := binary(),
     instance_hash := non_neg_integer(),
-    hash_algo     := atom()
+    hash_algo := atom()
 }.
 
 -type open_error() ::
     {sealed_idx, non_neg_integer(), term()}
-  | {sealed_pack, non_neg_integer(), term()}.
-
+    | {sealed_pack, non_neg_integer(), term()}.
 
 %% =============================================================================
 %% PUBLIC
@@ -84,36 +83,33 @@ open(Dir, Ctx, PackId) ->
             {ok, V};
         {error, {sealed_idx, PackId, Cause}} = E ->
             case is_rebuildable_idx_failure(Cause) of
-                true  -> maybe_rebuild_and_reopen(Dir, Ctx, PackId, Cause, E);
+                true -> maybe_rebuild_and_reopen(Dir, Ctx, PackId, Cause, E);
                 false -> E
             end;
         {error, _} = E ->
             E
     end.
 
-
 -spec open_ctx_from_writer(bondy_mst_pack_writer:t()) -> ctx().
 
 open_ctx_from_writer(W) ->
     #{
-        instance_id   => bondy_mst_pack_writer:instance_id(W),
+        instance_id => bondy_mst_pack_writer:instance_id(W),
         instance_hash => bondy_mst_pack_writer:instance_hash(W),
-        hash_algo     => bondy_mst_pack_writer:hash_algo(W)
+        hash_algo => bondy_mst_pack_writer:hash_algo(W)
     }.
-
 
 -spec open_ctx_from_manifest(bondy_mst_pack_manifest:t()) -> ctx().
 
 open_ctx_from_manifest(M) ->
     InstanceId = bondy_mst_pack_manifest:instance_id(M),
     #{
-        instance_id   => InstanceId,
+        instance_id => InstanceId,
         %% Centralised in the writer so a future change to the
         %% derivation lives in one place.
         instance_hash => bondy_mst_pack_writer:derive_instance_hash(InstanceId),
-        hash_algo     => bondy_mst_pack_manifest:hash_algo(M)
+        hash_algo => bondy_mst_pack_manifest:hash_algo(M)
     }.
-
 
 %% =============================================================================
 %% PRIVATE
@@ -142,7 +138,6 @@ attempt_open(Dir, PackId) ->
             {error, {sealed_idx, PackId, R}}
     end.
 
-
 %% @private
 %% `enoent` is the only FS error we route to rebuild — every other
 %% FS error (eacces, emfile, eio, …) would also fail the rebuild
@@ -150,30 +145,32 @@ attempt_open(Dir, PackId) ->
 %% Everything else in this list is a `bondy_mst_pack_index:open/1`
 %% decode error; the .pack is authoritative, so any of them is
 %% recoverable by re-deriving the index from a fresh scan.
-is_rebuildable_idx_failure(enoent)                       -> true;
-is_rebuildable_idx_failure(truncated_header)             -> true;
-is_rebuildable_idx_failure(truncated_trailer)            -> true;
-is_rebuildable_idx_failure(integrity_mismatch)           -> true;
-is_rebuildable_idx_failure(bad_magic)                    -> true;
-is_rebuildable_idx_failure({bad_version, _})             -> true;
-is_rebuildable_idx_failure({bad_hash_len, _})            -> true;
-is_rebuildable_idx_failure(truncated_fanout)             -> true;
-is_rebuildable_idx_failure(truncated_hashes)             -> true;
-is_rebuildable_idx_failure(truncated_offsets)            -> true;
-is_rebuildable_idx_failure({fanout_inconsistent, _})     -> true;
-is_rebuildable_idx_failure({bloom, _})                   -> true;
-is_rebuildable_idx_failure(_)                            -> false.
-
+is_rebuildable_idx_failure(enoent) -> true;
+is_rebuildable_idx_failure(truncated_header) -> true;
+is_rebuildable_idx_failure(truncated_trailer) -> true;
+is_rebuildable_idx_failure(integrity_mismatch) -> true;
+is_rebuildable_idx_failure(bad_magic) -> true;
+is_rebuildable_idx_failure({bad_version, _}) -> true;
+is_rebuildable_idx_failure({bad_hash_len, _}) -> true;
+is_rebuildable_idx_failure(truncated_fanout) -> true;
+is_rebuildable_idx_failure(truncated_hashes) -> true;
+is_rebuildable_idx_failure(truncated_offsets) -> true;
+is_rebuildable_idx_failure({fanout_inconsistent, _}) -> true;
+is_rebuildable_idx_failure({bloom, _}) -> true;
+is_rebuildable_idx_failure(_) -> false.
 
 %% @private
 maybe_rebuild_and_reopen(Dir, Ctx, PackId, Cause, OriginalErr) ->
-    InstanceId   = maps:get(instance_id, Ctx),
+    InstanceId = maps:get(instance_id, Ctx),
     InstanceHash = maps:get(instance_hash, Ctx),
-    HashAlgo     = maps:get(hash_algo, Ctx),
-    Trigger      = idx_failure_trigger(Cause),
-    StartTs      = erlang:monotonic_time(microsecond),
-    case bondy_mst_pack_idx_rebuild:rebuild(
-            Dir, PackId, InstanceHash, HashAlgo) of
+    HashAlgo = maps:get(hash_algo, Ctx),
+    Trigger = idx_failure_trigger(Cause),
+    StartTs = erlang:monotonic_time(microsecond),
+    case
+        bondy_mst_pack_idx_rebuild:rebuild(
+            Dir, PackId, InstanceHash, HashAlgo
+        )
+    of
         {ok, Outcome} ->
             DurationUs = erlang:monotonic_time(microsecond) - StartTs,
             emit_ok(InstanceId, PackId, Trigger, Outcome, DurationUs),
@@ -184,7 +181,6 @@ maybe_rebuild_and_reopen(Dir, Ctx, PackId, Cause, OriginalErr) ->
             OriginalErr
     end.
 
-
 %% @private
 %% Telemetry metadata wants a single atom for the trigger; collapse
 %% the codec's tagged variants (`{bad_version, _}` → `bad_version`)
@@ -193,40 +189,38 @@ idx_failure_trigger(Atom) when is_atom(Atom) -> Atom;
 idx_failure_trigger({Tag, _}) when is_atom(Tag) -> Tag;
 idx_failure_trigger(_) -> unknown.
 
-
 %% @private
 emit_ok(InstanceId, PackId, Trigger, Outcome, DurationUs) ->
     telemetry:execute(
         [bondy_mst, page_store, idx_rebuild],
         #{
-            duration_us       => DurationUs,
+            duration_us => DurationUs,
             records_recovered => maps:get(records_recovered, Outcome),
-            pack_bytes        => maps:get(pack_bytes, Outcome),
-            idx_bytes         => maps:get(idx_bytes, Outcome)
+            pack_bytes => maps:get(pack_bytes, Outcome),
+            idx_bytes => maps:get(idx_bytes, Outcome)
         },
         #{
             instance_id => InstanceId,
-            pack_id     => PackId,
-            result      => ok,
-            trigger     => Trigger
+            pack_id => PackId,
+            result => ok,
+            trigger => Trigger
         }
     ).
-
 
 %% @private
 emit_failed(InstanceId, PackId, Trigger, Reason, DurationUs) ->
     telemetry:execute(
         [bondy_mst, page_store, idx_rebuild],
         #{
-            duration_us       => DurationUs,
+            duration_us => DurationUs,
             records_recovered => 0,
-            pack_bytes        => 0,
-            idx_bytes         => 0
+            pack_bytes => 0,
+            idx_bytes => 0
         },
         #{
             instance_id => InstanceId,
-            pack_id     => PackId,
-            result      => {error, Reason},
-            trigger     => Trigger
+            pack_id => PackId,
+            result => {error, Reason},
+            trigger => Trigger
         }
     ).

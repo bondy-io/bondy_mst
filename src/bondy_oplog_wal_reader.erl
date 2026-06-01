@@ -73,19 +73,19 @@ rely on `committed_frame_offset` being a real frame start.
 -define(MAX_POLL_INTERVAL_MS, 200).
 
 -record(iter, {
-    writer_pid       :: pid(),
-    instance_id      :: instance_id(),
-    dir              :: file:filename_all(),
-    origin           :: bondy_oplog_origin:t(),
-    head_pos_ref     :: atomics:atomics_ref(),
-    follow           :: boolean(),
+    writer_pid :: pid(),
+    instance_id :: instance_id(),
+    dir :: file:filename_all(),
+    origin :: bondy_oplog_origin:t(),
+    head_pos_ref :: atomics:atomics_ref(),
+    follow :: boolean(),
     poll_interval_ms :: pos_integer(),
     %% Position within the WAL. `fd` is the open file descriptor for
     %% `segment_id`; `offset` is the byte at which the next frame
     %% header is expected.
-    segment_id       :: bondy_oplog_wal_segment:segment_id(),
-    fd               :: file:fd(),
-    offset           :: non_neg_integer(),
+    segment_id :: bondy_oplog_wal_segment:segment_id(),
+    fd :: file:fd(),
+    offset :: non_neg_integer(),
     %% Cached `prim_file:position(Fd, eof)` for the current segment,
     %% set the first time we observe `segment_id < head_segment_id` so
     %% subsequent `next/1` calls within the same sealed segment avoid
@@ -93,22 +93,22 @@ rely on `committed_frame_offset` being a real frame start.
     %% A sealed segment's file size is frozen by the writer (datasync
     %% then close before bumping the head atomic), so this value is
     %% safe to cache across the segment's lifetime in the reader.
-    sealed_size      :: non_neg_integer() | undefined,
+    sealed_size :: non_neg_integer() | undefined,
     %% HLC seek bookkeeping. Set when `{hlc, T}` is the start position;
     %% `next/1` keeps decoding frames until the batch's first HLC is
     %% `>= seek_target`, then stops filtering. `undefined` for
     %% `beginning` / `tail` / `{offset, _, _}` starts.
-    seek_target      :: bondy_oplog_hlc:hlc() | undefined,
+    seek_target :: bondy_oplog_hlc:hlc() | undefined,
     %% Upper bound for `{hlc_upper_bound, T}` opt. If set, frames whose
     %% first HLC is `> hlc_upper_bound` terminate the reader as if it
     %% had hit end_of_log. `undefined` means no upper bound.
-    hlc_upper_bound  :: bondy_oplog_hlc:hlc() | undefined,
+    hlc_upper_bound :: bondy_oplog_hlc:hlc() | undefined,
     %% Body-encryption config inherited from the writer's
     %% `reader_view/1` map. `disabled` skips the decrypt branch;
     %% `{enabled, Module}` lets the codec resolve frame `KeyId`s via
     %% `Module:lookup_key/1`. The reader does not call `current_key/0`
     %% — historic frames carry the id they were written with.
-    body_encryption  :: bondy_oplog_wal_codec:encryption()
+    body_encryption :: bondy_oplog_wal_codec:encryption()
 }).
 
 -type t() :: #iter{}.
@@ -125,11 +125,8 @@ rely on `committed_frame_offset` being a real frame start.
     | {poll_interval_ms, pos_integer()}
     | {hlc_upper_bound, bondy_oplog_hlc:hlc()}.
 -type next_result() ::
-    {ok,
-        Batch :: [bondy_oplog_event:t()],
-        Hlcs :: [bondy_oplog_hlc:hlc()],
-        Pos :: position(),
-        NewIter :: t()}
+    {ok, Batch :: [bondy_oplog_event:t()], Hlcs :: [bondy_oplog_hlc:hlc()],
+        Pos :: position(), NewIter :: t()}
     | end_of_log
     | {error, term()}.
 
@@ -466,10 +463,13 @@ open_segment(Dir, InstanceId, Origin, SegId) ->
         {ok, Fd} ->
             case bondy_oplog_wal_segment:read_header(Fd) of
                 {ok, Header} ->
-                    case bondy_oplog_wal_segment:verify(
-                        Header, InstanceId, Origin
-                    ) of
-                        ok -> {ok, Fd};
+                    case
+                        bondy_oplog_wal_segment:verify(
+                            Header, InstanceId, Origin
+                        )
+                    of
+                        ok ->
+                            {ok, Fd};
                         {error, _} = E ->
                             _ = prim_file:close(Fd),
                             E
@@ -511,8 +511,9 @@ bound(#iter{head_pos_ref = Ref, segment_id = MySeg} = Iter) ->
             %% (impossible by design) or the iter was opened against a
             %% different writer instance. Crash loudly so the bug is
             %% visible rather than producing nonsense data.
-            error({invariant_violation,
-                {reader_ahead_of_head, MySeg, HeadSeg}});
+            error(
+                {invariant_violation, {reader_ahead_of_head, MySeg, HeadSeg}}
+            );
         MySeg < HeadSeg ->
             cached_sealed_bound(Iter);
         true ->
@@ -524,14 +525,16 @@ bound(#iter{head_pos_ref = Ref, segment_id = MySeg} = Iter) ->
 %% never changes. Cache it on first observation so subsequent `next/1`
 %% calls within the same sealed segment avoid the `position(eof)`
 %% syscall per frame.
-cached_sealed_bound(#iter{sealed_size = Size} = Iter)
-        when is_integer(Size) ->
+cached_sealed_bound(#iter{sealed_size = Size} = Iter) when
+    is_integer(Size)
+->
     {sealed, Size, Iter};
 cached_sealed_bound(#iter{fd = Fd} = Iter) ->
-    Size = case prim_file:position(Fd, eof) of
-        {ok, S} -> S;
-        {error, _} -> 0
-    end,
+    Size =
+        case prim_file:position(Fd, eof) of
+            {ok, S} -> S;
+            {error, _} -> 0
+        end,
     {sealed, Size, Iter#iter{sealed_size = Size}}.
 
 %% @private
@@ -580,8 +583,14 @@ next_interval(_) -> ?MAX_POLL_INTERVAL_MS.
 %% just before the rotation atomic update lands), back off and retry
 %% via the poll loop.
 advance_segment(
-    #iter{segment_id = OldSeg, fd = OldFd, follow = Follow,
-          dir = Dir, instance_id = InstanceId, origin = Origin} = Iter
+    #iter{
+        segment_id = OldSeg,
+        fd = OldFd,
+        follow = Follow,
+        dir = Dir,
+        instance_id = InstanceId,
+        origin = Origin
+    } = Iter
 ) ->
     NextSegId = OldSeg + 1,
     case open_segment(Dir, InstanceId, Origin, NextSegId) of
@@ -638,11 +647,13 @@ read_frame(#iter{} = Iter, Kind, Bound) ->
                 {false, head} ->
                     not_enough_bytes_response(Iter);
                 {false, sealed} ->
-                    {error, {truncated_segment,
-                        #{segment => Iter#iter.segment_id,
-                          offset => Off,
-                          frame_len => FrameLen,
-                          file_size => Bound}}}
+                    {error,
+                        {truncated_segment, #{
+                            segment => Iter#iter.segment_id,
+                            offset => Off,
+                            frame_len => FrameLen,
+                            file_size => Bound
+                        }}}
             end;
         not_enough_bytes ->
             not_enough_bytes_response(Iter);
@@ -659,17 +670,20 @@ not_enough_bytes_response(#iter{}) ->
 %% @private
 read_frame_header(Fd, Off) ->
     case prim_file:pread(Fd, Off, ?FRAME_HEADER_BYTES) of
-        {ok, <<Magic:32/big-unsigned, FrameLen:32/big-unsigned, _/binary>>}
-                when Magic =:= ?BONDY_OPLOG_WAL_FRAME_MAGIC,
-                     FrameLen >= ?FRAME_HEADER_BYTES ->
+        {ok, <<Magic:32/big-unsigned, FrameLen:32/big-unsigned, _/binary>>} when
+            Magic =:= ?BONDY_OPLOG_WAL_FRAME_MAGIC,
+            FrameLen >= ?FRAME_HEADER_BYTES
+        ->
             {ok, FrameLen};
         {ok, Bin} when byte_size(Bin) < ?FRAME_HEADER_BYTES ->
             not_enough_bytes;
-        {ok, <<Magic:32/big-unsigned, _/binary>>}
-                when Magic =/= ?BONDY_OPLOG_WAL_FRAME_MAGIC ->
+        {ok, <<Magic:32/big-unsigned, _/binary>>} when
+            Magic =/= ?BONDY_OPLOG_WAL_FRAME_MAGIC
+        ->
             {error, bad_magic};
-        {ok, <<_:32, FrameLen:32, _/binary>>}
-                when FrameLen < ?FRAME_HEADER_BYTES ->
+        {ok, <<_:32, FrameLen:32, _/binary>>} when
+            FrameLen < ?FRAME_HEADER_BYTES
+        ->
             {error, length_invalid};
         eof ->
             not_enough_bytes;
@@ -678,7 +692,9 @@ read_frame_header(Fd, Off) ->
     end.
 
 %% @private
-read_frame_body(#iter{fd = Fd, offset = Off, segment_id = Seg} = Iter, FrameLen) ->
+read_frame_body(
+    #iter{fd = Fd, offset = Off, segment_id = Seg} = Iter, FrameLen
+) ->
     case prim_file:pread(Fd, Off, FrameLen) of
         {ok, FrameBin} when byte_size(FrameBin) =:= FrameLen ->
             decode_and_advance(Iter, FrameBin, FrameLen, Seg, Off);
@@ -694,9 +710,11 @@ read_frame_body(#iter{fd = Fd, offset = Off, segment_id = Seg} = Iter, FrameLen)
 decode_and_advance(#iter{} = Iter, FrameBin, FrameLen, Seg, Off) ->
     case bondy_oplog_wal_frame:decode(FrameBin) of
         {ok, RawBody, #{flags := Flags}} ->
-            case bondy_oplog_wal_codec:decode_body(
-                RawBody, Flags, codec_opts(Iter)
-            ) of
+            case
+                bondy_oplog_wal_codec:decode_body(
+                    RawBody, Flags, codec_opts(Iter)
+                )
+            of
                 {ok, Body} ->
                     case decode_batch_body(Body) of
                         {ok, Batch} ->
@@ -704,7 +722,7 @@ decode_and_advance(#iter{} = Iter, FrameBin, FrameLen, Seg, Off) ->
                                 bondy_oplog_event:key_hlc(
                                     bondy_oplog_event:key(E)
                                 )
-                                || E <- Batch
+                             || E <- Batch
                             ],
                             NextOff = Off + FrameLen,
                             NewIter = Iter#iter{offset = NextOff},

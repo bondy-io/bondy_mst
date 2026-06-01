@@ -31,7 +31,8 @@
 
 %% Current writer version — what `encode/1,2` produces by default.
 -define(BONDY_OPLOG_WAL_FRAME_VERSION,
-        ?BONDY_OPLOG_WAL_FRAME_VERSION_V2).
+    ?BONDY_OPLOG_WAL_FRAME_VERSION_V2
+).
 
 -define(BONDY_OPLOG_WAL_FRAME_FLAG_COMPRESSED, 16#000001).
 -define(BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED, 16#000002).
@@ -44,7 +45,7 @@
 %% old segments stay readable as long as their algorithm id is still
 %% understood. Reserved ids never write but may appear in fixtures.
 -define(BONDY_OPLOG_WAL_CODEC_ALGO_ZLIB, 1).
--define(BONDY_OPLOG_WAL_CODEC_ALGO_LZ4,  2).
+-define(BONDY_OPLOG_WAL_CODEC_ALGO_LZ4, 2).
 
 %% Encryption envelope (when Flags bit 1 is set):
 %%
@@ -58,10 +59,10 @@
 %% AES-256-GCM is the only algorithm supported today; the id widens
 %% the same way the compression-algorithm id does.
 -define(BONDY_OPLOG_WAL_CODEC_CIPHER_AES_256_GCM, 1).
--define(BONDY_OPLOG_WAL_CODEC_IV_BYTES,           12).
--define(BONDY_OPLOG_WAL_CODEC_TAG_BYTES,          16).
--define(BONDY_OPLOG_WAL_CODEC_KEY_ID_BYTES,       2).
--define(BONDY_OPLOG_WAL_CODEC_KEY_BYTES,          32).
+-define(BONDY_OPLOG_WAL_CODEC_IV_BYTES, 12).
+-define(BONDY_OPLOG_WAL_CODEC_TAG_BYTES, 16).
+-define(BONDY_OPLOG_WAL_CODEC_KEY_ID_BYTES, 2).
+-define(BONDY_OPLOG_WAL_CODEC_KEY_BYTES, 32).
 %% AlgorithmId(1) + KeyId(2) + IV(12) + Tag(16) = 31 bytes.
 -define(BONDY_OPLOG_WAL_CODEC_ENCRYPT_HEADER_BYTES, 31).
 
@@ -82,8 +83,9 @@
 %% a wire-format change.
 -define(BONDY_OPLOG_WAL_FRAME_KNOWN_FLAGS_V1, 16#000000).
 -define(BONDY_OPLOG_WAL_FRAME_KNOWN_FLAGS_V2,
-        (?BONDY_OPLOG_WAL_FRAME_FLAG_COMPRESSED
-         bor ?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED)).
+    (?BONDY_OPLOG_WAL_FRAME_FLAG_COMPRESSED bor
+        ?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED)
+).
 
 %% -----------------------------------------------------------------------------
 %% Segment format (§4)
@@ -144,7 +146,8 @@
 %% time); a rebuild during recovery upgrades them to v2.
 -define(BONDY_OPLOG_WAL_IDX_VERSION, ?BONDY_OPLOG_WAL_IDX_VERSION_V2).
 -define(BONDY_OPLOG_WAL_IDX_ENTRY_BYTES,
-        ?BONDY_OPLOG_WAL_IDX_ENTRY_BYTES_V2).
+    ?BONDY_OPLOG_WAL_IDX_ENTRY_BYTES_V2
+).
 
 %% Default index interval in bytes — the writer emits one index entry per
 %% ~64 KB of frames written. See `_design/WAL_DESIGN.md` §7.
@@ -189,7 +192,8 @@
 
 -define(BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_FILENAME, "snapshot.watermark").
 -define(BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_TMP_FILENAME,
-        "snapshot.watermark.tmp").
+    "snapshot.watermark.tmp"
+).
 -define(BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_VERSION, 1).
 
 %% Minimum number of live segments to keep after a retention sweep, even

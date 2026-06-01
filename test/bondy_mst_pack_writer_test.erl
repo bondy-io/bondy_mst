@@ -43,9 +43,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_mst_pack_writer_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_mst_pack_writer_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -57,8 +64,10 @@ rmrf(Dir) ->
 
 with_tmp_dir(Fun) ->
     Dir = mktemp_dir(),
-    try Fun(Dir)
-    after rmrf(Dir)
+    try
+        Fun(Dir)
+    after
+        rmrf(Dir)
     end.
 
 open_writer(Dir) ->
@@ -77,17 +86,24 @@ open_empty_dir_creates_manifest_lazy_incoming_test() ->
         try
             %% Manifest exists on disk and matches the in-memory state.
             {ok, OnDisk} = bondy_mst_pack_manifest:read(Dir),
-            ?assertEqual(bondy_mst_pack_manifest:instance_id(OnDisk),
-                         <<"writer-test">>),
+            ?assertEqual(
+                bondy_mst_pack_manifest:instance_id(OnDisk),
+                <<"writer-test">>
+            ),
             ?assertEqual(sha256, bondy_mst_pack_manifest:hash_algo(OnDisk)),
             ?assertEqual([], bondy_mst_pack_manifest:sealed_packs(OnDisk)),
-            ?assertEqual(absent,
-                         bondy_mst_pack_manifest:incoming_pack(OnDisk)),
+            ?assertEqual(
+                absent,
+                bondy_mst_pack_manifest:incoming_pack(OnDisk)
+            ),
             %% Lazy creation: incoming.pack does NOT exist until the
             %% first append. This keeps `open ; close` cycles a no-op
             %% against the on-disk state.
-            ?assertNot(filelib:is_regular(
-                bondy_mst_pack_paths:incoming_pack_path(Dir))),
+            ?assertNot(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:incoming_pack_path(Dir)
+                )
+            ),
             ?assertEqual(0, bondy_mst_pack_writer:incoming_offset(W)),
             ?assertEqual(1, bondy_mst_pack_writer:next_pack_id(W)),
             ?assertEqual(0, bondy_mst_pack_writer:pending_count(W))
@@ -101,14 +117,21 @@ first_append_materialises_incoming_and_flips_manifest_test() ->
         {ok, W} = open_writer(Dir),
         try
             {ok, _, W1} = bondy_mst_pack_writer:append(W, <<"x">>),
-            ?assert(filelib:is_regular(
-                bondy_mst_pack_paths:incoming_pack_path(Dir))),
+            ?assert(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:incoming_pack_path(Dir)
+                )
+            ),
             %% 48-byte pack header + 40-byte record header + 1-byte page.
-            ?assertEqual(48 + 40 + 1,
-                         bondy_mst_pack_writer:incoming_offset(W1)),
+            ?assertEqual(
+                48 + 40 + 1,
+                bondy_mst_pack_writer:incoming_offset(W1)
+            ),
             {ok, OnDisk} = bondy_mst_pack_manifest:read(Dir),
-            ?assertEqual(present,
-                         bondy_mst_pack_manifest:incoming_pack(OnDisk))
+            ?assertEqual(
+                present,
+                bondy_mst_pack_manifest:incoming_pack(OnDisk)
+            )
         after
             bondy_mst_pack_writer:close(W)
         end
@@ -128,8 +151,10 @@ reopen_uses_existing_manifest_test() ->
         bondy_mst_pack_writer:close(W1),
         {ok, W2} = open_writer(Dir),
         try
-            ?assertEqual(<<"writer-test">>,
-                         bondy_mst_pack_writer:instance_id(W2)),
+            ?assertEqual(
+                <<"writer-test">>,
+                bondy_mst_pack_writer:instance_id(W2)
+            ),
             ?assertEqual(0, bondy_mst_pack_writer:pending_count(W2))
         after
             bondy_mst_pack_writer:close(W2)
@@ -201,7 +226,10 @@ append_is_idempotent_test() ->
 append_then_reopen_preserves_pending_test() ->
     with_tmp_dir(fun(Dir) ->
         {ok, W} = open_writer(Dir),
-        Pages = [<<"page-", (integer_to_binary(I))/binary>> || I <- lists:seq(1, 5)],
+        Pages = [
+            <<"page-", (integer_to_binary(I))/binary>>
+         || I <- lists:seq(1, 5)
+        ],
         W1 = lists:foldl(
             fun(P, Acc) ->
                 {ok, _, A} = bondy_mst_pack_writer:append(Acc, P),
@@ -250,8 +278,10 @@ append_after_reopen_preserves_header_and_existing_records_test() ->
             ?assertEqual(OffBefore + 40 + byte_size(<<"third">>), OffAfter),
             %% First two hashes from the original session are still
             %% present (bag equality — order is map iteration order).
-            ?assertEqual(lists:sort(HashesBefore),
-                         lists:sort(HashesAfter -- [sha256(<<"third">>)]))
+            ?assertEqual(
+                lists:sort(HashesBefore),
+                lists:sort(HashesAfter -- [sha256(<<"third">>)])
+            )
         after
             bondy_mst_pack_writer:close(W5)
         end
@@ -275,11 +305,13 @@ corrupt_header_surfaces_as_needs_recovery_test() ->
         {ok, 0} = prim_file:position(Fd, bof),
         ok = prim_file:write(Fd, <<0:(?BONDY_MST_PACK_HEADER_BYTES * 8)>>),
         ok = prim_file:close(Fd),
-        ?assertEqual({error, needs_recovery},
-                     bondy_mst_pack_writer:open(
-                         Dir, #{instance_id => <<"writer-test">>}))
+        ?assertEqual(
+            {error, needs_recovery},
+            bondy_mst_pack_writer:open(
+                Dir, #{instance_id => <<"writer-test">>}
+            )
+        )
     end).
-
 
 %% =============================================================================
 %% Seal
@@ -310,22 +342,33 @@ seal_materialises_pack_and_idx_test() ->
         {ok, PackId, W2} = bondy_mst_pack_writer:seal(W1),
         try
             ?assertEqual(1, PackId),
-            ?assert(filelib:is_regular(
-                bondy_mst_pack_paths:sealed_pack_path(Dir, 1))),
-            ?assert(filelib:is_regular(
-                bondy_mst_pack_paths:sealed_idx_path(Dir, 1))),
+            ?assert(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:sealed_pack_path(Dir, 1)
+                )
+            ),
+            ?assert(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:sealed_idx_path(Dir, 1)
+                )
+            ),
             %% Post-seal the writer is in fresh-state: no incoming fd,
             %% offset 0; the next append re-creates incoming.pack lazily.
-            ?assertNot(filelib:is_regular(
-                bondy_mst_pack_paths:incoming_pack_path(Dir))),
+            ?assertNot(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:incoming_pack_path(Dir)
+                )
+            ),
             ?assertEqual(0, bondy_mst_pack_writer:incoming_offset(W2)),
             ?assertEqual(0, bondy_mst_pack_writer:pending_count(W2)),
             ?assertEqual(2, bondy_mst_pack_writer:next_pack_id(W2)),
             %% Manifest reflects the new pack.
             {ok, M} = bondy_mst_pack_manifest:read(Dir),
             ?assertEqual([1], bondy_mst_pack_manifest:sealed_packs(M)),
-            ?assertEqual(absent,
-                         bondy_mst_pack_manifest:incoming_pack(M))
+            ?assertEqual(
+                absent,
+                bondy_mst_pack_manifest:incoming_pack(M)
+            )
         after
             bondy_mst_pack_writer:close(W2)
         end
@@ -339,10 +382,16 @@ seal_then_append_advances_to_next_pack_id_test() ->
         {ok, _, W3} = bondy_mst_pack_writer:append(W2, <<"second">>),
         {ok, 2, W4} = bondy_mst_pack_writer:seal(W3),
         try
-            ?assert(filelib:is_regular(
-                bondy_mst_pack_paths:sealed_pack_path(Dir, 1))),
-            ?assert(filelib:is_regular(
-                bondy_mst_pack_paths:sealed_pack_path(Dir, 2))),
+            ?assert(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:sealed_pack_path(Dir, 1)
+                )
+            ),
+            ?assert(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:sealed_pack_path(Dir, 2)
+                )
+            ),
             {ok, M} = bondy_mst_pack_manifest:read(Dir),
             ?assertEqual([1, 2], bondy_mst_pack_manifest:sealed_packs(M)),
             ?assertEqual(3, bondy_mst_pack_writer:next_pack_id(W4))
@@ -393,9 +442,9 @@ orphan_pack_and_idx_both_deleted_on_reopen_test() ->
         {ok, W0} = open_writer(Dir),
         bondy_mst_pack_writer:close(W0),
         OrphanPack = bondy_mst_pack_paths:sealed_pack_path(Dir, 9999),
-        OrphanIdx  = bondy_mst_pack_paths:sealed_idx_path(Dir, 9999),
+        OrphanIdx = bondy_mst_pack_paths:sealed_idx_path(Dir, 9999),
         ok = file:write_file(OrphanPack, <<>>),
-        ok = file:write_file(OrphanIdx,  <<>>),
+        ok = file:write_file(OrphanIdx, <<>>),
         {ok, W1} = open_writer(Dir),
         try
             ?assertNot(filelib:is_regular(OrphanPack)),
@@ -414,11 +463,11 @@ valid_sealed_pack_preserved_alongside_orphan_test() ->
         {ok, 1, W2} = bondy_mst_pack_writer:seal(W1),
         bondy_mst_pack_writer:close(W2),
         RealPack = bondy_mst_pack_paths:sealed_pack_path(Dir, 1),
-        RealIdx  = bondy_mst_pack_paths:sealed_idx_path(Dir, 1),
+        RealIdx = bondy_mst_pack_paths:sealed_idx_path(Dir, 1),
         OrphanPack = bondy_mst_pack_paths:sealed_pack_path(Dir, 7),
-        OrphanIdx  = bondy_mst_pack_paths:sealed_idx_path(Dir, 7),
+        OrphanIdx = bondy_mst_pack_paths:sealed_idx_path(Dir, 7),
         ok = file:write_file(OrphanPack, <<"junk">>),
-        ok = file:write_file(OrphanIdx,  <<"junk">>),
+        ok = file:write_file(OrphanIdx, <<"junk">>),
         {ok, W3} = open_writer(Dir),
         try
             ?assert(filelib:is_regular(RealPack)),
@@ -472,18 +521,24 @@ tmp_artefact_deleted_even_when_id_is_in_manifest_test() ->
         {ok, 1, W2} = bondy_mst_pack_writer:seal(W1),
         bondy_mst_pack_writer:close(W2),
         TmpPack = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, 1),
-        TmpIdx  = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
+        TmpIdx = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
         ok = file:write_file(TmpPack, <<"residue">>),
-        ok = file:write_file(TmpIdx,  <<"residue">>),
+        ok = file:write_file(TmpIdx, <<"residue">>),
         {ok, W3} = open_writer(Dir),
         try
             ?assertNot(filelib:is_regular(TmpPack)),
             ?assertNot(filelib:is_regular(TmpIdx)),
             %% Real files unchanged.
-            ?assert(filelib:is_regular(
-                bondy_mst_pack_paths:sealed_pack_path(Dir, 1))),
-            ?assert(filelib:is_regular(
-                bondy_mst_pack_paths:sealed_idx_path(Dir, 1)))
+            ?assert(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:sealed_pack_path(Dir, 1)
+                )
+            ),
+            ?assert(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:sealed_idx_path(Dir, 1)
+                )
+            )
         after
             bondy_mst_pack_writer:close(W3)
         end
@@ -498,7 +553,7 @@ non_pack_files_left_alone_test() ->
         bondy_mst_pack_writer:close(W0),
         Stray = filename:join(Dir, "operator-notes.txt"),
         WeirdName = filename:join(Dir, "pack-without-digits.pack"),
-        ok = file:write_file(Stray,     <<"do not delete">>),
+        ok = file:write_file(Stray, <<"do not delete">>),
         ok = file:write_file(WeirdName, <<"also keep">>),
         {ok, W1} = open_writer(Dir),
         try
@@ -542,8 +597,10 @@ reader_open_no_sealed_packs_test() ->
         try
             ?assertEqual([], bondy_mst_pack_reader:sealed_pack_ids(R)),
             ?assertEqual([], bondy_mst_pack_reader:list(R)),
-            ?assertEqual(not_found,
-                         bondy_mst_pack_reader:get(R, sha256(<<"nope">>)))
+            ?assertEqual(
+                not_found,
+                bondy_mst_pack_reader:get(R, sha256(<<"nope">>))
+            )
         after
             bondy_mst_pack_reader:close(R)
         end
@@ -563,9 +620,13 @@ reader_resolves_every_sealed_page_test() ->
                 end,
                 lists:zip(Hashes, Pages)
             ),
-            ?assertEqual(not_found,
-                         bondy_mst_pack_reader:get(R,
-                                                   sha256(<<"missing">>))),
+            ?assertEqual(
+                not_found,
+                bondy_mst_pack_reader:get(
+                    R,
+                    sha256(<<"missing">>)
+                )
+            ),
             ?assertNot(bondy_mst_pack_reader:has(R, sha256(<<"missing">>))),
             ?assertEqual(lists:sort(Hashes), bondy_mst_pack_reader:list(R))
         after
@@ -613,15 +674,17 @@ reader_open_missing_manifest_test() ->
 proper_writer_test_() ->
     Opts = [{numtests, 50}, {to_file, user}],
     [
-        {timeout, 60,
-         ?_assert(proper:quickcheck(prop_seal_then_read(), Opts))}
+        {timeout, 60, ?_assert(proper:quickcheck(prop_seal_then_read(), Opts))}
     ].
 
 prop_seal_then_read() ->
     ?FORALL(
         Pages,
-        ?LET(N, choose(0, 30),
-             vector(N, ?LET(M, choose(0, 64), binary(M)))),
+        ?LET(
+            N,
+            choose(0, 30),
+            vector(N, ?LET(M, choose(0, 64), binary(M)))
+        ),
         with_tmp_dir_prop(fun(Dir) ->
             UniqueByHash = uniq_by_hash(Pages),
             {ok, W0} = open_writer(Dir),
@@ -637,7 +700,7 @@ prop_seal_then_read() ->
             ok = bondy_mst_pack_writer:close(
                 case ResultSeal of
                     {ok, no_op, X} -> X;
-                    {ok, _, X}     -> X
+                    {ok, _, X} -> X
                 end
             ),
             {ok, R} = bondy_mst_pack_reader:open(Dir),
@@ -738,8 +801,11 @@ flush_no_op_before_first_append_test() ->
             %% incoming.pack hasn't been created yet — flush is a no-op.
             {ok, W1} = bondy_mst_pack_writer:flush(W0),
             ?assertEqual(0, bondy_mst_pack_writer:unsynced_count(W1)),
-            ?assertNot(filelib:is_regular(
-                bondy_mst_pack_paths:incoming_pack_path(Dir)))
+            ?assertNot(
+                filelib:is_regular(
+                    bondy_mst_pack_paths:incoming_pack_path(Dir)
+                )
+            )
         after
             bondy_mst_pack_writer:close(W0)
         end
@@ -765,8 +831,10 @@ close_flushes_unsynced_records_test() ->
         {ok, W2} = open_writer_k(Dir, 1000),
         try
             ?assertEqual(5, bondy_mst_pack_writer:pending_count(W2)),
-            ?assertEqual(lists:sort(HashList),
-                         bondy_mst_pack_writer:pending_hashes(W2))
+            ?assertEqual(
+                lists:sort(HashList),
+                bondy_mst_pack_writer:pending_hashes(W2)
+            )
         after
             bondy_mst_pack_writer:close(W2)
         end
@@ -820,9 +888,11 @@ t_threshold_fires_eventually_test() ->
     with_tmp_dir(fun(Dir) ->
         {ok, W0} = bondy_mst_pack_writer:open(
             Dir,
-            #{instance_id => <<"writer-test">>,
-              sync_every_records => 1000,
-              sync_every_ms => 1}
+            #{
+                instance_id => <<"writer-test">>,
+                sync_every_records => 1000,
+                sync_every_ms => 1
+            }
         ),
         try
             {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
@@ -853,13 +923,16 @@ pack_rename_failure_returns_seal_error_test() ->
     with_tmp_dir(fun(Dir) ->
         {ok, W0} = open_writer(Dir),
         {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
-        SealRes = with_rename_fault(".pack.tmp", eio,
-            fun() -> bondy_mst_pack_writer:seal(W1) end),
+        SealRes = with_rename_fault(
+            ".pack.tmp",
+            eio,
+            fun() -> bondy_mst_pack_writer:seal(W1) end
+        ),
         ?assertMatch({error, {seal, {rename_pack, eio}}}, SealRes),
         bondy_mst_pack_writer:close(W1),
         %% No artefacts left over by `create_sealed_pack`'s cleanup.
         PackTmp = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, 1),
-        IdxTmp  = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
+        IdxTmp = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
         ?assertNot(filelib:is_regular(PackTmp)),
         ?assertNot(filelib:is_regular(IdxTmp)),
         %% Manifest unchanged: still no sealed packs, incoming present.
@@ -884,14 +957,17 @@ idx_rename_failure_returns_seal_error_test() ->
     with_tmp_dir(fun(Dir) ->
         {ok, W0} = open_writer(Dir),
         {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
-        SealRes = with_rename_fault(".idx.tmp", eio,
-            fun() -> bondy_mst_pack_writer:seal(W1) end),
+        SealRes = with_rename_fault(
+            ".idx.tmp",
+            eio,
+            fun() -> bondy_mst_pack_writer:seal(W1) end
+        ),
         ?assertMatch({error, {seal, {rename_idx, eio}}}, SealRes),
         bondy_mst_pack_writer:close(W1),
-        Pack    = bondy_mst_pack_paths:sealed_pack_path(Dir, 1),
-        Idx     = bondy_mst_pack_paths:sealed_idx_path(Dir, 1),
+        Pack = bondy_mst_pack_paths:sealed_pack_path(Dir, 1),
+        Idx = bondy_mst_pack_paths:sealed_idx_path(Dir, 1),
         PackTmp = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, 1),
-        IdxTmp  = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
+        IdxTmp = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, 1),
         ?assertNot(filelib:is_regular(Pack)),
         ?assertNot(filelib:is_regular(Idx)),
         ?assertNot(filelib:is_regular(PackTmp)),
@@ -915,12 +991,15 @@ manifest_rename_failure_leaves_orphan_pack_and_idx_test() ->
     with_tmp_dir(fun(Dir) ->
         {ok, W0} = open_writer(Dir),
         {ok, _, W1} = bondy_mst_pack_writer:append(W0, <<"a">>),
-        SealRes = with_rename_fault("manifest.tmp", eio,
-            fun() -> bondy_mst_pack_writer:seal(W1) end),
+        SealRes = with_rename_fault(
+            "manifest.tmp",
+            eio,
+            fun() -> bondy_mst_pack_writer:seal(W1) end
+        ),
         ?assertMatch({error, {manifest, eio}}, SealRes),
         bondy_mst_pack_writer:close(W1),
         Pack = bondy_mst_pack_paths:sealed_pack_path(Dir, 1),
-        Idx  = bondy_mst_pack_paths:sealed_idx_path(Dir, 1),
+        Idx = bondy_mst_pack_paths:sealed_idx_path(Dir, 1),
         %% Orphan state on disk.
         ?assert(filelib:is_regular(Pack)),
         ?assert(filelib:is_regular(Idx)),
@@ -956,8 +1035,11 @@ manifest_rename_failure_at_present_flip_test() ->
     %% file; reopen finds a clean fresh state.
     with_tmp_dir(fun(Dir) ->
         {ok, W0} = open_writer(Dir),
-        AppendRes = with_rename_fault("manifest.tmp", eio,
-            fun() -> bondy_mst_pack_writer:append(W0, <<"never lands">>) end),
+        AppendRes = with_rename_fault(
+            "manifest.tmp",
+            eio,
+            fun() -> bondy_mst_pack_writer:append(W0, <<"never lands">>) end
+        ),
         ?assertMatch({error, {manifest, eio}}, AppendRes),
         bondy_mst_pack_writer:close(W0),
         IncomingPath =
@@ -984,14 +1066,17 @@ manifest_rename_failure_at_present_flip_test() ->
 %% see each other's mocks.
 with_rename_fault(Suffix, Reason, Body) ->
     with_io_fault_lock(fun() ->
-        meck:expect(bondy_mst_io, rename,
+        meck:expect(
+            bondy_mst_io,
+            rename,
             fun(From, To) ->
                 FromStr = unicode:characters_to_list(From),
                 case lists:suffix(Suffix, FromStr) of
-                    true  -> {error, Reason};
+                    true -> {error, Reason};
                     false -> meck:passthrough([From, To])
                 end
-            end),
+            end
+        ),
         Body()
     end).
 
@@ -1004,8 +1089,10 @@ with_io_fault_lock(Body) ->
         {Lock, self()},
         fun() ->
             ok = meck:new(bondy_mst_io, [passthrough]),
-            try Body()
-            after _ = meck:unload(bondy_mst_io)
+            try
+                Body()
+            after
+                _ = meck:unload(bondy_mst_io)
             end
         end,
         [node()],
@@ -1038,7 +1125,7 @@ uniq_by_hash(Pages) ->
         fun(P, {S, A}) ->
             H = sha256(P),
             case maps:is_key(H, S) of
-                true  -> {S, A};
+                true -> {S, A};
                 false -> {S#{H => true}, [{H, P} | A]}
             end
         end,
@@ -1052,8 +1139,10 @@ uniq_by_hash(Pages) ->
 %% returns whatever its callback returns, so wrap.
 with_tmp_dir_prop(Fun) ->
     Dir = mktemp_dir(),
-    try Fun(Dir)
-    after rmrf(Dir)
+    try
+        Fun(Dir)
+    after
+        rmrf(Dir)
     end.
 
 %% =============================================================================
@@ -1072,13 +1161,15 @@ with_tmp_dir_prop(Fun) ->
 open_writer_root(Dir, RootEveryRecords, RootEveryMs) ->
     bondy_mst_pack_writer:open(
         Dir,
-        #{instance_id              => <<"writer-test">>,
-          %% Keep the data-path policy out of the way so we're
-          %% isolating manifest-write behaviour.
-          sync_every_records       => 1000,
-          sync_every_ms            => infinity,
-          root_flush_every_records => RootEveryRecords,
-          root_flush_every_ms      => RootEveryMs}
+        #{
+            instance_id => <<"writer-test">>,
+            %% Keep the data-path policy out of the way so we're
+            %% isolating manifest-write behaviour.
+            sync_every_records => 1000,
+            sync_every_ms => infinity,
+            root_flush_every_records => RootEveryRecords,
+            root_flush_every_ms => RootEveryMs
+        }
     ).
 
 disk_root(Dir) ->
@@ -1212,7 +1303,7 @@ reopen_with_unflushed_root_sees_prior_disk_root_test() ->
     %% the staleness window: WAL replay would advance it.)
     with_tmp_dir(fun(Dir) ->
         Persisted = sha256(<<"persisted">>),
-        Staged    = sha256(<<"staged">>),
+        Staged = sha256(<<"staged">>),
         {ok, W0} = open_writer_root(Dir, 1, infinity),
         %% First call: records=1 threshold flushes immediately.
         {ok, W1} = bondy_mst_pack_writer:set_root(W0, Persisted),

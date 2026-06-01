@@ -41,8 +41,10 @@ undefined_plus_issue_becomes_issued_test() ->
     H = hlc(100, 0),
     E = hlc(1000, 0),
     P = mk_payload(1),
-    ?assertEqual({issued, H, E, P},
-                 apply_ev(undefined, {issue, H, E, P})).
+    ?assertEqual(
+        {issued, H, E, P},
+        apply_ev(undefined, {issue, H, E, P})
+    ).
 
 issued_plus_newer_issue_supersedes_test() ->
     H1 = hlc(100, 0),
@@ -50,15 +52,19 @@ issued_plus_newer_issue_supersedes_test() ->
     E1 = hlc(1000, 0),
     E2 = hlc(2000, 0),
     S0 = {issued, H1, E1, mk_payload(1)},
-    ?assertEqual({issued, H2, E2, mk_payload(2)},
-                 apply_ev(S0, {issue, H2, E2, mk_payload(2)})).
+    ?assertEqual(
+        {issued, H2, E2, mk_payload(2)},
+        apply_ev(S0, {issue, H2, E2, mk_payload(2)})
+    ).
 
 issued_plus_older_issue_rejected_test() ->
     H1 = hlc(200, 0),
     H2 = hlc(100, 0),
     S0 = {issued, H1, hlc(1000, 0), mk_payload(1)},
-    ?assertEqual(S0,
-                 apply_ev(S0, {issue, H2, hlc(2000, 0), mk_payload(2)})).
+    ?assertEqual(
+        S0,
+        apply_ev(S0, {issue, H2, hlc(2000, 0), mk_payload(2)})
+    ).
 
 issued_plus_same_hlc_same_data_idempotent_test() ->
     H = hlc(100, 0),
@@ -71,8 +77,10 @@ issued_plus_same_hlc_larger_payload_resolves_test() ->
     H = hlc(100, 0),
     E = hlc(1000, 0),
     S0 = {issued, H, E, <<"a">>},
-    ?assertEqual({issued, H, E, <<"z">>},
-                 apply_ev(S0, {issue, H, E, <<"z">>})).
+    ?assertEqual(
+        {issued, H, E, <<"z">>},
+        apply_ev(S0, {issue, H, E, <<"z">>})
+    ).
 
 %% =============================================================================
 %% Revoke semantics
@@ -102,8 +110,10 @@ issued_plus_older_revoke_rejected_test() ->
 revoked_plus_newer_revoke_bumps_hlc_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
-    ?assertEqual({revoked, H2},
-                 apply_ev({revoked, H1}, {revoke, H2})).
+    ?assertEqual(
+        {revoked, H2},
+        apply_ev({revoked, H1}, {revoke, H2})
+    ).
 
 revoked_plus_older_revoke_idempotent_test() ->
     H1 = hlc(200, 0),
@@ -123,8 +133,10 @@ revoked_plus_newer_issue_reanimates_test() ->
     E = hlc(2000, 0),
     P2 = mk_payload(2),
     S0 = {revoked, H1},
-    ?assertEqual({issued, H2, E, P2},
-                 apply_ev(S0, {issue, H2, E, P2})).
+    ?assertEqual(
+        {issued, H2, E, P2},
+        apply_ev(S0, {issue, H2, E, P2})
+    ).
 
 revoked_plus_older_issue_rejected_test() ->
     H1 = hlc(200, 0),
@@ -135,8 +147,10 @@ revoked_plus_older_issue_rejected_test() ->
 revoked_plus_same_hlc_issue_revoke_wins_test() ->
     H = hlc(100, 0),
     S0 = {revoked, H},
-    ?assertEqual(S0,
-                 apply_ev(S0, {issue, H, hlc(2000, 0), mk_payload(2)})).
+    ?assertEqual(
+        S0,
+        apply_ev(S0, {issue, H, hlc(2000, 0), mk_payload(2)})
+    ).
 
 %% =============================================================================
 %% is_currently_valid/2
@@ -184,8 +198,10 @@ gc_threshold_of_issued_is_expiry_test() ->
     %% Doc §4.6: gc_threshold for issued is the expiry, not the issue's
     %% HLC. Lets us drop historic events past the cell's deadline.
     E = hlc(1000, 0),
-    ?assertEqual(E,
-                 ?MOD:gc_threshold({issued, hlc(100, 0), E, mk_payload(1)})).
+    ?assertEqual(
+        E,
+        ?MOD:gc_threshold({issued, hlc(100, 0), E, mk_payload(1)})
+    ).
 
 gc_threshold_of_revoked_is_state_hlc_test() ->
     H = hlc(200, 0),
@@ -280,8 +296,12 @@ dispatcher_apply_event_via_shorthand_test() ->
     P = mk_payload(1),
     ?assertEqual(
         {{issued, H, E, P}, P},
-        bondy_oplog_fold:apply_event(ttl_presence, undefined,
-                                     {issue, H, E, P}, undefined)
+        bondy_oplog_fold:apply_event(
+            ttl_presence,
+            undefined,
+            {issue, H, E, P},
+            undefined
+        )
     ).
 
 dispatcher_merge_states_via_shorthand_test() ->

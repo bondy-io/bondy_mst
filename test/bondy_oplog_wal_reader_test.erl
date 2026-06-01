@@ -24,9 +24,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_reader_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_reader_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -194,7 +201,8 @@ read_from_offset_resumes_at_frame_boundary_test() ->
 spawn_monitored_reader(Body) ->
     Parent = self(),
     {_Pid, MRef} = spawn_monitor(fun() ->
-        try Body(Parent)
+        try
+            Body(Parent)
         catch
             Class:Reason:Stack ->
                 Parent ! {reader_crashed, Class, Reason, Stack}
@@ -226,7 +234,10 @@ tail_follow_unblocks_on_append_test() ->
                     Parent ! {unexpected, Other}
             end
         end),
-        receive reader_ready -> ok after 1000 -> error(reader_not_ready) end,
+        receive
+            reader_ready -> ok
+        after 1000 -> error(reader_not_ready)
+        end,
         E = mk_event(123, 1),
         {ok, _, _} = bondy_oplog_wal:append(Pid, E),
         receive
@@ -266,7 +277,10 @@ tail_follow_unblocks_on_rotation_test() ->
                     Parent ! {unexpected, Other1}
             end
         end),
-        receive reader_ready -> ok after 1000 -> error(reader_not_ready) end,
+        receive
+            reader_ready -> ok
+        after 1000 -> error(reader_not_ready)
+        end,
         E1 = mk_event(1, 1),
         E2 = mk_event(2, 2),
         {ok, _, {0, _}} = bondy_oplog_wal:append(Pid, E1),
@@ -349,8 +363,11 @@ truncated_sealed_segment_surfaces_error_test() ->
         {ok, _, {1, _}} = bondy_oplog_wal:append(Pid, E3),
         %% Segment 0 is now sealed (writer has rotated to segment 1).
         SegPath = filename:join(
-            [Dir, instance_id(),
-             bondy_oplog_wal_segment:filename(0)]
+            [
+                Dir,
+                instance_id(),
+                bondy_oplog_wal_segment:filename(0)
+            ]
         ),
         {ok, #file_info{size = Size}} = file:read_file_info(SegPath),
         %% Trim 5 bytes off the end so frame 2 straddles EOF.
@@ -573,7 +590,8 @@ hlc_range_yields_slice_test() ->
             Pid, {hlc, Lo}, [{hlc_upper_bound, Hi}]
         ),
         {ok, Read} = drain_reader(Iter),
-        Expected = lists:sublist(Events, 3, 5),  %% items 3..7 inclusive
+        %% items 3..7 inclusive
+        Expected = lists:sublist(Events, 3, 5),
         ?assertEqual(Expected, Read)
     end).
 
@@ -588,8 +606,11 @@ qidx_is_flushed_to_disk_on_rotation_test() ->
         %% This second event forces rotation (segment 0 is full).
         {ok, _, {1, _}} = bondy_oplog_wal:append(Pid, E2),
         Seg0Idx = filename:join(
-            [Dir, instance_id(),
-             bondy_oplog_wal_idx:filename(0)]
+            [
+                Dir,
+                instance_id(),
+                bondy_oplog_wal_idx:filename(0)
+            ]
         ),
         ?assert(filelib:is_regular(Seg0Idx)),
         {ok, Entries} = bondy_oplog_wal_idx:read_file(Seg0Idx),
@@ -611,8 +632,11 @@ qidx_for_head_segment_is_flushed_on_close_test() ->
         [{ok, _, _} = bondy_oplog_wal:append(Pid, E) || E <- Events],
         ok = bondy_oplog_wal:close(Pid),
         Seg0Idx = filename:join(
-            [Dir, instance_id(),
-             bondy_oplog_wal_idx:filename(0)]
+            [
+                Dir,
+                instance_id(),
+                bondy_oplog_wal_idx:filename(0)
+            ]
         ),
         ?assert(filelib:is_regular(Seg0Idx)),
         {ok, Entries} = bondy_oplog_wal_idx:read_file(Seg0Idx),
@@ -633,8 +657,11 @@ qidx_not_written_on_close_if_no_appends_test() ->
         {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), Opts),
         ok = bondy_oplog_wal:close(Pid),
         Seg0Idx = filename:join(
-            [Dir, instance_id(),
-             bondy_oplog_wal_idx:filename(0)]
+            [
+                Dir,
+                instance_id(),
+                bondy_oplog_wal_idx:filename(0)
+            ]
         ),
         ?assertNot(filelib:is_regular(Seg0Idx))
     after

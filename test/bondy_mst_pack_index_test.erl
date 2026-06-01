@@ -113,22 +113,31 @@ fanout_search_matches_linear_test() ->
     %% Each present hash returns its offset.
     lists:foreach(
         fun({H, O}) ->
-            ?assertEqual({ok, O}, bondy_mst_pack_index:lookup(T, H),
-                          {present_lookup, H})
+            ?assertEqual(
+                {ok, O},
+                bondy_mst_pack_index:lookup(T, H),
+                {present_lookup, H}
+            )
         end,
         Sorted
     ),
     %% A run of absent hashes returns not_found.
-    Absent = [crypto:hash(sha256, <<"absent-", I:32>>) || I <- lists:seq(1, 50)],
+    Absent = [
+        crypto:hash(sha256, <<"absent-", I:32>>)
+     || I <- lists:seq(1, 50)
+    ],
     Present = [H || {H, _} <- Sorted],
     lists:foreach(
         fun(H) ->
             case lists:member(H, Present) of
-                true  -> ok;
+                true ->
+                    ok;
                 false ->
-                    ?assertEqual(not_found,
-                                 bondy_mst_pack_index:lookup(T, H),
-                                 {absent_lookup, H})
+                    ?assertEqual(
+                        not_found,
+                        bondy_mst_pack_index:lookup(T, H),
+                        {absent_lookup, H}
+                    )
             end
         end,
         Absent
@@ -144,7 +153,9 @@ bloom_no_false_negatives_test() ->
     Hashes = [crypto:hash(sha256, <<I:32>>) || I <- lists:seq(1, 500)],
     BF = bondy_mst_pack_bloom:build(Hashes, #{capacity => 500, p => 0.01}),
     lists:foreach(
-        fun(H) -> ?assertEqual(true, bondy_mst_pack_bloom:member(H, BF), {h, H}) end,
+        fun(H) ->
+            ?assertEqual(true, bondy_mst_pack_bloom:member(H, BF), {h, H})
+        end,
         Hashes
     ).
 
@@ -161,10 +172,11 @@ bloom_fpr_within_bound_test() ->
         fun(I, Acc) ->
             H = crypto:hash(sha256, <<"absent-", I:32>>),
             case sets:is_element(H, InsertedSet) of
-                true  -> Acc;
+                true ->
+                    Acc;
                 false ->
                     case bondy_mst_pack_bloom:member(H, BF) of
-                        true  -> Acc + 1;
+                        true -> Acc + 1;
                         false -> Acc
                     end
             end
@@ -186,7 +198,10 @@ bloom_round_trip_via_to_from_binary_test() ->
         Hashes
     ),
     %% Both filters answer identically on a set of absent inputs.
-    Absent = [crypto:hash(sha256, <<"absent-", I:32>>) || I <- lists:seq(1, 200)],
+    Absent = [
+        crypto:hash(sha256, <<"absent-", I:32>>)
+     || I <- lists:seq(1, 200)
+    ],
     lists:foreach(
         fun(H) ->
             ?assertEqual(
@@ -223,8 +238,10 @@ open_truncated_header_test() ->
         build_idx(make_entries(8))
     ),
     Short = binary:part(Bin, 0, 8),
-    ?assertEqual({error, truncated_header},
-                 bondy_mst_pack_index:open(Short)).
+    ?assertEqual(
+        {error, truncated_header},
+        bondy_mst_pack_index:open(Short)
+    ).
 
 open_bad_magic_test() ->
     %% Replace 4-byte magic with garbage. The trailer must be
@@ -241,8 +258,10 @@ open_bad_version_test() ->
         build_idx(make_entries(8))
     ),
     Bad = reseal(swap_version(strip_trailer(Bin0), 99)),
-    ?assertEqual({error, {bad_version, 99}},
-                 bondy_mst_pack_index:open(Bad)).
+    ?assertEqual(
+        {error, {bad_version, 99}},
+        bondy_mst_pack_index:open(Bad)
+    ).
 
 %% =============================================================================
 %% Hash boundary cases (first byte 0x00 and 0xFF)
@@ -266,7 +285,7 @@ fanout_spans_all_buckets_test() ->
     %% 31 sha256-derived bytes so the rest of the hash is unique.
     Entries = [
         {<<I:8, (binary:part(crypto:hash(sha256, <<I:32>>), 0, 31))/binary>>, I}
-        || I <- lists:seq(0, 255)
+     || I <- lists:seq(0, 255)
     ],
     Bin = iolist_to_binary(build_idx(Entries)),
     {ok, T} = bondy_mst_pack_index:open(Bin),
@@ -286,8 +305,10 @@ open_truncated_trailer_test() ->
     %% A 20-byte binary has a parseable header but cannot hold the
     %% 32-byte trailer. Open must short-circuit with the dedicated
     %% truncated_trailer error.
-    ?assertEqual({error, truncated_trailer},
-                 bondy_mst_pack_index:open(<<0:160>>)).
+    ?assertEqual(
+        {error, truncated_trailer},
+        bondy_mst_pack_index:open(<<0:160>>)
+    ).
 
 trailer_round_trip_test() ->
     Bin = iolist_to_binary(
@@ -303,8 +324,10 @@ trailer_detects_header_flip_test() ->
         build_idx(make_entries(8))
     ),
     Bad = flip_byte(Bin, 5),
-    ?assertEqual({error, integrity_mismatch},
-                 bondy_mst_pack_index:open(Bad)).
+    ?assertEqual(
+        {error, integrity_mismatch},
+        bondy_mst_pack_index:open(Bad)
+    ).
 
 trailer_detects_fanout_flip_test() ->
     %% Fanout starts after header + (bloom section size). Flipping a
@@ -317,8 +340,10 @@ trailer_detects_fanout_flip_test() ->
     BodyLen = byte_size(Bin) - 32,
     MidBody = BodyLen div 2,
     Bad = flip_byte(Bin, MidBody),
-    ?assertEqual({error, integrity_mismatch},
-                 bondy_mst_pack_index:open(Bad)).
+    ?assertEqual(
+        {error, integrity_mismatch},
+        bondy_mst_pack_index:open(Bad)
+    ).
 
 trailer_detects_trailer_flip_test() ->
     %% Flip the last byte of the file — trailer itself differs from
@@ -327,8 +352,10 @@ trailer_detects_trailer_flip_test() ->
         build_idx(make_entries(8))
     ),
     Bad = flip_byte(Bin, byte_size(Bin) - 1),
-    ?assertEqual({error, integrity_mismatch},
-                 bondy_mst_pack_index:open(Bad)).
+    ?assertEqual(
+        {error, integrity_mismatch},
+        bondy_mst_pack_index:open(Bad)
+    ).
 
 trailer_detects_bloom_off_flip_test() ->
     %% Same body shape but with bloom disabled — the fanout-region
@@ -338,8 +365,10 @@ trailer_detects_bloom_off_flip_test() ->
         build_idx(make_entries(8), #{bloom => false})
     ),
     Bad = flip_byte(Bin, byte_size(Bin) div 2),
-    ?assertEqual({error, integrity_mismatch},
-                 bondy_mst_pack_index:open(Bad)).
+    ?assertEqual(
+        {error, integrity_mismatch},
+        bondy_mst_pack_index:open(Bad)
+    ).
 
 %% =============================================================================
 %% Build error contract
@@ -386,7 +415,10 @@ build_first_entry_short_hash_test() ->
 %% =============================================================================
 
 make_entries(N) ->
-    [{crypto:hash(sha256, <<"k-", I:32>>), I * 17 + 13} || I <- lists:seq(1, N)].
+    [
+        {crypto:hash(sha256, <<"k-", I:32>>), I * 17 + 13}
+     || I <- lists:seq(1, N)
+    ].
 
 %% Strip the 32-byte sha256 trailer; callers mutate the resulting body
 %% then `reseal/1` to put a valid trailer back on.

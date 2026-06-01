@@ -28,16 +28,19 @@ encode(Body, Opts) ->
 empty_body_roundtrip_test() ->
     Frame = encode(<<>>),
     ?assertEqual(?HEADER, byte_size(Frame)),
-    ?assertMatch({ok, <<>>,
-                  #{version := ?BONDY_OPLOG_WAL_FRAME_VERSION, flags := 0}},
-                 bondy_oplog_wal_frame:decode(Frame)).
+    ?assertMatch(
+        {ok, <<>>, #{version := ?BONDY_OPLOG_WAL_FRAME_VERSION, flags := 0}},
+        bondy_oplog_wal_frame:decode(Frame)
+    ).
 
 small_body_roundtrip_test() ->
     Body = <<"hello, wal">>,
     Frame = encode(Body),
     ?assertEqual(?HEADER + byte_size(Body), byte_size(Frame)),
-    ?assertMatch({ok, Body, _},
-                 bondy_oplog_wal_frame:decode(Frame)).
+    ?assertMatch(
+        {ok, Body, _},
+        bondy_oplog_wal_frame:decode(Frame)
+    ).
 
 large_body_roundtrip_test() ->
     Body = crypto:strong_rand_bytes(64 * 1024),
@@ -66,8 +69,10 @@ term_to_binary_body_roundtrip_test() ->
 
 zero_flags_roundtrip_test() ->
     Frame = encode(<<"x">>, [{flags, 0}]),
-    ?assertMatch({ok, <<"x">>, #{flags := 0}},
-                 bondy_oplog_wal_frame:decode(Frame)).
+    ?assertMatch(
+        {ok, <<"x">>, #{flags := 0}},
+        bondy_oplog_wal_frame:decode(Frame)
+    ).
 
 encode_returns_iodata_test() ->
     %% Sanity: the public encode/1 returns iolist that flattens to a
@@ -75,8 +80,10 @@ encode_returns_iodata_test() ->
     Iodata = bondy_oplog_wal_frame:encode(<<"x">>),
     ?assert(is_list(Iodata)),
     ?assertEqual(?HEADER + 1, iolist_size(Iodata)),
-    ?assertMatch({ok, <<"x">>, _},
-                 bondy_oplog_wal_frame:decode(iolist_to_binary(Iodata))).
+    ?assertMatch(
+        {ok, <<"x">>, _},
+        bondy_oplog_wal_frame:decode(iolist_to_binary(Iodata))
+    ).
 
 header_bytes_constant_test() ->
     ?assertEqual(?HEADER, bondy_oplog_wal_frame:header_bytes()).
@@ -87,15 +94,18 @@ header_bytes_constant_test() ->
 
 truncated_header_test() ->
     [
-        ?assertMatch({error, truncated_header},
-                     bondy_oplog_wal_frame:decode(crypto:strong_rand_bytes(N)))
+        ?assertMatch(
+            {error, truncated_header},
+            bondy_oplog_wal_frame:decode(crypto:strong_rand_bytes(N))
+        )
      || N <- [0, 1, 5, 15]
     ].
 
 bad_magic_test() ->
     Frame = encode(<<"x">>),
-    Corrupt = <<16#DEADBEEF:32,
-                (binary:part(Frame, 4, byte_size(Frame) - 4))/binary>>,
+    Corrupt =
+        <<16#DEADBEEF:32,
+            (binary:part(Frame, 4, byte_size(Frame) - 4))/binary>>,
     ?assertEqual({error, bad_magic}, bondy_oplog_wal_frame:decode(Corrupt)).
 
 crc_mismatch_test() ->
@@ -120,8 +130,10 @@ trailing_bytes_test() ->
     %% A complete frame followed by extra bytes the caller forgot to trim.
     Frame = encode(<<"x">>),
     WithGarbage = <<Frame/binary, "extra">>,
-    ?assertEqual({error, trailing_bytes},
-                 bondy_oplog_wal_frame:decode(WithGarbage)).
+    ?assertEqual(
+        {error, trailing_bytes},
+        bondy_oplog_wal_frame:decode(WithGarbage)
+    ).
 
 unsupported_version_test() ->
     Body = <<"body">>,
@@ -130,21 +142,28 @@ unsupported_version_test() ->
     Flags = 0,
     CrcInput = <<FrameLen:32, Version:8, Flags:24, Body/binary>>,
     Crc = erlang:crc32(CrcInput),
-    Frame = <<?MAGIC:32, FrameLen:32, Crc:32, Version:8, Flags:24, Body/binary>>,
-    ?assertEqual({error, unsupported_version},
-                 bondy_oplog_wal_frame:decode(Frame)).
+    Frame =
+        <<?MAGIC:32, FrameLen:32, Crc:32, Version:8, Flags:24, Body/binary>>,
+    ?assertEqual(
+        {error, unsupported_version},
+        bondy_oplog_wal_frame:decode(Frame)
+    ).
 
 unknown_flag_v1_test() ->
     %% v1's known-flags mask is 0; every set bit is unknown_flag.
-    ?assertEqual({error, unknown_flag},
-                 decode(handcraft_frame(1, 16#000004, <<"body">>))).
+    ?assertEqual(
+        {error, unknown_flag},
+        decode(handcraft_frame(1, 16#000004, <<"body">>))
+    ).
 
 unknown_flag_v2_test() ->
     %% v2's mask now includes bit 0 (compressed_body); bit 2 is still
     %% outside the mask, so a v2 frame setting it must be rejected
     %% rather than silently accepted.
-    ?assertEqual({error, unknown_flag},
-                 decode(handcraft_frame(2, 16#000004, <<"body">>))).
+    ?assertEqual(
+        {error, unknown_flag},
+        decode(handcraft_frame(2, 16#000004, <<"body">>))
+    ).
 
 %% =============================================================================
 %% decode_header/1
@@ -154,8 +173,10 @@ decode_header_ok_test() ->
     Frame = encode(<<"abc">>),
     {ok, Header} = bondy_oplog_wal_frame:decode_header(Frame),
     ?assertEqual(?HEADER + 3, maps:get(frame_len, Header)),
-    ?assertEqual(?BONDY_OPLOG_WAL_FRAME_VERSION,
-                 maps:get(version, Header)),
+    ?assertEqual(
+        ?BONDY_OPLOG_WAL_FRAME_VERSION,
+        maps:get(version, Header)
+    ),
     ?assertEqual(0, maps:get(flags, Header)).
 
 decode_header_only_header_bytes_test() ->
@@ -165,22 +186,32 @@ decode_header_only_header_bytes_test() ->
 
 decode_header_bad_magic_test() ->
     Bin = <<0:32, 32:32, 0:32, 1:8, 0:24>>,
-    ?assertEqual({error, bad_magic},
-                 bondy_oplog_wal_frame:decode_header(Bin)).
+    ?assertEqual(
+        {error, bad_magic},
+        bondy_oplog_wal_frame:decode_header(Bin)
+    ).
 
 decode_header_length_invalid_test() ->
     Bin = <<?MAGIC:32, 8:32, 0:32, 1:8, 0:24>>,
-    ?assertEqual({error, length_invalid},
-                 bondy_oplog_wal_frame:decode_header(Bin)).
+    ?assertEqual(
+        {error, length_invalid},
+        bondy_oplog_wal_frame:decode_header(Bin)
+    ).
 
 decode_header_truncated_test() ->
     [
-        ?assertMatch({error, truncated_header},
-                     bondy_oplog_wal_frame:decode_header(<<>>)),
-        ?assertMatch({error, truncated_header},
-                     bondy_oplog_wal_frame:decode_header(<<?MAGIC:32>>)),
-        ?assertMatch({error, truncated_header},
-                     bondy_oplog_wal_frame:decode_header(<<?MAGIC:32, 0:64>>))
+        ?assertMatch(
+            {error, truncated_header},
+            bondy_oplog_wal_frame:decode_header(<<>>)
+        ),
+        ?assertMatch(
+            {error, truncated_header},
+            bondy_oplog_wal_frame:decode_header(<<?MAGIC:32>>)
+        ),
+        ?assertMatch(
+            {error, truncated_header},
+            bondy_oplog_wal_frame:decode_header(<<?MAGIC:32, 0:64>>)
+        )
     ].
 
 %% =============================================================================
@@ -188,22 +219,33 @@ decode_header_truncated_test() ->
 %% =============================================================================
 
 invalid_version_rejected_test() ->
-    ?assertError({badarg, _},
-                 bondy_oplog_wal_frame:encode(<<>>, [{version, 99}])).
+    ?assertError(
+        {badarg, _},
+        bondy_oplog_wal_frame:encode(<<>>, [{version, 99}])
+    ).
 
 invalid_flag_bit_rejected_at_encode_test() ->
     %% v2 accepts bits 0 (compressed_body) and 1 (encrypted_body);
     %% bit 2 and beyond are still outside the v2 known-flags mask.
-    ?assertError({badarg, _},
-                 bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#4}])),
-    ?assertError({badarg, _},
-                 bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#8}])),
-    ?assertError({badarg, _},
-                 bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#FFFFFFFF}])),
+    ?assertError(
+        {badarg, _},
+        bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#4}])
+    ),
+    ?assertError(
+        {badarg, _},
+        bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#8}])
+    ),
+    ?assertError(
+        {badarg, _},
+        bondy_oplog_wal_frame:encode(<<>>, [{flags, 16#FFFFFFFF}])
+    ),
     %% Explicitly producing a v1 frame: mask is zero, every bit is bad.
-    ?assertError({badarg, _},
-                 bondy_oplog_wal_frame:encode(
-                     <<>>, [{version, 1}, {flags, 16#1}])).
+    ?assertError(
+        {badarg, _},
+        bondy_oplog_wal_frame:encode(
+            <<>>, [{version, 1}, {flags, 16#1}]
+        )
+    ).
 
 %% =============================================================================
 %% v2 envelope + v1 backward compatibility
@@ -212,10 +254,13 @@ invalid_flag_bit_rejected_at_encode_test() ->
 %% Default-encoded frames advertise the current writer version.
 default_encoded_frame_is_v2_test() ->
     Frame = encode(<<"x">>),
-    ?assertMatch({ok, <<"x">>,
-                  #{version := ?BONDY_OPLOG_WAL_FRAME_VERSION_V2,
-                    flags := 0}},
-                 bondy_oplog_wal_frame:decode(Frame)).
+    ?assertMatch(
+        {ok, <<"x">>, #{
+            version := ?BONDY_OPLOG_WAL_FRAME_VERSION_V2,
+            flags := 0
+        }},
+        bondy_oplog_wal_frame:decode(Frame)
+    ).
 
 %% A v2 reader (this one) must continue to round-trip v1-encoded
 %% frames byte-for-byte. Production has v1-frame segments on disk from
@@ -223,8 +268,10 @@ default_encoded_frame_is_v2_test() ->
 v1_frame_decoded_by_v2_reader_test() ->
     Body = <<"legacy body">>,
     Frame = encode(Body, [{version, 1}]),
-    ?assertMatch({ok, Body, #{version := 1, flags := 0}},
-                 bondy_oplog_wal_frame:decode(Frame)).
+    ?assertMatch(
+        {ok, Body, #{version := 1, flags := 0}},
+        bondy_oplog_wal_frame:decode(Frame)
+    ).
 
 %% Same body encoded as v1 and as v2 differs only in the version byte
 %% (the CRC differs as a consequence). Bodies decode identically.
@@ -253,5 +300,4 @@ handcraft_frame(Version, Flags, Body) when is_binary(Body) ->
     FrameLen = ?HEADER + byte_size(Body),
     CrcInput = <<FrameLen:32, Version:8, Flags:24, Body/binary>>,
     Crc = erlang:crc32(CrcInput),
-    <<?MAGIC:32, FrameLen:32, Crc:32,
-      Version:8, Flags:24, Body/binary>>.
+    <<?MAGIC:32, FrameLen:32, Crc:32, Version:8, Flags:24, Body/binary>>.

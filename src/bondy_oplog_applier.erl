@@ -246,28 +246,29 @@ configured; defaults are no-ops so existing instances are unaffected.
     idle_waiter = undefined :: undefined | reference()
 }).
 
--type shard_key()   :: {atom(), atom(), non_neg_integer()}.
--type publish_fun() :: fun((bondy_oplog_event:t()) ->
-    {Key :: term(), Op :: term()} | skip).
+-type shard_key() :: {atom(), atom(), non_neg_integer()}.
+-type publish_fun() :: fun(
+    (bondy_oplog_event:t()) -> {Key :: term(), Op :: term()} | skip
+).
 -type cell_apply_ctx() :: #{
-    shard_key       := shard_key(),
-    adapter         := module(),
-    handle          := term(),
-    fold_module     := bondy_oplog_fold:strategy(),
+    shard_key := shard_key(),
+    adapter := module(),
+    handle := term(),
+    fold_module := bondy_oplog_fold:strategy(),
     %% Cache adapter pair captured at init time so the applier can
     %% keep the per-shard read cache coherent after every projection
     %% write. Without this, `bondy_db:apply/4` followed by `read/3` on
     %% a different process returns stale state — the cache is
     %% populate-on-miss and never invalidated by writers otherwise.
-    cache_adapter   => module() | undefined,
-    cache_handle    => term(),
+    cache_adapter => module() | undefined,
+    cache_handle => term(),
     %% Per-shard high-water HLC mark. Advanced via
     %% `bondy_oplog_high_water:advance/2` after every successful
     %% projection write in `apply_one_cell/11`. `undefined` when the
     %% shard's registry entry has no ref (legacy entries created
     %% before PR-D1 §3 — defensive only; new registrations always
     %% allocate).
-    high_water_ref  => bondy_oplog_high_water:ref() | undefined
+    high_water_ref => bondy_oplog_high_water:ref() | undefined
 }.
 
 -type opts() :: #{
@@ -452,7 +453,6 @@ projection's cells from.
 cell_apply_target(ApplierPid) when is_pid(ApplierPid) ->
     gen_server:call(ApplierPid, cell_apply_target, infinity).
 
-
 -spec resolve_logical_event(pid(), term(), term(), term()) ->
     {ok, term() | passthrough} | {error, term()}.
 
@@ -471,22 +471,28 @@ the caller skips the WAL append. Otherwise returns
 `{error, no_cell_apply_target}` if the applier wasn't configured
 with a `cell_apply_target`.
 """.
-resolve_logical_event(ApplierPid, Bucket, Key, Event)
-        when is_pid(ApplierPid) ->
-    gen_server:call(ApplierPid,
-                    {resolve_logical_event, Bucket, Key, Event},
-                    infinity).
+resolve_logical_event(ApplierPid, Bucket, Key, Event) when
+    is_pid(ApplierPid)
+->
+    gen_server:call(
+        ApplierPid,
+        {resolve_logical_event, Bucket, Key, Event},
+        infinity
+    ).
 
 -type install_mode() :: replace | merge.
 
 -spec install_catalogue_batch(
     pid(),
-    [bondy_oplog_transport:cell()] | {install_mode(), [bondy_oplog_transport:cell()]}
+    [bondy_oplog_transport:cell()]
+    | {install_mode(), [bondy_oplog_transport:cell()]}
 ) ->
-    {ok, #{installed := non_neg_integer(),
-           skipped := non_neg_integer(),
-           merged := non_neg_integer(),
-           replaced_no_merge := non_neg_integer()}}
+    {ok, #{
+        installed := non_neg_integer(),
+        skipped := non_neg_integer(),
+        merged := non_neg_integer(),
+        replaced_no_merge := non_neg_integer()
+    }}
     | {error, term()}.
 
 -doc """
@@ -522,12 +528,15 @@ lacks `merge_states/2` and the path fell back to skip-if-older.
 Returns `{error, no_cell_apply_target}` if the applier was not started
 with a `cell_apply_target`.
 """.
-install_catalogue_batch(ApplierPid, Cells)
-        when is_pid(ApplierPid), is_list(Cells) ->
+install_catalogue_batch(ApplierPid, Cells) when
+    is_pid(ApplierPid), is_list(Cells)
+->
     install_catalogue_batch(ApplierPid, {replace, Cells});
-install_catalogue_batch(ApplierPid, {Mode, Cells})
-        when is_pid(ApplierPid), is_list(Cells),
-             (Mode =:= replace orelse Mode =:= merge) ->
+install_catalogue_batch(ApplierPid, {Mode, Cells}) when
+    is_pid(ApplierPid),
+    is_list(Cells),
+    (Mode =:= replace orelse Mode =:= merge)
+->
     gen_server:call(
         ApplierPid, {install_catalogue_batch, Mode, Cells}, infinity
     ).
@@ -558,21 +567,41 @@ do_init(InstanceId, WalDir, CommitEvery, PollMs, Opts) ->
     PublishFun = maps:get(publish_fun, Opts, undefined),
     case resolve_cell_apply_ctx(Opts) of
         {ok, CellCtx} ->
-            do_init_2(InstanceId, WalDir, CommitEvery, PollMs, Opts,
-                AeTargets, PublishNs, PublishFun, CellCtx);
+            do_init_2(
+                InstanceId,
+                WalDir,
+                CommitEvery,
+                PollMs,
+                Opts,
+                AeTargets,
+                PublishNs,
+                PublishFun,
+                CellCtx
+            );
         {error, _} = Err ->
             {stop, Err}
     end.
 
-do_init_2(InstanceId, WalDir, CommitEvery, PollMs, _Opts,
-          AeTargets, PublishNs, PublishFun, CellCtx) ->
+do_init_2(
+    InstanceId,
+    WalDir,
+    CommitEvery,
+    PollMs,
+    _Opts,
+    AeTargets,
+    PublishNs,
+    PublishFun,
+    CellCtx
+) ->
     case resolve_siblings(InstanceId) of
         {ok, InstP, WalP, MST, Watermark} ->
             CO = read_consumer_offset(WalDir),
             StartPos = resume_position(MST, Watermark),
-            case bondy_oplog_wal_reader:open(
-                WalP, StartPos, [{follow, false}]
-            ) of
+            case
+                bondy_oplog_wal_reader:open(
+                    WalP, StartPos, [{follow, false}]
+                )
+            of
                 {ok, Iter} ->
                     {ValidatorMod, ValidatorState} =
                         bondy_oplog_instance:get_validator(InstP),
@@ -647,16 +676,20 @@ resolve_cell_apply_ctx(Opts) ->
             case bondy_db_core_registry:lookup(NS, Index, Shard) of
                 {ok, Entry} ->
                     {ok, #{
-                        shard_key      => Key,
-                        adapter        =>
-                            bondy_db_core_registry:entry_projection_adapter(Entry),
-                        handle         =>
-                            bondy_db_core_registry:entry_projection_handle(Entry),
-                        fold_module    =>
+                        shard_key => Key,
+                        adapter =>
+                            bondy_db_core_registry:entry_projection_adapter(
+                                Entry
+                            ),
+                        handle =>
+                            bondy_db_core_registry:entry_projection_handle(
+                                Entry
+                            ),
+                        fold_module =>
                             bondy_db_core_registry:entry_fold_module(Entry),
-                        cache_adapter  =>
+                        cache_adapter =>
                             bondy_db_core_registry:entry_cache_adapter(Entry),
-                        cache_handle   =>
+                        cache_handle =>
                             bondy_db_core_registry:entry_cache_handle(Entry),
                         high_water_ref =>
                             bondy_db_core_registry:entry_high_water_ref(Entry)
@@ -666,9 +699,16 @@ resolve_cell_apply_ctx(Opts) ->
             end
     end.
 
-handle_call({enqueue_remote, Event}, From,
-            #state{validator_module = Mod, validator_state = VS,
-                   instance_pid = InstP, instance_id = Id} = State) ->
+handle_call(
+    {enqueue_remote, Event},
+    From,
+    #state{
+        validator_module = Mod,
+        validator_state = VS,
+        instance_pid = InstP,
+        instance_id = Id
+    } = State
+) ->
     %% Spawn-and-reply: free the applier mailbox immediately so the WAL
     %% drain (`handle_info(drain, _)`) and other `enqueue_remote` calls
     %% can interleave. The worker captures the read-only validator
@@ -711,24 +751,44 @@ handle_call({enqueue_remote, Event}, From,
         end
     end),
     {noreply, State};
-handle_call(get_projection, _From,
-            #state{fold_module = undefined} = State) ->
+handle_call(
+    get_projection,
+    _From,
+    #state{fold_module = undefined} = State
+) ->
     {reply, {error, no_fold_configured}, State};
-handle_call(get_projection, _From,
-            #state{fold_state = FS} = State) ->
+handle_call(
+    get_projection,
+    _From,
+    #state{fold_state = FS} = State
+) ->
     {reply, {ok, FS}, State};
-handle_call(cell_apply_target, _From,
-            #state{cell_apply_ctx = undefined} = State) ->
+handle_call(
+    cell_apply_target,
+    _From,
+    #state{cell_apply_ctx = undefined} = State
+) ->
     {reply, undefined, State};
-handle_call(cell_apply_target, _From,
-            #state{cell_apply_ctx = #{shard_key := Key}} = State) ->
+handle_call(
+    cell_apply_target,
+    _From,
+    #state{cell_apply_ctx = #{shard_key := Key}} = State
+) ->
     {reply, {ok, Key}, State};
-handle_call({install_catalogue_batch, _Mode, _Cells}, _From,
-            #state{cell_apply_ctx = undefined} = State) ->
+handle_call(
+    {install_catalogue_batch, _Mode, _Cells},
+    _From,
+    #state{cell_apply_ctx = undefined} = State
+) ->
     {reply, {error, no_cell_apply_target}, State};
-handle_call({install_catalogue_batch, Mode, Cells}, _From,
-            #state{cell_apply_ctx = Ctx,
-                   instance_id = Id} = State) ->
+handle_call(
+    {install_catalogue_batch, Mode, Cells},
+    _From,
+    #state{
+        cell_apply_ctx = Ctx,
+        instance_id = Id
+    } = State
+) ->
     Result = do_install_catalogue_batch(Id, Ctx, Mode, Cells),
     {reply, Result, State};
 handle_call(replay_cell_events, _From, State) ->
@@ -737,32 +797,41 @@ handle_call(replay_cell_events, _From, State) ->
     %% up. Callers that need read-your-peers-write semantics use this
     %% instead of the cast.
     {reply, ok, do_replay_cell_events(State)};
-handle_call({resolve_logical_event, _Bucket, _Key, _Event}, _From,
-            #state{cell_apply_ctx = undefined} = State) ->
+handle_call(
+    {resolve_logical_event, _Bucket, _Key, _Event},
+    _From,
+    #state{cell_apply_ctx = undefined} = State
+) ->
     {reply, {error, no_cell_apply_target}, State};
-handle_call({resolve_logical_event, Bucket, Key, Event}, _From,
-            #state{cell_apply_ctx = Ctx} = State) ->
-    #{adapter := Adapter,
-      handle  := Handle,
-      fold_module := Fold} = Ctx,
+handle_call(
+    {resolve_logical_event, Bucket, Key, Event},
+    _From,
+    #state{cell_apply_ctx = Ctx} = State
+) ->
+    #{
+        adapter := Adapter,
+        handle := Handle,
+        fold_module := Fold
+    } = Ctx,
     %% Read current cell state. With single-applier-per-cell, this
     %% read is serialised against the applier's event loop (the
     %% applier's `drain_loop/1` releases between batches; gen_server
     %% calls dispatch between handler returns). The instance defers
     %% WAL append until our reply, so resolve+append is atomic from
     %% the caller's perspective.
-    State0 = case Adapter:get(Handle, Bucket, Key) of
-        not_found ->
-            bondy_oplog_fold:initial_value(Fold);
-        {ok, Frame} ->
-            {_PrevHlc, StateBytes, _ValueBytes} =
-                bondy_oplog_cell_frame:decode_full(Frame),
-            bondy_oplog_fold:decode_state(Fold, StateBytes)
-    end,
+    State0 =
+        case Adapter:get(Handle, Bucket, Key) of
+            not_found ->
+                bondy_oplog_fold:initial_value(Fold);
+            {ok, Frame} ->
+                {_PrevHlc, StateBytes, _ValueBytes} =
+                    bondy_oplog_cell_frame:decode_full(Frame),
+                bondy_oplog_fold:decode_state(Fold, StateBytes)
+        end,
     Reply =
         case bondy_oplog_fold:resolve_event(Fold, State0, Event) of
             passthrough -> {ok, passthrough};
-            Resolved    -> {ok, Resolved}
+            Resolved -> {ok, Resolved}
         end,
     {reply, Reply, State};
 handle_call(_Req, _From, State) ->
@@ -811,8 +880,10 @@ handle_info(drain, State0) ->
         {stop, Reason, State2} ->
             {stop, Reason, State2}
     end;
-handle_info({'DOWN', MRef, process, _Pid, _Reason},
-            #state{idle_waiter = MRef} = State) ->
+handle_info(
+    {'DOWN', MRef, process, _Pid, _Reason},
+    #state{idle_waiter = MRef} = State
+) ->
     %% Our parked idle waiter finished: the WAL's durable position
     %% advanced past our read offset, the await timed out, or the WAL
     %% errored. In every case the right response is to re-drain (if
@@ -834,8 +905,12 @@ handle_info(drain_backstop, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, #state{iter = Iter, consumer_offset = CO,
-                          wal_dir = Dir, uncommitted = N}) ->
+terminate(_Reason, #state{
+    iter = Iter,
+    consumer_offset = CO,
+    wal_dir = Dir,
+    uncommitted = N
+}) ->
     case N > 0 of
         true -> _ = bondy_oplog_wal_state:write_consumer_offset(Dir, CO);
         false -> ok
@@ -1021,7 +1096,10 @@ drain_loop_step(#state{iter = Iter} = State0) ->
             {LastHlc, Count} = batch_summary(Batch),
             State1 = bump_offset(
                 StateA#state{iter = NewIter},
-                NextSeg, NextOff, LastHlc, Count
+                NextSeg,
+                NextOff,
+                LastHlc,
+                Count
             ),
             State2 = maybe_commit(State1),
             drain_loop(State2);
@@ -1050,7 +1128,9 @@ drain_loop_step(#state{iter = Iter} = State0) ->
 %% does not perpetually observe a row whose event the system has
 %% rejected. Subsequent applier passes do not retry rejected events
 %% (replay-from-beginning would just re-fire the same failure).
-apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch) ->
+apply_batch(
+    #state{instance_id = Id, instance_pid = InstancePid} = State, Batch
+) ->
     %% Per-stage timing. Five stages emit `duration_us` + `count`
     %% under `[bondy_oplog, applier, batch_<stage>]` so the bench
     %% harness can compute µs/event-spent-in-this-stage and isolate
@@ -1064,13 +1144,16 @@ apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch)
     {Verified, Rejected} = verify_batch(State, Batch, [], []),
     telemetry:execute(
         [bondy_oplog, applier, batch_verify],
-        #{duration_us => erlang:monotonic_time(microsecond) - VerifyT0,
-          count       => BatchSize},
+        #{
+            duration_us => erlang:monotonic_time(microsecond) - VerifyT0,
+            count => BatchSize
+        },
         #{instance_id => Id}
     ),
     RejectedCount = length(Rejected),
     case Rejected of
-        [] -> ok;
+        [] ->
+            ok;
         _ ->
             ok = evict_rejected_overlay(Id, Rejected),
             %% No `install_local_batch` cast will be issued for these
@@ -1109,8 +1192,11 @@ apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch)
                 S1 = apply_fold_batch(State, FoldEvents),
                 telemetry:execute(
                     [bondy_oplog, applier, batch_fold],
-                    #{duration_us => erlang:monotonic_time(microsecond) - FoldT0,
-                      count       => length(FoldEvents)},
+                    #{
+                        duration_us => erlang:monotonic_time(microsecond) -
+                            FoldT0,
+                        count => length(FoldEvents)
+                    },
                     #{instance_id => Id}
                 ),
 
@@ -1118,8 +1204,11 @@ apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch)
                 S2 = apply_cell_batch(S1, CellEvents),
                 telemetry:execute(
                     [bondy_oplog, applier, batch_cell_apply],
-                    #{duration_us => erlang:monotonic_time(microsecond) - CellT0,
-                      count       => length(CellEvents)},
+                    #{
+                        duration_us => erlang:monotonic_time(microsecond) -
+                            CellT0,
+                        count => length(CellEvents)
+                    },
                     #{instance_id => Id}
                 ),
 
@@ -1127,8 +1216,11 @@ apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch)
                 ok = publish_batch(S2, Verified),
                 telemetry:execute(
                     [bondy_oplog, applier, batch_publish],
-                    #{duration_us => erlang:monotonic_time(microsecond) - PublishT0,
-                      count       => VerifiedCount},
+                    #{
+                        duration_us => erlang:monotonic_time(microsecond) -
+                            PublishT0,
+                        count => VerifiedCount
+                    },
                     #{instance_id => Id}
                 ),
 
@@ -1148,8 +1240,11 @@ apply_batch(#state{instance_id = Id, instance_pid = InstancePid} = State, Batch)
                 ),
                 telemetry:execute(
                     [bondy_oplog, applier, batch_install_cast],
-                    #{duration_us => erlang:monotonic_time(microsecond) - InstallT0,
-                      count       => VerifiedCount},
+                    #{
+                        duration_us => erlang:monotonic_time(microsecond) -
+                            InstallT0,
+                        count => VerifiedCount
+                    },
                     #{instance_id => Id}
                 ),
                 S2
@@ -1196,14 +1291,20 @@ apply_fold_batch(#state{fold_module = undefined} = State, _Verified) ->
     State;
 apply_fold_batch(State, []) ->
     State;
-apply_fold_batch(#state{fold_module = Mod,
-                        fold_state = FS0,
-                        instance_id = Id} = State, Verified) ->
+apply_fold_batch(
+    #state{
+        fold_module = Mod,
+        fold_state = FS0,
+        instance_id = Id
+    } = State,
+    Verified
+) ->
     try
         FS1 = lists:foldl(
             fun(Event, Acc) ->
                 {NewState, _Delta} = bondy_oplog_fold:apply_event(
-                    Mod, Acc,
+                    Mod,
+                    Acc,
                     bondy_oplog_event:op(Event),
                     bondy_oplog_event:key(Event)
                 ),
@@ -1241,11 +1342,16 @@ apply_cell_batch(State, []) ->
     State;
 apply_cell_batch(#state{cell_apply_ctx = undefined} = State, _Events) ->
     State;
-apply_cell_batch(#state{cell_apply_ctx = Ctx,
-                        instance_id = Id} = State, Events) ->
+apply_cell_batch(
+    #state{
+        cell_apply_ctx = Ctx,
+        instance_id = Id
+    } = State,
+    Events
+) ->
     #{adapter := Adapter, handle := Handle, fold_module := Fold} = Ctx,
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
-    CacheHandle  = maps:get(cache_handle,  Ctx, undefined),
+    CacheHandle = maps:get(cache_handle, Ctx, undefined),
     HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
 
     %% PR-PS-15b: collect all per-event writes into a single
@@ -1264,9 +1370,19 @@ apply_cell_batch(#state{cell_apply_ctx = Ctx,
             case bondy_oplog_event:op(Event) of
                 {cell_apply, Bucket, Key, FoldEvent} ->
                     Meta = bondy_oplog_event:key(Event),
-                    case compute_one_cell(Id, Adapter, Handle, Fold,
-                                          WAcc, Bucket, Key,
-                                          FoldEvent, Meta) of
+                    case
+                        compute_one_cell(
+                            Id,
+                            Adapter,
+                            Handle,
+                            Fold,
+                            WAcc,
+                            Bucket,
+                            Key,
+                            FoldEvent,
+                            Meta
+                        )
+                    of
                         {ok, NewFrame, NewHlc} ->
                             WAcc1 = WAcc#{{Bucket, Key} => NewFrame},
                             {WAcc1, max_hlc(HlcAcc, NewHlc)};
@@ -1290,8 +1406,10 @@ apply_cell_batch(#state{cell_apply_ctx = Ctx,
             PutResult = Adapter:put_batch(Handle, Entries),
             telemetry:execute(
                 [bondy_oplog, applier, batch_cell_put],
-                #{duration_us => erlang:monotonic_time(microsecond) - PutT0,
-                  count       => length(Entries)},
+                #{
+                    duration_us => erlang:monotonic_time(microsecond) - PutT0,
+                    count => length(Entries)
+                },
                 #{instance_id => Id}
             ),
             case PutResult of
@@ -1307,7 +1425,7 @@ apply_cell_batch(#state{cell_apply_ctx = Ctx,
                     ),
                     case MaxHlc of
                         undefined -> ok;
-                        _         -> advance_high_water(HighWaterRef, MaxHlc)
+                        _ -> advance_high_water(HighWaterRef, MaxHlc)
                     end;
                 {error, Reason} ->
                     ?LOG_WARNING(#{
@@ -1337,8 +1455,17 @@ apply_cell_batch(#state{cell_apply_ctx = Ctx,
 %% PR-PS-15a `cell_put` and `cell_side_effects` events are GONE in
 %% PR-PS-15b — the put + side-effects now happen once per batch and
 %% are measured by `batch_cell_put` in `apply_cell_batch/2`.
-compute_one_cell(Id, Adapter, Handle, Fold, LocalWrites, Bucket, Key,
-                 FoldEvent, Meta) ->
+compute_one_cell(
+    Id,
+    Adapter,
+    Handle,
+    Fold,
+    LocalWrites,
+    Bucket,
+    Key,
+    FoldEvent,
+    Meta
+) ->
     try
         ReadT0 = erlang:monotonic_time(microsecond),
         {OldState, OldValueOpt} =
@@ -1350,14 +1477,20 @@ compute_one_cell(Id, Adapter, Handle, Fold, LocalWrites, Bucket, Key,
                         {ok, OldFrame} ->
                             {_PrevHlc, OldStateBytes, OldValueBytes} =
                                 bondy_oplog_cell_frame:decode_full(OldFrame),
-                            {bondy_oplog_fold:decode_state(Fold, OldStateBytes),
-                             OldValueBytes}
+                            {
+                                bondy_oplog_fold:decode_state(
+                                    Fold, OldStateBytes
+                                ),
+                                OldValueBytes
+                            }
                     end;
                 LocalFrame ->
                     {_PrevHlc, LStateBytes, LValueBytes} =
                         bondy_oplog_cell_frame:decode_full(LocalFrame),
-                    {bondy_oplog_fold:decode_state(Fold, LStateBytes),
-                     LValueBytes}
+                    {
+                        bondy_oplog_fold:decode_state(Fold, LStateBytes),
+                        LValueBytes
+                    }
             end,
         telemetry:execute(
             [bondy_oplog, applier, cell_read],
@@ -1372,7 +1505,9 @@ compute_one_cell(Id, Adapter, Handle, Fold, LocalWrites, Bucket, Key,
         NewStateBytes = bondy_oplog_fold:encode_state(Fold, NewState),
         NewValueBytes = compose_value_bytes(Fold, OldValueOpt, Delta),
         NewFrame = bondy_oplog_cell_frame:encode(
-            Hlc, NewStateBytes, NewValueBytes,
+            Hlc,
+            NewStateBytes,
+            NewValueBytes,
             bondy_oplog_fold:value_equals_state(Fold)
         ),
         telemetry:execute(
@@ -1421,9 +1556,13 @@ max_hlc(_, B) -> B.
 %% boot time are observed; subsequent replays use the diff.
 do_replay_cell_events(#state{cell_apply_ctx = undefined} = State) ->
     State;
-do_replay_cell_events(#state{cell_apply_ctx = Ctx,
-                             instance_id = Id,
-                             last_replayed_root = LastRoot} = State) ->
+do_replay_cell_events(
+    #state{
+        cell_apply_ctx = Ctx,
+        instance_id = Id,
+        last_replayed_root = LastRoot
+    } = State
+) ->
     case bondy_oplog_registry:mst(Id) of
         undefined ->
             State;
@@ -1434,8 +1573,11 @@ do_replay_cell_events(#state{cell_apply_ctx = Ctx,
                     telemetry:execute(
                         [bondy_oplog, applier, replay_cell_events],
                         #{cells_applied => 0, pairs => 0},
-                        #{instance_id => Id, outcome => no_change,
-                          incremental => LastRoot =/= undefined}
+                        #{
+                            instance_id => Id,
+                            outcome => no_change,
+                            incremental => LastRoot =/= undefined
+                        }
                     ),
                     State;
                 _ ->
@@ -1450,8 +1592,11 @@ do_replay_cell_events(#state{cell_apply_ctx = Ctx,
                     telemetry:execute(
                         [bondy_oplog, applier, replay_cell_events],
                         #{cells_applied => Count, pairs => length(Pairs)},
-                        #{instance_id => Id, outcome => applied,
-                          incremental => LastRoot =/= undefined}
+                        #{
+                            instance_id => Id,
+                            outcome => applied,
+                            incremental => LastRoot =/= undefined
+                        }
                     ),
                     State#state{last_replayed_root = CurrentRoot}
             end
@@ -1494,16 +1639,33 @@ diff_pairs(MST, LastRoot, Id) ->
 apply_cell_pairs(Ctx, Id, Pairs) ->
     #{adapter := Adapter, handle := Handle, fold_module := Fold} = Ctx,
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
-    CacheHandle  = maps:get(cache_handle,  Ctx, undefined),
+    CacheHandle = maps:get(cache_handle, Ctx, undefined),
     HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
     try
         {LocalWrites, MaxHlc, N} = lists:foldl(
             fun
-                ({MstKey, {{cell_apply, Bucket, CellKey, FoldEvent},
-                           _Meta, _Prev, _Sig}}, {WAcc, HlcAcc, NAcc}) ->
-                    case compute_one_cell(Id, Adapter, Handle, Fold,
-                                          WAcc, Bucket, CellKey,
-                                          FoldEvent, MstKey) of
+                (
+                    {MstKey, {
+                        {cell_apply, Bucket, CellKey, FoldEvent},
+                        _Meta,
+                        _Prev,
+                        _Sig
+                    }},
+                    {WAcc, HlcAcc, NAcc}
+                ) ->
+                    case
+                        compute_one_cell(
+                            Id,
+                            Adapter,
+                            Handle,
+                            Fold,
+                            WAcc,
+                            Bucket,
+                            CellKey,
+                            FoldEvent,
+                            MstKey
+                        )
+                    of
                         {ok, NewFrame, NewHlc} ->
                             WAcc1 = WAcc#{{Bucket, CellKey} => NewFrame},
                             {WAcc1, max_hlc(HlcAcc, NewHlc), NAcc + 1};
@@ -1517,14 +1679,20 @@ apply_cell_pairs(Ctx, Id, Pairs) ->
             Pairs
         ),
         case map_size(LocalWrites) of
-            0 -> ok;
+            0 ->
+                ok;
             _ ->
-                Entries = [{B, K, F} || {{B, K}, F} <- maps:to_list(LocalWrites)],
+                Entries = [
+                    {B, K, F}
+                 || {{B, K}, F} <- maps:to_list(LocalWrites)
+                ],
                 case Adapter:put_batch(Handle, Entries) of
                     ok ->
                         maps:foreach(
                             fun({B, K}, _F) ->
-                                invalidate_cache(CacheAdapter, CacheHandle, B, K)
+                                invalidate_cache(
+                                    CacheAdapter, CacheHandle, B, K
+                                )
                             end,
                             LocalWrites
                         ),
@@ -1587,14 +1755,15 @@ compose_value_bytes(Fold, OldValueOpt, Delta) ->
             undefined;
         false ->
             OldValue = decode_old_value(Fold, OldValueOpt),
-            NewValue = case Delta of
-                none ->
-                    OldValue;
-                _ ->
-                    bondy_oplog_fold:apply_value_delta(
-                        Fold, OldValue, Delta
-                    )
-            end,
+            NewValue =
+                case Delta of
+                    none ->
+                        OldValue;
+                    _ ->
+                        bondy_oplog_fold:apply_value_delta(
+                            Fold, OldValue, Delta
+                        )
+                end,
             term_to_binary(NewValue)
     end.
 
@@ -1653,37 +1822,72 @@ advance_high_water(Ref, Hlc) ->
 %% skip-if-older replacement.
 do_install_catalogue_batch(Id, Ctx, Mode, Cells) ->
     #{
-        adapter        := Adapter,
-        handle         := Handle,
-        cache_adapter  := CacheAdapter,
-        cache_handle   := CacheHandle,
+        adapter := Adapter,
+        handle := Handle,
+        cache_adapter := CacheAdapter,
+        cache_handle := CacheHandle,
         high_water_ref := HighWaterRef,
-        fold_module    := Fold
+        fold_module := Fold
     } = Ctx,
     Counts = lists:foldl(
         fun(Cell, Acc) ->
-            install_one_cell(Id, Mode, Fold, Adapter, Handle,
-                             CacheAdapter, CacheHandle,
-                             HighWaterRef, Cell, Acc)
+            install_one_cell(
+                Id,
+                Mode,
+                Fold,
+                Adapter,
+                Handle,
+                CacheAdapter,
+                CacheHandle,
+                HighWaterRef,
+                Cell,
+                Acc
+            )
         end,
-        #{installed => 0, skipped => 0,
-          merged => 0, replaced_no_merge => 0},
+        #{
+            installed => 0,
+            skipped => 0,
+            merged => 0,
+            replaced_no_merge => 0
+        },
         Cells
     ),
     {ok, Counts}.
 
 %% @private
-install_one_cell(Id, Mode, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
-                 HighWaterRef, {Bucket, Key, Frame}, Acc) ->
+install_one_cell(
+    Id,
+    Mode,
+    Fold,
+    Adapter,
+    Handle,
+    CacheAdapter,
+    CacheHandle,
+    HighWaterRef,
+    {Bucket, Key, Frame},
+    Acc
+) ->
     try bondy_oplog_cell_frame:decode_full(Frame) of
         {IncomingHlc, IncomingStateBytes, _IncomingValueBytes} ->
             Existing = read_existing_for_install(
                 Mode, Adapter, Handle, Bucket, Key
             ),
             handle_cell(
-                Id, Mode, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
-                HighWaterRef, Bucket, Key, Frame,
-                IncomingHlc, IncomingStateBytes, Existing, Acc
+                Id,
+                Mode,
+                Fold,
+                Adapter,
+                Handle,
+                CacheAdapter,
+                CacheHandle,
+                HighWaterRef,
+                Bucket,
+                Key,
+                Frame,
+                IncomingHlc,
+                IncomingStateBytes,
+                Existing,
+                Acc
             )
     catch
         C:R:St ->
@@ -1694,7 +1898,9 @@ install_one_cell(Id, Mode, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
                 instance_id => Id,
                 bucket => Bucket,
                 cell_key => Key,
-                class => C, reason => R, stacktrace => St
+                class => C,
+                reason => R,
+                stacktrace => St
             }),
             bump(skipped, Acc)
     end.
@@ -1753,37 +1959,98 @@ adapter_head_hlc(Adapter, Handle, Bucket, Key) ->
     end.
 
 %% @private
-handle_cell(_Id, _Mode, _Fold, Adapter, Handle, CacheAdapter, CacheHandle,
-            HighWaterRef, Bucket, Key, Frame, IncomingHlc,
-            _IncomingStateBytes, not_found, Acc) ->
+handle_cell(
+    _Id,
+    _Mode,
+    _Fold,
+    Adapter,
+    Handle,
+    CacheAdapter,
+    CacheHandle,
+    HighWaterRef,
+    Bucket,
+    Key,
+    Frame,
+    IncomingHlc,
+    _IncomingStateBytes,
+    not_found,
+    Acc
+) ->
     %% No local cell — install verbatim under both modes.
     install_cell_unchecked(
-        Adapter, Handle, CacheAdapter, CacheHandle, HighWaterRef,
-        Bucket, Key, Frame, IncomingHlc
+        Adapter,
+        Handle,
+        CacheAdapter,
+        CacheHandle,
+        HighWaterRef,
+        Bucket,
+        Key,
+        Frame,
+        IncomingHlc
     ),
     bump(installed, Acc);
-handle_cell(Id, replace, _Fold, Adapter, Handle, CacheAdapter, CacheHandle,
-            HighWaterRef, Bucket, Key, Frame, IncomingHlc,
-            _IncomingStateBytes, {ok, ExistingHlc, _ExistingStateBytes}, Acc) ->
+handle_cell(
+    Id,
+    replace,
+    _Fold,
+    Adapter,
+    Handle,
+    CacheAdapter,
+    CacheHandle,
+    HighWaterRef,
+    Bucket,
+    Key,
+    Frame,
+    IncomingHlc,
+    _IncomingStateBytes,
+    {ok, ExistingHlc, _ExistingStateBytes},
+    Acc
+) ->
     case IncomingHlc > ExistingHlc of
         true ->
             install_cell_unchecked(
-                Adapter, Handle, CacheAdapter, CacheHandle, HighWaterRef,
-                Bucket, Key, Frame, IncomingHlc
+                Adapter,
+                Handle,
+                CacheAdapter,
+                CacheHandle,
+                HighWaterRef,
+                Bucket,
+                Key,
+                Frame,
+                IncomingHlc
             ),
             bump(installed, Acc);
         false ->
             telemetry:execute(
                 [bondy_oplog, applier, catalogue_bootstrap, cell_skipped],
                 #{count => 1},
-                #{instance_id => Id, bucket => Bucket, cell_key => Key,
-                  incoming_hlc => IncomingHlc, existing_hlc => ExistingHlc}
+                #{
+                    instance_id => Id,
+                    bucket => Bucket,
+                    cell_key => Key,
+                    incoming_hlc => IncomingHlc,
+                    existing_hlc => ExistingHlc
+                }
             ),
             bump(skipped, Acc)
     end;
-handle_cell(Id, merge, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
-            HighWaterRef, Bucket, Key, _Frame, IncomingHlc,
-            IncomingStateBytes, {ok, ExistingHlc, ExistingStateBytes}, Acc) ->
+handle_cell(
+    Id,
+    merge,
+    Fold,
+    Adapter,
+    Handle,
+    CacheAdapter,
+    CacheHandle,
+    HighWaterRef,
+    Bucket,
+    Key,
+    _Frame,
+    IncomingHlc,
+    IncomingStateBytes,
+    {ok, ExistingHlc, ExistingStateBytes},
+    Acc
+) ->
     try
         IncomingState = bondy_oplog_fold:decode_state(Fold, IncomingStateBytes),
         ExistingState = bondy_oplog_fold:decode_state(Fold, ExistingStateBytes),
@@ -1796,22 +2063,39 @@ handle_cell(Id, merge, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
             Fold, MergedState, MergedStateBytes
         ),
         MergedFrame = bondy_oplog_cell_frame:encode(
-            MergedHlc, MergedStateBytes, MergedValueBytes,
+            MergedHlc,
+            MergedStateBytes,
+            MergedValueBytes,
             bondy_oplog_fold:value_equals_state(Fold)
         ),
         install_cell_unchecked(
-            Adapter, Handle, CacheAdapter, CacheHandle, HighWaterRef,
-            Bucket, Key, MergedFrame, MergedHlc
+            Adapter,
+            Handle,
+            CacheAdapter,
+            CacheHandle,
+            HighWaterRef,
+            Bucket,
+            Key,
+            MergedFrame,
+            MergedHlc
         ),
         bump(merged, Acc)
     catch
         error:{merge_states_not_supported, _} ->
             telemetry:execute(
-                [bondy_oplog, applier, catalogue_bootstrap,
-                 presence_basic_replaced],
+                [
+                    bondy_oplog,
+                    applier,
+                    catalogue_bootstrap,
+                    presence_basic_replaced
+                ],
                 #{count => 1},
-                #{instance_id => Id, bucket => Bucket, cell_key => Key,
-                  fold_module => Fold}
+                #{
+                    instance_id => Id,
+                    bucket => Bucket,
+                    cell_key => Key,
+                    fold_module => Fold
+                }
             ),
             ?LOG_WARNING(#{
                 description =>
@@ -1823,12 +2107,23 @@ handle_cell(Id, merge, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
                 cell_key => Key,
                 fold_module => Fold
             }),
-            handle_cell(Id, replace, Fold, Adapter, Handle,
-                        CacheAdapter, CacheHandle, HighWaterRef,
-                        Bucket, Key, _Frame, IncomingHlc,
-                        IncomingStateBytes,
-                        {ok, ExistingHlc, ExistingStateBytes},
-                        bump(replaced_no_merge, Acc));
+            handle_cell(
+                Id,
+                replace,
+                Fold,
+                Adapter,
+                Handle,
+                CacheAdapter,
+                CacheHandle,
+                HighWaterRef,
+                Bucket,
+                Key,
+                _Frame,
+                IncomingHlc,
+                IncomingStateBytes,
+                {ok, ExistingHlc, ExistingStateBytes},
+                bump(replaced_no_merge, Acc)
+            );
         C:R:St ->
             ?LOG_WARNING(#{
                 description =>
@@ -1836,7 +2131,9 @@ handle_cell(Id, merge, Fold, Adapter, Handle, CacheAdapter, CacheHandle,
                 instance_id => Id,
                 bucket => Bucket,
                 cell_key => Key,
-                class => C, reason => R, stacktrace => St
+                class => C,
+                reason => R,
+                stacktrace => St
             }),
             bump(skipped, Acc)
     end.
@@ -1858,8 +2155,17 @@ bump(Key, Acc) ->
     maps:update_with(Key, fun(X) -> X + 1 end, Acc).
 
 %% @private
-install_cell_unchecked(Adapter, Handle, CacheAdapter, CacheHandle,
-                       HighWaterRef, Bucket, Key, Frame, Hlc) ->
+install_cell_unchecked(
+    Adapter,
+    Handle,
+    CacheAdapter,
+    CacheHandle,
+    HighWaterRef,
+    Bucket,
+    Key,
+    Frame,
+    Hlc
+) ->
     case Adapter:put_batch(Handle, [{Bucket, Key, Frame}]) of
         ok ->
             invalidate_cache(CacheAdapter, CacheHandle, Bucket, Key),
@@ -1905,15 +2211,18 @@ evict_rejected_overlay(InstanceId, Events) ->
                 fun(Event) ->
                     Key = bondy_oplog_event:key(Event),
                     Hlc = bondy_oplog_event:key_hlc(Key),
-                    _ = try
-                        ets:select_delete(Tab, [{
-                            {Key, '_', '$1', '_'},
-                            [{'=<', '$1', Hlc}],
-                            [true]
-                        }])
-                    catch
-                        error:badarg -> 0
-                    end
+                    _ =
+                        try
+                            ets:select_delete(Tab, [
+                                {
+                                    {Key, '_', '$1', '_'},
+                                    [{'=<', '$1', Hlc}],
+                                    [true]
+                                }
+                            ])
+                        catch
+                            error:badarg -> 0
+                        end
                 end,
                 Events
             ),
@@ -1932,10 +2241,14 @@ verify_event(#state{validator_module = Mod, validator_state = VS}, Event) ->
 %% cannot wedge the applier. In-flight `enqueue_remote` workers
 %% captured the old snapshot before this cast was processed and
 %% continue to use it — there is no mid-flight swap.
-do_refresh_validator(Reason,
-                     #state{instance_id = Id,
-                            validator_module = Mod,
-                            validator_state = VS} = State) ->
+do_refresh_validator(
+    Reason,
+    #state{
+        instance_id = Id,
+        validator_module = Mod,
+        validator_state = VS
+    } = State
+) ->
     case erlang:function_exported(Mod, refresh, 1) of
         false ->
             ?LOG_DEBUG(#{
@@ -1950,8 +2263,12 @@ do_refresh_validator(Reason,
             telemetry:execute(
                 [bondy_oplog, applier, validator_refresh],
                 #{count => 1},
-                #{instance_id => Id, validator => Mod,
-                  outcome => unsupported, refresh_reason => Reason}
+                #{
+                    instance_id => Id,
+                    validator => Mod,
+                    outcome => unsupported,
+                    refresh_reason => Reason
+                }
             ),
             State;
         true ->
@@ -1968,8 +2285,12 @@ do_refresh_validator(Reason,
                     telemetry:execute(
                         [bondy_oplog, applier, validator_refresh],
                         #{count => 1},
-                        #{instance_id => Id, validator => Mod,
-                          outcome => ok, refresh_reason => Reason}
+                        #{
+                            instance_id => Id,
+                            validator => Mod,
+                            outcome => ok,
+                            refresh_reason => Reason
+                        }
                     ),
                     State#state{validator_state = NewVS};
                 {error, RefreshReason} ->
@@ -1986,9 +2307,13 @@ do_refresh_validator(Reason,
                     telemetry:execute(
                         [bondy_oplog, applier, validator_refresh],
                         #{count => 1},
-                        #{instance_id => Id, validator => Mod,
-                          outcome => error, refresh_reason => Reason,
-                          error => RefreshReason}
+                        #{
+                            instance_id => Id,
+                            validator => Mod,
+                            outcome => error,
+                            refresh_reason => Reason,
+                            error => RefreshReason
+                        }
                     ),
                     State
             catch
@@ -2007,9 +2332,14 @@ do_refresh_validator(Reason,
                     telemetry:execute(
                         [bondy_oplog, applier, validator_refresh],
                         #{count => 1},
-                        #{instance_id => Id, validator => Mod,
-                          outcome => crashed, refresh_reason => Reason,
-                          class => C, error => R}
+                        #{
+                            instance_id => Id,
+                            validator => Mod,
+                            outcome => crashed,
+                            refresh_reason => Reason,
+                            class => C,
+                            error => R
+                        }
                     ),
                     State
             end
@@ -2060,8 +2390,13 @@ batch_summary(Batch) ->
     {LastHlc, length(Batch)}.
 
 %% @private
-bump_offset(#state{consumer_offset = CO0, uncommitted = U} = State,
-            Seg, Off, LastHlc, Count) ->
+bump_offset(
+    #state{consumer_offset = CO0, uncommitted = U} = State,
+    Seg,
+    Off,
+    LastHlc,
+    Count
+) ->
     CO1 = bondy_oplog_wal_state:with_position(CO0, Seg, Off),
     CO2 = bondy_oplog_wal_state:with_hlc(CO1, LastHlc),
     Old = bondy_oplog_wal_state:commit_count(CO2),
@@ -2069,8 +2404,9 @@ bump_offset(#state{consumer_offset = CO0, uncommitted = U} = State,
     State#state{consumer_offset = CO3, uncommitted = U + Count}.
 
 %% @private
-maybe_commit(#state{uncommitted = U, commit_every = N} = State)
-        when U >= N ->
+maybe_commit(#state{uncommitted = U, commit_every = N} = State) when
+    U >= N
+->
     commit_now(State);
 maybe_commit(State) ->
     State.
@@ -2078,13 +2414,15 @@ maybe_commit(State) ->
 %% @private
 commit_now(#state{uncommitted = 0} = State) ->
     State;
-commit_now(#state{
-    instance_id = InstanceId,
-    instance_pid = InstancePid,
-    wal_dir = Dir,
-    wal_pid = WalPid,
-    consumer_offset = CO
-} = State) ->
+commit_now(
+    #state{
+        instance_id = InstanceId,
+        instance_pid = InstancePid,
+        wal_dir = Dir,
+        wal_pid = WalPid,
+        consumer_offset = CO
+    } = State
+) ->
     %% Drain barrier: block until the instance has processed every
     %% `install_local_batch` cast we issued before this commit. The
     %% FIFO mailbox ordering of casts and the synchronous call
@@ -2242,9 +2580,12 @@ validate_cell_apply_target(Opts) ->
     case maps:get(cell_apply_target, Opts, undefined) of
         undefined ->
             ok;
-        {NS, Index, Shard}
-                when is_atom(NS), is_atom(Index),
-                     is_integer(Shard), Shard >= 0 ->
+        {NS, Index, Shard} when
+            is_atom(NS),
+            is_atom(Index),
+            is_integer(Shard),
+            Shard >= 0
+        ->
             ok;
         Bad ->
             {error, {invalid_cell_apply_target, Bad}}
@@ -2252,9 +2593,12 @@ validate_cell_apply_target(Opts) ->
 
 validate_ae_targets([]) ->
     ok;
-validate_ae_targets([{NS, Index, Shard} | Rest])
-        when is_atom(NS), is_atom(Index),
-             is_integer(Shard), Shard >= 0 ->
+validate_ae_targets([{NS, Index, Shard} | Rest]) when
+    is_atom(NS),
+    is_atom(Index),
+    is_integer(Shard),
+    Shard >= 0
+->
     validate_ae_targets(Rest);
 validate_ae_targets([Bad | _]) ->
     {error, {invalid_ae_target, Bad}};
@@ -2262,7 +2606,7 @@ validate_ae_targets(Bad) ->
     {error, {invalid_ae_targets, Bad}}.
 
 validate_publish_opts(Opts) ->
-    NS  = maps:get(publish_ns, Opts, undefined),
+    NS = maps:get(publish_ns, Opts, undefined),
     Fun = maps:get(publish_fun, Opts, undefined),
     case {NS, Fun} of
         {undefined, undefined} -> ok;
@@ -2280,8 +2624,14 @@ publish_batch(#state{publish_ns = undefined}, _Verified) ->
     ok;
 publish_batch(#state{publish_fun = undefined}, _Verified) ->
     ok;
-publish_batch(#state{instance_id = Id, publish_ns = NS,
-                     publish_fun = Fun}, Verified) ->
+publish_batch(
+    #state{
+        instance_id = Id,
+        publish_ns = NS,
+        publish_fun = Fun
+    },
+    Verified
+) ->
     {Count, Skipped} = lists:foldl(
         fun(Event, {C, S}) ->
             case derive_publish(Fun, Event, Id) of
@@ -2307,9 +2657,11 @@ publish_batch(#state{instance_id = Id, publish_ns = NS,
 
 derive_publish(Fun, Event, InstanceId) ->
     try Fun(Event) of
-        skip            -> skip;
-        {K, Op}         -> {K, Op};
-        Bad             ->
+        skip ->
+            skip;
+        {K, Op} ->
+            {K, Op};
+        Bad ->
             log_publish_fun_bad_return(InstanceId, Event, Bad),
             skip
     catch

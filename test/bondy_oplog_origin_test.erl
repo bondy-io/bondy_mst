@@ -102,10 +102,14 @@ new_is_fresh_each_call_test() ->
 validate_test_() ->
     [
         ?_assertEqual(ok, bondy_oplog_origin:validate(<<1, 2, 3>>)),
-        ?_assertEqual({error, invalid_origin},
-                      bondy_oplog_origin:validate(<<>>)),
-        ?_assertEqual({error, invalid_origin},
-                      bondy_oplog_origin:validate(not_a_binary))
+        ?_assertEqual(
+            {error, invalid_origin},
+            bondy_oplog_origin:validate(<<>>)
+        ),
+        ?_assertEqual(
+            {error, invalid_origin},
+            bondy_oplog_origin:validate(not_a_binary)
+        )
     ].
 
 %% -----------------------------------------------------------------------------

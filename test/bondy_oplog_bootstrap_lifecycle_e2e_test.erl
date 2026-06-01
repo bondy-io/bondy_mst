@@ -199,7 +199,7 @@ rm_rf(Dir0) ->
                 fun(E) ->
                     P = filename:join(Dir, E),
                     case filelib:is_dir(P) of
-                        true  -> rm_rf(P);
+                        true -> rm_rf(P);
                         false -> file:delete(P)
                     end
                 end,

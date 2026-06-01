@@ -80,8 +80,8 @@ Where `ValueBytes` is `ValueBin` (HasValueColumn=1) or `StateBin`
 -export_type([frame/0]).
 -export_type([head_metadata/0]).
 
--type frame()          :: binary().
--type head_metadata()  :: binary().
+-type frame() :: binary().
+-type head_metadata() :: binary().
 
 -export([encode/4]).
 -export([decode_full/1]).
@@ -118,23 +118,19 @@ encode(Hlc, StateBytes, undefined, true) when
     is_integer(Hlc), Hlc >= 0, is_binary(StateBytes)
 ->
     StateLen = byte_size(StateBytes),
-    <<?VERSION:8,
-      ?NO_VALUE_COLUMN:1, 0:7,
-      ?HLC_BYTES:16/big-unsigned, Hlc:64/big-unsigned,
-      StateLen:32/big-unsigned, StateBytes/binary>>;
-
+    <<?VERSION:8, ?NO_VALUE_COLUMN:1, 0:7, ?HLC_BYTES:16/big-unsigned,
+        Hlc:64/big-unsigned, StateLen:32/big-unsigned, StateBytes/binary>>;
 encode(Hlc, StateBytes, ValueBytes, false) when
-    is_integer(Hlc), Hlc >= 0,
-    is_binary(StateBytes), is_binary(ValueBytes)
+    is_integer(Hlc),
+    Hlc >= 0,
+    is_binary(StateBytes),
+    is_binary(ValueBytes)
 ->
     StateLen = byte_size(StateBytes),
     ValueLen = byte_size(ValueBytes),
-    <<?VERSION:8,
-      ?HAS_VALUE_COLUMN:1, 0:7,
-      ?HLC_BYTES:16/big-unsigned, Hlc:64/big-unsigned,
-      StateLen:32/big-unsigned, StateBytes/binary,
-      ValueLen:32/big-unsigned, ValueBytes/binary>>.
-
+    <<?VERSION:8, ?HAS_VALUE_COLUMN:1, 0:7, ?HLC_BYTES:16/big-unsigned,
+        Hlc:64/big-unsigned, StateLen:32/big-unsigned, StateBytes/binary,
+        ValueLen:32/big-unsigned, ValueBytes/binary>>.
 
 -doc """
 Decode a V2 cell frame into `{Hlc, StateBytes, ValueBytes}`.
@@ -146,11 +142,11 @@ value bytes for those folds use `StateBytes` directly.
 -spec decode_full(frame()) ->
     {bondy_oplog_hlc:hlc(), binary(), binary() | undefined}.
 
-decode_full(<<?VERSION:8,
-              HasValueColumn:1, _Reserved:7,
-              HlcLen:16/big-unsigned, HlcBin:HlcLen/binary,
-              StateLen:32/big-unsigned, StateBytes:StateLen/binary,
-              Rest/binary>>) ->
+decode_full(
+    <<?VERSION:8, HasValueColumn:1, _Reserved:7, HlcLen:16/big-unsigned,
+        HlcBin:HlcLen/binary, StateLen:32/big-unsigned,
+        StateBytes:StateLen/binary, Rest/binary>>
+) ->
     Hlc = binary:decode_unsigned(HlcBin, big),
     case HasValueColumn of
         ?HAS_VALUE_COLUMN ->
@@ -160,7 +156,6 @@ decode_full(<<?VERSION:8,
             <<>> = Rest,
             {Hlc, StateBytes, undefined}
     end.
-
 
 -doc """
 Project a V2 frame to the HEAD wire format
@@ -178,11 +173,11 @@ their `head/3` callback as `extract_head(get(Handle, Bucket, Key))`.
 """.
 -spec extract_head(frame()) -> head_metadata().
 
-extract_head(<<?VERSION:8,
-               HasValueColumn:1, _Reserved:7,
-               HlcLen:16/big-unsigned, HlcBin:HlcLen/binary,
-               StateLen:32/big-unsigned, StateBytes:StateLen/binary,
-               Rest/binary>>) ->
+extract_head(
+    <<?VERSION:8, HasValueColumn:1, _Reserved:7, HlcLen:16/big-unsigned,
+        HlcBin:HlcLen/binary, StateLen:32/big-unsigned,
+        StateBytes:StateLen/binary, Rest/binary>>
+) ->
     case HasValueColumn of
         ?HAS_VALUE_COLUMN ->
             <<ValueLen:32/big-unsigned, ValueBytes:ValueLen/binary>> = Rest,
@@ -191,7 +186,6 @@ extract_head(<<?VERSION:8,
             <<>> = Rest,
             <<HlcLen:16/big-unsigned, HlcBin/binary, StateBytes/binary>>
     end.
-
 
 -doc """
 Decode the HEAD wire format produced by `extract_head/1` (or by the
@@ -203,11 +197,11 @@ Total over well-formed HEAD bytes; malformed input raises
 """.
 -spec decode_head(head_metadata()) -> {bondy_oplog_hlc:hlc(), binary()}.
 
-decode_head(<<HlcLen:16/big-unsigned, HlcBin:HlcLen/binary,
-              ValueBytes/binary>>) ->
+decode_head(
+    <<HlcLen:16/big-unsigned, HlcBin:HlcLen/binary, ValueBytes/binary>>
+) ->
     Hlc = binary:decode_unsigned(HlcBin, big),
     {Hlc, ValueBytes}.
-
 
 -spec encoded_size(
     StateBytes :: non_neg_integer(),
@@ -220,10 +214,11 @@ encoded_size(StateSize, undefined, true) when
 ->
     %% 1 (version) + 1 (flag byte) + 2 + ?HLC_BYTES + 4 + StateSize.
     1 + 1 + 2 + ?HLC_BYTES + 4 + StateSize;
-
 encoded_size(StateSize, ValueSize, false) when
-    is_integer(StateSize), StateSize >= 0,
-    is_integer(ValueSize), ValueSize >= 0
+    is_integer(StateSize),
+    StateSize >= 0,
+    is_integer(ValueSize),
+    ValueSize >= 0
 ->
     %% Same as above plus 4 + ValueSize for the optional value column.
     1 + 1 + 2 + ?HLC_BYTES + 4 + StateSize + 4 + ValueSize.

@@ -42,30 +42,38 @@ init_returns_handle() ->
 get_after_put_returns_value() ->
     {ok, H} = bondy_oplog_cache_ets:init(ns, primary, 0, #{}),
     ok = bondy_oplog_cache_ets:put(H, ?B, <<"k">>, {<<"v">>, 42}),
-    ?assertEqual({ok, {<<"v">>, 42}},
-                 bondy_oplog_cache_ets:get(H, ?B, <<"k">>)),
+    ?assertEqual(
+        {ok, {<<"v">>, 42}},
+        bondy_oplog_cache_ets:get(H, ?B, <<"k">>)
+    ),
     ok = bondy_oplog_cache_ets:invalidate_all(H).
 
 get_missing_returns_not_found() ->
     {ok, H} = bondy_oplog_cache_ets:init(ns, primary, 0, #{}),
-    ?assertEqual(not_found,
-                 bondy_oplog_cache_ets:get(H, ?B, <<"absent">>)),
+    ?assertEqual(
+        not_found,
+        bondy_oplog_cache_ets:get(H, ?B, <<"absent">>)
+    ),
     ok = bondy_oplog_cache_ets:invalidate_all(H).
 
 put_overwrites_existing_entry() ->
     {ok, H} = bondy_oplog_cache_ets:init(ns, primary, 0, #{}),
     ok = bondy_oplog_cache_ets:put(H, ?B, <<"k">>, {<<"v1">>, 1}),
     ok = bondy_oplog_cache_ets:put(H, ?B, <<"k">>, {<<"v2">>, 2}),
-    ?assertEqual({ok, {<<"v2">>, 2}},
-                 bondy_oplog_cache_ets:get(H, ?B, <<"k">>)),
+    ?assertEqual(
+        {ok, {<<"v2">>, 2}},
+        bondy_oplog_cache_ets:get(H, ?B, <<"k">>)
+    ),
     ok = bondy_oplog_cache_ets:invalidate_all(H).
 
 delete_removes_entry() ->
     {ok, H} = bondy_oplog_cache_ets:init(ns, primary, 0, #{}),
     ok = bondy_oplog_cache_ets:put(H, ?B, <<"k">>, {<<"v">>, 1}),
     ok = bondy_oplog_cache_ets:delete(H, ?B, <<"k">>),
-    ?assertEqual(not_found,
-                 bondy_oplog_cache_ets:get(H, ?B, <<"k">>)),
+    ?assertEqual(
+        not_found,
+        bondy_oplog_cache_ets:get(H, ?B, <<"k">>)
+    ),
     ok = bondy_oplog_cache_ets:invalidate_all(H).
 
 delete_missing_is_ok() ->
@@ -75,11 +83,15 @@ delete_missing_is_ok() ->
 
 invalidate_all_clears_table() ->
     {ok, H} = bondy_oplog_cache_ets:init(ns, primary, 0, #{}),
-    [bondy_oplog_cache_ets:put(H, ?B, K, {V, V})
-     || {K, V} <- [{<<"a">>, 1}, {<<"b">>, 2}, {<<"c">>, 3}]],
+    [
+        bondy_oplog_cache_ets:put(H, ?B, K, {V, V})
+     || {K, V} <- [{<<"a">>, 1}, {<<"b">>, 2}, {<<"c">>, 3}]
+    ],
     ok = bondy_oplog_cache_ets:invalidate_all(H),
-    [?assertEqual(not_found, bondy_oplog_cache_ets:get(H, ?B, K))
-     || K <- [<<"a">>, <<"b">>, <<"c">>]].
+    [
+        ?assertEqual(not_found, bondy_oplog_cache_ets:get(H, ?B, K))
+     || K <- [<<"a">>, <<"b">>, <<"c">>]
+    ].
 
 info_reports_size() ->
     {ok, H} = bondy_oplog_cache_ets:init(ns, primary, 0, #{}),
@@ -91,8 +103,10 @@ info_reports_size() ->
 
 max_entries_evicts_overflow() ->
     {ok, H} = bondy_oplog_cache_ets:init(ns, primary, 0, #{max_entries => 3}),
-    [bondy_oplog_cache_ets:put(H, ?B, K, {K, 1})
-     || K <- [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>]],
+    [
+        bondy_oplog_cache_ets:put(H, ?B, K, {K, 1})
+     || K <- [<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>]
+    ],
     Info = bondy_oplog_cache_ets:info(H),
     %% Reserved '$max_entries' row + at most 3 cached entries.
     ?assert(maps:get(size, Info) =< 4),
@@ -101,8 +115,10 @@ max_entries_evicts_overflow() ->
 
 max_entries_does_not_evict_reserved_row() ->
     {ok, H} = bondy_oplog_cache_ets:init(ns, primary, 0, #{max_entries => 2}),
-    [bondy_oplog_cache_ets:put(H, ?B, K, {K, 1})
-     || K <- [<<"a">>, <<"b">>, <<"c">>, <<"d">>]],
+    [
+        bondy_oplog_cache_ets:put(H, ?B, K, {K, 1})
+     || K <- [<<"a">>, <<"b">>, <<"c">>, <<"d">>]
+    ],
     Info = bondy_oplog_cache_ets:info(H),
     ?assertEqual(2, maps:get(max_entries, Info)),
     ok = bondy_oplog_cache_ets:invalidate_all(H).
@@ -111,10 +127,14 @@ distinct_buckets_do_not_collide() ->
     {ok, H} = bondy_oplog_cache_ets:init(ns, primary, 0, #{}),
     ok = bondy_oplog_cache_ets:put(H, <<"b1">>, <<"k">>, {<<"v1">>, 1}),
     ok = bondy_oplog_cache_ets:put(H, <<"b2">>, <<"k">>, {<<"v2">>, 2}),
-    ?assertEqual({ok, {<<"v1">>, 1}},
-                 bondy_oplog_cache_ets:get(H, <<"b1">>, <<"k">>)),
-    ?assertEqual({ok, {<<"v2">>, 2}},
-                 bondy_oplog_cache_ets:get(H, <<"b2">>, <<"k">>)),
+    ?assertEqual(
+        {ok, {<<"v1">>, 1}},
+        bondy_oplog_cache_ets:get(H, <<"b1">>, <<"k">>)
+    ),
+    ?assertEqual(
+        {ok, {<<"v2">>, 2}},
+        bondy_oplog_cache_ets:get(H, <<"b2">>, <<"k">>)
+    ),
     ok = bondy_oplog_cache_ets:invalidate_all(H).
 
 close_deletes_table() ->

@@ -18,9 +18,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_mst_pack_io_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_mst_pack_io_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -90,8 +97,10 @@ read_returns_body_for_known_hash_test() ->
     with_sealed_view(Corpus, fun(View, _Dir) ->
         lists:foreach(
             fun({H, Off}) ->
-                ?assertEqual({ok, maps:get(H, Corpus)},
-                             bondy_mst_pack_io:read_record(View, H, Off))
+                ?assertEqual(
+                    {ok, maps:get(H, Corpus)},
+                    bondy_mst_pack_io:read_record(View, H, Off)
+                )
             end,
             hashes_with_offsets(View)
         )
@@ -105,8 +114,10 @@ read_handles_zero_length_body_test() ->
     with_sealed_view(Corpus, fun(View, _Dir) ->
         [{H, Off}] = hashes_with_offsets(View),
         ?assertEqual(EmptyHash, H),
-        ?assertEqual({ok, <<>>},
-                     bondy_mst_pack_io:read_record(View, H, Off))
+        ?assertEqual(
+            {ok, <<>>},
+            bondy_mst_pack_io:read_record(View, H, Off)
+        )
     end).
 
 %% =============================================================================
@@ -121,8 +132,10 @@ read_returns_not_found_when_hash_mismatch_test() ->
         [{H1, Off1}, {_H2, _Off2}] = hashes_with_offsets(View),
         WrongHash = h(999),
         ?assertNotEqual(H1, WrongHash),
-        ?assertEqual(not_found,
-                     bondy_mst_pack_io:read_record(View, WrongHash, Off1))
+        ?assertEqual(
+            not_found,
+            bondy_mst_pack_io:read_record(View, WrongHash, Off1)
+        )
     end).
 
 %% =============================================================================
@@ -138,8 +151,10 @@ read_returns_short_header_when_offset_past_eof_test() ->
         %% Position past the trailer — no record there.
         BogusOffset = Size + 100,
         BogusHash = h(1),
-        ?assertEqual({error, {pack_io, 1, short_header}},
-            bondy_mst_pack_io:read_record(View, BogusHash, BogusOffset))
+        ?assertEqual(
+            {error, {pack_io, 1, short_header}},
+            bondy_mst_pack_io:read_record(View, BogusHash, BogusOffset)
+        )
     end).
 
 %% =============================================================================
@@ -160,8 +175,10 @@ read_returns_crc_mismatch_on_body_corruption_test() ->
         try
             [{H, Off}] = hashes_with_offsets(View1),
             ?assertEqual(Hash, H),
-            ?assertEqual({error, {crc_mismatch, 1, Hash}},
-                         bondy_mst_pack_io:read_record(View1, Hash, Off))
+            ?assertEqual(
+                {error, {crc_mismatch, 1, Hash}},
+                bondy_mst_pack_io:read_record(View1, Hash, Off)
+            )
         after
             _ = prim_file:close(View1#sealed_view.pack_fd)
         end

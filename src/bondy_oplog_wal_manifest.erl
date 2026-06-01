@@ -67,8 +67,7 @@ a partial mix.
 -type hlc_or_undefined() :: bondy_oplog_hlc:hlc() | undefined.
 -type t() :: #?MODULE{}.
 -type live_segment() :: {non_neg_integer(), hlc_or_undefined()}.
--type scrubber_alert() :: {SegmentId :: non_neg_integer(),
-                           Reason :: atom()}.
+-type scrubber_alert() :: {SegmentId :: non_neg_integer(), Reason :: atom()}.
 
 -export_type([t/0]).
 -export_type([live_segment/0]).
@@ -271,8 +270,9 @@ wins — multiple bad frames in the same segment still produce one
 alert).
 """).
 -spec with_scrubber_alert(t(), non_neg_integer(), atom()) -> t().
-with_scrubber_alert(#?MODULE{scrubber_alerts = A} = M, SegmentId, Reason)
-  when is_integer(SegmentId), SegmentId >= 0, is_atom(Reason) ->
+with_scrubber_alert(#?MODULE{scrubber_alerts = A} = M, SegmentId, Reason) when
+    is_integer(SegmentId), SegmentId >= 0, is_atom(Reason)
+->
     A1 = lists:keystore(SegmentId, 1, A, {SegmentId, Reason}),
     M#?MODULE{scrubber_alerts = A1}.
 
@@ -281,8 +281,9 @@ Clears any scrubber alert for `SegmentId`. Returns the manifest
 unchanged if no alert was present.
 """).
 -spec without_scrubber_alert(t(), non_neg_integer()) -> t().
-without_scrubber_alert(#?MODULE{scrubber_alerts = A} = M, SegmentId)
-  when is_integer(SegmentId), SegmentId >= 0 ->
+without_scrubber_alert(#?MODULE{scrubber_alerts = A} = M, SegmentId) when
+    is_integer(SegmentId), SegmentId >= 0
+->
     M#?MODULE{scrubber_alerts = lists:keydelete(SegmentId, 1, A)}.
 
 %% =============================================================================
@@ -447,4 +448,3 @@ write_and_sync(TmpPath, Bin) ->
         {error, _} = E ->
             E
     end.
-

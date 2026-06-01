@@ -263,42 +263,54 @@ do_bootstrap_catalogue(Instance, Peer, Opts) ->
     TransportOpts = maps:get(transport_opts, Opts, #{}),
     WasLive = is_live(Instance),
     Start = erlang:monotonic_time(),
-    Result = case Transport:request(
-        Peer, Instance, get_catalogue_snapshot_init, TransportOpts
-    ) of
-        {ok, no_snapshot} ->
-            %% Peer has nothing to ship. Run the regular pull and let
-            %% the lifecycle stay where it was — the caller seeded the
-            %% replica as `live` (genesis) or expects a future
-            %% bootstrap against a non-empty peer.
-            run(Instance, Peer, Opts);
-        {ok, {init, {Watermark, Cursor}}} ->
-            case pull_install_loop(
-                Instance, Peer, Transport, TransportOpts, Cursor, 0, 0
-            ) of
-                {ok, Installed, Skipped} ->
-                    ok = bondy_oplog_instance:finalize_catalogue_bootstrap(
-                        Instance, Watermark, WasLive
-                    ),
-                    telemetry:execute(
-                        [bondy_oplog, sync, catalogue_bootstrap, complete],
-                        #{installed => Installed, skipped => Skipped,
-                          watermark => Watermark},
-                        #{instance_id => Instance, peer => Peer,
-                          was_live => WasLive}
-                    ),
-                    run(Instance, Peer, Opts);
-                {error, _} = E ->
-                    E
-            end;
-        {error, _} = E ->
-            E
-    end,
+    Result =
+        case
+            Transport:request(
+                Peer, Instance, get_catalogue_snapshot_init, TransportOpts
+            )
+        of
+            {ok, no_snapshot} ->
+                %% Peer has nothing to ship. Run the regular pull and let
+                %% the lifecycle stay where it was — the caller seeded the
+                %% replica as `live` (genesis) or expects a future
+                %% bootstrap against a non-empty peer.
+                run(Instance, Peer, Opts);
+            {ok, {init, {Watermark, Cursor}}} ->
+                case
+                    pull_install_loop(
+                        Instance, Peer, Transport, TransportOpts, Cursor, 0, 0
+                    )
+                of
+                    {ok, Installed, Skipped} ->
+                        ok = bondy_oplog_instance:finalize_catalogue_bootstrap(
+                            Instance, Watermark, WasLive
+                        ),
+                        telemetry:execute(
+                            [bondy_oplog, sync, catalogue_bootstrap, complete],
+                            #{
+                                installed => Installed,
+                                skipped => Skipped,
+                                watermark => Watermark
+                            },
+                            #{
+                                instance_id => Instance,
+                                peer => Peer,
+                                was_live => WasLive
+                            }
+                        ),
+                        run(Instance, Peer, Opts);
+                    {error, _} = E ->
+                        E
+                end;
+            {error, _} = E ->
+                E
+        end,
     Duration = erlang:monotonic_time() - Start,
-    Outcome = case Result of
-        {ok, _}    -> ok;
-        {error, _} -> error
-    end,
+    Outcome =
+        case Result of
+            {ok, _} -> ok;
+            {error, _} -> error
+        end,
     telemetry:execute(
         [bondy_oplog, sync, catalogue_bootstrap, Outcome],
         #{duration => Duration},
@@ -323,8 +335,13 @@ pull_install_loop(
             of
                 {ok, #{installed := I, skipped := S} = _Counts} ->
                     pull_install_loop(
-                        Instance, Peer, Transport, TransportOpts,
-                        NextCursor, Installed + I, Skipped + S
+                        Instance,
+                        Peer,
+                        Transport,
+                        TransportOpts,
+                        NextCursor,
+                        Installed + I,
+                        Skipped + S
                     );
                 {error, _} = E ->
                     E
@@ -341,7 +358,7 @@ pull_install_loop(
 %% `merge_states/2` (or fall back to skip-if-older for folds without).
 install_mode(Instance) ->
     case is_live(Instance) of
-        true  -> merge;
+        true -> merge;
         false -> replace
     end.
 
@@ -400,7 +417,7 @@ start_bootstrap_catalogue(Instance, Peer, Opts) ->
 is_live(Instance) ->
     case bondy_oplog_instance:lifecycle_state(Instance) of
         live -> true;
-        _    -> false
+        _ -> false
     end.
 
 %% =============================================================================
@@ -499,7 +516,6 @@ maybe_record({ok, Root}, Instance, Peer, true) when is_binary(Root) ->
     ok = bump_ae_on_sync(Instance, Peer);
 maybe_record(_, _, _, _) ->
     ok.
-
 
 %% @private
 %% Substrate read-side freshness wiring (MST_DB_DESIGN §18 item 8).

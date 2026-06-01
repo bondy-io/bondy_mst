@@ -155,13 +155,22 @@ run_pipeline(Dir, InstanceId, Origin, Opts0, Manifest) ->
     case validate_manifest(Manifest, InstanceId) of
         ok ->
             CleanedOrphans = cleanup_orphans(Dir, Manifest),
-            case verify_sealed_segments(Dir, InstanceId, Origin,
-                                         IdxIntervalBytes, BodyEnc,
-                                         Manifest) of
+            case
+                verify_sealed_segments(
+                    Dir,
+                    InstanceId,
+                    Origin,
+                    IdxIntervalBytes,
+                    BodyEnc,
+                    Manifest
+                )
+            of
                 ok ->
-                    case recover_head_segment(
-                        Dir, InstanceId, Origin, Opts, Manifest
-                    ) of
+                    case
+                        recover_head_segment(
+                            Dir, InstanceId, Origin, Opts, Manifest
+                        )
+                    of
                         {ok, HeadInfo} ->
                             finalize(Dir, Manifest, HeadInfo, CleanedOrphans);
                         {error, _} = E ->
@@ -211,7 +220,8 @@ validate_manifest(Manifest, InstanceId) ->
 validate_current_in_live(Manifest) ->
     Current = bondy_oplog_wal_manifest:current_segment(Manifest),
     LiveIds = [
-        Id || {Id, _} <- bondy_oplog_wal_manifest:live_segments(Manifest)
+        Id
+     || {Id, _} <- bondy_oplog_wal_manifest:live_segments(Manifest)
     ],
     case lists:member(Current, LiveIds) of
         true ->
@@ -299,7 +309,10 @@ build_result(Manifest, HeadInfo, CO, CleanedOrphans) ->
 %% an operator who left an unrelated file in the WAL directory might
 %% be unhappy to find it deleted on every restart.
 cleanup_orphans(Dir, Manifest) ->
-    LiveIds = [Id || {Id, _} <- bondy_oplog_wal_manifest:live_segments(Manifest)],
+    LiveIds = [
+        Id
+     || {Id, _} <- bondy_oplog_wal_manifest:live_segments(Manifest)
+    ],
     case file:list_dir(Dir) of
         {ok, Names} ->
             lists:filtermap(
@@ -350,12 +363,16 @@ classify_file(Name, LiveIds) when is_binary(Name) ->
     classify_file(binary_to_list(Name), LiveIds);
 classify_file(Name, LiveIds) ->
     case Name of
-        ?BONDY_OPLOG_WAL_MANIFEST_FILENAME -> keep;
-        ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME -> {drop, manifest_tmp};
-        ?BONDY_OPLOG_WAL_CONSUMER_OFFSET_FILENAME -> keep;
+        ?BONDY_OPLOG_WAL_MANIFEST_FILENAME ->
+            keep;
+        ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME ->
+            {drop, manifest_tmp};
+        ?BONDY_OPLOG_WAL_CONSUMER_OFFSET_FILENAME ->
+            keep;
         ?BONDY_OPLOG_WAL_CONSUMER_OFFSET_TMP_FILENAME ->
             {drop, consumer_offset_tmp};
-        ?BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_FILENAME -> keep;
+        ?BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_FILENAME ->
+            keep;
         ?BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_TMP_FILENAME ->
             {drop, snapshot_watermark_tmp};
         _ ->
@@ -412,8 +429,14 @@ parse_segment_id(Name, Suffix) when is_list(Name) ->
 %% Validates and (if necessary) rebuilds the `.qidx` for every sealed
 %% segment in the manifest. The head segment is handled separately by
 %% `recover_head_segment/5`.
-verify_sealed_segments(Dir, InstanceId, Origin, IdxIntervalBytes,
-                        BodyEnc, Manifest) ->
+verify_sealed_segments(
+    Dir,
+    InstanceId,
+    Origin,
+    IdxIntervalBytes,
+    BodyEnc,
+    Manifest
+) ->
     Current = bondy_oplog_wal_manifest:current_segment(Manifest),
     Live = bondy_oplog_wal_manifest:live_segments(Manifest),
     Sealed = [{Id, FH} || {Id, FH} <- Live, Id =/= Current],
@@ -424,11 +447,19 @@ verify_sealed_segments(Dir, InstanceId, Origin, IdxIntervalBytes,
 %% @private
 verify_sealed_loop([], _Dir, _InstanceId, _Origin, _Interval, _BodyEnc) ->
     ok;
-verify_sealed_loop([{SegId, _FH} | Rest], Dir, InstanceId, Origin,
-                    Interval, BodyEnc) ->
-    case verify_sealed_segment(
-        Dir, SegId, InstanceId, Origin, Interval, BodyEnc
-    ) of
+verify_sealed_loop(
+    [{SegId, _FH} | Rest],
+    Dir,
+    InstanceId,
+    Origin,
+    Interval,
+    BodyEnc
+) ->
+    case
+        verify_sealed_segment(
+            Dir, SegId, InstanceId, Origin, Interval, BodyEnc
+        )
+    of
         ok ->
             verify_sealed_loop(
                 Rest, Dir, InstanceId, Origin, Interval, BodyEnc
@@ -443,9 +474,11 @@ verify_sealed_segment(Dir, SegId, InstanceId, Origin, Interval, BodyEnc) ->
     case bondy_oplog_wal_segment:open(SegPath) of
         {ok, Fd, Header} ->
             Res =
-                case bondy_oplog_wal_segment:verify(
-                    Header, InstanceId, Origin
-                ) of
+                case
+                    bondy_oplog_wal_segment:verify(
+                        Header, InstanceId, Origin
+                    )
+                of
                     ok ->
                         ensure_sealed_idx(
                             Dir, SegId, Fd, Interval, BodyEnc
@@ -516,9 +549,11 @@ scan_loop_for_index(Fd, Off, Acc, BodyEnc) ->
         {ok, FrameLen} ->
             case bondy_oplog_wal_idx:would_index(Acc, FrameLen) of
                 true ->
-                    case read_and_decode_frame_body(
-                        Fd, Off, FrameLen, BodyEnc
-                    ) of
+                    case
+                        read_and_decode_frame_body(
+                            Fd, Off, FrameLen, BodyEnc
+                        )
+                    of
                         {ok, Body} ->
                             case decode_first_last_hlc(Body) of
                                 {ok, FirstHlc, LastHlc} ->
@@ -529,14 +564,16 @@ scan_loop_for_index(Fd, Off, Acc, BodyEnc) ->
                                     scan_loop_for_index(
                                         Fd, Off + FrameLen, Acc1, BodyEnc
                                     );
-                                {error, _} = E -> E
+                                {error, _} = E ->
+                                    E
                             end;
                         {truncate, Reason} ->
                             %% Sealed segment body corruption is a real
                             %% recovery error — surface so the operator
                             %% sees it.
                             {error, {sealed_body, Reason}};
-                        {error, _} = E -> E
+                        {error, _} = E ->
+                            E
                     end;
                 false ->
                     Acc1 = bondy_oplog_wal_idx:note_skipped_frame(
@@ -573,26 +610,31 @@ scan_loop_for_index(Fd, Off, Acc, BodyEnc) ->
 %% scale the expectation linearly; switch to a streaming rewrite if
 %% recovery memory becomes a constraint.
 -record(head_scan, {
-    mode             :: recovery_mode(),
-    segment_id       :: non_neg_integer(),
-    idx_interval     :: pos_integer(),
-    first_hlc        :: bondy_oplog_hlc:hlc() | undefined,
-    last_hlc         :: bondy_oplog_hlc:hlc() | undefined,
-    frame_count = 0  :: non_neg_integer(),
+    mode :: recovery_mode(),
+    segment_id :: non_neg_integer(),
+    idx_interval :: pos_integer(),
+    first_hlc :: bondy_oplog_hlc:hlc() | undefined,
+    last_hlc :: bondy_oplog_hlc:hlc() | undefined,
+    frame_count = 0 :: non_neg_integer(),
     skipped_frames = 0 :: non_neg_integer(),
-    skipped_bytes  = 0 :: non_neg_integer(),
+    skipped_bytes = 0 :: non_neg_integer(),
     %% [{SrcOff, FrameLen, FirstHlc, LastHlc}], newest-first. Only
     %% populated in rescan.
-    accepted_rev = [] :: [{non_neg_integer(), pos_integer(),
-                            bondy_oplog_hlc:hlc(),
-                            bondy_oplog_hlc:hlc()}],
-    idx_acc          :: bondy_oplog_wal_idx:accumulator(),
+    accepted_rev = [] :: [
+        {
+            non_neg_integer(),
+            pos_integer(),
+            bondy_oplog_hlc:hlc(),
+            bondy_oplog_hlc:hlc()
+        }
+    ],
+    idx_acc :: bondy_oplog_wal_idx:accumulator(),
     %% Body-encryption config inherited from `recovery_opts`. The
     %% head-scan calls `read_and_decode_frame_body/4` once per frame
     %% header it accepts, threading this so the codec can resolve
     %% per-frame `KeyId`s back to keys via the operator-supplied
     %% registry. `disabled` means no decrypt path is taken.
-    body_encryption  :: bondy_oplog_wal_codec:encryption()
+    body_encryption :: bondy_oplog_wal_codec:encryption()
 }).
 
 %% @private
@@ -691,8 +733,9 @@ head_result(Fd, SegId, LastValid, TruncatedBytes, S) ->
     %% truncation bytes are accounted for separately via
     %% `truncated_bytes` and are not "scanned" in this sense — the
     %% scanner halted before descending into them.
-    ScannedBytes = max(0, LastValid - ?SEG_HEADER_BYTES)
-        + S#head_scan.skipped_bytes,
+    ScannedBytes =
+        max(0, LastValid - ?SEG_HEADER_BYTES) +
+            S#head_scan.skipped_bytes,
     #{
         segment_id => SegId,
         head_fd => Fd,
@@ -727,9 +770,11 @@ scan_head_loop(Fd, Off, S) ->
 
 %% @private
 scan_with_header(Fd, Off, FrameLen, S) ->
-    case read_and_decode_frame_body(
-        Fd, Off, FrameLen, S#head_scan.body_encryption
-    ) of
+    case
+        read_and_decode_frame_body(
+            Fd, Off, FrameLen, S#head_scan.body_encryption
+        )
+    of
         {ok, Body} ->
             absorb_frame(Fd, Off, FrameLen, Body, S);
         {truncate, Reason} ->
@@ -756,12 +801,13 @@ accept_frame(Off, FrameLen, FirstHlc, LastHlc, S) ->
     IdxAcc = bondy_oplog_wal_idx:note_frame(
         S#head_scan.idx_acc, FirstHlc, LastHlc, Off, FrameLen
     ),
-    AcceptedRev = case S#head_scan.mode of
-        rescan ->
-            [{Off, FrameLen, FirstHlc, LastHlc} | S#head_scan.accepted_rev];
-        strict ->
-            S#head_scan.accepted_rev
-    end,
+    AcceptedRev =
+        case S#head_scan.mode of
+            rescan ->
+                [{Off, FrameLen, FirstHlc, LastHlc} | S#head_scan.accepted_rev];
+            strict ->
+                S#head_scan.accepted_rev
+        end,
     S#head_scan{
         first_hlc = pick_first_hlc(S#head_scan.first_hlc, FirstHlc),
         last_hlc = LastHlc,
@@ -779,7 +825,9 @@ accept_frame(Off, FrameLen, FirstHlc, LastHlc, S) ->
 %%
 %% `FrameLen` is `undefined` when the failure happened at the header
 %% level (we don't know how long the corrupt frame is supposed to be).
-handle_skip_or_stop(_Fd, Off, _FrameLen, _Reason, #head_scan{mode = strict} = S) ->
+handle_skip_or_stop(
+    _Fd, Off, _FrameLen, _Reason, #head_scan{mode = strict} = S
+) ->
     {ok, Off, S};
 handle_skip_or_stop(Fd, Off, FrameLen, Reason, #head_scan{mode = rescan} = S) ->
     %% Two strategies based on what we know:
@@ -924,9 +972,11 @@ rewrite_head_compact(SrcFd, SegId, Header, Dir, S) ->
             HeaderBin = bondy_oplog_wal_segment:encode_header(Header),
             case copy_frames_to_tmp(SrcFd, DstFd, HeaderBin, S) of
                 {ok, NewLastValid, NewIdxAcc} ->
-                    case finalize_compact_tmp(
-                        DstFd, TmpPath, FinalPath, Dir
-                    ) of
+                    case
+                        finalize_compact_tmp(
+                            DstFd, TmpPath, FinalPath, Dir
+                        )
+                    of
                         {ok, NewFd} ->
                             {ok, NewFd, NewLastValid, NewIdxAcc};
                         {error, _} = E ->
@@ -959,8 +1009,13 @@ copy_frames_to_tmp(SrcFd, DstFd, HeaderBin, S) ->
 %% @private
 copy_loop(_SrcFd, _DstFd, Pos, [], IdxAcc) ->
     {ok, Pos, IdxAcc};
-copy_loop(SrcFd, DstFd, Pos,
-          [{SrcOff, FrameLen, FirstHlc, LastHlc} | Rest], IdxAcc) ->
+copy_loop(
+    SrcFd,
+    DstFd,
+    Pos,
+    [{SrcOff, FrameLen, FirstHlc, LastHlc} | Rest],
+    IdxAcc
+) ->
     case prim_file:pread(SrcFd, SrcOff, FrameLen) of
         {ok, Bin} when byte_size(Bin) =:= FrameLen ->
             case prim_file:write(DstFd, Bin) of
@@ -1011,7 +1066,8 @@ reopen_compacted(FinalPath) ->
             %% Position at EOF so subsequent writer appends land at
             %% the right offset.
             case prim_file:position(NewFd, eof) of
-                {ok, _} -> {ok, NewFd};
+                {ok, _} ->
+                    {ok, NewFd};
                 {error, Reason} ->
                     _ = prim_file:close(NewFd),
                     {error, {position, Reason}}
@@ -1040,13 +1096,15 @@ truncate_head_if_needed(Fd, LastValid) ->
                         ok -> {ok, Size - LastValid};
                         {error, _} = E -> E
                     end;
-                {error, _} = E -> E
+                {error, _} = E ->
+                    E
             end;
         {ok, Size} when Size < LastValid ->
             %% Shouldn't happen — the scan can't progress past the
             %% physical EOF. Crash loudly if it does.
             {error, {scan_past_eof, Size, LastValid}};
-        {error, _} = E -> E
+        {error, _} = E ->
+            E
     end.
 
 %% -----------------------------------------------------------------------------
@@ -1080,12 +1138,13 @@ clamp_consumer_offset(CO, Manifest, HeadInfo, Dir) ->
 %% @private
 clamp_offset_within_segment(CO, Seg, Off, HeadInfo, Dir) ->
     HeadSeg = maps:get(segment_id, HeadInfo),
-    Bound = case Seg of
-        HeadSeg ->
-            maps:get(last_valid_offset, HeadInfo);
-        _ ->
-            sealed_segment_size(Dir, Seg)
-    end,
+    Bound =
+        case Seg of
+            HeadSeg ->
+                maps:get(last_valid_offset, HeadInfo);
+            _ ->
+                sealed_segment_size(Dir, Seg)
+        end,
     %% Clamp magnitude to ≤ Bound; then clamp to a frame boundary.
     ClampedToBound = min(Off, Bound),
     Aligned = align_to_frame_boundary(
@@ -1241,9 +1300,11 @@ read_and_decode_frame_body(Fd, Off, FrameLen, BodyEnc) ->
         {ok, Bin} when byte_size(Bin) =:= FrameLen ->
             case bondy_oplog_wal_frame:decode(Bin) of
                 {ok, RawBody, #{flags := Flags}} ->
-                    case bondy_oplog_wal_codec:decode_body(
-                        RawBody, Flags, #{body_encryption => BodyEnc}
-                    ) of
+                    case
+                        bondy_oplog_wal_codec:decode_body(
+                            RawBody, Flags, #{body_encryption => BodyEnc}
+                        )
+                    of
                         {ok, Body} ->
                             {ok, Body};
                         {error, Reason} ->
@@ -1254,7 +1315,8 @@ read_and_decode_frame_body(Fd, Off, FrameLen, BodyEnc) ->
                             %% strict/rescan dispatch.
                             {truncate, {codec, Reason}}
                     end;
-                {error, Reason} -> {truncate, Reason}
+                {error, Reason} ->
+                    {truncate, Reason}
             end;
         {ok, _Short} ->
             {truncate, truncated_body};

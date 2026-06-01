@@ -35,10 +35,10 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -define(CACHE_MOD, bondy_oplog_cache_ets).
--define(PROJ_MOD,  bondy_oplog_projection_leveled).
--define(STRATEGY,  lww_register).
--define(NUMTESTS,  30).
--define(BUCKET,    <<>>).
+-define(PROJ_MOD, bondy_oplog_projection_leveled).
+-define(STRATEGY, lww_register).
+-define(NUMTESTS, 30).
+-define(BUCKET, <<>>).
 
 -export([prop_read_returns_latest_fold_leveled/0]).
 -export([prop_range_monotonicity_leveled/0]).
@@ -52,9 +52,15 @@ key_gen() ->
     elements([<<"a">>, <<"b">>, <<"c">>, <<"d">>]).
 
 events_gen() ->
-    ?LET(N, integer(0, 6),
-         ?LET(Ops, vector(N, op_kind_gen()),
-              hlc_index(Ops))).
+    ?LET(
+        N,
+        integer(0, 6),
+        ?LET(
+            Ops,
+            vector(N, op_kind_gen()),
+            hlc_index(Ops)
+        )
+    ).
 
 op_kind_gen() ->
     oneof([set, clear]).
@@ -73,52 +79,65 @@ hlc_value(Idx) ->
     <<Idx:32/big>>.
 
 range_bounds_gen() ->
-    ?LET({L, H},
-         {elements([<<"a">>, <<"b">>, <<"c">>]),
-          elements([<<"b">>, <<"c">>, <<"d">>, <<"z">>])},
-         case L =< H of
-             true  -> {L, H};
-             false -> {H, L}
-         end).
+    ?LET(
+        {L, H},
+        {
+            elements([<<"a">>, <<"b">>, <<"c">>]),
+            elements([<<"b">>, <<"c">>, <<"d">>, <<"z">>])
+        },
+        case L =< H of
+            true -> {L, H};
+            false -> {H, L}
+        end
+    ).
 
 %% =============================================================================
 %% Properties
 %% =============================================================================
 
 prop_read_returns_latest_fold_leveled() ->
-    ?FORALL({Key, Events}, {key_gen(), events_gen()},
+    ?FORALL(
+        {Key, Events},
+        {key_gen(), events_gen()},
         with_shard(fun(NS) ->
             populate_overlay(NS, Key, Events),
             Got = bondy_db_core:read(NS, primary, Key),
             Expected = expected_read(Events),
             equal_read_result(Got, Expected)
-        end)).
-
+        end)
+    ).
 
 prop_overlay_projection_merge_leveled() ->
-    ?FORALL({Key, Events, OverlayOp},
-            {key_gen(), events_gen(), op_kind_gen()},
-        ?IMPLIES(Events =/= [],
+    ?FORALL(
+        {Key, Events, OverlayOp},
+        {key_gen(), events_gen(), op_kind_gen()},
+        ?IMPLIES(
+            Events =/= [],
             with_shard(fun(NS) ->
                 ProjValue = fold_events(initial(), Events),
                 materialise(NS, Key, ProjValue),
                 ProjHlc = hlc_of(ProjValue),
                 OverlayHlc = ProjHlc + 1,
-                OverlayEvent = case OverlayOp of
-                    set   -> {set, OverlayHlc, hlc_value(OverlayHlc)};
-                    clear -> {clear, OverlayHlc}
-                end,
+                OverlayEvent =
+                    case OverlayOp of
+                        set -> {set, OverlayHlc, hlc_value(OverlayHlc)};
+                        clear -> {clear, OverlayHlc}
+                    end,
                 insert_overlay(NS, Key, OverlayEvent),
                 Got = bondy_db_core:read(NS, primary, Key),
                 Expected = expected_read(Events ++ [OverlayEvent]),
                 equal_read_result(Got, Expected)
-            end))).
-
+            end)
+        )
+    ).
 
 prop_range_monotonicity_leveled() ->
-    ?FORALL({Keys, {Low, High}},
-            {list(elements([<<"a">>, <<"b">>, <<"c">>, <<"d">>])),
-             range_bounds_gen()},
+    ?FORALL(
+        {Keys, {Low, High}},
+        {
+            list(elements([<<"a">>, <<"b">>, <<"c">>, <<"d">>])),
+            range_bounds_gen()
+        },
         with_shard(fun(NS) ->
             UniqueKeys = lists:usort(Keys),
             lists:foreach(
@@ -127,13 +146,18 @@ prop_range_monotonicity_leveled() ->
                 end,
                 lists:zip(UniqueKeys, lists:seq(1, length(UniqueKeys)))
             ),
-            {ok, Rows} = bondy_db_core:range(NS, primary,
-                                            {Low, High}, #{}),
+            {ok, Rows} = bondy_db_core:range(
+                NS,
+                primary,
+                {Low, High},
+                #{}
+            ),
             ResultKeys = [K || {K, _, _} <- Rows],
             Sorted = ResultKeys =:= lists:sort(ResultKeys),
             Expected = [K || K <- UniqueKeys, K >= Low, K < High],
             Sorted andalso ResultKeys =:= Expected
-        end)).
+        end)
+    ).
 
 %% =============================================================================
 %% Setup / teardown (leveled-aware)
@@ -149,23 +173,28 @@ with_shard(Fn) ->
         stop_shard(Handle)
     end.
 
-
 start_shard(NS, Index, Shard, ShardCount) ->
     Dir = make_tempdir(),
     %% head_only=with_lookup required by bondy_oplog_projection_leveled
     %% (PR-PS-15b); use the proplist form to add it.
     {ok, Bookie} = leveled_bookie:book_start(
-        [{root_path, Dir},
-         {cache_size, 2000},
-         {max_journalsize, 100_000_000},
-         {sync_strategy, none},
-         {head_only, with_lookup}]
+        [
+            {root_path, Dir},
+            {cache_size, 2000},
+            {max_journalsize, 100_000_000},
+            {sync_strategy, none},
+            {head_only, with_lookup}
+        ]
     ),
     {ok, CH} = ?CACHE_MOD:init(NS, Index, Shard, #{}),
     %% Bucket is a call-time parameter; the leveled projection adapter's
     %% handle only carries the Bookie pid.
-    {ok, PH} = ?PROJ_MOD:open(NS, Index, Shard,
-                              #{bookie => Bookie}),
+    {ok, PH} = ?PROJ_MOD:open(
+        NS,
+        Index,
+        Shard,
+        #{bookie => Bookie}
+    ),
     OV = bondy_oplog_db_overlay:new(),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
         shard_count => ShardCount,
@@ -176,14 +205,27 @@ start_shard(NS, Index, Shard, ShardCount) ->
         overlay => OV,
         fold_module => ?STRATEGY
     }),
-    #{ns => NS, index => Index, shard => Shard,
-      cache_handle => CH, projection => PH, overlay => OV,
-      bookie => Bookie, dir => Dir}.
+    #{
+        ns => NS,
+        index => Index,
+        shard => Shard,
+        cache_handle => CH,
+        projection => PH,
+        overlay => OV,
+        bookie => Bookie,
+        dir => Dir
+    }.
 
-
-stop_shard(#{ns := NS, index := Index, shard := Shard,
-             cache_handle := CH, projection := PH, overlay := OV,
-             bookie := Bookie, dir := Dir}) ->
+stop_shard(#{
+    ns := NS,
+    index := Index,
+    shard := Shard,
+    cache_handle := CH,
+    projection := PH,
+    overlay := OV,
+    bookie := Bookie,
+    dir := Dir
+}) ->
     ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = ?CACHE_MOD:invalidate_all(CH),
     ok = ?PROJ_MOD:close(PH),
@@ -191,11 +233,11 @@ stop_shard(#{ns := NS, index := Index, shard := Shard,
     ok = leveled_bookie:book_close(Bookie),
     rmrf(Dir).
 
-
 mk_ns() ->
-    list_to_atom("mst_db_proper_lev_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
-
+    list_to_atom(
+        "mst_db_proper_lev_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 make_tempdir() ->
     Base = filename:join([
@@ -206,14 +248,12 @@ make_tempdir() ->
     ok = filelib:ensure_dir(filename:join(Base, ".keep")),
     Base.
 
-
 rmrf(Dir) ->
     case file:del_dir_r(Dir) of
         ok -> ok;
         {error, enoent} -> ok;
         {error, _} -> ok
     end.
-
 
 %% =============================================================================
 %% Model helpers (same as ETS suite)
@@ -269,27 +309,29 @@ fold_events(State, Events) ->
         Events
     ).
 
-hlc_of({set, _Val, H})  -> H;
-hlc_of({cleared, H})    -> H;
-hlc_of(undefined)       -> 0.
+hlc_of({set, _Val, H}) -> H;
+hlc_of({cleared, H}) -> H;
+hlc_of(undefined) -> 0.
 
-hlc_of_event({set, H, _})  -> H;
-hlc_of_event({clear, H})   -> H.
+hlc_of_event({set, H, _}) -> H;
+hlc_of_event({clear, H}) -> H.
 
 expected_read(Events) ->
-    Sorted = lists:sort(fun(A, B) -> hlc_of_event(A) =< hlc_of_event(B) end,
-                        Events),
+    Sorted = lists:sort(
+        fun(A, B) -> hlc_of_event(A) =< hlc_of_event(B) end,
+        Events
+    ),
     State = fold_events(initial(), Sorted),
     case bondy_oplog_fold:to_value(?STRATEGY, State) of
         undefined -> undefined;
-        Value     -> {Value, hlc_of(State)}
+        Value -> {Value, hlc_of(State)}
     end.
 
 equal_read_result(Got, Expected) ->
     case {Got, Expected} of
         {undefined, undefined} -> true;
-        {{V1, H1}, {V2, H2}}   -> V1 =:= V2 andalso H1 =:= H2;
-        _                      -> false
+        {{V1, H1}, {V2, H2}} -> V1 =:= V2 andalso H1 =:= H2;
+        _ -> false
     end.
 
 %% =============================================================================
@@ -297,8 +339,7 @@ equal_read_result(Got, Expected) ->
 %% =============================================================================
 
 properties_leveled_test_() ->
-    {timeout, 600,
-     fun() ->
+    {timeout, 600, fun() ->
         Opts = [{to_file, user}, {numtests, ?NUMTESTS}],
         Props = [
             prop_read_returns_latest_fold_leveled(),
@@ -309,4 +350,4 @@ properties_leveled_test_() ->
             fun(Prop) -> ?assert(proper:quickcheck(Prop, Opts)) end,
             Props
         )
-     end}.
+    end}.

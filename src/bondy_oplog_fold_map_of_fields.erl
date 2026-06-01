@@ -147,20 +147,22 @@ Events:
 -export([encode_event/1]).
 -export([decode_event/1]).
 
--type field()       :: binary().
--type strategy()    :: lww_register
-                     | strict_register
-                     | ttl_presence.
+-type field() :: binary().
+-type strategy() ::
+    lww_register
+    | strict_register
+    | ttl_presence.
 
--type sub_state()   :: any().
+-type sub_state() :: any().
 -type inner_event() :: any().
 
--type entry()       :: {strategy(), sub_state()}.
+-type entry() :: {strategy(), sub_state()}.
 
--type state()       :: #{field() => entry()}.
+-type state() :: #{field() => entry()}.
 
--type event()       :: {field_event, field(), strategy(), inner_event()}
-                     | {remove_field, bondy_oplog_hlc:hlc(), field(), strategy()}.
+-type event() ::
+    {field_event, field(), strategy(), inner_event()}
+    | {remove_field, bondy_oplog_hlc:hlc(), field(), strategy()}.
 
 -export_type([state/0, event/0, strategy/0, field/0]).
 
@@ -173,12 +175,12 @@ Events:
 initial_value() ->
     #{}.
 
-
 -spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
     bondy_oplog_fold:apply_result().
 
-apply_event(Map, {field_event, F, S, IE}, Meta)
-        when is_binary(F), is_atom(S) ->
+apply_event(Map, {field_event, F, S, IE}, Meta) when
+    is_binary(F), is_atom(S)
+->
     ok = assert_supported(S),
     case maps:get(F, Map, undefined) of
         undefined ->
@@ -195,12 +197,11 @@ apply_event(Map, {field_event, F, S, IE}, Meta)
         {OtherS, _} ->
             erlang:error({strategy_mismatch, F, OtherS, S})
     end;
-
-apply_event(Map, {remove_field, H, F, S}, Meta)
-        when is_integer(H), is_binary(F), is_atom(S) ->
+apply_event(Map, {remove_field, H, F, S}, Meta) when
+    is_integer(H), is_binary(F), is_atom(S)
+->
     ok = assert_supported(S),
     apply_event(Map, {field_event, F, S, purge_event(S, H)}, Meta).
-
 
 -spec to_value(state()) -> #{field() => bondy_oplog_fold:fold_value()}.
 
@@ -210,7 +211,6 @@ to_value(Map) ->
         Map
     ).
 
-
 -doc """
 The map-level delta is a per-field directive
 `{field, F, SubStrategy, SubDelta}` that defers sub-value computation
@@ -219,9 +219,9 @@ the value map (`#{F => SubValue}`) does not carry it; without the tag
 we could not call back into the right sub-fold's `apply_value_delta`.
 """.
 -spec apply_value_delta(
-        #{field() => bondy_oplog_fold:fold_value()},
-        {field, field(), strategy(), bondy_oplog_fold:value_delta()}
-    ) -> #{field() => bondy_oplog_fold:fold_value()}.
+    #{field() => bondy_oplog_fold:fold_value()},
+    {field, field(), strategy(), bondy_oplog_fold:value_delta()}
+) -> #{field() => bondy_oplog_fold:fold_value()}.
 
 apply_value_delta(MapValue, {field, F, S, SubDelta}) ->
     SubInit = bondy_oplog_fold:to_value(
@@ -231,7 +231,6 @@ apply_value_delta(MapValue, {field, F, S, SubDelta}) ->
     NewSubValue = bondy_oplog_fold:apply_value_delta(S, OldSubValue, SubDelta),
     MapValue#{F => NewSubValue}.
 
-
 -spec merge_states(state(), state()) -> state().
 
 merge_states(A, B) when is_map(A), is_map(B) ->
@@ -240,14 +239,14 @@ merge_states(A, B) when is_map(A), is_map(B) ->
     lists:foldl(
         fun(F, Acc) ->
             case {maps:get(F, A, undefined), maps:get(F, B, undefined)} of
-                {undefined, EB}     -> Acc#{F => EB};
-                {EA, undefined}     -> Acc#{F => EA};
-                {EA, EB}            -> Acc#{F => merge_entries(F, EA, EB)}
+                {undefined, EB} -> Acc#{F => EB};
+                {EA, undefined} -> Acc#{F => EA};
+                {EA, EB} -> Acc#{F => merge_entries(F, EA, EB)}
             end
         end,
         #{},
-        Uniq).
-
+        Uniq
+    ).
 
 -spec hlc(state()) -> bondy_oplog_hlc:hlc().
 
@@ -256,7 +255,6 @@ hlc(Map) when map_size(Map) =:= 0 ->
 hlc(Map) ->
     lists:max([entry_hlc(E) || E <- maps:values(Map)]).
 
-
 -spec gc_threshold(state()) -> bondy_oplog_hlc:hlc() | undefined.
 
 gc_threshold(Map) when map_size(Map) =:= 0 ->
@@ -264,86 +262,72 @@ gc_threshold(Map) when map_size(Map) =:= 0 ->
 gc_threshold(Map) ->
     lists:max([entry_gc(E) || E <- maps:values(Map)]).
 
-
 -spec encode_state(state()) -> binary().
 
 encode_state(Map) when is_map(Map) ->
     N = maps:size(Map),
     Entries = lists:sort(maps:to_list(Map)),
-    Body = << <<(byte_size(F)):32/big-unsigned,
-                F/binary,
-                (encode_entry(E))/binary>>
-              || {F, E} <- Entries >>,
+    Body = <<
+        <<(byte_size(F)):32/big-unsigned, F/binary, (encode_entry(E))/binary>>
+     || {F, E} <- Entries
+    >>,
     <<N:32/big-unsigned, Body/binary>>.
-
 
 -spec decode_state(binary()) -> state().
 
 decode_state(<<N:32/big-unsigned, Rest/binary>>) ->
     decode_entries(N, Rest, #{}).
 
-
 -spec encode_event(event()) -> binary().
 
-encode_event({field_event, F, S, IE})
-        when is_binary(F), is_atom(S) ->
+encode_event({field_event, F, S, IE}) when
+    is_binary(F), is_atom(S)
+->
     ok = assert_supported(S),
     Tag = bondy_oplog_fold:tag_of(S),
     IEBin = bondy_oplog_fold:encode_event(S, IE),
-    <<1,
-      (byte_size(F)):32/big-unsigned, F/binary,
-      Tag:8,
-      (byte_size(IEBin)):32/big-unsigned, IEBin/binary>>;
-
-encode_event({remove_field, H, F, S})
-        when is_integer(H), is_binary(F), is_atom(S) ->
+    <<1, (byte_size(F)):32/big-unsigned, F/binary, Tag:8,
+        (byte_size(IEBin)):32/big-unsigned, IEBin/binary>>;
+encode_event({remove_field, H, F, S}) when
+    is_integer(H), is_binary(F), is_atom(S)
+->
     ok = assert_supported(S),
     Tag = bondy_oplog_fold:tag_of(S),
-    <<2, H:64/big-unsigned,
-         (byte_size(F)):32/big-unsigned, F/binary,
-         Tag:8>>.
-
+    <<2, H:64/big-unsigned, (byte_size(F)):32/big-unsigned, F/binary, Tag:8>>.
 
 -spec decode_event(binary()) -> event().
 
-decode_event(<<1,
-               FSize:32/big-unsigned, F:FSize/binary,
-               Tag:8,
-               IESize:32/big-unsigned, IE:IESize/binary>>) ->
+decode_event(
+    <<1, FSize:32/big-unsigned, F:FSize/binary, Tag:8, IESize:32/big-unsigned,
+        IE:IESize/binary>>
+) ->
     S = bondy_oplog_fold:mod_of_tag(Tag),
     InnerEvent = bondy_oplog_fold:decode_event(S, IE),
     {field_event, F, S, InnerEvent};
-
-decode_event(<<2, H:64/big-unsigned,
-                  FSize:32/big-unsigned, F:FSize/binary,
-                  Tag:8>>) ->
+decode_event(
+    <<2, H:64/big-unsigned, FSize:32/big-unsigned, F:FSize/binary, Tag:8>>
+) ->
     S = bondy_oplog_fold:mod_of_tag(Tag),
     {remove_field, H, F, S}.
-
 
 %% =============================================================================
 %% INTERNAL
 %% =============================================================================
 
-assert_supported(lww_register)    -> ok;
+assert_supported(lww_register) -> ok;
 assert_supported(strict_register) -> ok;
-assert_supported(ttl_presence)    -> ok;
-assert_supported(Other) ->
-    erlang:error({unsupported_field_strategy, Other}).
+assert_supported(ttl_presence) -> ok;
+assert_supported(Other) -> erlang:error({unsupported_field_strategy, Other}).
 
+lift_field_delta(_F, _S, none) -> none;
+lift_field_delta(F, S, SubDelta) -> {field, F, S, SubDelta}.
 
-lift_field_delta(_F, _S, none)     -> none;
-lift_field_delta(F,  S,  SubDelta) -> {field, F, S, SubDelta}.
-
-
-purge_event(lww_register, H)    -> {clear, H};
+purge_event(lww_register, H) -> {clear, H};
 purge_event(strict_register, H) -> {revoke, H};
-purge_event(ttl_presence, H)    -> {revoke, H}.
-
+purge_event(ttl_presence, H) -> {revoke, H}.
 
 entry_hlc({S, SubState}) ->
     bondy_oplog_fold:hlc(S, SubState).
-
 
 entry_gc({S, SubState}) ->
     case bondy_oplog_fold:gc_threshold(S, SubState) of
@@ -351,14 +335,11 @@ entry_gc({S, SubState}) ->
         N when is_integer(N) -> N
     end.
 
-
 merge_entries(_F, {S, SA}, {S, SB}) ->
     Merged = bondy_oplog_fold:merge_states(S, SA, SB),
     {S, Merged};
-
 merge_entries(F, {Sa, _}, {Sb, _}) ->
     erlang:error({strategy_mismatch, F, Sa, Sb}).
-
 
 encode_entry({S, SubState}) ->
     ok = assert_supported(S),
@@ -366,14 +347,16 @@ encode_entry({S, SubState}) ->
     Bin = bondy_oplog_fold:encode_state(S, SubState),
     <<Tag:8, (byte_size(Bin)):32/big-unsigned, Bin/binary>>.
 
-
 decode_entries(0, <<>>, Acc) ->
     Acc;
-
-decode_entries(N, <<FSize:32/big-unsigned, F:FSize/binary,
-                    Tag:8, SubSize:32/big-unsigned,
-                    Sub:SubSize/binary, Rest/binary>>, Acc)
-        when N > 0 ->
+decode_entries(
+    N,
+    <<FSize:32/big-unsigned, F:FSize/binary, Tag:8, SubSize:32/big-unsigned,
+        Sub:SubSize/binary, Rest/binary>>,
+    Acc
+) when
+    N > 0
+->
     S = bondy_oplog_fold:mod_of_tag(Tag),
     SubState = bondy_oplog_fold:decode_state(S, Sub),
     decode_entries(N - 1, Rest, Acc#{F => {S, SubState}}).

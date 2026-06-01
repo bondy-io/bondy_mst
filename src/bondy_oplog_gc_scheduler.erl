@@ -318,7 +318,10 @@ cancel_pending_tick(#state{tick_ref = undefined} = State) ->
     State;
 cancel_pending_tick(#state{tick_ref = Ref} = State) ->
     _ = erlang:cancel_timer(Ref, [{async, false}, {info, false}]),
-    receive tick -> ok after 0 -> ok end,
+    receive
+        tick -> ok
+    after 0 -> ok
+    end,
     State#state{tick_ref = undefined}.
 
 %% @private

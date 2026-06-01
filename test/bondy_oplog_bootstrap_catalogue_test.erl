@@ -28,9 +28,11 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
 
 bootstrap_catalogue_test_() ->
@@ -42,24 +44,31 @@ bootstrap_catalogue_test_() ->
         fun merge_mode_picks_higher_hlc_for_lww/0
     ]}.
 
-
 fresh_replica_bootstraps_from_peer() ->
     %% Set up the peer with cells, the local replica with nothing.
     {Peer, _PeerNS, _, _} = setup_instance(),
     {Local, _LocalNS, _, _} = setup_instance(),
-    Cells = [{<<"k1">>, 10, <<"v1">>},
-             {<<"k2">>, 20, <<"v2">>},
-             {<<"k3">>, 5,  <<"v3">>},
-             {<<"k4">>, 25, <<"v4">>}],
-    [bondy_oplog:append(Peer, {cell_apply, ?B, K, {set, Hlc, V}})
-     || {K, Hlc, V} <- Cells],
+    Cells = [
+        {<<"k1">>, 10, <<"v1">>},
+        {<<"k2">>, 20, <<"v2">>},
+        {<<"k3">>, 5, <<"v3">>},
+        {<<"k4">>, 25, <<"v4">>}
+    ],
+    [
+        bondy_oplog:append(Peer, {cell_apply, ?B, K, {set, Hlc, V}})
+     || {K, Hlc, V} <- Cells
+    ],
     _ = barrier(Peer),
 
     %% Pre-bootstrap: peer high-water = 25, local high-water = 0.
-    ?assertMatch({ok, 25},
-                 high_water(Peer)),
-    ?assertMatch({ok, no_watermark},
-                 high_water(Local)),
+    ?assertMatch(
+        {ok, 25},
+        high_water(Peer)
+    ),
+    ?assertMatch(
+        {ok, no_watermark},
+        high_water(Local)
+    ),
 
     ?assertMatch(
         {ok, _Root},
@@ -72,21 +81,23 @@ fresh_replica_bootstraps_from_peer() ->
     ?assertMatch({ok, 25}, high_water(Local)),
 
     %% Verify every key has the right cell present on the local replica.
-    PeerEntry  = peer_entry(Peer),
+    PeerEntry = peer_entry(Peer),
     LocalEntry = peer_entry(Local),
     LocalAdapter = bondy_db_core_registry:entry_projection_adapter(LocalEntry),
-    LocalHandle  = bondy_db_core_registry:entry_projection_handle(LocalEntry),
-    PeerAdapter  = bondy_db_core_registry:entry_projection_adapter(PeerEntry),
-    PeerHandle   = bondy_db_core_registry:entry_projection_handle(PeerEntry),
-    [begin
-         {ok, LocalFrame} = LocalAdapter:get(LocalHandle, ?B, K),
-         {ok, PeerFrame}  = PeerAdapter:get(PeerHandle, ?B, K),
-         ?assertEqual(PeerFrame, LocalFrame)
-     end || {K, _, _} <- Cells],
+    LocalHandle = bondy_db_core_registry:entry_projection_handle(LocalEntry),
+    PeerAdapter = bondy_db_core_registry:entry_projection_adapter(PeerEntry),
+    PeerHandle = bondy_db_core_registry:entry_projection_handle(PeerEntry),
+    [
+        begin
+            {ok, LocalFrame} = LocalAdapter:get(LocalHandle, ?B, K),
+            {ok, PeerFrame} = PeerAdapter:get(PeerHandle, ?B, K),
+            ?assertEqual(PeerFrame, LocalFrame)
+        end
+     || {K, _, _} <- Cells
+    ],
 
     teardown(Peer),
     teardown(Local).
-
 
 bootstrap_marks_local_live() ->
     %% Persistent (storage_path-backed) instances default to
@@ -113,7 +124,6 @@ bootstrap_marks_local_live() ->
     teardown(Local),
     file:del_dir_r(BaseDir).
 
-
 no_snapshot_falls_through_to_sync() ->
     %% Peer = single-CRDT mode (returns no_snapshot). Local = catalogue.
     Peer = mk_id(),
@@ -130,7 +140,6 @@ no_snapshot_falls_through_to_sync() ->
     bondy_oplog:stop_instance(Peer),
     teardown(Local).
 
-
 merge_mode_picks_higher_hlc_for_lww() ->
     %% Both replicas have applied cells. Local is `live` (ephemeral),
     %% so `bootstrap_catalogue` runs in merge mode. For LWW register,
@@ -140,11 +149,19 @@ merge_mode_picks_higher_hlc_for_lww() ->
 
     %% Local has K1@5=local, K2@30=local-wins.
     %% Peer  has K1@20=peer-wins,  K2@10=peer.
-    _ = bondy_oplog:append(Local, {cell_apply, ?B, <<"k1">>, {set, 5, <<"local-k1">>}}),
-    _ = bondy_oplog:append(Local, {cell_apply, ?B, <<"k2">>, {set, 30, <<"local-k2">>}}),
+    _ = bondy_oplog:append(
+        Local, {cell_apply, ?B, <<"k1">>, {set, 5, <<"local-k1">>}}
+    ),
+    _ = bondy_oplog:append(
+        Local, {cell_apply, ?B, <<"k2">>, {set, 30, <<"local-k2">>}}
+    ),
     _ = barrier(Local),
-    _ = bondy_oplog:append(Peer, {cell_apply, ?B, <<"k1">>, {set, 20, <<"peer-k1">>}}),
-    _ = bondy_oplog:append(Peer, {cell_apply, ?B, <<"k2">>, {set, 10, <<"peer-k2">>}}),
+    _ = bondy_oplog:append(
+        Peer, {cell_apply, ?B, <<"k1">>, {set, 20, <<"peer-k1">>}}
+    ),
+    _ = bondy_oplog:append(
+        Peer, {cell_apply, ?B, <<"k2">>, {set, 10, <<"peer-k2">>}}
+    ),
     _ = barrier(Peer),
 
     %% Sanity — local is live (so install_mode is merge).
@@ -157,7 +174,7 @@ merge_mode_picks_higher_hlc_for_lww() ->
     %% After merge, K1 has the peer's HLC=20 winning, K2 keeps local's HLC=30.
     LocalEntry = peer_entry(Local),
     Adapter = bondy_db_core_registry:entry_projection_adapter(LocalEntry),
-    Handle  = bondy_db_core_registry:entry_projection_handle(LocalEntry),
+    Handle = bondy_db_core_registry:entry_projection_handle(LocalEntry),
     {ok, K1Frame} = Adapter:get(Handle, ?B, <<"k1">>),
     {ok, K2Frame} = Adapter:get(Handle, ?B, <<"k2">>),
     {K1Hlc, _, _} = bondy_oplog_cell_frame:decode_full(K1Frame),
@@ -167,7 +184,6 @@ merge_mode_picks_higher_hlc_for_lww() ->
 
     teardown(Peer),
     teardown(Local).
-
 
 single_crdt_local_refuses_bootstrap_catalogue() ->
     Local = mk_id(),
@@ -185,7 +201,6 @@ single_crdt_local_refuses_bootstrap_catalogue() ->
     bondy_oplog:stop_instance(Local),
     bondy_oplog:stop_instance(Peer).
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
@@ -202,23 +217,24 @@ setup_instance() ->
     }),
     {Id, NS, Cache, Proj}.
 
-
 setup_instance_persistent(BaseDir, ExtraOpts) ->
     Id = mk_id(),
     NS = ns_of(Id),
     {Cache, Proj} = register_shard(NS, primary, 0),
     Path = filename:join([BaseDir, binary_to_list(Id)]),
     ok = filelib:ensure_path(Path),
-    Opts = maps:merge(#{
-        fold_module => lww_register,
-        applier => #{
-            cell_apply_target => {NS, primary, 0}
+    Opts = maps:merge(
+        #{
+            fold_module => lww_register,
+            applier => #{
+                cell_apply_target => {NS, primary, 0}
+            },
+            storage_path => list_to_binary(Path)
         },
-        storage_path => list_to_binary(Path)
-    }, ExtraOpts),
+        ExtraOpts
+    ),
     {ok, _} = bondy_oplog:start_instance(Id, Opts),
     {Id, NS, Cache, Proj}.
-
 
 test_dir() ->
     Base = filename:join([
@@ -229,31 +245,30 @@ test_dir() ->
     ok = filelib:ensure_path(Base),
     Base.
 
-
 teardown(Id) ->
     bondy_oplog:stop_instance(Id),
     NS = ns_of(Id),
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
         {N, I, S} <- [bondy_db_core_registry:entry_key(E)],
-        N =:= NS],
+        N =:= NS
+    ],
     ok.
-
 
 register_shard(NS, Index, Shard) ->
     {ok, Cache} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
-    {ok, Proj}  = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
+    {ok, Proj} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => Cache,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => Cache,
         projection_adapter => bondy_oplog_projection_ets,
-        projection_handle  => Proj,
-        overlay            => disabled,
-        fold_module        => lww_register
+        projection_handle => Proj,
+        overlay => disabled,
+        fold_module => lww_register
     }),
     {Cache, Proj}.
-
 
 mk_id() ->
     iolist_to_binary([
@@ -261,19 +276,15 @@ mk_id() ->
         integer_to_binary(erlang:unique_integer([positive]))
     ]).
 
-
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
-
 
 barrier(Id) ->
     bondy_oplog:projection(Id).
 
-
 high_water(Id) ->
     NS = ns_of(Id),
     bondy_db_core_registry:high_water_hlc(NS, primary, 0).
-
 
 peer_entry(Id) ->
     NS = ns_of(Id),

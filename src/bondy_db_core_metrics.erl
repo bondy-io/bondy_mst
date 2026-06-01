@@ -71,26 +71,30 @@ the restart. A restart of `bondy_metrics` wipes the counters.
 -define(SERVER, ?MODULE).
 -define(HANDLER_ID, ?MODULE).
 
--define(M_READS,         bondy_db_core_reads_total).
--define(M_RANGES,        bondy_db_core_ranges_total).
--define(M_CACHE_HITS,    bondy_db_core_cache_hits_total).
--define(M_CACHE_MISSES,  bondy_db_core_cache_misses_total).
+-define(M_READS, bondy_db_core_reads_total).
+-define(M_RANGES, bondy_db_core_ranges_total).
+-define(M_CACHE_HITS, bondy_db_core_cache_hits_total).
+-define(M_CACHE_MISSES, bondy_db_core_cache_misses_total).
 
 -record(state, {
-    enabled       :: boolean(),
-    interval_ms   :: non_neg_integer(),
-    tick_ref      :: undefined | reference(),
+    enabled :: boolean(),
+    interval_ms :: non_neg_integer(),
+    tick_ref :: undefined | reference(),
     %% Monotonic-ms timestamp of the previous tick. Used as the default
     %% baseline for any namespace first seen on this tick so the very
     %% first window is bounded by "time since last tick" rather than
     %% clamping to 1ms.
-    last_tick_ts  :: integer(),
+    last_tick_ts :: integer(),
     %% Snapshot of {Reads, Ranges, Hits, Misses, MonoMs} at last tick.
-    snapshot      :: #{atom() => {non_neg_integer(),
-                                  non_neg_integer(),
-                                  non_neg_integer(),
-                                  non_neg_integer(),
-                                  integer()}}
+    snapshot :: #{
+        atom() => {
+            non_neg_integer(),
+            non_neg_integer(),
+            non_neg_integer(),
+            non_neg_integer(),
+            integer()
+        }
+    }
 }).
 
 -export([child_spec/0, child_spec/1]).
@@ -102,8 +106,14 @@ the restart. A restart of `bondy_metrics` wipes the counters.
 %% Telemetry handler callback.
 -export([handle_event/4]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 %% =============================================================================
 %% API
@@ -122,18 +132,15 @@ child_spec(Opts) ->
         modules => [?MODULE]
     }.
 
-
 -spec start_link() -> {ok, pid()} | {error, term()}.
 
 start_link() ->
     start_link(#{}).
 
-
 -spec start_link(map()) -> {ok, pid()} | {error, term()}.
 
 start_link(Opts) when is_map(Opts) ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, Opts, []).
-
 
 ?DOC("""
 Current configuration and the namespaces tracked in the last snapshot.
@@ -143,7 +150,6 @@ Current configuration and the namespaces tracked in the last snapshot.
 info() ->
     gen_server:call(?SERVER, info).
 
-
 ?DOC("""
 Force an immediate gauge emit for every known namespace; otherwise the
 tick fires every `interval_ms`. Useful in tests and for manual probes.
@@ -152,7 +158,6 @@ tick fires every `interval_ms`. Useful in tests and for manual probes.
 
 snapshot_now() ->
     gen_server:call(?SERVER, snapshot_now).
-
 
 ?DOC("""
 Enable or disable the periodic gauge emit at runtime. Disabling cancels
@@ -166,7 +171,6 @@ Operator and test affordance; not part of any consumer API.
 
 set_enabled(Enabled) when is_boolean(Enabled) ->
     gen_server:call(?SERVER, {set_enabled, Enabled}).
-
 
 %% =============================================================================
 %% Telemetry handler
@@ -190,18 +194,18 @@ handle_event([bondy_db_core, range], _Meas, #{namespace := NS}, _Cfg) ->
 handle_event(_Event, _Meas, _Meta, _Cfg) ->
     ok.
 
-
 %% =============================================================================
 %% gen_server callbacks
 %% =============================================================================
 
 init(Opts) ->
     process_flag(trap_exit, true),
-    {Enabled, IntervalMs} = case resolve_interval(Opts) of
-        disabled -> {false, 0};
-        N when is_integer(N), N > 0 -> {true, N};
-        _ -> {false, 0}
-    end,
+    {Enabled, IntervalMs} =
+        case resolve_interval(Opts) of
+            disabled -> {false, 0};
+            N when is_integer(N), N > 0 -> {true, N};
+            _ -> {false, 0}
+        end,
     ok = telemetry:attach_many(
         ?HANDLER_ID,
         [[bondy_db_core, read], [bondy_db_core, range]],
@@ -215,7 +219,6 @@ init(Opts) ->
         snapshot = #{}
     },
     {ok, schedule_tick(State)}.
-
 
 handle_call(info, _From, State) ->
     Reply = #{
@@ -233,25 +236,20 @@ handle_call({set_enabled, Enabled}, _From, State0) ->
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
-
 handle_cast(_Msg, State) ->
     {noreply, State}.
-
 
 handle_info(tick, State) ->
     {noreply, schedule_tick(run_tick(State))};
 handle_info(_Info, State) ->
     {noreply, State}.
 
-
 terminate(_Reason, _State) ->
     _ = telemetry:detach(?HANDLER_ID),
     ok.
 
-
 code_change(_, State, _) ->
     {ok, State}.
-
 
 %% =============================================================================
 %% PRIVATE
@@ -259,14 +257,14 @@ code_change(_, State, _) ->
 
 resolve_interval(Opts) ->
     case maps:find(interval_ms, Opts) of
-        {ok, V} -> V;
+        {ok, V} ->
+            V;
         error ->
             case application:get_env(bondy_mst, metrics) of
                 {ok, M} when is_map(M) -> maps:get(interval_ms, M, 1000);
                 _ -> 1000
             end
     end.
-
 
 schedule_tick(#state{enabled = false} = State) ->
     State#state{tick_ref = undefined};
@@ -275,7 +273,6 @@ schedule_tick(#state{interval_ms = Ms} = State) when Ms > 0 ->
     State#state{tick_ref = Ref};
 schedule_tick(#state{} = State) ->
     State#state{tick_ref = undefined}.
-
 
 cancel_pending_tick(#state{tick_ref = undefined} = State) ->
     State;
@@ -288,7 +285,6 @@ cancel_pending_tick(#state{tick_ref = Ref} = State) ->
     after 0 -> ok
     end,
     State#state{tick_ref = undefined}.
-
 
 run_tick(#state{} = State0) ->
     Now = erlang:monotonic_time(millisecond),
@@ -305,50 +301,54 @@ run_tick(#state{} = State0) ->
     ),
     State0#state{snapshot = Snapshot1, last_tick_ts = Now}.
 
-
-emit_namespace_gauges(NS, Now, #state{snapshot = Prev, last_tick_ts = Tick0},
-                      Acc) ->
+emit_namespace_gauges(
+    NS,
+    Now,
+    #state{snapshot = Prev, last_tick_ts = Tick0},
+    Acc
+) ->
     Label = #{namespace => NS},
-    Reads  = counter_value(?M_READS, Label),
+    Reads = counter_value(?M_READS, Label),
     Ranges = counter_value(?M_RANGES, Label),
-    Hits   = counter_value(?M_CACHE_HITS, Label),
+    Hits = counter_value(?M_CACHE_HITS, Label),
     Misses = counter_value(?M_CACHE_MISSES, Label),
     {PrevReads, PrevRanges, PrevHits, PrevMisses, PrevTs} =
         maps:get(NS, Prev, {0, 0, 0, 0, Tick0}),
-    DeltaReads  = Reads  - PrevReads,
+    DeltaReads = Reads - PrevReads,
     DeltaRanges = Ranges - PrevRanges,
-    DeltaHits   = Hits   - PrevHits,
+    DeltaHits = Hits - PrevHits,
     DeltaMisses = Misses - PrevMisses,
     %% Use the actual elapsed window since the last snapshot — robust
     %% against scheduler jitter or skipped ticks. `max(_, 1)` keeps the
     %% division well-defined on the (rare) zero-elapsed case.
     Window = max(Now - PrevTs, 1),
-    CacheHitRate = case DeltaHits + DeltaMisses of
-        0 -> undefined;
-        Total -> DeltaHits / Total
-    end,
-    ReadRps  = (DeltaReads  * 1000) / Window,
+    CacheHitRate =
+        case DeltaHits + DeltaMisses of
+            0 -> undefined;
+            Total -> DeltaHits / Total
+        end,
+    ReadRps = (DeltaReads * 1000) / Window,
     RangeRps = (DeltaRanges * 1000) / Window,
     SubCount = subscriber_count(NS),
     LagMaxMs = freshness_lag_max_ms(NS, Now),
     telemetry:execute(
         [bondy_db_core, metrics, refresh],
-        #{cache_hit_rate => CacheHitRate,
-          read_rps => ReadRps,
-          range_rps => RangeRps,
-          subscriber_count => SubCount,
-          current_freshness_lag_max_ms => LagMaxMs},
+        #{
+            cache_hit_rate => CacheHitRate,
+            read_rps => ReadRps,
+            range_rps => RangeRps,
+            subscriber_count => SubCount,
+            current_freshness_lag_max_ms => LagMaxMs
+        },
         #{namespace => NS, interval_ms => Window}
     ),
     Acc#{NS => {Reads, Ranges, Hits, Misses, Now}}.
-
 
 counter_value(Name, Label) ->
     case bondy_metrics:value(#{name => Name, label => Label}) of
         undefined -> 0;
         V -> V
     end.
-
 
 counter_namespaces() ->
     %% Union the namespaces across all four counter names. Each
@@ -358,14 +358,12 @@ counter_namespaces() ->
     Labels = lists:flatten([bondy_metrics:with_name(N) || N <- Names]),
     lists:usort([NS || {#{namespace := NS}, _V} <- Labels]).
 
-
 safe_namespaces() ->
     try
         bondy_db_core_registry:namespaces()
     catch
         _:_ -> []
     end.
-
 
 subscriber_count(NS) ->
     try
@@ -374,16 +372,19 @@ subscriber_count(NS) ->
         _:_ -> 0
     end.
 
-
 freshness_lag_max_ms(NS, NowMs) ->
     try bondy_db_core_registry:shards_for(NS) of
         [] ->
             0;
         Entries ->
             lists:max(
-                [NowMs - atomics:get(
-                    bondy_db_core_registry:entry_ae_atomics(E), 1)
-                 || E <- Entries]
+                [
+                    NowMs -
+                        atomics:get(
+                            bondy_db_core_registry:entry_ae_atomics(E), 1
+                        )
+                 || E <- Entries
+                ]
             )
     catch
         _:_ -> 0

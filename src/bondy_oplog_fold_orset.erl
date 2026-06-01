@@ -131,21 +131,21 @@ dot sets are ordset (sorted), tombstones are ordset (sorted) — so two
 -export([decode_event/1]).
 
 -type element_v() :: binary().
--type node_id()   :: binary().
--type counter()   :: non_neg_integer().
--type dot()       :: {node_id(), counter()}.
--type dot_set()   :: ordsets:ordset(dot()).
--type live_map()  :: #{element_v() => dot_set()}.
+-type node_id() :: binary().
+-type counter() :: non_neg_integer().
+-type dot() :: {node_id(), counter()}.
+-type dot_set() :: ordsets:ordset(dot()).
+-type live_map() :: #{element_v() => dot_set()}.
 
 -type state() :: #{
-    live       := live_map(),
+    live := live_map(),
     tombstones := dot_set(),
-    hlc        := bondy_oplog_hlc:hlc()
+    hlc := bondy_oplog_hlc:hlc()
 }.
 
 -type event() ::
-        {add, bondy_oplog_hlc:hlc(), element_v(), dot()}
-        | {remove, bondy_oplog_hlc:hlc(), element_v(), [dot()]}.
+    {add, bondy_oplog_hlc:hlc(), element_v(), dot()}
+    | {remove, bondy_oplog_hlc:hlc(), element_v(), [dot()]}.
 
 -export_type([state/0, event/0, dot/0]).
 
@@ -158,13 +158,16 @@ dot sets are ordset (sorted), tombstones are ordset (sorted) — so two
 initial_value() ->
     #{live => #{}, tombstones => [], hlc => 0}.
 
-
 -spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
     bondy_oplog_fold:apply_result().
 
-apply_event(#{live := L, tombstones := T, hlc := H0} = S,
-            {add, H, Elem, Dot}, _Meta)
-        when is_binary(Elem) ->
+apply_event(
+    #{live := L, tombstones := T, hlc := H0} = S,
+    {add, H, Elem, Dot},
+    _Meta
+) when
+    is_binary(Elem)
+->
     H1 = erlang:max(H, H0),
     case ordsets:is_element(Dot, T) of
         true ->
@@ -177,16 +180,20 @@ apply_event(#{live := L, tombstones := T, hlc := H0} = S,
             Dots0 = maps:get(Elem, L, []),
             Dots1 = ordsets:add_element(Dot, Dots0),
             NewS = S#{live := L#{Elem => Dots1}, hlc := H1},
-            Delta = case WasLive of
-                true  -> none;
-                false -> {add_elem, Elem}
-            end,
+            Delta =
+                case WasLive of
+                    true -> none;
+                    false -> {add_elem, Elem}
+                end,
             {NewS, Delta}
     end;
-
-apply_event(#{live := L0, tombstones := T0, hlc := H0} = S,
-            {remove, H, _Elem, ObservedDots}, _Meta)
-        when is_list(ObservedDots) ->
+apply_event(
+    #{live := L0, tombstones := T0, hlc := H0} = S,
+    {remove, H, _Elem, ObservedDots},
+    _Meta
+) when
+    is_list(ObservedDots)
+->
     H1 = erlang:max(H, H0),
     DotsToTomb = ordsets:from_list(ObservedDots),
     T1 = ordsets:union(T0, DotsToTomb),
@@ -198,18 +205,17 @@ apply_event(#{live := L0, tombstones := T0, hlc := H0} = S,
     %% than corrupting state).
     {L1, RemovedElems} = scrub_dots(L0, DotsToTomb),
     NewS = S#{live := L1, tombstones := T1, hlc := H1},
-    Delta = case RemovedElems of
-        []  -> none;
-        Els -> {remove_elems, ordsets:from_list(Els)}
-    end,
+    Delta =
+        case RemovedElems of
+            [] -> none;
+            Els -> {remove_elems, ordsets:from_list(Els)}
+        end,
     {NewS, Delta}.
-
 
 -spec to_value(state()) -> ordsets:ordset(element_v()).
 
 to_value(#{live := L}) ->
     ordsets:from_list(maps:keys(L)).
-
 
 -doc """
 Combine an OR-Set value with an `apply_event/3` delta.
@@ -220,9 +226,11 @@ Deltas:
 - `{remove_elems, Elems}` — the event evicted every listed element
   (their last live dot was tombstoned).
 """.
--spec apply_value_delta(ordsets:ordset(element_v()),
-                        {add_elem, element_v()}
-                        | {remove_elems, ordsets:ordset(element_v())}) ->
+-spec apply_value_delta(
+    ordsets:ordset(element_v()),
+    {add_elem, element_v()}
+    | {remove_elems, ordsets:ordset(element_v())}
+) ->
     ordsets:ordset(element_v()).
 
 apply_value_delta(OldValue, {add_elem, Elem}) ->
@@ -230,21 +238,20 @@ apply_value_delta(OldValue, {add_elem, Elem}) ->
 apply_value_delta(OldValue, {remove_elems, Elems}) ->
     ordsets:subtract(OldValue, Elems).
 
-
 -spec merge_states(state(), state()) -> state().
 
-merge_states(#{live := La, tombstones := Ta, hlc := Ha},
-             #{live := Lb, tombstones := Tb, hlc := Hb}) ->
+merge_states(
+    #{live := La, tombstones := Ta, hlc := Ha},
+    #{live := Lb, tombstones := Tb, hlc := Hb}
+) ->
     Tu = ordsets:union(Ta, Tb),
     Hu = erlang:max(Ha, Hb),
     Lu = merge_live(La, Lb, Tu),
     #{live => Lu, tombstones => Tu, hlc => Hu}.
 
-
 -spec hlc(state()) -> bondy_oplog_hlc:hlc().
 
 hlc(#{hlc := H}) -> H.
-
 
 -spec gc_threshold(state()) -> bondy_oplog_hlc:hlc() | undefined.
 
@@ -253,62 +260,64 @@ gc_threshold(#{live := L, tombstones := [], hlc := 0}) when map_size(L) == 0 ->
 gc_threshold(#{hlc := H}) ->
     H.
 
-
 -spec encode_state(state()) -> binary().
 
 encode_state(#{live := L, tombstones := T, hlc := H}) ->
     LiveEntries = lists:sort(maps:to_list(L)),
     NumLive = length(LiveEntries),
-    LiveBin = iolist_to_binary([encode_live_entry(E, D) || {E, D} <- LiveEntries]),
+    LiveBin = iolist_to_binary([
+        encode_live_entry(E, D)
+     || {E, D} <- LiveEntries
+    ]),
     NumTomb = length(T),
     TombBin = iolist_to_binary([encode_dot(D) || D <- T]),
-    <<H:64/big-unsigned,
-      NumLive:32/big-unsigned, LiveBin/binary,
-      NumTomb:32/big-unsigned, TombBin/binary>>.
-
+    <<H:64/big-unsigned, NumLive:32/big-unsigned, LiveBin/binary,
+        NumTomb:32/big-unsigned, TombBin/binary>>.
 
 -spec decode_state(binary()) -> state().
 
-decode_state(<<H:64/big-unsigned,
-               NumLive:32/big-unsigned, Rest0/binary>>) ->
+decode_state(<<H:64/big-unsigned, NumLive:32/big-unsigned, Rest0/binary>>) ->
     {LiveEntries, Rest1} = decode_live_entries(NumLive, Rest0, []),
     <<NumTomb:32/big-unsigned, Rest2/binary>> = Rest1,
     {Tombs, <<>>} = decode_dots(NumTomb, Rest2, []),
-    #{live => maps:from_list(LiveEntries),
-      tombstones => Tombs,
-      hlc => H}.
-
+    #{
+        live => maps:from_list(LiveEntries),
+        tombstones => Tombs,
+        hlc => H
+    }.
 
 -spec encode_event(event()) -> binary().
 
-encode_event({add, H, Elem, Dot})
-        when is_integer(H), is_binary(Elem) ->
+encode_event({add, H, Elem, Dot}) when
+    is_integer(H), is_binary(Elem)
+->
     ElemSize = byte_size(Elem),
     DotBin = encode_dot(Dot),
-    <<1, H:64/big-unsigned, ElemSize:32/big-unsigned, Elem/binary, DotBin/binary>>;
-
-encode_event({remove, H, Elem, ObservedDots})
-        when is_integer(H), is_binary(Elem), is_list(ObservedDots) ->
+    <<1, H:64/big-unsigned, ElemSize:32/big-unsigned, Elem/binary,
+        DotBin/binary>>;
+encode_event({remove, H, Elem, ObservedDots}) when
+    is_integer(H), is_binary(Elem), is_list(ObservedDots)
+->
     ElemSize = byte_size(Elem),
     NumDots = length(ObservedDots),
     DotsBin = iolist_to_binary([encode_dot(D) || D <- ObservedDots]),
     <<2, H:64/big-unsigned, ElemSize:32/big-unsigned, Elem/binary,
-      NumDots:32/big-unsigned, DotsBin/binary>>.
-
+        NumDots:32/big-unsigned, DotsBin/binary>>.
 
 -spec decode_event(binary()) -> event().
 
-decode_event(<<1, H:64/big-unsigned, ElemSize:32/big-unsigned,
-               Elem:ElemSize/binary, Rest/binary>>) ->
+decode_event(
+    <<1, H:64/big-unsigned, ElemSize:32/big-unsigned, Elem:ElemSize/binary,
+        Rest/binary>>
+) ->
     {Dot, <<>>} = decode_one_dot(Rest),
     {add, H, Elem, Dot};
-
-decode_event(<<2, H:64/big-unsigned, ElemSize:32/big-unsigned,
-               Elem:ElemSize/binary,
-               NumDots:32/big-unsigned, Rest/binary>>) ->
+decode_event(
+    <<2, H:64/big-unsigned, ElemSize:32/big-unsigned, Elem:ElemSize/binary,
+        NumDots:32/big-unsigned, Rest/binary>>
+) ->
     {Dots, <<>>} = decode_dots(NumDots, Rest, []),
     {remove, H, Elem, Dots}.
-
 
 %% =============================================================================
 %% INTERNAL — scrub tombstoned dots from every live entry
@@ -320,11 +329,12 @@ scrub_dots(Live, DotsToTomb) ->
             Remaining = ordsets:subtract(Dots, DotsToTomb),
             case Remaining of
                 [] -> {AccLive, [K | AccRemoved]};
-                _  -> {AccLive#{K => Remaining}, AccRemoved}
+                _ -> {AccLive#{K => Remaining}, AccRemoved}
             end
         end,
         {#{}, []},
-        Live).
+        Live
+    ).
 
 %% =============================================================================
 %% INTERNAL — merge
@@ -340,11 +350,12 @@ merge_live(La, Lb, Tombs) ->
             Live = ordsets:subtract(U, Tombs),
             case Live of
                 [] -> Acc;
-                _  -> Acc#{K => Live}
+                _ -> Acc#{K => Live}
             end
         end,
         #{},
-        Keys).
+        Keys
+    ).
 
 %% =============================================================================
 %% INTERNAL — encoding
@@ -354,21 +365,23 @@ encode_live_entry(Elem, Dots) ->
     ElemSize = byte_size(Elem),
     NumDots = length(Dots),
     DotsBin = iolist_to_binary([encode_dot(D) || D <- Dots]),
-    <<ElemSize:32/big-unsigned, Elem/binary,
-      NumDots:32/big-unsigned, DotsBin/binary>>.
+    <<ElemSize:32/big-unsigned, Elem/binary, NumDots:32/big-unsigned,
+        DotsBin/binary>>.
 
 encode_dot({Node, Counter}) when is_binary(Node), is_integer(Counter) ->
     NodeSize = byte_size(Node),
     <<NodeSize:16/big-unsigned, Node/binary, Counter:64/big-unsigned>>.
 
-
 decode_live_entries(0, Rest, Acc) ->
     {lists:reverse(Acc), Rest};
-decode_live_entries(N, <<ElemSize:32/big-unsigned, Elem:ElemSize/binary,
-                         NumDots:32/big-unsigned, Rest0/binary>>, Acc) when N > 0 ->
+decode_live_entries(
+    N,
+    <<ElemSize:32/big-unsigned, Elem:ElemSize/binary, NumDots:32/big-unsigned,
+        Rest0/binary>>,
+    Acc
+) when N > 0 ->
     {Dots, Rest1} = decode_dots(NumDots, Rest0, []),
     decode_live_entries(N - 1, Rest1, [{Elem, Dots} | Acc]).
-
 
 decode_dots(0, Rest, Acc) ->
     {lists:reverse(Acc), Rest};
@@ -376,7 +389,8 @@ decode_dots(N, Bin, Acc) when N > 0 ->
     {Dot, Rest} = decode_one_dot(Bin),
     decode_dots(N - 1, Rest, [Dot | Acc]).
 
-
-decode_one_dot(<<NodeSize:16/big-unsigned, Node:NodeSize/binary,
-                 Counter:64/big-unsigned, Rest/binary>>) ->
+decode_one_dot(
+    <<NodeSize:16/big-unsigned, Node:NodeSize/binary, Counter:64/big-unsigned,
+        Rest/binary>>
+) ->
     {{Node, Counter}, Rest}.

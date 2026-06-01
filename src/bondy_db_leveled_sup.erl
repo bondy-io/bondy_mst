@@ -49,8 +49,7 @@ policy it wants (re-call `start_bookie/2`, refresh its routing map).
 start_link() ->
     supervisor:start_link(?MODULE, []).
 
-
--doc("""
+-doc """
 Stop the supervisor and every Bookie it owns. Returns `ok` once every
 child has terminated.
 
@@ -59,16 +58,16 @@ Children are terminated via `supervisor:terminate_child/2` so leveled's
 the supervisor itself is unlinked and killed — supervisors do not
 expose a clean self-stop API and `exit(Sup, shutdown)` is not honoured
 by an arbitrary caller.
-""").
+""".
 -spec stop(Sup :: pid()) -> ok.
 
 stop(Sup) when is_pid(Sup) ->
     %% Terminate children first so leveled flushes cleanly.
     Children = [
         Pid
-        || {_Id, Pid, _Type, _Mods}
-            <- supervisor:which_children(Sup),
-           is_pid(Pid)
+     || {_Id, Pid, _Type, _Mods} <-
+            supervisor:which_children(Sup),
+        is_pid(Pid)
     ],
     lists:foreach(
         fun(Pid) ->
@@ -89,8 +88,7 @@ stop(Sup) when is_pid(Sup) ->
         ok
     end.
 
-
--doc("""
+-doc """
 Provision a leveled Bookie under the supervisor at `Dir` with `Opts`.
 
 `Opts` is the proplist passed straight to `leveled_bookie:book_start/1`.
@@ -99,7 +97,7 @@ At minimum it must include the keys leveled requires (typically
 module does not validate `Opts` — that is leveled's job.
 
 Returns the Bookie pid on success.
-""").
+""".
 -spec start_bookie(
     Sup :: pid(),
     Opts :: proplists:proplist()
@@ -108,27 +106,26 @@ Returns the Bookie pid on success.
 start_bookie(Sup, Opts) when is_pid(Sup), is_list(Opts) ->
     supervisor:start_child(Sup, [Opts]).
 
-
 %% =============================================================================
 %% SUPERVISOR CALLBACKS
 %% =============================================================================
 
 init([]) ->
     SupFlags = #{
-        strategy  => simple_one_for_one,
+        strategy => simple_one_for_one,
         intensity => 0,
-        period    => 1
+        period => 1
     },
     %% `temporary` because a restart would hand the topology a fresh
     %% Bookie pid it has no way to learn about; the topology owns
     %% restart policy. `shutdown => 30_000` matches the `stop/1`
     %% deadline so leveled has time to flush.
     ChildSpec = #{
-        id        => leveled_bookie,
-        start     => {leveled_bookie, book_start, []},
-        restart   => temporary,
-        shutdown  => 30_000,
-        type      => worker,
-        modules   => [leveled_bookie]
+        id => leveled_bookie,
+        start => {leveled_bookie, book_start, []},
+        restart => temporary,
+        shutdown => 30_000,
+        type => worker,
+        modules => [leveled_bookie]
     },
     {ok, {SupFlags, [ChildSpec]}}.

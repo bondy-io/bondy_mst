@@ -29,9 +29,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_mst_pack_manifest_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_mst_pack_manifest_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -43,8 +50,10 @@ rmrf(Dir) ->
 
 with_tmp_dir(Fun) ->
     Dir = mktemp_dir(),
-    try Fun(Dir)
-    after rmrf(Dir)
+    try
+        Fun(Dir)
+    after
+        rmrf(Dir)
     end.
 
 sample() ->
@@ -80,23 +89,31 @@ decode_rejects_missing_required_field_test() ->
         {current_root, undefined},
         {sealed_packs, []}
     ],
-    ?assertEqual({error, {missing_field, instance_id}},
-                 bondy_mst_pack_manifest:decode(Terms)).
+    ?assertEqual(
+        {error, {missing_field, instance_id}},
+        bondy_mst_pack_manifest:decode(Terms)
+    ).
 
 decode_rejects_bad_hash_algo_test() ->
     Terms = base_terms() ++ [{hash_algo, md5}],
-    ?assertEqual({error, {bad_hash_algo, md5}},
-                 bondy_mst_pack_manifest:decode(Terms)).
+    ?assertEqual(
+        {error, {bad_hash_algo, md5}},
+        bondy_mst_pack_manifest:decode(Terms)
+    ).
 
 decode_rejects_bad_current_root_test() ->
     Terms = override_terms(base_terms(), current_root, <<"too short">>),
-    ?assertEqual({error, {bad_current_root, <<"too short">>}},
-                 bondy_mst_pack_manifest:decode(Terms)).
+    ?assertEqual(
+        {error, {bad_current_root, <<"too short">>}},
+        bondy_mst_pack_manifest:decode(Terms)
+    ).
 
 decode_rejects_non_ascending_sealed_packs_test() ->
     Terms = override_terms(base_terms(), sealed_packs, [1, 3, 2]),
-    ?assertEqual({error, {bad_sealed_packs, [1, 3, 2]}},
-                 bondy_mst_pack_manifest:decode(Terms)).
+    ?assertEqual(
+        {error, {bad_sealed_packs, [1, 3, 2]}},
+        bondy_mst_pack_manifest:decode(Terms)
+    ).
 
 decode_accepts_empty_sealed_packs_test() ->
     Terms = base_terms(),
@@ -108,8 +125,10 @@ decode_tolerates_unknown_field_test() ->
 
 decode_rejects_non_proplist_test() ->
     Terms = [{manifest_version, 1}, banana, {instance_id, <<"x">>}],
-    ?assertEqual({error, not_proplist},
-                 bondy_mst_pack_manifest:decode(Terms)).
+    ?assertEqual(
+        {error, not_proplist},
+        bondy_mst_pack_manifest:decode(Terms)
+    ).
 
 %% =============================================================================
 %% Setters
@@ -133,8 +152,10 @@ add_sealed_pack_appends_in_order_test() ->
 add_sealed_pack_rejects_non_monotone_test() ->
     M0 = sample(),
     M1 = bondy_mst_pack_manifest:add_sealed_pack(M0, 5),
-    ?assertError({non_monotone_pack_id, 3, 5},
-                 bondy_mst_pack_manifest:add_sealed_pack(M1, 3)).
+    ?assertError(
+        {non_monotone_pack_id, 3, 5},
+        bondy_mst_pack_manifest:add_sealed_pack(M1, 3)
+    ).
 
 remove_sealed_packs_advances_watermark_test() ->
     M0 = lists:foldl(
@@ -208,11 +229,13 @@ read_ignores_stale_tmp_file_test() ->
 write_to_missing_dir_returns_error_test() ->
     %% No directory creation in `write/2`; the caller owns the
     %% per-instance directory bootstrap.
-    ?assertMatch({error, _},
-                 bondy_mst_pack_manifest:write(
-                     "/nonexistent/path/that/should/not/exist",
-                     sample()
-                 )).
+    ?assertMatch(
+        {error, _},
+        bondy_mst_pack_manifest:write(
+            "/nonexistent/path/that/should/not/exist",
+            sample()
+        )
+    ).
 
 path_helpers_test() ->
     Dir = "/var/lib/bondy/mst/inst-1",
@@ -233,7 +256,7 @@ proper_manifest_test_() ->
     Opts = [{numtests, 50}, {to_file, user}],
     [
         {timeout, 30,
-         ?_assert(proper:quickcheck(prop_encode_decode_roundtrip(), Opts))}
+            ?_assert(proper:quickcheck(prop_encode_decode_roundtrip(), Opts))}
     ].
 
 prop_encode_decode_roundtrip() ->
@@ -244,7 +267,8 @@ prop_encode_decode_roundtrip() ->
             Bin = bondy_mst_pack_manifest:encode(M),
             {ok, Terms} = string_to_terms(binary_to_list(Bin)),
             case bondy_mst_pack_manifest:decode(Terms) of
-                {ok, M} -> true;
+                {ok, M} ->
+                    true;
                 Other ->
                     io:format("decode mismatch ~p~n", [Other]),
                     false
@@ -255,20 +279,32 @@ prop_encode_decode_roundtrip() ->
 manifest_gen() ->
     ?LET(
         {Inst, Root, Packs, Incoming, Compacted},
-        {?LET(N, choose(1, 16), binary(N)),
-         oneof([undefined,
-                ?LET(B, binary(?HASH_LEN), B)]),
-         ?LET(L, choose(0, 8),
-              ?LET(Bases, vector(L, choose(0, 1000)),
-                   strict_ascending(Bases))),
-         oneof([present, absent]),
-         non_neg_integer()},
+        {
+            ?LET(N, choose(1, 16), binary(N)),
+            oneof([
+                undefined,
+                ?LET(B, binary(?HASH_LEN), B)
+            ]),
+            ?LET(
+                L,
+                choose(0, 8),
+                ?LET(
+                    Bases,
+                    vector(L, choose(0, 1000)),
+                    strict_ascending(Bases)
+                )
+            ),
+            oneof([present, absent]),
+            non_neg_integer()
+        },
         begin
             M0 = bondy_mst_pack_manifest:new(Inst, sha256),
             M1 = bondy_mst_pack_manifest:with_current_root(M0, Root),
             M2 = bondy_mst_pack_manifest:with_incoming_pack(M1, Incoming),
             M3 = lists:foldl(
-                fun(P, Acc) -> bondy_mst_pack_manifest:add_sealed_pack(Acc, P) end,
+                fun(P, Acc) ->
+                    bondy_mst_pack_manifest:add_sealed_pack(Acc, P)
+                end,
                 M2,
                 Packs
             ),
@@ -280,7 +316,8 @@ manifest_gen() ->
 
 %% @private  Coerce a list of non-negative integers into a strictly
 %%           ascending list by sorting + dedup + advancing duplicates.
-strict_ascending([]) -> [];
+strict_ascending([]) ->
+    [];
 strict_ascending(L) ->
     Sorted = lists:sort(L),
     dedup_advance(Sorted, -1, []).

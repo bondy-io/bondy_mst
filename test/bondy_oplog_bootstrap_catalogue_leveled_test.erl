@@ -33,9 +33,11 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
 
 leveled_bootstrap_test_() ->
@@ -43,32 +45,37 @@ leveled_bootstrap_test_() ->
         {timeout, 30, fun fresh_replica_bootstraps_via_leveled/0}
     ]}.
 
-
 fresh_replica_bootstraps_via_leveled() ->
     Dir1 = make_tempdir(),
     Dir2 = make_tempdir(),
     %% head_only=with_lookup required by bondy_oplog_projection_leveled (PR-PS-15b).
     BookOpts = fun(D) ->
-        [{root_path, D},
-         {cache_size, 2000},
-         {max_journalsize, 100_000_000},
-         {sync_strategy, none},
-         {head_only, with_lookup}]
+        [
+            {root_path, D},
+            {cache_size, 2000},
+            {max_journalsize, 100_000_000},
+            {sync_strategy, none},
+            {head_only, with_lookup}
+        ]
     end,
     {ok, B1} = leveled_bookie:book_start(BookOpts(Dir1)),
     {ok, B2} = leveled_bookie:book_start(BookOpts(Dir2)),
     try
-        {Peer,  PeerEntry}  = setup_instance_with_leveled(B1),
+        {Peer, PeerEntry} = setup_instance_with_leveled(B1),
         {Local, LocalEntry} = setup_instance_with_leveled(B2),
 
-        Cells = [{<<"alpha">>,   10, <<"a">>},
-                 {<<"beta">>,    25, <<"b">>},
-                 {<<"gamma">>,    5, <<"c">>},
-                 {<<"delta">>,   17, <<"d">>},
-                 {<<"epsilon">>, 33, <<"e">>}],
+        Cells = [
+            {<<"alpha">>, 10, <<"a">>},
+            {<<"beta">>, 25, <<"b">>},
+            {<<"gamma">>, 5, <<"c">>},
+            {<<"delta">>, 17, <<"d">>},
+            {<<"epsilon">>, 33, <<"e">>}
+        ],
 
-        [bondy_oplog:append(Peer, {cell_apply, ?B, K, {set, Hlc, V}})
-         || {K, Hlc, V} <- Cells],
+        [
+            bondy_oplog:append(Peer, {cell_apply, ?B, K, {set, Hlc, V}})
+         || {K, Hlc, V} <- Cells
+        ],
         _ = bondy_oplog:projection(Peer),
 
         %% Pre-bootstrap state.
@@ -89,11 +96,14 @@ fresh_replica_bootstraps_via_leveled() ->
         PA = ?PA,
         PeerH = bondy_db_core_registry:entry_projection_handle(PeerEntry),
         LocalH = bondy_db_core_registry:entry_projection_handle(LocalEntry),
-        [begin
-             {ok, PFrame} = PA:get(PeerH, ?B, K),
-             {ok, LFrame} = PA:get(LocalH, ?B, K),
-             ?assertEqual(PFrame, LFrame)
-         end || {K, _, _} <- Cells]
+        [
+            begin
+                {ok, PFrame} = PA:get(PeerH, ?B, K),
+                {ok, LFrame} = PA:get(LocalH, ?B, K),
+                ?assertEqual(PFrame, LFrame)
+            end
+         || {K, _, _} <- Cells
+        ]
     after
         ok = leveled_bookie:book_close(B1),
         ok = leveled_bookie:book_close(B2),
@@ -108,16 +118,16 @@ fresh_replica_bootstraps_via_leveled() ->
 setup_instance_with_leveled(BookiePid) ->
     Id = mk_id(),
     NS = ns_of(Id),
-    {ok, Proj}  = ?PA:open(NS, primary, 0, #{bookie => BookiePid}),
+    {ok, Proj} = ?PA:open(NS, primary, 0, #{bookie => BookiePid}),
     {ok, Cache} = bondy_oplog_cache_ets:init(NS, primary, 0, #{}),
     ok = bondy_db_core_registry:register(NS, primary, 0, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => Cache,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => Cache,
         projection_adapter => ?PA,
-        projection_handle  => Proj,
-        overlay            => disabled,
-        fold_module        => lww_register
+        projection_handle => Proj,
+        overlay => disabled,
+        fold_module => lww_register
     }),
     {ok, _} = bondy_oplog:start_instance(Id, #{
         fold_module => lww_register,
@@ -128,11 +138,9 @@ setup_instance_with_leveled(BookiePid) ->
     {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, 0),
     {Id, Entry}.
 
-
 high_water_for(Entry) ->
     Ref = bondy_db_core_registry:entry_high_water_ref(Entry),
     bondy_oplog_high_water:read(Ref).
-
 
 mk_id() ->
     iolist_to_binary([
@@ -140,10 +148,8 @@ mk_id() ->
         integer_to_binary(erlang:unique_integer([positive]))
     ]).
 
-
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
-
 
 make_tempdir() ->
     Base = filename:join([
@@ -153,7 +159,6 @@ make_tempdir() ->
     ]),
     ok = filelib:ensure_dir(filename:join(Base, ".keep")),
     Base.
-
 
 rmrf(Dir) ->
     case file:del_dir_r(Dir) of

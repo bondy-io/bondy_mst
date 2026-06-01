@@ -17,23 +17,20 @@
 %% =============================================================================
 
 topology_test_() ->
-    {foreach,
-        fun setup/0,
-        fun cleanup/1,
-        [
-            fun init_with_valid_opts/1,
-            fun init_rejects_missing_sup/1,
-            fun init_rejects_missing_dir/1,
-            fun open_table_starts_one_bookie_per_shard/1,
-            fun open_table_distinct_entities_get_distinct_bookies/1,
-            fun route_returns_adapter_and_handle/1,
-            fun route_distinct_shards_get_distinct_bookies/1,
-            fun route_same_shard_returns_stable_handle/1,
-            fun route_unknown_shard_returns_error/1,
-            fun close_table_stops_bookies/1,
-            fun shutdown_stops_supervisor_and_children/1,
-            fun end_to_end_put_get_through_topology/1
-        ]}.
+    {foreach, fun setup/0, fun cleanup/1, [
+        fun init_with_valid_opts/1,
+        fun init_rejects_missing_sup/1,
+        fun init_rejects_missing_dir/1,
+        fun open_table_starts_one_bookie_per_shard/1,
+        fun open_table_distinct_entities_get_distinct_bookies/1,
+        fun route_returns_adapter_and_handle/1,
+        fun route_distinct_shards_get_distinct_bookies/1,
+        fun route_same_shard_returns_stable_handle/1,
+        fun route_unknown_shard_returns_error/1,
+        fun close_table_stops_bookies/1,
+        fun shutdown_stops_supervisor_and_children/1,
+        fun end_to_end_put_get_through_topology/1
+    ]}.
 
 %% =============================================================================
 %% Setup / teardown
@@ -53,7 +50,7 @@ setup() ->
 
 cleanup({Sup, Dir}) ->
     case is_process_alive(Sup) of
-        true  -> bondy_db_leveled_sup:stop(Sup);
+        true -> bondy_db_leveled_sup:stop(Sup);
         false -> ok
     end,
     rmrf(Dir),
@@ -71,7 +68,6 @@ init_with_valid_opts({Sup, Dir}) ->
         )
     end.
 
-
 init_rejects_missing_sup({_Sup, Dir}) ->
     fun() ->
         ?assertMatch(
@@ -80,7 +76,6 @@ init_rejects_missing_sup({_Sup, Dir}) ->
         )
     end.
 
-
 init_rejects_missing_dir({Sup, _Dir}) ->
     fun() ->
         ?assertMatch(
@@ -88,7 +83,6 @@ init_rejects_missing_dir({Sup, _Dir}) ->
             ?MOD:init(my_db, #{sup => Sup})
         )
     end.
-
 
 open_table_starts_one_bookie_per_shard({Sup, Dir}) ->
     fun() ->
@@ -107,11 +101,10 @@ open_table_starts_one_bookie_per_shard({Sup, Dir}) ->
         ?assertEqual(length(Pids), sets:size(sets:from_list(Pids)))
     end.
 
-
 open_table_distinct_entities_get_distinct_bookies({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
-        {ok, Users,  _S1} = ?MOD:open_table(users,  2, #{}, S0),
+        {ok, Users, _S1} = ?MOD:open_table(users, 2, #{}, S0),
         {ok, Tokens, _S2} = ?MOD:open_table(tokens, 2, #{}, S0),
         UPids = maps:values(maps:get(shards, Users)),
         TPids = maps:values(maps:get(shards, Tokens)),
@@ -120,7 +113,6 @@ open_table_distinct_entities_get_distinct_bookies({Sup, Dir}) ->
         ),
         ?assertEqual(0, sets:size(Common))
     end.
-
 
 route_returns_adapter_and_handle({Sup, Dir}) ->
     fun() ->
@@ -134,7 +126,6 @@ route_returns_adapter_and_handle({Sup, Dir}) ->
         ?assertNot(maps:is_key(bucket, Handle))
     end.
 
-
 route_distinct_shards_get_distinct_bookies({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
@@ -143,7 +134,6 @@ route_distinct_shards_get_distinct_bookies({Sup, Dir}) ->
         {ok, _, #{bookie := B1}} = ?MOD:route(1, T),
         ?assertNotEqual(B0, B1)
     end.
-
 
 route_same_shard_returns_stable_handle({Sup, Dir}) ->
     fun() ->
@@ -155,7 +145,6 @@ route_same_shard_returns_stable_handle({Sup, Dir}) ->
         ?assertEqual(H0, H1)
     end.
 
-
 route_unknown_shard_returns_error({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
@@ -165,7 +154,6 @@ route_unknown_shard_returns_error({Sup, Dir}) ->
             ?MOD:route(99, T)
         )
     end.
-
 
 close_table_stops_bookies({Sup, Dir}) ->
     fun() ->
@@ -178,7 +166,6 @@ close_table_stops_bookies({Sup, Dir}) ->
         wait_until_dead(Pids, 5_000)
     end.
 
-
 shutdown_stops_supervisor_and_children({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
@@ -189,7 +176,6 @@ shutdown_stops_supervisor_and_children({Sup, Dir}) ->
         ?assertNot(is_process_alive(Sup)),
         wait_until_dead(Pids, 5_000)
     end.
-
 
 end_to_end_put_get_through_topology({Sup, Dir}) ->
     fun() ->
@@ -206,12 +192,15 @@ end_to_end_put_get_through_topology({Sup, Dir}) ->
             {<<"realm-1">>, <<"alice">>, F1},
             {<<"realm-2">>, <<"alice">>, F2}
         ]),
-        ?assertEqual({ok, F1},
-                     Adapter:get(Handle, <<"realm-1">>, <<"alice">>)),
-        ?assertEqual({ok, F2},
-                     Adapter:get(Handle, <<"realm-2">>, <<"alice">>))
+        ?assertEqual(
+            {ok, F1},
+            Adapter:get(Handle, <<"realm-1">>, <<"alice">>)
+        ),
+        ?assertEqual(
+            {ok, F2},
+            Adapter:get(Handle, <<"realm-2">>, <<"alice">>)
+        )
     end.
-
 
 %% =============================================================================
 %% Helpers
@@ -226,20 +215,17 @@ make_tempdir() ->
     ok = filelib:ensure_dir(filename:join(Base, ".keep")),
     Base.
 
-
 mk_frame(Bytes) when is_binary(Bytes) ->
     %% Wrap raw bytes in the minimal V2 cell-frame shape so the leveled
     %% tag extractor accepts the object.
     bondy_oplog_cell_frame:encode(0, Bytes, Bytes, false).
 
-
 rmrf(Dir) ->
     case file:del_dir_r(Dir) of
-        ok              -> ok;
+        ok -> ok;
         {error, enoent} -> ok;
-        {error, _}      -> ok
+        {error, _} -> ok
     end.
-
 
 wait_until_dead([], _Deadline) ->
     ok;

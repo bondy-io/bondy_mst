@@ -24,9 +24,11 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
 
 transport_test_() ->
@@ -37,7 +39,6 @@ transport_test_() ->
         fun single_crdt_instance_returns_no_snapshot/0
     ]}.
 
-
 init_wire_envelope() ->
     {Id, _NS, _, _} = setup_instance(),
     _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"x">>, {set, 50, <<"v">>}}),
@@ -47,7 +48,6 @@ init_wire_envelope() ->
         ?T:request(Id, Id, get_catalogue_snapshot_init, #{})
     ),
     teardown(Id).
-
 
 next_batch_then_done_wire_envelope() ->
     {Id, _NS, _, _} = setup_instance(),
@@ -68,14 +68,12 @@ next_batch_then_done_wire_envelope() ->
     ),
     teardown(Id).
 
-
 init_for_unknown_instance_errors() ->
     Bogus = <<"ghost-instance-id">>,
     ?assertMatch(
         {error, {peer_not_running, Bogus}},
         ?T:request(Bogus, Bogus, get_catalogue_snapshot_init, #{})
     ).
-
 
 single_crdt_instance_returns_no_snapshot() ->
     Id = mk_id(),
@@ -107,29 +105,28 @@ setup_instance() ->
     }),
     {Id, NS, Cache, Proj}.
 
-
 teardown(Id) ->
     bondy_oplog:stop_instance(Id),
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
-
 
 register_shard(NS, Index, Shard) ->
     {ok, Cache} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
-    {ok, Proj}  = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
+    {ok, Proj} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => Cache,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => Cache,
         projection_adapter => bondy_oplog_projection_ets,
-        projection_handle  => Proj,
-        overlay            => disabled,
-        fold_module        => lww_register
+        projection_handle => Proj,
+        overlay => disabled,
+        fold_module => lww_register
     }),
     {Cache, Proj}.
-
 
 mk_id() ->
     iolist_to_binary([
@@ -137,10 +134,8 @@ mk_id() ->
         integer_to_binary(erlang:unique_integer([positive]))
     ]).
 
-
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
-
 
 barrier(Id) ->
     bondy_oplog:projection(Id).

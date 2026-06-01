@@ -83,17 +83,15 @@ on next open.
 
 -type create_error() ::
     {idx_build, bondy_mst_pack_index:build_error()}
-  | {rename_pack, term()}
-  | {rename_idx, term()}
-  | term().
+    | {rename_pack, term()}
+    | {rename_idx, term()}
+    | term().
 
 -type commit_error() :: {manifest, term()}.
-
 
 %% =============================================================================
 %% API
 %% =============================================================================
-
 
 ?DOC("""
 Streams a new sealed `pack-NNNN.pack` + `.idx` pair from `Hashes`
@@ -117,17 +115,25 @@ A `Reader` failure for any hash aborts the stream and surfaces as
 `{error, _}`; the tmp files are cleaned up.
 """).
 -spec create_sealed_pack(
-        Dir :: file:filename_all(),
-        InstanceHash :: non_neg_integer(),
-        HashAlgo :: atom(),
-        PackId :: pos_integer(),
-        Hashes :: [binary()],
-        Reader :: reader()
-    ) -> ok | {error, create_error()}.
+    Dir :: file:filename_all(),
+    InstanceHash :: non_neg_integer(),
+    HashAlgo :: atom(),
+    PackId :: pos_integer(),
+    Hashes :: [binary()],
+    Reader :: reader()
+) -> ok | {error, create_error()}.
 
 create_sealed_pack(Dir, InstanceHash, HashAlgo, PackId, Hashes, Reader) ->
-    case stream_sealed_pack(Dir, InstanceHash, HashAlgo, PackId, Hashes,
-                            Reader) of
+    case
+        stream_sealed_pack(
+            Dir,
+            InstanceHash,
+            HashAlgo,
+            PackId,
+            Hashes,
+            Reader
+        )
+    of
         {ok, Entries} ->
             case write_sealed_idx_from_entries(Dir, PackId, Entries) of
                 ok ->
@@ -147,7 +153,6 @@ create_sealed_pack(Dir, InstanceHash, HashAlgo, PackId, Hashes, Reader) ->
             {error, R}
     end.
 
-
 ?DOC("""
 Atomic manifest swap that finalises a seal: adds `PackId` to
 `sealed_packs` and clears `incoming_pack`. Returns the updated
@@ -161,8 +166,11 @@ sealed pack is durable and the incoming pack is reclaimable.
 Note that the store's `gc/2` does NOT call this — GC retires old
 packs in the same swap and so writes its own composite manifest.
 """).
--spec commit_manifest(file:filename_all(), bondy_mst_pack_manifest:t(),
-                      pos_integer()) ->
+-spec commit_manifest(
+    file:filename_all(),
+    bondy_mst_pack_manifest:t(),
+    pos_integer()
+) ->
     {ok, bondy_mst_pack_manifest:t()} | {error, commit_error()}.
 
 commit_manifest(Dir, M, PackId) ->
@@ -171,10 +179,9 @@ commit_manifest(Dir, M, PackId) ->
         absent
     ),
     case bondy_mst_pack_manifest:write(Dir, M1) of
-        ok           -> {ok, M1};
-        {error, R}   -> {error, {manifest, R}}
+        ok -> {ok, M1};
+        {error, R} -> {error, {manifest, R}}
     end.
-
 
 ?DOC("""
 Deletes the on-disk `pack-NNNN.pack` and `pack-NNNN.idx` for a
@@ -188,7 +195,6 @@ delete_sealed_pack_files(Dir, PackId) ->
     _ = prim_file:delete(bondy_mst_pack_paths:sealed_idx_path(Dir, PackId)),
     ok.
 
-
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
@@ -200,13 +206,13 @@ delete_sealed_pack_files(Dir, PackId) ->
 stream_sealed_pack(Dir, IH, HashAlgo, PackId, Hashes, Reader) ->
     TmpPath = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, PackId),
     Header = bondy_mst_pack_codec:encode_pack_header(#{
-        version       => bondy_mst_pack_codec:version(),
-        flags         => 0,
-        pack_id       => PackId,
+        version => bondy_mst_pack_codec:version(),
+        flags => 0,
+        pack_id => PackId,
         instance_hash => IH,
-        hash_algo     => HashAlgo,
-        created_at    => erlang:system_time(millisecond),
-        record_count  => length(Hashes)
+        hash_algo => HashAlgo,
+        created_at => erlang:system_time(millisecond),
+        record_count => length(Hashes)
     }),
     case prim_file:open(TmpPath, [write, raw, binary, exclusive]) of
         {ok, Fd} ->
@@ -219,7 +225,6 @@ stream_sealed_pack(Dir, IH, HashAlgo, PackId, Hashes, Reader) ->
             E
     end.
 
-
 %% @private
 stream_sealed_pack_body(Fd, Header, Hashes, Reader) ->
     case prim_file:write(Fd, Header) of
@@ -230,14 +235,13 @@ stream_sealed_pack_body(Fd, Header, Hashes, Reader) ->
             E
     end.
 
-
 %% @private
 stream_records(Fd, Ctx, _Off, [], _Reader, Acc) ->
     Trailer = crypto:hash_final(Ctx),
     case prim_file:write(Fd, Trailer) of
         ok ->
             case bondy_mst_io:datasync(Fd) of
-                ok             -> {ok, lists:reverse(Acc)};
+                ok -> {ok, lists:reverse(Acc)};
                 {error, _} = E -> E
             end;
         {error, _} = E ->
@@ -250,17 +254,23 @@ stream_records(Fd, Ctx, Off, [Hash | Rest], Reader, Acc) ->
             case prim_file:write(Fd, Record) of
                 ok ->
                     Ctx1 = crypto:hash_update(Ctx, Record),
-                    RecBytes = bondy_mst_pack_codec:record_header_bytes()
-                              + byte_size(Body),
-                    stream_records(Fd, Ctx1, Off + RecBytes, Rest, Reader,
-                                   [{Hash, Off} | Acc]);
+                    RecBytes =
+                        bondy_mst_pack_codec:record_header_bytes() +
+                            byte_size(Body),
+                    stream_records(
+                        Fd,
+                        Ctx1,
+                        Off + RecBytes,
+                        Rest,
+                        Reader,
+                        [{Hash, Off} | Acc]
+                    );
                 {error, _} = E ->
                     E
             end;
         {error, _} = E ->
             E
     end.
-
 
 %% @private
 %% Entries are `[{Hash, Offset}]` already in sort-by-hash order — the
@@ -273,7 +283,6 @@ write_sealed_idx_from_entries(Dir, PackId, Entries) ->
         {error, Reason} ->
             {error, {idx_build, Reason}}
     end.
-
 
 %% @private
 write_sealed_idx_bin(Dir, PackId, Bin) ->
@@ -294,13 +303,12 @@ write_sealed_idx_bin(Dir, PackId, Bin) ->
             E
     end.
 
-
 %% @private
 rename_sealed_pair(Dir, PackId) ->
     PackTmp = bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, PackId),
-    Pack    = bondy_mst_pack_paths:sealed_pack_path(Dir, PackId),
-    IdxTmp  = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, PackId),
-    Idx     = bondy_mst_pack_paths:sealed_idx_path(Dir, PackId),
+    Pack = bondy_mst_pack_paths:sealed_pack_path(Dir, PackId),
+    IdxTmp = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, PackId),
+    Idx = bondy_mst_pack_paths:sealed_idx_path(Dir, PackId),
     case bondy_mst_io:rename(PackTmp, Pack) of
         ok ->
             case bondy_mst_io:rename(IdxTmp, Idx) of
@@ -315,9 +323,10 @@ rename_sealed_pair(Dir, PackId) ->
             {error, {rename_pack, R}}
     end.
 
-
 %% @private
 cleanup_tmp(Dir, PackId) ->
-    _ = prim_file:delete(bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, PackId)),
+    _ = prim_file:delete(
+        bondy_mst_pack_paths:sealed_pack_tmp_path(Dir, PackId)
+    ),
     _ = prim_file:delete(bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, PackId)),
     ok.

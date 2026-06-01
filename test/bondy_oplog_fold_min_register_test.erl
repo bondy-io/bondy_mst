@@ -35,8 +35,10 @@ initial_value_is_undefined_test() ->
 
 first_set_records_value_and_hlc_test() ->
     H = hlc(100, 0),
-    ?assertEqual({5, H},
-                 apply_ev(undefined, {set, 5}, key(H))).
+    ?assertEqual(
+        {5, H},
+        apply_ev(undefined, {set, 5}, key(H))
+    ).
 
 lower_value_supersedes_test() ->
     H1 = hlc(100, 0),
@@ -57,8 +59,10 @@ equal_value_idempotent_on_value_test() ->
 
 negative_values_accepted_test() ->
     H = hlc(100, 0),
-    ?assertEqual({-9, H},
-                 apply_ev({-1, H}, {set, -9}, key(H))).
+    ?assertEqual(
+        {-9, H},
+        apply_ev({-1, H}, {set, -9}, key(H))
+    ).
 
 %% =============================================================================
 %% to_value/1

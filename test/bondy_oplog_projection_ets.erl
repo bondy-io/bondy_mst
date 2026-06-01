@@ -51,23 +51,27 @@ range(Tab, Bucket, Low, High, Opts) ->
     Direction = maps:get(direction, Opts, asc),
     %% Rows are keyed by `{Bucket, Key}`. To scan a single bucket's
     %% `[Low, High)` we constrain the composite key to that bucket.
-    MS = [{
-        {{'$1', '$2'}, '$3'},
-        [
-            {'=:=', '$1', {const, Bucket}},
-            {'>=',  '$2', {const, Low}},
-            {'<',   '$2', {const, High}}
-        ],
-        [{{'$2', '$3'}}]
-    }],
-    Result = case ets:select(Tab, MS, Limit) of
-        '$end_of_table' -> [];
-        {Found, _Cont} -> Found
-    end,
-    Ordered = case Direction of
-        asc -> Result;
-        desc -> lists:reverse(Result)
-    end,
+    MS = [
+        {
+            {{'$1', '$2'}, '$3'},
+            [
+                {'=:=', '$1', {const, Bucket}},
+                {'>=', '$2', {const, Low}},
+                {'<', '$2', {const, High}}
+            ],
+            [{{'$2', '$3'}}]
+        }
+    ],
+    Result =
+        case ets:select(Tab, MS, Limit) of
+            '$end_of_table' -> [];
+            {Found, _Cont} -> Found
+        end,
+    Ordered =
+        case Direction of
+            asc -> Result;
+            desc -> lists:reverse(Result)
+        end,
     {ok, Ordered}.
 
 delete(Tab, Bucket, Key) ->

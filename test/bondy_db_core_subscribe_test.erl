@@ -92,8 +92,8 @@ prefix_list_pattern_matches_by_prefix() ->
     NS = some_ns(),
     {ok, Ref} = bondy_db_core:subscribe(NS, {prefix, [a, b]}),
     ok = bondy_db_core:publish(NS, [a, b, c], 1, hit),
-    ok = bondy_db_core:publish(NS, [a, x],    2, miss),
-    ok = bondy_db_core:publish(NS, [a, b],    3, hit2),
+    ok = bondy_db_core:publish(NS, [a, x], 2, miss),
+    ok = bondy_db_core:publish(NS, [a, b], 3, hit2),
     ?assertEqual(
         [
             {bondy_db_core_event, NS, [a, b, c], 1, hit},
@@ -113,12 +113,13 @@ prefix_pattern_with_type_mismatch_does_not_match() ->
 
 match_fun_pattern_filters_events() ->
     NS = some_ns(),
-    Pred = fun(K) when is_binary(K) -> byte_size(K) > 3;
-             (_) -> false
-          end,
+    Pred = fun
+        (K) when is_binary(K) -> byte_size(K) > 3;
+        (_) -> false
+    end,
     {ok, Ref} = bondy_db_core:subscribe(NS, {match, Pred}),
-    ok = bondy_db_core:publish(NS, <<"ab">>,    1, miss),
-    ok = bondy_db_core:publish(NS, <<"abcd">>,  2, hit),
+    ok = bondy_db_core:publish(NS, <<"ab">>, 1, miss),
+    ok = bondy_db_core:publish(NS, <<"abcd">>, 2, hit),
     ok = bondy_db_core:publish(NS, <<"abcde">>, 3, hit2),
     ?assertEqual(
         [
@@ -136,7 +137,7 @@ match_fun_throwing_is_treated_as_false() ->
     Pred = fun(K) when is_binary(K) -> byte_size(K) > 3 end,
     {ok, Ref} = bondy_db_core:subscribe(NS, {match, Pred}),
     ok = bondy_db_core:publish(NS, not_a_binary, 1, miss),
-    ok = bondy_db_core:publish(NS, <<"abcd">>,    2, hit),
+    ok = bondy_db_core:publish(NS, <<"abcd">>, 2, hit),
     ?assertEqual(
         [{bondy_db_core_event, NS, <<"abcd">>, 2, hit}],
         drain()
@@ -160,14 +161,20 @@ subscriber_down_cleans_up_subscription() ->
     Pid = spawn(fun() ->
         {ok, _Ref} = bondy_db_core:subscribe(NS, all),
         Parent ! ready,
-        receive go_down -> ok end
+        receive
+            go_down -> ok
+        end
     end),
     Mon = erlang:monitor(process, Pid),
-    receive ready -> ok end,
+    receive
+        ready -> ok
+    end,
     Before = bondy_db_core_dispatcher:subscription_count(),
     ?assert(Before >= 1),
     Pid ! go_down,
-    receive {'DOWN', Mon, process, Pid, _} -> ok end,
+    receive
+        {'DOWN', Mon, process, Pid, _} -> ok
+    end,
     %% Give the dispatcher a brief moment to process the DOWN.
     ok = sync_with_dispatcher(),
     After = bondy_db_core_dispatcher:subscription_count(),
@@ -202,15 +209,28 @@ multiple_subscribers_all_receive_matching() ->
         Msgs = drain(50),
         Parent ! {msgs, 2, Msgs}
     end),
-    receive {ready, 1} -> ok end,
-    receive {ready, 2} -> ok end,
+    receive
+        {ready, 1} -> ok
+    end,
+    receive
+        {ready, 2} -> ok
+    end,
     ok = bondy_db_core:publish(NS, <<"k">>, 1, op),
-    Msgs1 = receive {msgs, 1, M1} -> M1 after 200 -> [] end,
-    Msgs2 = receive {msgs, 2, M2} -> M2 after 200 -> [] end,
+    Msgs1 =
+        receive
+            {msgs, 1, M1} -> M1
+        after 200 -> []
+        end,
+    Msgs2 =
+        receive
+            {msgs, 2, M2} -> M2
+        after 200 -> []
+        end,
     ?assertEqual([{bondy_db_core_event, NS, <<"k">>, 1, op}], Msgs1),
     ?assertEqual([{bondy_db_core_event, NS, <<"k">>, 1, op}], Msgs2),
     %% Subscribers exit on their own; DOWN cleans up.
-    _ = Sub1, _ = Sub2,
+    _ = Sub1,
+    _ = Sub2,
     ok.
 
 unsubscribe_unknown_ref_is_idempotent() ->
@@ -222,8 +242,10 @@ unsubscribe_unknown_ref_is_idempotent() ->
 %% =============================================================================
 
 some_ns() ->
-    list_to_atom("mst_db_sub_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
+    list_to_atom(
+        "mst_db_sub_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 drain() ->
     drain(20).

@@ -25,9 +25,9 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -define(CACHE_MOD, bondy_oplog_cache_ets).
--define(PROJ_MOD,  bondy_oplog_projection_ets).
--define(STRATEGY,  lww_register).
--define(NUMTESTS,  50).
+-define(PROJ_MOD, bondy_oplog_projection_ets).
+-define(STRATEGY, lww_register).
+-define(NUMTESTS, 50).
 
 -export([prop_read_returns_latest_fold/0]).
 -export([prop_cache_coherence_write_through/0]).
@@ -49,9 +49,15 @@ key_gen() ->
 %% Each event is `{set, V, H}` or `{clear, H}` keyed implicitly by the
 %% caller-chosen Key. HLCs come from the index + 1 to avoid 0.
 events_gen() ->
-    ?LET(N, integer(0, 8),
-         ?LET(Ops, vector(N, op_kind_gen()),
-              hlc_index(Ops))).
+    ?LET(
+        N,
+        integer(0, 8),
+        ?LET(
+            Ops,
+            vector(N, op_kind_gen()),
+            hlc_index(Ops)
+        )
+    ).
 
 op_kind_gen() ->
     oneof([set, clear]).
@@ -75,13 +81,17 @@ range_bounds_gen() ->
     %% Always produces `Low =< High` with both drawn from the live
     %% key universe. `<<"z">>` (outside the universe) acts as a
     %% guaranteed upper bound.
-    ?LET({L, H},
-         {elements([<<"a">>, <<"b">>, <<"c">>]),
-          elements([<<"b">>, <<"c">>, <<"d">>, <<"z">>])},
-         case L =< H of
-             true  -> {L, H};
-             false -> {H, L}
-         end).
+    ?LET(
+        {L, H},
+        {
+            elements([<<"a">>, <<"b">>, <<"c">>]),
+            elements([<<"b">>, <<"c">>, <<"d">>, <<"z">>])
+        },
+        case L =< H of
+            true -> {L, H};
+            false -> {H, L}
+        end
+    ).
 
 %% =============================================================================
 %% Properties
@@ -91,40 +101,52 @@ range_bounds_gen() ->
 %% interleaving of `set`/`clear`) in HLC order, `read/3` must return
 %% the same `{Value, Hlc}` the model computes.
 prop_read_returns_latest_fold() ->
-    ?FORALL({Key, Events}, {key_gen(), events_gen()},
+    ?FORALL(
+        {Key, Events},
+        {key_gen(), events_gen()},
         with_shard(fun(NS) ->
             populate_overlay(NS, Key, Events),
             Got = bondy_db_core:read(NS, primary, Key),
             Expected = expected_read(Events),
             equal_read_result(Got, Expected)
-        end)).
+        end)
+    ).
 
 %% D7 — Overlay-projection merge correctness. A pre-materialised
 %% projection cell at HLC=H_proj with a pending overlay event E at
 %% HLC > H_proj must read back as `fold(S, [E])`.
 prop_overlay_projection_merge() ->
-    ?FORALL({Key, Events, OverlayOp}, {key_gen(), events_gen(), op_kind_gen()},
-        ?IMPLIES(Events =/= [],
+    ?FORALL(
+        {Key, Events, OverlayOp},
+        {key_gen(), events_gen(), op_kind_gen()},
+        ?IMPLIES(
+            Events =/= [],
             with_shard(fun(NS) ->
                 ProjValue = fold_events(initial(), Events),
                 materialise(NS, Key, ProjValue),
                 ProjHlc = hlc_of(ProjValue),
                 OverlayHlc = ProjHlc + 1,
-                OverlayEvent = case OverlayOp of
-                    set   -> {set, OverlayHlc, hlc_value(OverlayHlc)};
-                    clear -> {clear, OverlayHlc}
-                end,
+                OverlayEvent =
+                    case OverlayOp of
+                        set -> {set, OverlayHlc, hlc_value(OverlayHlc)};
+                        clear -> {clear, OverlayHlc}
+                    end,
                 insert_overlay(NS, Key, OverlayEvent),
                 Got = bondy_db_core:read(NS, primary, Key),
                 Expected = expected_read(Events ++ [OverlayEvent]),
                 equal_read_result(Got, Expected)
-            end))).
+            end)
+        )
+    ).
 
 %% D3 — Fenced read consistency. For a fence T, overlay events with
 %% HLC > T must NOT contribute to the result.
 prop_fenced_read_excludes_past_fence() ->
-    ?FORALL({Key, Events}, {key_gen(), events_gen()},
-        ?IMPLIES(Events =/= [],
+    ?FORALL(
+        {Key, Events},
+        {key_gen(), events_gen()},
+        ?IMPLIES(
+            Events =/= [],
             with_shard(fun(NS) ->
                 populate_overlay(NS, Key, Events),
                 MaxH = max_hlc(Events),
@@ -136,14 +158,19 @@ prop_fenced_read_excludes_past_fence() ->
                 Filtered = [E || E <- Events, hlc_of_event(E) =< Fence],
                 Expected = expected_read(Filtered),
                 equal_read_result(Got, Expected)
-            end))).
+            end)
+        )
+    ).
 
 %% D4 — Range monotonicity. Range scans return keys in sorted order
 %% and cover exactly the cells in `[Low, High)`.
 prop_range_monotonicity() ->
-    ?FORALL({Keys, {Low, High}},
-            {list(elements([<<"a">>, <<"b">>, <<"c">>, <<"d">>])),
-             range_bounds_gen()},
+    ?FORALL(
+        {Keys, {Low, High}},
+        {
+            list(elements([<<"a">>, <<"b">>, <<"c">>, <<"d">>])),
+            range_bounds_gen()
+        },
         with_shard(fun(NS) ->
             UniqueKeys = lists:usort(Keys),
             lists:foreach(
@@ -152,19 +179,25 @@ prop_range_monotonicity() ->
                 end,
                 lists:zip(UniqueKeys, lists:seq(1, length(UniqueKeys)))
             ),
-            {ok, Rows} = bondy_db_core:range(NS, primary,
-                                            {Low, High}, #{}),
+            {ok, Rows} = bondy_db_core:range(
+                NS,
+                primary,
+                {Low, High},
+                #{}
+            ),
             ResultKeys = [K || {K, _, _} <- Rows],
             Sorted = ResultKeys =:= lists:sort(ResultKeys),
             Expected = [K || K <- UniqueKeys, K >= Low, K < High],
             Sorted andalso ResultKeys =:= Expected
-        end)).
+        end)
+    ).
 
 %% D5 — Freshness predicate correctness. A registered NS is fresh iff
 %% every shard has lag ≤ MaxLag.
 prop_ensure_fresh_correctness() ->
-    ?FORALL({BumpDeltas, MaxLag},
-            {non_empty(list(integer(0, 50))), integer(1, 100)},
+    ?FORALL(
+        {BumpDeltas, MaxLag},
+        {non_empty(list(integer(0, 50))), integer(1, 100)},
         with_shard_count(length(BumpDeltas), fun(NS, Shards) ->
             %% For each shard, sleep nothing but pretend the bump
             %% happened `Delta` ms ago by writing the explicit
@@ -185,13 +218,15 @@ prop_ensure_fresh_correctness() ->
                 {stale, [NS]} when AnyStale -> true;
                 _ -> false
             end
-        end)).
+        end)
+    ).
 
 %% D6 — Subscription delivery. Every published event matching the
 %% subscriber's pattern is delivered, in publish order.
 prop_subscription_delivers_matches() ->
-    ?FORALL({NSKey, Keys},
-            {atom_ns(), non_empty(list(key_gen()))},
+    ?FORALL(
+        {NSKey, Keys},
+        {atom_ns(), non_empty(list(key_gen()))},
         begin
             {ok, _} = application:ensure_all_started(bondy_mst),
             {ok, Ref} = bondy_db_core:subscribe(NSKey, {prefix, <<"a">>}),
@@ -203,12 +238,17 @@ prop_subscription_delivers_matches() ->
             ),
             Got = drain_messages(NSKey, 50),
             ok = bondy_db_core:unsubscribe(Ref),
-            Expected = [{bondy_db_core_event, NSKey, K, I, op}
-                        || {K, I} <- lists:zip(Keys,
-                                               lists:seq(1, length(Keys))),
-                           binary:longest_common_prefix([K, <<"a">>]) =:= 1],
+            Expected = [
+                {bondy_db_core_event, NSKey, K, I, op}
+             || {K, I} <- lists:zip(
+                    Keys,
+                    lists:seq(1, length(Keys))
+                ),
+                binary:longest_common_prefix([K, <<"a">>]) =:= 1
+            ],
             Got =:= Expected
-        end).
+        end
+    ).
 
 %% D2 — Cache coherence post-§3.6. `write_through/4` no longer folds
 %% the event into the cached value (no fold currently exports
@@ -223,19 +263,23 @@ prop_subscription_delivers_matches() ->
 %% 2. The next read returns the projection's pre-event value (same
 %%    as an explicit `invalidate_all/1`-then-read sequence).
 prop_cache_coherence_write_through() ->
-    ?FORALL({Key, Events, ExtraOp},
-            {key_gen(), events_gen(), op_kind_gen()},
-        ?IMPLIES(Events =/= [],
+    ?FORALL(
+        {Key, Events, ExtraOp},
+        {key_gen(), events_gen(), op_kind_gen()},
+        ?IMPLIES(
+            Events =/= [],
             with_shard(fun(NS) ->
                 ProjValue = fold_events(initial(), Events),
                 materialise(NS, Key, ProjValue),
                 _ = bondy_db_core:read(NS, primary, Key),
                 NewHlc = max_hlc(Events) + 10,
-                Event = case ExtraOp of
-                    set   -> mk_event(NewHlc, {set, NewHlc,
-                                              hlc_value(NewHlc)});
-                    clear -> mk_event(NewHlc, {clear, NewHlc})
-                end,
+                Event =
+                    case ExtraOp of
+                        set ->
+                            mk_event(NewHlc, {set, NewHlc, hlc_value(NewHlc)});
+                        clear ->
+                            mk_event(NewHlc, {clear, NewHlc})
+                    end,
                 ok = bondy_db_core:write_through(NS, primary, Key, Event),
                 {ok, Entry} =
                     bondy_db_core_registry:lookup(NS, primary, 0),
@@ -249,18 +293,23 @@ prop_cache_coherence_write_through() ->
                 ok = ?CACHE_MOD:invalidate_all(CH),
                 Slow = bondy_db_core:read(NS, primary, Key),
                 Expected = expected_read(Events),
-                CacheEmpty
-                  andalso equal_read_result(Cached, Expected)
-                  andalso equal_read_result(Slow, Expected)
-            end))).
+                CacheEmpty andalso
+                    equal_read_result(Cached, Expected) andalso
+                    equal_read_result(Slow, Expected)
+            end)
+        )
+    ).
 
 %% D8 — Concurrent reader safety. With N readers and 1 writer, every
 %% observation must correspond to a valid prefix-fold of the event
 %% log (i.e. there must exist some i s.t. observed value equals
 %% fold(initial, events[1..i])).
 prop_concurrent_readers_observe_lineage() ->
-    ?FORALL({Key, Events}, {key_gen(), events_gen()},
-        ?IMPLIES(Events =/= [],
+    ?FORALL(
+        {Key, Events},
+        {key_gen(), events_gen()},
+        ?IMPLIES(
+            Events =/= [],
             with_shard(fun(NS) ->
                 Parent = self(),
                 Readers = [
@@ -268,20 +317,23 @@ prop_concurrent_readers_observe_lineage() ->
                         Snapshots = read_loop(NS, Key, 20, []),
                         Parent ! {snap, self(), Snapshots}
                     end)
-                  || _ <- lists:seq(1, 3)
+                 || _ <- lists:seq(1, 3)
                 ],
                 %% Writer interleaves with readers.
                 populate_overlay(NS, Key, Events),
                 %% Collect.
                 AllSnaps = lists:flatten(
-                    [collect_snaps(P) || P <- Readers]),
+                    [collect_snaps(P) || P <- Readers]
+                ),
                 %% Build the valid lineage map: HLC → expected Value.
                 Lineage = build_lineage(Events),
                 lists:all(
                     fun({V, H}) -> in_lineage({V, H}, Lineage) end,
                     AllSnaps
                 )
-            end))).
+            end)
+        )
+    ).
 
 %% =============================================================================
 %% Setup helpers
@@ -314,25 +366,48 @@ start_shard(NS, Index, Shard, ShardCount) ->
         overlay => OV,
         fold_module => ?STRATEGY
     }),
-    #{ns => NS, index => Index, shard => Shard,
-      cache_handle => CH, projection => PH, overlay => OV}.
+    #{
+        ns => NS,
+        index => Index,
+        shard => Shard,
+        cache_handle => CH,
+        projection => PH,
+        overlay => OV
+    }.
 
-stop_shard(#{ns := NS, index := Index, shard := Shard,
-             cache_handle := CH, projection := PH, overlay := OV}) ->
+stop_shard(#{
+    ns := NS,
+    index := Index,
+    shard := Shard,
+    cache_handle := CH,
+    projection := PH,
+    overlay := OV
+}) ->
     ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = ?CACHE_MOD:invalidate_all(CH),
     ok = ?PROJ_MOD:close(PH),
     ok = bondy_oplog_db_overlay:delete(OV).
 
 mk_ns() ->
-    list_to_atom("mst_db_proper_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
+    list_to_atom(
+        "mst_db_proper_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 atom_ns() ->
-    ?LET(_, integer(),
-         list_to_atom("mst_db_proper_pub_" ++
-                      integer_to_list(erlang:unique_integer([positive,
-                                                              monotonic])))).
+    ?LET(
+        _,
+        integer(),
+        list_to_atom(
+            "mst_db_proper_pub_" ++
+                integer_to_list(
+                    erlang:unique_integer([
+                        positive,
+                        monotonic
+                    ])
+                )
+        )
+    ).
 
 %% Set a shard's AE counter to a specific (Now - Delta) monotonic value.
 set_ae_at(NS, Index, Shard, AtTs) ->
@@ -397,30 +472,32 @@ fold_events(State, Events) ->
         Events
     ).
 
-hlc_of({set, _Val, H})  -> H;
-hlc_of({cleared, H})    -> H;
-hlc_of(undefined)       -> 0.
+hlc_of({set, _Val, H}) -> H;
+hlc_of({cleared, H}) -> H;
+hlc_of(undefined) -> 0.
 
-hlc_of_event({set, H, _})  -> H;
-hlc_of_event({clear, H})   -> H.
+hlc_of_event({set, H, _}) -> H;
+hlc_of_event({clear, H}) -> H.
 
 max_hlc(Events) ->
     lists:max([hlc_of_event(E) || E <- Events]).
 
 expected_read(Events) ->
-    Sorted = lists:sort(fun(A, B) -> hlc_of_event(A) =< hlc_of_event(B) end,
-                        Events),
+    Sorted = lists:sort(
+        fun(A, B) -> hlc_of_event(A) =< hlc_of_event(B) end,
+        Events
+    ),
     State = fold_events(initial(), Sorted),
     case bondy_oplog_fold:to_value(?STRATEGY, State) of
         undefined -> undefined;
-        Value     -> {Value, hlc_of(State)}
+        Value -> {Value, hlc_of(State)}
     end.
 
 equal_read_result(Got, Expected) ->
     case {Got, Expected} of
         {undefined, undefined} -> true;
-        {{V1, H1}, {V2, H2}}   -> V1 =:= V2 andalso H1 =:= H2;
-        _                      -> false
+        {{V1, H1}, {V2, H2}} -> V1 =:= V2 andalso H1 =:= H2;
+        _ -> false
     end.
 
 drain_messages(NS, TimeoutMs) ->
@@ -437,10 +514,11 @@ drain_messages(NS, TimeoutMs, Acc) ->
 read_loop(_NS, _Key, 0, Acc) ->
     Acc;
 read_loop(NS, Key, N, Acc) ->
-    Snap = case bondy_db_core:read(NS, primary, Key) of
-        undefined -> {undefined, 0};
-        {V, H}    -> {V, H}
-    end,
+    Snap =
+        case bondy_db_core:read(NS, primary, Key) of
+            undefined -> {undefined, 0};
+            {V, H} -> {V, H}
+        end,
     read_loop(NS, Key, N - 1, [Snap | Acc]).
 
 collect_snaps(P) ->
@@ -451,8 +529,10 @@ collect_snaps(P) ->
     end.
 
 build_lineage(Events) ->
-    Sorted = lists:sort(fun(A, B) -> hlc_of_event(A) =< hlc_of_event(B) end,
-                        Events),
+    Sorted = lists:sort(
+        fun(A, B) -> hlc_of_event(A) =< hlc_of_event(B) end,
+        Events
+    ),
     %% Lineage maps each HLC to the user-facing value the reader would
     %% observe after folding the prefix of events ending at that HLC.
     %% Step 2's read API returns `to_value(State)`, not the raw state.
@@ -460,10 +540,11 @@ build_lineage(Events) ->
         fun(E, {Acc, Prev}) ->
             {New, _Delta} =
                 bondy_oplog_fold:apply_event(?STRATEGY, Prev, E, undefined),
-            H = case New of
-                undefined -> 0;
-                _         -> hlc_of(New)
-            end,
+            H =
+                case New of
+                    undefined -> 0;
+                    _ -> hlc_of(New)
+                end,
             Value = bondy_oplog_fold:to_value(?STRATEGY, New),
             {maps:put(H, Value, Acc), New}
         end,
@@ -486,8 +567,7 @@ in_lineage({V, H}, Lineage) ->
 %% =============================================================================
 
 properties_test_() ->
-    {timeout, 600,
-     fun() ->
+    {timeout, 600, fun() ->
         Opts = [{to_file, user}, {numtests, ?NUMTESTS}],
         Props = [
             prop_read_returns_latest_fold(),
@@ -503,4 +583,4 @@ properties_test_() ->
             fun(Prop) -> ?assert(proper:quickcheck(Prop, Opts)) end,
             Props
         )
-     end}.
+    end}.

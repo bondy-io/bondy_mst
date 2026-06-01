@@ -88,8 +88,11 @@ stop_instance(SupPid) when is_pid(SupPid) ->
     case supervisor:terminate_child(?SERVER, SupPid) of
         ok ->
             case InstanceId of
-                undefined -> ok;
-                Id -> _ = bondy_oplog_registry:unregister(Id), ok
+                undefined ->
+                    ok;
+                Id ->
+                    _ = bondy_oplog_registry:unregister(Id),
+                    ok
             end;
         {error, not_found} ->
             {error, not_found}
@@ -131,4 +134,3 @@ do_start(InstanceId, Opts) ->
         {error, _} = E ->
             E
     end.
-

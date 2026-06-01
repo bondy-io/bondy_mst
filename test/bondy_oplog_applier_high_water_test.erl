@@ -26,9 +26,11 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
 
 high_water_test_() ->
@@ -41,7 +43,6 @@ high_water_test_() ->
         fun unregistered_shard_reports_not_found/0
     ]}.
 
-
 fresh_shard_reports_no_watermark() ->
     {_Id, NS, _Cache, _Proj} = setup_instance(),
     ?assertEqual(
@@ -50,11 +51,11 @@ fresh_shard_reports_no_watermark() ->
     ),
     teardown(NS).
 
-
 one_cell_apply_advances_watermark() ->
     {Id, NS, _Cache, _Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"alice">>,
-                                {set, 42, <<"v1">>}}),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"alice">>, {set, 42, <<"v1">>}}
+    ),
     _ = barrier(Id),
     ?assertEqual(
         {ok, 42},
@@ -62,11 +63,10 @@ one_cell_apply_advances_watermark() ->
     ),
     teardown(NS).
 
-
 monotonic_cells_advance_each_time() ->
     {Id, NS, _Cache, _Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k1">>, {set, 1,  <<"a">>}}),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k2">>, {set, 5,  <<"b">>}}),
+    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k1">>, {set, 1, <<"a">>}}),
+    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k2">>, {set, 5, <<"b">>}}),
     _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k3">>, {set, 17, <<"c">>}}),
     _ = barrier(Id),
     ?assertEqual(
@@ -75,21 +75,21 @@ monotonic_cells_advance_each_time() ->
     ),
     teardown(NS).
 
-
 older_cell_does_not_regress_watermark() ->
     {Id, NS, _Cache, _Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k1">>, {set, 100, <<"new">>}}),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"k1">>, {set, 100, <<"new">>}}
+    ),
     _ = barrier(Id),
     %% Older HLC on a different key: the new cell's frame HLC is 3, but
     %% the high-water atomic should NOT regress.
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k2">>, {set, 3,   <<"old">>}}),
+    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k2">>, {set, 3, <<"old">>}}),
     _ = barrier(Id),
     ?assertEqual(
         {ok, 100},
         bondy_db_core_registry:high_water_hlc(NS, primary, 0)
     ),
     teardown(NS).
-
 
 watermark_is_per_shard() ->
     %% Two distinct shards in the same namespace. cell_apply against
@@ -98,18 +98,21 @@ watermark_is_per_shard() ->
     {_Cache1, _Proj1} = register_shard(NS, primary, 1),
     _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>, {set, 77, <<"v">>}}),
     _ = barrier(Id),
-    ?assertEqual({ok, 77},            bondy_db_core_registry:high_water_hlc(NS, primary, 0)),
-    ?assertEqual({ok, no_watermark},  bondy_db_core_registry:high_water_hlc(NS, primary, 1)),
+    ?assertEqual(
+        {ok, 77}, bondy_db_core_registry:high_water_hlc(NS, primary, 0)
+    ),
+    ?assertEqual(
+        {ok, no_watermark},
+        bondy_db_core_registry:high_water_hlc(NS, primary, 1)
+    ),
     ok = bondy_db_core_registry:unregister(NS, primary, 1),
     teardown(NS).
-
 
 unregistered_shard_reports_not_found() ->
     ?assertEqual(
         not_found,
         bondy_db_core_registry:high_water_hlc(unknown_ns, primary, 0)
     ).
-
 
 %% =============================================================================
 %% Helpers (mirror bondy_oplog_applier_cell_apply_test)
@@ -127,30 +130,29 @@ setup_instance() ->
     }),
     {Id, NS, Cache, Proj}.
 
-
 teardown(NS) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
         {N, I, S} <- [bondy_db_core_registry:entry_key(E)],
-        N =:= NS],
+        N =:= NS
+    ],
     ok.
-
 
 register_shard(NS, Index, Shard) ->
     {ok, Cache} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
-    {ok, Proj}  = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
+    {ok, Proj} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => Cache,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => Cache,
         projection_adapter => bondy_oplog_projection_ets,
-        projection_handle  => Proj,
-        overlay            => disabled,
-        fold_module        => lww_register
+        projection_handle => Proj,
+        overlay => disabled,
+        fold_module => lww_register
     }),
     {Cache, Proj}.
-
 
 mk_id() ->
     iolist_to_binary([
@@ -158,10 +160,8 @@ mk_id() ->
         integer_to_binary(erlang:unique_integer([positive]))
     ]).
 
-
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
-
 
 barrier(Id) ->
     bondy_oplog:projection(Id).

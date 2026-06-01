@@ -49,7 +49,6 @@ cap_test_() ->
         {timeout, 10, fun zero_cap_disables_dispatch/0}
     ]}.
 
-
 cap_honoured_within_a_tick() ->
     ok = bondy_oplog_sync_scheduler:set_max_inflight_bootstraps(2),
     Insts = [pre_bootstrap_instance() || _ <- lists:seq(1, 3)],
@@ -66,7 +65,6 @@ cap_honoured_within_a_tick() ->
     %% Wait for DOWN cleanup so subsequent tests start clean.
     wait_until_inflight(0, 2000).
 
-
 inflight_cleans_up_after_session_dies() ->
     ok = bondy_oplog_sync_scheduler:set_max_inflight_bootstraps(4),
     Inst = pre_bootstrap_instance(),
@@ -80,7 +78,6 @@ inflight_cleans_up_after_session_dies() ->
     ?assertEqual(0, current_inflight()),
     bondy_oplog:stop_instance(Inst).
 
-
 info_reports_cap_and_current() ->
     ok = bondy_oplog_sync_scheduler:set_max_inflight_bootstraps(7),
     Info = bondy_oplog_sync_scheduler:info(),
@@ -88,7 +85,6 @@ info_reports_cap_and_current() ->
     ?assert(maps:is_key(current_inflight_bootstraps, Info)),
     %% Reset.
     ok = bondy_oplog_sync_scheduler:set_max_inflight_bootstraps(4).
-
 
 zero_cap_disables_dispatch() ->
     ok = bondy_oplog_sync_scheduler:set_max_inflight_bootstraps(0),
@@ -102,7 +98,6 @@ zero_cap_disables_dispatch() ->
     %% Restore to the default for downstream tests.
     ok = bondy_oplog_sync_scheduler:set_max_inflight_bootstraps(4),
     bondy_oplog:stop_instance(Inst).
-
 
 %% =============================================================================
 %% Helpers
@@ -122,7 +117,6 @@ pre_bootstrap_instance() ->
     ?assertEqual(pre_bootstrap, bondy_oplog_instance:lifecycle_state(Id)),
     Id.
 
-
 %% Triggers ONE tick and counts how many `dispatch_bootstrap` vs
 %% `bootstrap_capped` telemetry events fire for the supplied instance
 %% set. Within a tick the gen_server processes instances sequentially
@@ -133,13 +127,13 @@ run_one_tick_and_count(InstanceIds) ->
     Self = self(),
     Ref = make_ref(),
     HDispatch = {?MODULE, dispatch, Ref},
-    HCapped   = {?MODULE, capped,   Ref},
+    HCapped = {?MODULE, capped, Ref},
     telemetry:attach(
         HDispatch,
         [bondy_oplog, sync_scheduler, dispatch_bootstrap],
         fun(_, _, Meta, _) ->
             case sets:is_element(maps:get(instance_id, Meta), InstSet) of
-                true  -> Self ! {Ref, dispatched};
+                true -> Self ! {Ref, dispatched};
                 false -> ok
             end
         end,
@@ -150,7 +144,7 @@ run_one_tick_and_count(InstanceIds) ->
         [bondy_oplog, sync_scheduler, bootstrap_capped],
         fun(_, _, Meta, _) ->
             case sets:is_element(maps:get(instance_id, Meta), InstSet) of
-                true  -> Self ! {Ref, capped};
+                true -> Self ! {Ref, capped};
                 false -> ok
             end
         end,
@@ -166,28 +160,33 @@ run_one_tick_and_count(InstanceIds) ->
         telemetry:detach(HCapped)
     end.
 
-
 collect_events(_Ref, 0, _Timeout, Acc) ->
     Acc;
 collect_events(Ref, Remaining, Timeout, Acc) ->
     receive
         {Ref, dispatched} ->
-            collect_events(Ref, Remaining - 1, Timeout,
-                Acc#{dispatched := maps:get(dispatched, Acc) + 1});
+            collect_events(
+                Ref,
+                Remaining - 1,
+                Timeout,
+                Acc#{dispatched := maps:get(dispatched, Acc) + 1}
+            );
         {Ref, capped} ->
-            collect_events(Ref, Remaining - 1, Timeout,
-                Acc#{capped := maps:get(capped, Acc) + 1})
+            collect_events(
+                Ref,
+                Remaining - 1,
+                Timeout,
+                Acc#{capped := maps:get(capped, Acc) + 1}
+            )
     after Timeout ->
         error({missing_events, Remaining, Acc})
     end.
-
 
 current_inflight() ->
     maps:get(
         current_inflight_bootstraps,
         bondy_oplog_sync_scheduler:info()
     ).
-
 
 wait_until_inflight(Target, TimeoutMs) ->
     Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
@@ -203,11 +202,12 @@ wait_until_inflight_loop(Target, Deadline) ->
                     timer:sleep(20),
                     wait_until_inflight_loop(Target, Deadline);
                 false ->
-                    error({timeout_waiting_for_inflight, Target,
-                           current_inflight()})
+                    error(
+                        {timeout_waiting_for_inflight, Target,
+                            current_inflight()}
+                    )
             end
     end.
-
 
 mk_id() ->
     iolist_to_binary([

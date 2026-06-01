@@ -62,7 +62,6 @@ read_cache_hit_emits_source_cache() ->
     ?assertEqual(0, maps:get(shard, Meta)),
     teardown_shard(Setup).
 
-
 read_projection_only_emits_source_projection() ->
     NS = mk_ns(),
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0),
@@ -77,7 +76,6 @@ read_projection_only_emits_source_projection() ->
     %% back to get/3 + extract_head/1.
     ?assertEqual(fallback, maps:get(head_path, Meta)),
     teardown_shard(Setup).
-
 
 read_with_overlay_emits_projection_with_overlay() ->
     NS = mk_ns(),
@@ -94,7 +92,6 @@ read_with_overlay_emits_projection_with_overlay() ->
     ?assertEqual(slow, maps:get(path, Meta)),
     teardown_shard(Setup).
 
-
 read_overlay_only_emits_source_overlay_only() ->
     NS = mk_ns(),
     {Setup, #{overlay := OV}} = setup_shard(NS, primary, 0),
@@ -109,7 +106,6 @@ read_overlay_only_emits_source_overlay_only() ->
     ?assertEqual(overlay_only, maps:get(source, Meta)),
     ?assertEqual(slow, maps:get(path, Meta)),
     teardown_shard(Setup).
-
 
 read_batch_event_carries_namespaces_and_fence() ->
     NSA = mk_ns(),
@@ -130,7 +126,6 @@ read_batch_event_carries_namespaces_and_fence() ->
     teardown_shard(SetupA),
     teardown_shard(SetupB).
 
-
 range_event_counts_entries() ->
     NS = mk_ns(),
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0),
@@ -149,7 +144,6 @@ range_event_counts_entries() ->
     ?assertEqual(0, maps:get(shard, Meta)),
     teardown_shard(Setup).
 
-
 read_at_hlc_success_not_refused() ->
     NS = mk_ns(),
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0),
@@ -162,7 +156,6 @@ read_at_hlc_success_not_refused() ->
     ?assertEqual(undefined, maps:get(refusal_reason, Meta)),
     ?assertEqual(NS, maps:get(namespace, Meta)),
     teardown_shard(Setup).
-
 
 read_at_hlc_refusal_carries_reason() ->
     NS = mk_ns(),
@@ -178,7 +171,6 @@ read_at_hlc_refusal_carries_reason() ->
     ?assertEqual(historical_read_unavailable, maps:get(refusal_reason, Meta)),
     teardown_shard(Setup).
 
-
 ensure_fresh_event_counts_namespaces_and_stale() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0),
@@ -191,7 +183,6 @@ ensure_fresh_event_counts_namespaces_and_stale() ->
     ?assertEqual(1, maps:get(namespaces_checked, Meas)),
     ?assertEqual(1, maps:get(stale_count, Meas)),
     teardown_shard(Setup).
-
 
 subscribe_event_carries_pattern_type_and_count() ->
     NS = mk_ns(),
@@ -209,20 +200,19 @@ subscribe_event_carries_pattern_type_and_count() ->
     ?assertEqual(prefix, maps:get(pattern_type, Meta2)),
     ?assert(maps:get(current_subscribers, Meta2) >= 2).
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
 
 mk_ns() ->
-    list_to_atom("mst_tel_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
-
+    list_to_atom(
+        "mst_tel_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 mk_event(Hlc, Origin, Seq, Op) ->
     K = bondy_oplog_event:key(Hlc, Origin, Seq),
     bondy_oplog_event:new(K, Op, undefined).
-
 
 setup_shard(NS, Index, Shard) ->
     {ok, CH} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
@@ -237,23 +227,32 @@ setup_shard(NS, Index, Shard) ->
         overlay => OV,
         fold_module => lww_register
     }),
-    Setup = #{ns => NS, index => Index, shard => Shard,
-              cache_handle => CH, projection => PH, overlay => OV},
+    Setup = #{
+        ns => NS,
+        index => Index,
+        shard => Shard,
+        cache_handle => CH,
+        projection => PH,
+        overlay => OV
+    },
     {Setup, Setup}.
 
-
-teardown_shard(#{ns := NS, index := Index, shard := Shard,
-                 cache_handle := CH, projection := PH, overlay := OV}) ->
+teardown_shard(#{
+    ns := NS,
+    index := Index,
+    shard := Shard,
+    cache_handle := CH,
+    projection := PH,
+    overlay := OV
+}) ->
     ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),
     ok = bondy_oplog_db_overlay:delete(OV).
 
-
 seed_projection(PH, Key, Hlc, State) ->
     Frame = bondy_oplog_test_helpers:frame(lww_register, State, Hlc),
     ok = bondy_oplog_projection_ets:put_batch(PH, [{<<>>, Key, Frame}]).
-
 
 %% Attach a handler that forwards every event to the test process,
 %% run `Fun`, and detach.
@@ -273,7 +272,6 @@ with_handler(Events, Fun) ->
     after
         telemetry:detach(HandlerId)
     end.
-
 
 %% Drain the mailbox for the first matching event; fail loudly if not
 %% received within a short window.

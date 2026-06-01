@@ -46,7 +46,8 @@ with_telemetry(Fun) ->
         end,
         []
     ),
-    try Fun()
+    try
+        Fun()
     after
         ok = telemetry:detach(HandlerId),
         drain()
@@ -81,26 +82,39 @@ mailbox_dump() ->
 %% =============================================================================
 
 mk_tmp_dir() ->
-    Base = lists:flatten(io_lib:format(
-        "/tmp/bondy_mst_pack_idx_rebuild_test_~p_~p",
-        [erlang:system_time(microsecond),
-         erlang:unique_integer([positive])])),
+    Base = lists:flatten(
+        io_lib:format(
+            "/tmp/bondy_mst_pack_idx_rebuild_test_~p_~p",
+            [
+                erlang:system_time(microsecond),
+                erlang:unique_integer([positive])
+            ]
+        )
+    ),
     ok = filelib:ensure_path(Base),
     Base.
 
-rmrf(Dir) -> _ = file:del_dir_r(Dir), ok.
+rmrf(Dir) ->
+    _ = file:del_dir_r(Dir),
+    ok.
 
 mk_instance_id() ->
     list_to_binary(
         "idx_rebuild_test_" ++
-        integer_to_list(erlang:unique_integer([positive]))).
+            integer_to_list(erlang:unique_integer([positive]))
+    ).
 
 %% Pack-store backend directly so we have access to `seal/1`.
 open_pack_store(Dir, InstanceId) ->
-    bondy_mst_pack_store:open(sha256,
-        #{dir => Dir, instance_id => InstanceId,
-          auto_seal_records => infinity,
-          auto_seal_bytes   => infinity}).
+    bondy_mst_pack_store:open(
+        sha256,
+        #{
+            dir => Dir,
+            instance_id => InstanceId,
+            auto_seal_records => infinity,
+            auto_seal_bytes => infinity
+        }
+    ).
 
 mk_page(K, V) ->
     bondy_mst_page:new(0, undefined, [{K, V, undefined}]).
@@ -119,7 +133,8 @@ seed_and_seal(N) ->
             {H, S2} = bondy_mst_pack_store:put(S, P),
             {S2, [{H, P} | Acc]}
         end,
-        {S0, []}, lists:seq(1, N)
+        {S0, []},
+        lists:seq(1, N)
     ),
     {ok, S2} = bondy_mst_pack_store:seal(S1),
     [PackId] = bondy_mst_pack_store:sealed_pack_ids(S2),
@@ -180,17 +195,18 @@ missing_idx_rebuilt_test() ->
             ?assertEqual(false, filelib:is_regular(idx_path(Dir, PackId))),
             S = open_pack_store(Dir, InstanceId),
             {M, D} = recv_event(),
-            ?assertEqual(ok,          maps:get(result, D)),
-            ?assertEqual(enoent,      maps:get(trigger, D)),
-            ?assertEqual(PackId,      maps:get(pack_id, D)),
-            ?assertEqual(InstanceId,  maps:get(instance_id, D)),
-            ?assertEqual(5,           maps:get(records_recovered, M)),
+            ?assertEqual(ok, maps:get(result, D)),
+            ?assertEqual(enoent, maps:get(trigger, D)),
+            ?assertEqual(PackId, maps:get(pack_id, D)),
+            ?assertEqual(InstanceId, maps:get(instance_id, D)),
+            ?assertEqual(5, maps:get(records_recovered, M)),
             ?assert(maps:get(idx_bytes, M) > 0),
             ?assert(maps:get(pack_bytes, M) > 0),
             ?assert(filelib:is_regular(idx_path(Dir, PackId))),
             ok = bondy_mst_pack_store:close(S),
             assert_all_pages_readable(Dir, InstanceId, HashPages)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -206,12 +222,13 @@ truncated_idx_rebuilt_test() ->
             truncate_to(idx_path(Dir, PackId), 8),
             S = open_pack_store(Dir, InstanceId),
             {M, D} = recv_event(),
-            ?assertEqual(ok,                 maps:get(result, D)),
-            ?assertEqual(truncated_header,   maps:get(trigger, D)),
-            ?assertEqual(4,                  maps:get(records_recovered, M)),
+            ?assertEqual(ok, maps:get(result, D)),
+            ?assertEqual(truncated_header, maps:get(trigger, D)),
+            ?assertEqual(4, maps:get(records_recovered, M)),
             ok = bondy_mst_pack_store:close(S),
             assert_all_pages_readable(Dir, InstanceId, HashPages)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -227,18 +244,23 @@ bad_magic_idx_rebuilt_test() ->
             flip_byte(idx_path(Dir, PackId), 0),
             S = open_pack_store(Dir, InstanceId),
             {M, D} = recv_event(),
-            ?assertEqual(ok,        maps:get(result, D)),
+            ?assertEqual(ok, maps:get(result, D)),
             %% Header is the first thing parsed; integrity check fails
             %% before magic if the trailer doesn't match the new bytes —
             %% the flipped magic makes both checks fail. integrity_mismatch
             %% wins because the trailer is verified first.
             Trigger = maps:get(trigger, D),
-            ?assert(lists:member(Trigger,
-                                 [bad_magic, integrity_mismatch])),
+            ?assert(
+                lists:member(
+                    Trigger,
+                    [bad_magic, integrity_mismatch]
+                )
+            ),
             ?assertEqual(3, maps:get(records_recovered, M)),
             ok = bondy_mst_pack_store:close(S),
             assert_all_pages_readable(Dir, InstanceId, HashPages)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -255,18 +277,20 @@ integrity_mismatch_idx_rebuilt_test() ->
             %% Flip a byte well inside the body (past the 16-byte header,
             %% before the 32-byte trailer) — header still validates, but
             %% the sha256 trailer over the body no longer matches.
-            MidOffset = ?BONDY_MST_PACK_IDX_HEADER_BYTES +
-                        (IdxSize - ?BONDY_MST_PACK_IDX_HEADER_BYTES -
-                         ?BONDY_MST_PACK_IDX_TRAILER_BYTES) div 2,
+            MidOffset =
+                ?BONDY_MST_PACK_IDX_HEADER_BYTES +
+                    (IdxSize - ?BONDY_MST_PACK_IDX_HEADER_BYTES -
+                        ?BONDY_MST_PACK_IDX_TRAILER_BYTES) div 2,
             flip_byte(IdxPath, MidOffset),
             S = open_pack_store(Dir, InstanceId),
             {M, D} = recv_event(),
-            ?assertEqual(ok,                  maps:get(result, D)),
-            ?assertEqual(integrity_mismatch,  maps:get(trigger, D)),
-            ?assertEqual(6,                   maps:get(records_recovered, M)),
+            ?assertEqual(ok, maps:get(result, D)),
+            ?assertEqual(integrity_mismatch, maps:get(trigger, D)),
+            ?assertEqual(6, maps:get(records_recovered, M)),
             ok = bondy_mst_pack_store:close(S),
             assert_all_pages_readable(Dir, InstanceId, HashPages)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -291,7 +315,8 @@ bloom_corrupt_idx_rebuilt_test() ->
             ?assertEqual(8, maps:get(records_recovered, M)),
             ok = bondy_mst_pack_store:close(S),
             assert_all_pages_readable(Dir, InstanceId, HashPages)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -307,7 +332,8 @@ clean_reopen_no_event_test() ->
             expect_no_event(),
             ok = bondy_mst_pack_store:close(S),
             assert_all_pages_readable(Dir, InstanceId, HashPages)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -338,13 +364,14 @@ multi_pack_rebuild_test() ->
             Events = [recv_event() || _ <- PackIds],
             lists:foreach(
                 fun({_M, D}) ->
-                    ?assertEqual(ok,     maps:get(result, D)),
+                    ?assertEqual(ok, maps:get(result, D)),
                     ?assertEqual(enoent, maps:get(trigger, D))
                 end,
                 Events
             ),
             ok = bondy_mst_pack_store:close(S)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -354,7 +381,8 @@ seal_after_puts(S, KVs) ->
             {_, A1} = bondy_mst_pack_store:put(A, mk_page(K, V)),
             A1
         end,
-        S, KVs
+        S,
+        KVs
     ),
     {ok, Sealed} = bondy_mst_pack_store:seal(Sn),
     Sealed.
@@ -371,8 +399,9 @@ pack_corruption_refuses_rebuild_test() ->
             PackSize = file_size(PackPath),
             %% Flip a byte inside the first record's body (past 48-byte
             %% header + 40-byte record header, before the trailer).
-            BodyOffset = ?BONDY_MST_PACK_HEADER_BYTES +
-                         ?BONDY_MST_PACK_RECORD_HEADER_BYTES + 2,
+            BodyOffset =
+                ?BONDY_MST_PACK_HEADER_BYTES +
+                    ?BONDY_MST_PACK_RECORD_HEADER_BYTES + 2,
             ?assert(BodyOffset < PackSize - ?BONDY_MST_PACK_TRAILER_BYTES),
             flip_byte(PackPath, BodyOffset),
             %% Also wipe the .idx so the open is forced to attempt
@@ -385,9 +414,10 @@ pack_corruption_refuses_rebuild_test() ->
             ),
             {_M, D} = recv_event(),
             ?assertMatch({error, {pack, _}}, maps:get(result, D)),
-            ?assertEqual(enoent,  maps:get(trigger, D)),
-            ?assertEqual(PackId,  maps:get(pack_id, D))
-        after rmrf(Dir)
+            ?assertEqual(enoent, maps:get(trigger, D)),
+            ?assertEqual(PackId, maps:get(pack_id, D))
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -413,7 +443,8 @@ pack_short_trailer_refuses_rebuild_test() ->
             ),
             {_M, D} = recv_event(),
             ?assertMatch({error, {pack, _}}, maps:get(result, D))
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -436,10 +467,13 @@ direct_rebuild_succeeds_test() ->
                 bondy_mst_pack_codec:decode_pack_header(Header),
             {ok, Outcome} =
                 bondy_mst_pack_idx_rebuild:rebuild(Dir, PackId, IH, HA),
-            ?assertEqual(length(HashPages),
-                         maps:get(records_recovered, Outcome)),
+            ?assertEqual(
+                length(HashPages),
+                maps:get(records_recovered, Outcome)
+            ),
             ?assert(maps:get(idx_bytes, Outcome) > 0),
             ?assert(filelib:is_regular(idx_path(Dir, PackId)))
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).

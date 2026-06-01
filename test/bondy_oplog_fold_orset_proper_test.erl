@@ -35,8 +35,11 @@
 %% =============================================================================
 
 hlc_gen() ->
-    ?LET({Phys, Log}, {integer(0, 1000), integer(0, 1023)},
-         bondy_oplog_hlc:encode(Phys, Log)).
+    ?LET(
+        {Phys, Log},
+        {integer(0, 1000), integer(0, 1023)},
+        bondy_oplog_hlc:encode(Phys, Log)
+    ).
 
 %% Small finite alphabets keep counter-examples readable and ensure
 %% the generator routinely produces overlapping dots/elements (which
@@ -56,82 +59,119 @@ element_gen() ->
 event_gen() ->
     oneof([
         {add, hlc_gen(), element_gen(), dot_gen()},
-        ?LET(N, integer(0, 3),
-             {remove, hlc_gen(), element_gen(), vector(N, dot_gen())})
+        ?LET(
+            N,
+            integer(0, 3),
+            {remove, hlc_gen(), element_gen(), vector(N, dot_gen())}
+        )
     ]).
 
 events_gen() ->
     list(event_gen()).
 
 state_gen() ->
-    ?LET(Events, events_gen(),
-         lists:foldl(fun(E, S) -> apply_ev(S, E) end,
-                     ?MOD:initial_value(),
-                     Events)).
+    ?LET(
+        Events,
+        events_gen(),
+        lists:foldl(
+            fun(E, S) -> apply_ev(S, E) end,
+            ?MOD:initial_value(),
+            Events
+        )
+    ).
 
 %% =============================================================================
 %% Properties
 %% =============================================================================
 
 prop_apply_event_idempotent() ->
-    ?FORALL({State, Event}, {state_gen(), event_gen()},
+    ?FORALL(
+        {State, Event},
+        {state_gen(), event_gen()},
         begin
             S1 = apply_ev(State, Event),
             S2 = apply_ev(S1, Event),
             S1 =:= S2
-        end).
+        end
+    ).
 
 prop_apply_event_hlc_monotonic() ->
-    ?FORALL({State, Event}, {state_gen(), event_gen()},
+    ?FORALL(
+        {State, Event},
+        {state_gen(), event_gen()},
         begin
             H0 = ?MOD:hlc(State),
             H1 = ?MOD:hlc(apply_ev(State, Event)),
             H1 >= H0
-        end).
+        end
+    ).
 
 prop_merge_states_commutative() ->
-    ?FORALL({A, B}, {state_gen(), state_gen()},
-        ?MOD:merge_states(A, B) =:= ?MOD:merge_states(B, A)).
+    ?FORALL(
+        {A, B},
+        {state_gen(), state_gen()},
+        ?MOD:merge_states(A, B) =:= ?MOD:merge_states(B, A)
+    ).
 
 prop_merge_states_associative() ->
-    ?FORALL({A, B, C}, {state_gen(), state_gen(), state_gen()},
+    ?FORALL(
+        {A, B, C},
+        {state_gen(), state_gen(), state_gen()},
         begin
             L = ?MOD:merge_states(?MOD:merge_states(A, B), C),
             R = ?MOD:merge_states(A, ?MOD:merge_states(B, C)),
             L =:= R
-        end).
+        end
+    ).
 
 prop_merge_states_idempotent() ->
-    ?FORALL(A, state_gen(),
-        ?MOD:merge_states(A, A) =:= A).
+    ?FORALL(
+        A,
+        state_gen(),
+        ?MOD:merge_states(A, A) =:= A
+    ).
 
 prop_encode_state_roundtrip() ->
-    ?FORALL(State, state_gen(),
-        ?MOD:decode_state(?MOD:encode_state(State)) =:= State).
+    ?FORALL(
+        State,
+        state_gen(),
+        ?MOD:decode_state(?MOD:encode_state(State)) =:= State
+    ).
 
 prop_encode_event_roundtrip() ->
-    ?FORALL(Event, event_gen(),
-        ?MOD:decode_event(?MOD:encode_event(Event)) =:= Event).
+    ?FORALL(
+        Event,
+        event_gen(),
+        ?MOD:decode_event(?MOD:encode_event(Event)) =:= Event
+    ).
 
 prop_gc_safe() ->
-    ?FORALL(Events, events_gen(),
+    ?FORALL(
+        Events,
+        events_gen(),
         begin
-            S = lists:foldl(fun(E, Acc) -> apply_ev(Acc, E) end,
-                            ?MOD:initial_value(), Events),
+            S = lists:foldl(
+                fun(E, Acc) -> apply_ev(Acc, E) end,
+                ?MOD:initial_value(),
+                Events
+            ),
             Threshold = ?MOD:gc_threshold(S),
             Remaining = [E || E <- Events, event_hlc(E) > as_int(Threshold)],
-            S2 = lists:foldl(fun(E, Acc) -> apply_ev(Acc, E) end,
-                             S, Remaining),
+            S2 = lists:foldl(
+                fun(E, Acc) -> apply_ev(Acc, E) end,
+                S,
+                Remaining
+            ),
             S =:= S2
-        end).
+        end
+    ).
 
 %% =============================================================================
 %% EUnit wrapper
 %% =============================================================================
 
 properties_test_() ->
-    {timeout, 300,
-     fun() ->
+    {timeout, 300, fun() ->
         Opts = [{to_file, user}, {numtests, ?DEFAULT_NUMTESTS}],
         Props = [
             prop_apply_event_idempotent(),
@@ -147,13 +187,13 @@ properties_test_() ->
             fun(Prop) -> ?assert(proper:quickcheck(Prop, Opts)) end,
             Props
         )
-     end}.
+    end}.
 
 %% =============================================================================
 %% Helpers
 %% =============================================================================
 
-event_hlc({add, H, _, _})    -> H;
+event_hlc({add, H, _, _}) -> H;
 event_hlc({remove, H, _, _}) -> H.
 
 as_int(undefined) -> -1;

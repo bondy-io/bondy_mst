@@ -76,8 +76,12 @@ events_for_isolates_by_bucket_test() ->
     Eb = mk_event(<<"k">>, 10, <<"o">>, 1),
     bondy_oplog_db_overlay:insert(Tab, <<"b1">>, <<"k">>, Ea),
     bondy_oplog_db_overlay:insert(Tab, <<"b2">>, <<"k">>, Eb),
-    ?assertEqual([Ea], bondy_oplog_db_overlay:events_for(Tab, <<"b1">>, <<"k">>, 0)),
-    ?assertEqual([Eb], bondy_oplog_db_overlay:events_for(Tab, <<"b2">>, <<"k">>, 0)),
+    ?assertEqual(
+        [Ea], bondy_oplog_db_overlay:events_for(Tab, <<"b1">>, <<"k">>, 0)
+    ),
+    ?assertEqual(
+        [Eb], bondy_oplog_db_overlay:events_for(Tab, <<"b2">>, <<"k">>, 0)
+    ),
     ok = bondy_oplog_db_overlay:delete(Tab).
 
 events_for_orders_by_hlc_then_origin_then_seq_test() ->
@@ -103,8 +107,10 @@ range_returns_keys_in_window_test() ->
     Ea = mk_event(<<"a">>, 5, <<"o">>, 0),
     Eb = mk_event(<<"b">>, 5, <<"o">>, 1),
     Ec = mk_event(<<"c">>, 5, <<"o">>, 2),
-    [bondy_oplog_db_overlay:insert(Tab, ?B, K, E)
-     || {K, E} <- [{<<"a">>, Ea}, {<<"b">>, Eb}, {<<"c">>, Ec}]],
+    [
+        bondy_oplog_db_overlay:insert(Tab, ?B, K, E)
+     || {K, E} <- [{<<"a">>, Ea}, {<<"b">>, Eb}, {<<"c">>, Ec}]
+    ],
     %% Half-open interval [a, c) — excludes c.
     ?assertEqual(
         [{<<"a">>, Ea}, {<<"b">>, Eb}],
@@ -163,7 +169,9 @@ evict_to_preserves_higher_hlc_at_same_cell_test() ->
     E2 = mk_event(<<"k">>, 100, <<"o">>, 1),
     bondy_oplog_db_overlay:insert(Tab, ?B, <<"k">>, E1),
     bondy_oplog_db_overlay:insert(Tab, ?B, <<"k">>, E2),
-    Deleted = bondy_oplog_db_overlay:evict_to(Tab, 5, bondy_oplog_event:key(E1)),
+    Deleted = bondy_oplog_db_overlay:evict_to(
+        Tab, 5, bondy_oplog_event:key(E1)
+    ),
     ?assertEqual(1, Deleted),
     ?assertEqual([E2], bondy_oplog_db_overlay:events_for(Tab, ?B, <<"k">>, 0)),
     ok = bondy_oplog_db_overlay:delete(Tab).
@@ -177,7 +185,9 @@ evict_to_uses_event_key_tiebreaker_at_same_hlc_test() ->
     bondy_oplog_db_overlay:insert(Tab, ?B, <<"k">>, Eb),
     %% Watermark = Ea ⇒ only Ea evicted; Eb survives because its
     %% event_key is greater under term order.
-    Deleted = bondy_oplog_db_overlay:evict_to(Tab, 10, bondy_oplog_event:key(Ea)),
+    Deleted = bondy_oplog_db_overlay:evict_to(
+        Tab, 10, bondy_oplog_event:key(Ea)
+    ),
     ?assertEqual(1, Deleted),
     ?assertEqual([Eb], bondy_oplog_db_overlay:events_for(Tab, ?B, <<"k">>, 0)),
     ok = bondy_oplog_db_overlay:delete(Tab).

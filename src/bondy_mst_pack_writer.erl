@@ -90,21 +90,21 @@ unsynced pages on recovery. Callers that need stricter durability
 """).
 
 -record(?MODULE, {
-    dir              :: file:filename_all(),
-    instance_id      :: binary(),
-    hash_algo        :: atom(),
-    instance_hash    :: non_neg_integer(),
-    manifest         :: bondy_mst_pack_manifest:t(),
-    incoming_fd      :: file:fd() | undefined,
-    incoming_offset  :: non_neg_integer(),
+    dir :: file:filename_all(),
+    instance_id :: binary(),
+    hash_algo :: atom(),
+    instance_hash :: non_neg_integer(),
+    manifest :: bondy_mst_pack_manifest:t(),
+    incoming_fd :: file:fd() | undefined,
+    incoming_offset :: non_neg_integer(),
     %% Hash => {Offset, PageLen, Body}. Offset is the byte offset of
     %% the record header in incoming.pack; PageLen is the body length;
     %% Body is the page bytes kept resident so the MST traversal
     %% (which re-reads pages via `pending_read/2` immediately after
     %% writing them) doesn't have to syscall back to disk. Caps memory
     %% at the auto-seal threshold (~16 MB by default).
-    pending          :: #{binary() => {non_neg_integer(), non_neg_integer(), binary()}},
-    next_pack_id      :: pos_integer(),
+    pending :: #{binary() => {non_neg_integer(), non_neg_integer(), binary()}},
+    next_pack_id :: pos_integer(),
     %% Durability policy. After each successful append, the writer
     %% datasyncs when EITHER `unsynced_count >= sync_every_records`
     %% OR `monotonic_ms - last_sync_ms >= sync_every_ms`. The
@@ -112,9 +112,9 @@ unsynced pages on recovery. Callers that need stricter durability
     %% append happens; callers wanting a true wall-clock guarantee
     %% should run their own timer that calls `flush/1`.
     sync_every_records :: pos_integer(),
-    sync_every_ms      :: pos_integer() | infinity,
+    sync_every_ms :: pos_integer() | infinity,
     unsynced_count = 0 :: non_neg_integer(),
-    last_sync_ms       :: integer(),
+    last_sync_ms :: integer(),
     %% Root-flush debounce. `set_root/2` rewrites the manifest, which
     %% costs tmp+datasync+rename+fsync_dir (4 fsyncs) — ~40-200 ms per
     %% call on macOS APFS. Without debouncing the MST applier (one
@@ -127,21 +127,21 @@ unsynced pages on recovery. Callers that need stricter durability
     %% current in-memory root. `close/1` and `flush/1` force a flush
     %% so clean shutdown is lossless.
     root_flush_every_records :: pos_integer() | infinity,
-    root_flush_every_ms      :: pos_integer() | infinity,
-    root_unsynced_count = 0  :: non_neg_integer(),
-    last_root_flush_ms       :: integer(),
-    root_dirty = false       :: boolean()
+    root_flush_every_ms :: pos_integer() | infinity,
+    root_unsynced_count = 0 :: non_neg_integer(),
+    last_root_flush_ms :: integer(),
+    root_dirty = false :: boolean()
 }).
 
 -type t() :: #?MODULE{}.
 
 -type open_opts() :: #{
     instance_id := binary(),
-    hash_algo   => atom(),
+    hash_algo => atom(),
     sync_every_records => pos_integer(),
-    sync_every_ms      => pos_integer() | infinity,
+    sync_every_ms => pos_integer() | infinity,
     root_flush_every_records => pos_integer() | infinity,
-    root_flush_every_ms      => pos_integer() | infinity
+    root_flush_every_ms => pos_integer() | infinity
 }.
 
 -type open_error() ::
@@ -219,21 +219,35 @@ truncating partial records.
 
 open(Dir, Opts) when is_list(Dir) orelse is_binary(Dir), is_map(Opts) ->
     case maps:find(instance_id, Opts) of
-        {ok, InstanceId} when is_binary(InstanceId), byte_size(InstanceId) > 0 ->
+        {ok, InstanceId} when
+            is_binary(InstanceId), byte_size(InstanceId) > 0
+        ->
             HashAlgo = maps:get(hash_algo, Opts, sha256),
             Policy = #{
                 sync_every_records =>
-                    maps:get(sync_every_records, Opts,
-                             ?BONDY_MST_PACK_DEFAULT_SYNC_EVERY_RECORDS),
-                sync_every_ms      =>
-                    maps:get(sync_every_ms, Opts,
-                             ?BONDY_MST_PACK_DEFAULT_SYNC_EVERY_MS),
+                    maps:get(
+                        sync_every_records,
+                        Opts,
+                        ?BONDY_MST_PACK_DEFAULT_SYNC_EVERY_RECORDS
+                    ),
+                sync_every_ms =>
+                    maps:get(
+                        sync_every_ms,
+                        Opts,
+                        ?BONDY_MST_PACK_DEFAULT_SYNC_EVERY_MS
+                    ),
                 root_flush_every_records =>
-                    maps:get(root_flush_every_records, Opts,
-                             ?BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_RECORDS),
+                    maps:get(
+                        root_flush_every_records,
+                        Opts,
+                        ?BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_RECORDS
+                    ),
                 root_flush_every_ms =>
-                    maps:get(root_flush_every_ms, Opts,
-                             ?BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_MS)
+                    maps:get(
+                        root_flush_every_ms,
+                        Opts,
+                        ?BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_MS
+                    )
             },
             do_open(Dir, InstanceId, HashAlgo, Policy);
         _ ->
@@ -315,18 +329,18 @@ request.
 
 flush(#?MODULE{} = W) ->
     case flush_incoming(W) of
-        {ok, W1}       -> flush_pending_root(W1);
+        {ok, W1} -> flush_pending_root(W1);
         {error, _} = E -> E
     end.
 
 %% @private
-flush_incoming(#?MODULE{unsynced_count = 0} = W)    -> {ok, W};
+flush_incoming(#?MODULE{unsynced_count = 0} = W) -> {ok, W};
 flush_incoming(#?MODULE{incoming_fd = undefined} = W) -> {ok, W};
-flush_incoming(#?MODULE{} = W)                      -> do_sync(W).
+flush_incoming(#?MODULE{} = W) -> do_sync(W).
 
 %% @private
 flush_pending_root(#?MODULE{root_dirty = false} = W) -> {ok, W};
-flush_pending_root(#?MODULE{} = W)                   -> do_flush_root(W).
+flush_pending_root(#?MODULE{} = W) -> do_flush_root(W).
 
 ?DOC("""
 Seals the incoming pack into a numbered sealed pack.
@@ -354,7 +368,9 @@ and any `.tmp` orphans visible for recovery. Failure at step 4
 the recovery scanner removes on next open.
 """).
 -spec seal(t()) ->
-    {ok, no_op, t()} | {ok, PackId :: pos_integer(), t()} | {error, seal_error()}.
+    {ok, no_op, t()}
+    | {ok, PackId :: pos_integer(), t()}
+    | {error, seal_error()}.
 
 seal(#?MODULE{pending = P} = W) when map_size(P) =:= 0 ->
     case bondy_mst_pack_manifest:incoming_pack(W#?MODULE.manifest) of
@@ -362,8 +378,8 @@ seal(#?MODULE{pending = P} = W) when map_size(P) =:= 0 ->
             %% No pending records to seal, but a staged root is unflushed.
             %% Piggy-back the root flush onto a no-op seal.
             case do_flush_root(W) of
-                {ok, W1}       -> {ok, no_op, W1};
-                {error, R}     -> {error, {manifest, R}}
+                {ok, W1} -> {ok, no_op, W1};
+                {error, R} -> {error, {manifest, R}}
             end;
         absent ->
             {ok, no_op, W};
@@ -371,12 +387,15 @@ seal(#?MODULE{pending = P} = W) when map_size(P) =:= 0 ->
             %% Pending is empty but manifest says present — reconcile.
             %% The in-memory manifest also carries any staged root, so the
             %% write below covers both reconciliation and root debounce.
-            M1 = bondy_mst_pack_manifest:with_incoming_pack(W#?MODULE.manifest, absent),
+            M1 = bondy_mst_pack_manifest:with_incoming_pack(
+                W#?MODULE.manifest, absent
+            ),
             case bondy_mst_pack_manifest:write(W#?MODULE.dir, M1) of
                 ok ->
-                    {ok, no_op, reset_root_flush_counters(
-                        W#?MODULE{manifest = M1}
-                    )};
+                    {ok, no_op,
+                        reset_root_flush_counters(
+                            W#?MODULE{manifest = M1}
+                        )};
                 {error, R} ->
                     {error, {manifest, R}}
             end
@@ -418,12 +437,12 @@ flush attempt will retry.
 set_root(#?MODULE{} = W, Root) when is_binary(Root); Root =:= undefined ->
     M1 = bondy_mst_pack_manifest:with_current_root(W#?MODULE.manifest, Root),
     W1 = W#?MODULE{
-        manifest            = M1,
+        manifest = M1,
         root_unsynced_count = W#?MODULE.root_unsynced_count + 1,
-        root_dirty          = true
+        root_dirty = true
     },
     case root_flush_due(W1) of
-        true  -> do_flush_root(W1);
+        true -> do_flush_root(W1);
         false -> {ok, W1}
     end.
 
@@ -534,8 +553,13 @@ do_open(Dir, InstanceId, HashAlgo, Policy) ->
                         ok ->
                             case cleanup_orphan_packs(Dir, Manifest) of
                                 ok ->
-                                    open_incoming(Dir, InstanceId, HashAlgo,
-                                                  Manifest, Policy);
+                                    open_incoming(
+                                        Dir,
+                                        InstanceId,
+                                        HashAlgo,
+                                        Manifest,
+                                        Policy
+                                    );
                                 {error, R} ->
                                     {error, {orphan_cleanup, R}}
                             end;
@@ -564,7 +588,7 @@ load_or_create_manifest(Dir, InstanceId, HashAlgo) ->
         {error, enoent} ->
             M = bondy_mst_pack_manifest:new(InstanceId, HashAlgo),
             case bondy_mst_pack_manifest:write(Dir, M) of
-                ok          -> {ok, M};
+                ok -> {ok, M};
                 {error, _} = E -> E
             end;
         {error, _} = E ->
@@ -596,7 +620,6 @@ pack all hash the same way.
 derive_instance_hash(InstanceId) when is_binary(InstanceId) ->
     erlang:phash2(InstanceId, 1 bsl 32).
 
-
 %% @private
 open_incoming(Dir, InstanceId, HashAlgo, Manifest, Policy) ->
     InstanceHash = derive_instance_hash(InstanceId),
@@ -608,11 +631,25 @@ open_incoming(Dir, InstanceId, HashAlgo, Manifest, Policy) ->
             %% Defer creating incoming.pack until the first append.
             %% Keeps `open/close` cycles idempotent: the on-disk state
             %% matches the manifest's declared state at all times.
-            {ok, fresh_state(Dir, InstanceId, HashAlgo, InstanceHash,
-                             Manifest, Policy)};
+            {ok,
+                fresh_state(
+                    Dir,
+                    InstanceId,
+                    HashAlgo,
+                    InstanceHash,
+                    Manifest,
+                    Policy
+                )};
         {present, true} ->
-            resume_incoming(Dir, Path, InstanceId, HashAlgo,
-                            InstanceHash, Manifest, Policy);
+            resume_incoming(
+                Dir,
+                Path,
+                InstanceId,
+                HashAlgo,
+                InstanceHash,
+                Manifest,
+                Policy
+            );
         {absent, true} ->
             %% Orphan from a previous crash; recovery's job.
             {error, needs_recovery};
@@ -634,14 +671,14 @@ fresh_state(Dir, InstanceId, HashAlgo, InstanceHash, Manifest, Policy) ->
         pending = #{},
         next_pack_id = next_pack_id_from(Manifest),
         sync_every_records = maps:get(sync_every_records, Policy),
-        sync_every_ms      = maps:get(sync_every_ms, Policy),
-        unsynced_count     = 0,
-        last_sync_ms       = Now,
+        sync_every_ms = maps:get(sync_every_ms, Policy),
+        unsynced_count = 0,
+        last_sync_ms = Now,
         root_flush_every_records = maps:get(root_flush_every_records, Policy),
-        root_flush_every_ms      = maps:get(root_flush_every_ms, Policy),
-        root_unsynced_count      = 0,
-        last_root_flush_ms       = Now,
-        root_dirty               = false
+        root_flush_every_ms = maps:get(root_flush_every_ms, Policy),
+        root_unsynced_count = 0,
+        last_root_flush_ms = Now,
+        root_dirty = false
     }.
 
 %% @private
@@ -655,13 +692,13 @@ ensure_incoming_open(#?MODULE{incoming_fd = Fd} = W) when Fd =/= undefined ->
 ensure_incoming_open(#?MODULE{} = W) ->
     Path = bondy_mst_pack_paths:incoming_pack_path(W#?MODULE.dir),
     Header = bondy_mst_pack_codec:encode_pack_header(#{
-        version       => bondy_mst_pack_codec:version(),
-        flags         => 0,
-        pack_id       => 0,
+        version => bondy_mst_pack_codec:version(),
+        flags => 0,
+        pack_id => 0,
         instance_hash => W#?MODULE.instance_hash,
-        hash_algo     => W#?MODULE.hash_algo,
-        created_at    => erlang:system_time(millisecond),
-        record_count  => 0
+        hash_algo => W#?MODULE.hash_algo,
+        created_at => erlang:system_time(millisecond),
+        record_count => 0
     }),
     case prim_file:open(Path, [read, write, raw, binary, exclusive]) of
         {ok, Fd} ->
@@ -693,23 +730,33 @@ flip_manifest_to_present(W, Fd, HeaderSize) ->
             %% `open/2` (which may have been many ms earlier and would
             %% spuriously trip a tight `sync_every_ms` on the first append).
             %% The manifest write above also covered any staged root.
-            {ok, reset_root_flush_counters(W#?MODULE{
-                manifest        = M,
-                incoming_fd     = Fd,
-                incoming_offset = HeaderSize,
-                last_sync_ms    = erlang:monotonic_time(millisecond)
-            })};
+            {ok,
+                reset_root_flush_counters(W#?MODULE{
+                    manifest = M,
+                    incoming_fd = Fd,
+                    incoming_offset = HeaderSize,
+                    last_sync_ms = erlang:monotonic_time(millisecond)
+                })};
         {error, R} ->
             _ = prim_file:close(Fd),
-            _ = prim_file:delete(bondy_mst_pack_paths:incoming_pack_path(
-                W#?MODULE.dir
-            )),
+            _ = prim_file:delete(
+                bondy_mst_pack_paths:incoming_pack_path(
+                    W#?MODULE.dir
+                )
+            ),
             {error, {manifest, R}}
     end.
 
 %% @private
-resume_incoming(Dir, Path, InstanceId, HashAlgo, InstanceHash, Manifest,
-                Policy) ->
+resume_incoming(
+    Dir,
+    Path,
+    InstanceId,
+    HashAlgo,
+    InstanceHash,
+    Manifest,
+    Policy
+) ->
     case prim_file:open(Path, [read, write, raw, binary]) of
         {ok, Fd} ->
             case scan_incoming(Fd, InstanceHash, HashAlgo) of
@@ -723,7 +770,7 @@ resume_incoming(Dir, Path, InstanceId, HashAlgo, InstanceHash, Manifest,
                     %% EndOffset so subsequent writes append correctly.
                     case prim_file:position(Fd, EndOffset) of
                         {ok, EndOffset} -> ok;
-                        {error, R}      -> error({resume_seek, R})
+                        {error, R} -> error({resume_seek, R})
                     end,
                     Now = erlang:monotonic_time(millisecond),
                     {ok, #?MODULE{
@@ -767,8 +814,9 @@ scan_incoming(Fd, ExpectedInstanceHash, ExpectedAlgo) ->
     case prim_file:pread(Fd, 0, HeaderBytes) of
         {ok, HBin} when byte_size(HBin) =:= HeaderBytes ->
             case bondy_mst_pack_codec:decode_pack_header(HBin) of
-                {ok, #{instance_hash := IH, hash_algo := A}}
-                    when IH =:= ExpectedInstanceHash, A =:= ExpectedAlgo ->
+                {ok, #{instance_hash := IH, hash_algo := A}} when
+                    IH =:= ExpectedInstanceHash, A =:= ExpectedAlgo
+                ->
                     scan_records(Fd, HeaderBytes, #{});
                 {ok, _} ->
                     %% Header decoded cleanly but the instance or hash
@@ -837,7 +885,7 @@ verify_scanned_body(_Fd, _BodyOffset, 0, Header, Hash) ->
         ok ->
             case crypto:hash(sha256, <<>>) of
                 Hash -> {ok, <<>>};
-                _    -> {error, needs_recovery}
+                _ -> {error, needs_recovery}
             end;
         {error, _} ->
             {error, needs_recovery}
@@ -849,7 +897,7 @@ verify_scanned_body(Fd, BodyOffset, L, Header, Hash) ->
                 ok ->
                     case crypto:hash(sha256, Body) of
                         Hash -> {ok, Body};
-                        _    -> {error, needs_recovery}
+                        _ -> {error, needs_recovery}
                     end;
                 {error, _} ->
                     {error, needs_recovery}
@@ -860,10 +908,11 @@ verify_scanned_body(Fd, BodyOffset, L, Header, Hash) ->
 
 %% @private
 next_pack_id_from(Manifest) ->
-    Highest = case bondy_mst_pack_manifest:sealed_packs(Manifest) of
-        [] -> bondy_mst_pack_manifest:deleted_through(Manifest);
-        L  -> lists:max(L)
-    end,
+    Highest =
+        case bondy_mst_pack_manifest:sealed_packs(Manifest) of
+            [] -> bondy_mst_pack_manifest:deleted_through(Manifest);
+            L -> lists:max(L)
+        end,
     Highest + 1.
 
 %% @private
@@ -998,11 +1047,11 @@ do_append(#?MODULE{incoming_fd = Fd, incoming_offset = Off} = W, Hash, Page) ->
             },
             W1 = W#?MODULE{
                 incoming_offset = NewOff,
-                pending         = Pending,
-                unsynced_count  = W#?MODULE.unsynced_count + 1
+                pending = Pending,
+                unsynced_count = W#?MODULE.unsynced_count + 1
             },
             case maybe_sync_after_append(W1) of
-                {ok, W2}       -> {ok, Hash, W2};
+                {ok, W2} -> {ok, Hash, W2};
                 {error, _} = E -> E
             end;
         {error, R} ->
@@ -1010,16 +1059,24 @@ do_append(#?MODULE{incoming_fd = Fd, incoming_offset = Off} = W, Hash, Page) ->
     end.
 
 %% @private
-maybe_sync_after_append(#?MODULE{unsynced_count = N,
-                                 sync_every_records = K} = W) when N >= K ->
+maybe_sync_after_append(
+    #?MODULE{
+        unsynced_count = N,
+        sync_every_records = K
+    } = W
+) when N >= K ->
     do_sync(W);
 maybe_sync_after_append(#?MODULE{sync_every_ms = infinity} = W) ->
     {ok, W};
-maybe_sync_after_append(#?MODULE{last_sync_ms = Last,
-                                 sync_every_ms = T} = W) ->
+maybe_sync_after_append(
+    #?MODULE{
+        last_sync_ms = Last,
+        sync_every_ms = T
+    } = W
+) ->
     Now = erlang:monotonic_time(millisecond),
     case Now - Last >= T of
-        true  -> do_sync(W);
+        true -> do_sync(W);
         false -> {ok, W}
     end.
 
@@ -1029,7 +1086,7 @@ do_sync(#?MODULE{incoming_fd = Fd} = W) ->
         ok ->
             {ok, W#?MODULE{
                 unsynced_count = 0,
-                last_sync_ms   = erlang:monotonic_time(millisecond)
+                last_sync_ms = erlang:monotonic_time(millisecond)
             }};
         {error, R} ->
             {error, {sync, R}}
@@ -1049,14 +1106,19 @@ do_sync(#?MODULE{incoming_fd = Fd} = W) ->
 %% carries it.
 root_flush_due(#?MODULE{root_dirty = false}) ->
     false;
-root_flush_due(#?MODULE{root_unsynced_count = N,
-                        root_flush_every_records = K}) when
-        is_integer(K), N >= K ->
+root_flush_due(#?MODULE{
+    root_unsynced_count = N,
+    root_flush_every_records = K
+}) when
+    is_integer(K), N >= K
+->
     true;
 root_flush_due(#?MODULE{root_flush_every_ms = infinity}) ->
     false;
-root_flush_due(#?MODULE{last_root_flush_ms = Last,
-                        root_flush_every_ms = T}) ->
+root_flush_due(#?MODULE{
+    last_root_flush_ms = Last,
+    root_flush_every_ms = T
+}) ->
     erlang:monotonic_time(millisecond) - Last >= T.
 
 %% @private
@@ -1077,8 +1139,8 @@ do_flush_root(#?MODULE{dir = Dir, manifest = M} = W) ->
 reset_root_flush_counters(#?MODULE{} = W) ->
     W#?MODULE{
         root_unsynced_count = 0,
-        last_root_flush_ms  = erlang:monotonic_time(millisecond),
-        root_dirty          = false
+        last_root_flush_ms = erlang:monotonic_time(millisecond),
+        root_dirty = false
     }.
 
 %% =============================================================================
@@ -1086,15 +1148,24 @@ reset_root_flush_counters(#?MODULE{} = W) ->
 %% =============================================================================
 
 %% @private
-do_seal(#?MODULE{
-    dir = Dir, instance_hash = IH, hash_algo = HashAlgo,
-    manifest = M, incoming_fd = Fd, pending = Pending,
-    next_pack_id = PackId
-} = W) ->
+do_seal(
+    #?MODULE{
+        dir = Dir,
+        instance_hash = IH,
+        hash_algo = HashAlgo,
+        manifest = M,
+        incoming_fd = Fd,
+        pending = Pending,
+        next_pack_id = PackId
+    } = W
+) ->
     Hashes = lists:sort(maps:keys(Pending)),
     Reader = pending_reader(Fd, Pending),
-    case bondy_mst_pack_seal:create_sealed_pack(
-            Dir, IH, HashAlgo, PackId, Hashes, Reader) of
+    case
+        bondy_mst_pack_seal:create_sealed_pack(
+            Dir, IH, HashAlgo, PackId, Hashes, Reader
+        )
+    of
         ok ->
             commit_seal(Dir, M, PackId, W);
         {error, R} ->
@@ -1159,10 +1230,12 @@ reopen_fresh_incoming(W, M1, PackId) ->
         W#?MODULE.hash_algo,
         W#?MODULE.instance_hash,
         M1,
-        #{sync_every_records       => W#?MODULE.sync_every_records,
-          sync_every_ms             => W#?MODULE.sync_every_ms,
-          root_flush_every_records  => W#?MODULE.root_flush_every_records,
-          root_flush_every_ms       => W#?MODULE.root_flush_every_ms}
+        #{
+            sync_every_records => W#?MODULE.sync_every_records,
+            sync_every_ms => W#?MODULE.sync_every_ms,
+            root_flush_every_records => W#?MODULE.root_flush_every_records,
+            root_flush_every_ms => W#?MODULE.root_flush_every_ms
+        }
     ),
     {ok, PackId, Fresh#?MODULE{next_pack_id = PackId + 1}}.
 

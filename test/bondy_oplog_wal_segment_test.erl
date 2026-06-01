@@ -14,9 +14,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_seg_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_seg_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -46,7 +53,9 @@ create_and_read_header_test() ->
         SegId = 7,
         Path = filename:join(Dir, bondy_oplog_wal_segment:filename(SegId)),
         {ok, Fd, Header} =
-            bondy_oplog_wal_segment:create(Path, SegId, instance_id(), origin()),
+            bondy_oplog_wal_segment:create(
+                Path, SegId, instance_id(), origin()
+            ),
         ok = prim_file:close(Fd),
         ?assertEqual(SegId, bondy_oplog_wal_segment:segment_id(Header)),
         ?assertEqual(origin(), bondy_oplog_wal_segment:origin(Header)),
@@ -59,8 +68,10 @@ create_and_read_header_test() ->
 filename_is_zero_padded_test() ->
     ?assertEqual(<<"000000000.qdata">>, bondy_oplog_wal_segment:filename(0)),
     ?assertEqual(<<"000000042.qdata">>, bondy_oplog_wal_segment:filename(42)),
-    ?assertEqual(<<"999999999.qdata">>,
-                 bondy_oplog_wal_segment:filename(999999999)).
+    ?assertEqual(
+        <<"999999999.qdata">>,
+        bondy_oplog_wal_segment:filename(999999999)
+    ).
 
 instance_id_hash_is_8_bytes_test() ->
     Hash = bondy_oplog_wal_segment:instance_id_hash(instance_id()),
@@ -89,9 +100,14 @@ verify_match_test() ->
         {ok, Fd, Header} =
             bondy_oplog_wal_segment:create(Path, 0, instance_id(), origin()),
         ok = prim_file:close(Fd),
-        ?assertEqual(ok,
-                     bondy_oplog_wal_segment:verify(Header, instance_id(),
-                                                    origin()))
+        ?assertEqual(
+            ok,
+            bondy_oplog_wal_segment:verify(
+                Header,
+                instance_id(),
+                origin()
+            )
+        )
     end).
 
 verify_instance_mismatch_test() ->
@@ -102,8 +118,11 @@ verify_instance_mismatch_test() ->
         ok = prim_file:close(Fd),
         ?assertMatch(
             {error, {orphan_segment, instance_id_hash_mismatch}},
-            bondy_oplog_wal_segment:verify(Header, <<"other-instance">>,
-                                            origin())
+            bondy_oplog_wal_segment:verify(
+                Header,
+                <<"other-instance">>,
+                origin()
+            )
         )
     end).
 
@@ -134,8 +153,10 @@ open_truncated_header_test() ->
     with_dir(fun(Dir) ->
         Path = filename:join(Dir, "truncated.qdata"),
         ok = file:write_file(Path, <<1, 2, 3, 4>>),
-        ?assertEqual({error, truncated_header},
-                     bondy_oplog_wal_segment:open(Path))
+        ?assertEqual(
+            {error, truncated_header},
+            bondy_oplog_wal_segment:open(Path)
+        )
     end).
 
 open_bad_magic_test() ->
@@ -153,9 +174,15 @@ create_refuses_existing_file_test() ->
     with_dir(fun(Dir) ->
         Path = filename:join(Dir, bondy_oplog_wal_segment:filename(0)),
         ok = file:write_file(Path, <<0>>),
-        ?assertMatch({error, _},
-                     bondy_oplog_wal_segment:create(Path, 0, instance_id(),
-                                                    origin()))
+        ?assertMatch(
+            {error, _},
+            bondy_oplog_wal_segment:create(
+                Path,
+                0,
+                instance_id(),
+                origin()
+            )
+        )
     end).
 
 create_rejects_invalid_origin_test() ->

@@ -138,7 +138,9 @@ direction_desc_reverses_result() ->
     materialise(PH, <<"b">>, {set, <<"vb">>, 2}, 2),
     materialise(PH, <<"c">>, {set, <<"vc">>, 3}, 3),
     {ok, Rows} =
-        bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{direction => desc}),
+        bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>}, #{
+            direction => desc
+        }),
     ?assertEqual(
         [
             {<<"c">>, <<"vc">>, 3},
@@ -156,8 +158,12 @@ include_overlay_false_drops_overlay_events() ->
     materialise(PH, <<"a">>, {set, <<"old">>, 1}, 1),
     overlay_insert(OV, <<"a">>, 10, {set, 10, <<"new">>}),
     {ok, Rows} =
-        bondy_db_core:range(NS, primary, {<<"a">>, <<"z">>},
-                           #{include_overlay => false}),
+        bondy_db_core:range(
+            NS,
+            primary,
+            {<<"a">>, <<"z">>},
+            #{include_overlay => false}
+        ),
     ?assertEqual([{<<"a">>, <<"old">>, 1}], Rows),
     teardown_shard(Setup).
 
@@ -200,8 +206,10 @@ unknown_namespace_returns_no_shards() ->
 %% =============================================================================
 
 mk_ns() ->
-    list_to_atom("mst_db_range_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
+    list_to_atom(
+        "mst_db_range_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 mk_event(Hlc, Origin, Seq, Op) ->
     K = bondy_oplog_event:key(Hlc, Origin, Seq),
@@ -228,12 +236,24 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
         overlay => OV,
         fold_module => Strategy
     }),
-    Setup = #{ns => NS, index => Index, shard => Shard,
-              cache_handle => CH, projection => PH, overlay => OV},
+    Setup = #{
+        ns => NS,
+        index => Index,
+        shard => Shard,
+        cache_handle => CH,
+        projection => PH,
+        overlay => OV
+    },
     {Setup, Setup}.
 
-teardown_shard(#{ns := NS, index := Index, shard := Shard,
-                 cache_handle := CH, projection := PH, overlay := OV}) ->
+teardown_shard(#{
+    ns := NS,
+    index := Index,
+    shard := Shard,
+    cache_handle := CH,
+    projection := PH,
+    overlay := OV
+}) ->
     ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),

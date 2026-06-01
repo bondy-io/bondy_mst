@@ -57,7 +57,6 @@ cost.
 
 -export_type([ref/0]).
 
-
 %% =============================================================================
 %% API
 %% =============================================================================
@@ -72,7 +71,6 @@ Called once per shard at `bondy_db_core_registry:register/4` time.
 new() ->
     atomics:new(1, [{signed, false}]).
 
-
 -doc """
 Advances the watermark to `Hlc` if and only if `Hlc` is strictly
 greater than the current value. Returns `ok` either way.
@@ -86,7 +84,6 @@ either the CAS wins or the current value already exceeds `Hlc`.
 advance(Ref, Hlc) when is_integer(Hlc), Hlc >= 0 ->
     advance_loop(Ref, Hlc).
 
-
 -doc """
 Returns the current watermark, distinguishing the "no watermark
 recorded yet" case (`{ok, no_watermark}`) from the "watermark is
@@ -96,10 +93,9 @@ recorded yet" case (`{ok, no_watermark}`) from the "watermark is
 
 read(Ref) ->
     case atomics:get(Ref, 1) of
-        0   -> {ok, no_watermark};
+        0 -> {ok, no_watermark};
         Hlc -> {ok, Hlc}
     end.
-
 
 -doc """
 Returns the raw counter value without the no-watermark distinction.
@@ -112,7 +108,6 @@ max-CAS loop) and want to skip the wrapper tuple.
 read_raw(Ref) ->
     atomics:get(Ref, 1).
 
-
 %% =============================================================================
 %% INTERNAL
 %% =============================================================================
@@ -124,7 +119,7 @@ advance_loop(Ref, Hlc) ->
             ok;
         true ->
             case atomics:compare_exchange(Ref, 1, Cur, Hlc) of
-                ok       -> ok;
-                _Other   -> advance_loop(Ref, Hlc)
+                ok -> ok;
+                _Other -> advance_loop(Ref, Hlc)
             end
     end.

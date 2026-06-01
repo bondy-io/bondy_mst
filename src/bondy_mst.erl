@@ -513,7 +513,9 @@ diff_to_list(#?MODULE{} = T1, #?MODULE{} = T2) ->
     );
 diff_to_list(#?MODULE{store = Store} = T, undefined) ->
     diff_to_list(T, Store, root(T), Store, undefined);
-diff_to_list(#?MODULE{store = Store} = T, OtherRoot) when is_binary(OtherRoot) ->
+diff_to_list(#?MODULE{store = Store} = T, OtherRoot) when
+    is_binary(OtherRoot)
+->
     case bondy_mst_store:get(Store, OtherRoot) of
         undefined ->
             %% Previous root has been GC'd; fall back to full list.
@@ -1193,21 +1195,39 @@ merge_aux(A, B, Store0, ARoot, BRoot) ->
         {undefined, undefined} ->
             %% Both sides are dangling — pathologically corrupt
             %% input. Reset to empty.
-            log_dangling_root("merge_aux: both A and B roots dangling",
-                              A, B, Store0, ARoot, BRoot),
+            log_dangling_root(
+                "merge_aux: both A and B roots dangling",
+                A,
+                B,
+                Store0,
+                ARoot,
+                BRoot
+            ),
             {undefined, Store0};
         {undefined, _} ->
             %% A's root hash doesn't resolve in any store. Treat A as
             %% empty for this subtree — fall back to clause 3's
             %% "copy B over" behaviour.
-            log_dangling_root("merge_aux: A root dangling, falling back to B",
-                              A, B, Store0, ARoot, BRoot),
+            log_dangling_root(
+                "merge_aux: A root dangling, falling back to B",
+                A,
+                B,
+                Store0,
+                ARoot,
+                BRoot
+            ),
             Store = bondy_mst_store:copy(Store0, B#?MODULE.store, BRoot),
             {BRoot, Store};
         {_, undefined} ->
             %% B's root hash doesn't resolve. Keep A as-is.
-            log_dangling_root("merge_aux: B root dangling, keeping A",
-                              A, B, Store0, ARoot, BRoot),
+            log_dangling_root(
+                "merge_aux: B root dangling, keeping A",
+                A,
+                B,
+                Store0,
+                ARoot,
+                BRoot
+            ),
             {ARoot, Store0};
         _ ->
             merge_aux_pages(A, B, Store0, ARoot, BRoot, APage, BPage)

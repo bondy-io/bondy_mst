@@ -174,8 +174,12 @@ range_returns_events_in_key_order() ->
     %% Capture append returns so a silent `{error, _}` from one of
     %% the writes does not masquerade as a read-path bug downstream.
     AppendKeys = [bondy_oplog:append(Id, N) || N <- lists:seq(1, 20)],
-    Bad = [R || R <- AppendKeys, not is_tuple(R)
-                                 orelse element(1, R) =:= error],
+    Bad = [
+        R
+     || R <- AppendKeys,
+        not is_tuple(R) orelse
+            element(1, R) =:= error
+    ],
     ?assertEqual([], Bad),
     Min = bondy_oplog_event:min_key(),
     Max = bondy_oplog_event:max_key_for_hlc(16#FFFFFFFFFFFFFFFF),
@@ -429,8 +433,10 @@ refresh_validator_noop_when_callback_not_exported() ->
     {ok, _} = bondy_oplog:start_instance(Id, #{
         validator => bondy_oplog_test_reject_validator
     }),
-    ?assertEqual(ok,
-        bondy_oplog_instance:refresh_validator(Id, no_op_check)),
+    ?assertEqual(
+        ok,
+        bondy_oplog_instance:refresh_validator(Id, no_op_check)
+    ),
     %% Validator is still alive and still rejecting.
     ?assertEqual({error, refused}, append_peer_event(Id, anything, 1)),
     ok = bondy_oplog:stop_instance(Id).
@@ -475,14 +481,15 @@ refresh_validator_in_flight_keeps_old_snapshot() ->
     end),
     %% Wait for worker A's `verifying` notification — proves A is
     %% parked on its captured snapshot.
-    WorkerA = receive
-        {verifying, ok, WA} -> WA
-    after 2000 ->
-        ets:delete(Tab),
-        exit(HelperA, kill),
-        bondy_oplog:stop_instance(Id),
-        error({timeout_waiting_for_worker_a})
-    end,
+    WorkerA =
+        receive
+            {verifying, ok, WA} -> WA
+        after 2000 ->
+            ets:delete(Tab),
+            exit(HelperA, kill),
+            bondy_oplog:stop_instance(Id),
+            error({timeout_waiting_for_worker_a})
+        end,
     %% Refresh the applier's snapshot. Worker A is still parked
     %% inside `verify_event/2` and must remain unaffected.
     ok = bondy_oplog_instance:refresh_validator(Id, in_flight_test),
@@ -495,21 +502,30 @@ refresh_validator_in_flight_keeps_old_snapshot() ->
         Reply = append_peer_event(Id, op_beta, 2),
         Self ! {ResultB, Reply}
     end),
-    WorkerB = receive
-        {verifying, refused, WB} -> WB
-    after 2000 ->
-        ets:delete(Tab),
-        exit(HelperA, kill),
-        exit(HelperB, kill),
-        bondy_oplog:stop_instance(Id),
-        error({timeout_waiting_for_worker_b})
-    end,
+    WorkerB =
+        receive
+            {verifying, refused, WB} -> WB
+        after 2000 ->
+            ets:delete(Tab),
+            exit(HelperA, kill),
+            exit(HelperB, kill),
+            bondy_oplog:stop_instance(Id),
+            error({timeout_waiting_for_worker_b})
+        end,
     %% Release worker A first; it must return ok (snapshot-1 verdict),
     %% proving in-flight events stick with their captured snapshot.
     WorkerA ! {release, WorkerA},
     WorkerB ! {release, WorkerB},
-    ReplyA = receive {ResultA, RA} -> RA after 2000 -> error(timeout_a) end,
-    ReplyB = receive {ResultB, RB} -> RB after 2000 -> error(timeout_b) end,
+    ReplyA =
+        receive
+            {ResultA, RA} -> RA
+        after 2000 -> error(timeout_a)
+        end,
+    ReplyB =
+        receive
+            {ResultB, RB} -> RB
+        after 2000 -> error(timeout_b)
+        end,
     ?assertEqual(ok, ReplyA),
     ?assertEqual({error, refused}, ReplyB),
     ets:delete(Tab),
@@ -790,7 +806,7 @@ unwrap_supervisor_error({Reason, Stack}) when is_list(Stack) ->
     %% from a "Reason that happens to be a 2-tuple with list payload"
     %% by checking that Stack is a list of 4-element stack frames.
     case is_stacktrace(Stack) of
-        true  -> Reason;
+        true -> Reason;
         false -> {Reason, Stack}
     end;
 unwrap_supervisor_error(Reason) ->

@@ -58,18 +58,16 @@ roundtrip_empty_state_with_value_column_test() ->
 
 encoded_frame_no_value_column_layout_test() ->
     Frame = ?MOD:encode(42, <<"abc">>, undefined, true),
-    <<2:8, 0:1, _Reserved:7,
-      HlcLen:16/big-unsigned, _Hlc:HlcLen/binary,
-      StateLen:32/big-unsigned, StateBytes:StateLen/binary>> = Frame,
+    <<2:8, 0:1, _Reserved:7, HlcLen:16/big-unsigned, _Hlc:HlcLen/binary,
+        StateLen:32/big-unsigned, StateBytes:StateLen/binary>> = Frame,
     ?assertEqual(8, HlcLen),
     ?assertEqual(<<"abc">>, StateBytes).
 
 encoded_frame_with_value_column_layout_test() ->
     Frame = ?MOD:encode(42, <<"abc">>, <<"v">>, false),
-    <<2:8, 1:1, _Reserved:7,
-      HlcLen:16/big-unsigned, _Hlc:HlcLen/binary,
-      StateLen:32/big-unsigned, StateBytes:StateLen/binary,
-      ValueLen:32/big-unsigned, ValueBytes:ValueLen/binary>> = Frame,
+    <<2:8, 1:1, _Reserved:7, HlcLen:16/big-unsigned, _Hlc:HlcLen/binary,
+        StateLen:32/big-unsigned, StateBytes:StateLen/binary,
+        ValueLen:32/big-unsigned, ValueBytes:ValueLen/binary>> = Frame,
     ?assertEqual(8, HlcLen),
     ?assertEqual(<<"abc">>, StateBytes),
     ?assertEqual(<<"v">>, ValueBytes).

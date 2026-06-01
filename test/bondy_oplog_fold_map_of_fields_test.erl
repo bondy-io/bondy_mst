@@ -23,22 +23,27 @@ initial_value_is_empty_map_test() ->
 
 field_event_inserts_lww_register_test() ->
     H = hlc(1, 0),
-    S = apply_ev(?MOD:initial_value(),
-                         {field_event, <<"name">>, lww_register, {set, H, <<"alice">>}}),
+    S = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"name">>, lww_register, {set, H, <<"alice">>}}
+    ),
     ?assertEqual(#{<<"name">> => {lww_register, {set, <<"alice">>, H}}}, S).
 
 field_event_inserts_strict_register_test() ->
     H = hlc(1, 0),
-    S = apply_ev(?MOD:initial_value(),
-                         {field_event, <<"role">>, strict_register, {set, H, <<"admin">>}}),
+    S = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"role">>, strict_register, {set, H, <<"admin">>}}
+    ),
     ?assertEqual(#{<<"role">> => {strict_register, {set, <<"admin">>, H}}}, S).
 
 field_event_inserts_ttl_presence_test() ->
     H = hlc(1, 0),
     E = hlc(10, 0),
-    S = apply_ev(?MOD:initial_value(),
-                         {field_event, <<"lease">>, ttl_presence,
-                          {issue, H, E, <<"p">>}}),
+    S = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"lease">>, ttl_presence, {issue, H, E, <<"p">>}}
+    ),
     ?assertMatch(#{<<"lease">> := {ttl_presence, {issued, H, E, <<"p">>}}}, S).
 
 %% =============================================================================
@@ -48,43 +53,67 @@ field_event_inserts_ttl_presence_test() ->
 field_event_updates_existing_test() ->
     H1 = hlc(1, 0),
     H2 = hlc(2, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {field_event, <<"x">>, lww_register, {set, H1, <<"a">>}}),
-    S1 = apply_ev(S0,
-                          {field_event, <<"x">>, lww_register, {set, H2, <<"b">>}}),
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"x">>, lww_register, {set, H1, <<"a">>}}
+    ),
+    S1 = apply_ev(
+        S0,
+        {field_event, <<"x">>, lww_register, {set, H2, <<"b">>}}
+    ),
     ?assertEqual(#{<<"x">> => {lww_register, {set, <<"b">>, H2}}}, S1).
 
 field_event_independent_fields_test() ->
     H = hlc(1, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {field_event, <<"a">>, lww_register, {set, H, <<"av">>}}),
-    S1 = apply_ev(S0,
-                          {field_event, <<"b">>, strict_register, {set, H, <<"bv">>}}),
-    ?assertMatch(#{<<"a">> := {lww_register, _},
-                   <<"b">> := {strict_register, _}}, S1).
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"a">>, lww_register, {set, H, <<"av">>}}
+    ),
+    S1 = apply_ev(
+        S0,
+        {field_event, <<"b">>, strict_register, {set, H, <<"bv">>}}
+    ),
+    ?assertMatch(
+        #{
+            <<"a">> := {lww_register, _},
+            <<"b">> := {strict_register, _}
+        },
+        S1
+    ).
 
 field_event_strategy_mismatch_crashes_test() ->
     H = hlc(1, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {field_event, <<"f">>, lww_register, {set, H, <<"v">>}}),
-    ?assertError({strategy_mismatch, <<"f">>, lww_register, strict_register},
-                 apply_ev(S0,
-                                  {field_event, <<"f">>, strict_register,
-                                   {set, H, <<"v">>}})).
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"f">>, lww_register, {set, H, <<"v">>}}
+    ),
+    ?assertError(
+        {strategy_mismatch, <<"f">>, lww_register, strict_register},
+        apply_ev(
+            S0,
+            {field_event, <<"f">>, strict_register, {set, H, <<"v">>}}
+        )
+    ).
 
 field_event_unsupported_strategy_crashes_test() ->
     H = hlc(1, 0),
-    ?assertError({unsupported_field_strategy, presence_basic},
-                 apply_ev(?MOD:initial_value(),
-                                  {field_event, <<"f">>, presence_basic,
-                                   {create, H, <<"v">>}})).
+    ?assertError(
+        {unsupported_field_strategy, presence_basic},
+        apply_ev(
+            ?MOD:initial_value(),
+            {field_event, <<"f">>, presence_basic, {create, H, <<"v">>}}
+        )
+    ).
 
 orset_strategy_rejected_test() ->
     H = hlc(1, 0),
-    ?assertError({unsupported_field_strategy, orset},
-                 apply_ev(?MOD:initial_value(),
-                                  {field_event, <<"tags">>, orset,
-                                   {add, H, <<"red">>, {<<"n1">>, 1}}})).
+    ?assertError(
+        {unsupported_field_strategy, orset},
+        apply_ev(
+            ?MOD:initial_value(),
+            {field_event, <<"tags">>, orset, {add, H, <<"red">>, {<<"n1">>, 1}}}
+        )
+    ).
 
 %% =============================================================================
 %% apply_event — remove_field (dispatched to sub-fold purge)
@@ -92,67 +121,89 @@ orset_strategy_rejected_test() ->
 
 remove_field_lww_on_empty_creates_cleared_test() ->
     H = hlc(5, 0),
-    S = apply_ev(?MOD:initial_value(),
-                         {remove_field, H, <<"x">>, lww_register}),
+    S = apply_ev(
+        ?MOD:initial_value(),
+        {remove_field, H, <<"x">>, lww_register}
+    ),
     ?assertEqual(#{<<"x">> => {lww_register, {cleared, H}}}, S).
 
 remove_field_strict_on_empty_creates_revoked_test() ->
     H = hlc(5, 0),
-    S = apply_ev(?MOD:initial_value(),
-                         {remove_field, H, <<"x">>, strict_register}),
+    S = apply_ev(
+        ?MOD:initial_value(),
+        {remove_field, H, <<"x">>, strict_register}
+    ),
     ?assertEqual(#{<<"x">> => {strict_register, {revoked, H}}}, S).
 
 remove_field_ttl_on_empty_creates_revoked_test() ->
     H = hlc(5, 0),
-    S = apply_ev(?MOD:initial_value(),
-                         {remove_field, H, <<"x">>, ttl_presence}),
+    S = apply_ev(
+        ?MOD:initial_value(),
+        {remove_field, H, <<"x">>, ttl_presence}
+    ),
     ?assertEqual(#{<<"x">> => {ttl_presence, {revoked, H}}}, S).
 
 remove_field_on_live_clears_test() ->
     H1 = hlc(1, 0),
     H2 = hlc(2, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {field_event, <<"x">>, lww_register, {set, H1, <<"v">>}}),
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"x">>, lww_register, {set, H1, <<"v">>}}
+    ),
     S1 = apply_ev(S0, {remove_field, H2, <<"x">>, lww_register}),
     ?assertEqual(#{<<"x">> => {lww_register, {cleared, H2}}}, S1).
 
 remove_field_strict_on_live_revokes_test() ->
     H1 = hlc(1, 0),
     H2 = hlc(2, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {field_event, <<"x">>, strict_register, {set, H1, <<"v">>}}),
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"x">>, strict_register, {set, H1, <<"v">>}}
+    ),
     S1 = apply_ev(S0, {remove_field, H2, <<"x">>, strict_register}),
     ?assertEqual(#{<<"x">> => {strict_register, {revoked, H2}}}, S1).
 
 remove_field_at_same_hlc_clears_test() ->
     %% Clear wins ties per lww_register semantics.
     H = hlc(1, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {field_event, <<"x">>, lww_register, {set, H, <<"v">>}}),
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"x">>, lww_register, {set, H, <<"v">>}}
+    ),
     S1 = apply_ev(S0, {remove_field, H, <<"x">>, lww_register}),
     ?assertEqual(#{<<"x">> => {lww_register, {cleared, H}}}, S1).
 
 remove_field_with_older_hlc_is_noop_test() ->
     H1 = hlc(5, 0),
     H2 = hlc(2, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {field_event, <<"x">>, lww_register, {set, H1, <<"v">>}}),
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"x">>, lww_register, {set, H1, <<"v">>}}
+    ),
     S1 = apply_ev(S0, {remove_field, H2, <<"x">>, lww_register}),
     %% LWW rejects older clear — state unchanged.
     ?assertEqual(S0, S1).
 
 remove_field_strategy_mismatch_crashes_test() ->
     H = hlc(1, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {field_event, <<"f">>, lww_register, {set, H, <<"v">>}}),
-    ?assertError({strategy_mismatch, <<"f">>, lww_register, strict_register},
-                 apply_ev(S0, {remove_field, H, <<"f">>, strict_register})).
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"f">>, lww_register, {set, H, <<"v">>}}
+    ),
+    ?assertError(
+        {strategy_mismatch, <<"f">>, lww_register, strict_register},
+        apply_ev(S0, {remove_field, H, <<"f">>, strict_register})
+    ).
 
 remove_field_unsupported_strategy_crashes_test() ->
     H = hlc(1, 0),
-    ?assertError({unsupported_field_strategy, orset},
-                 apply_ev(?MOD:initial_value(),
-                                  {remove_field, H, <<"x">>, orset})).
+    ?assertError(
+        {unsupported_field_strategy, orset},
+        apply_ev(
+            ?MOD:initial_value(),
+            {remove_field, H, <<"x">>, orset}
+        )
+    ).
 
 %% =============================================================================
 %% apply_event — re-introduction after cleared (LWW only — strict and ttl
@@ -162,20 +213,28 @@ remove_field_unsupported_strategy_crashes_test() ->
 field_event_after_cleared_lww_reintroduces_test() ->
     H1 = hlc(1, 0),
     H2 = hlc(2, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {remove_field, H1, <<"x">>, lww_register}),
-    S1 = apply_ev(S0,
-                          {field_event, <<"x">>, lww_register, {set, H2, <<"new">>}}),
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {remove_field, H1, <<"x">>, lww_register}
+    ),
+    S1 = apply_ev(
+        S0,
+        {field_event, <<"x">>, lww_register, {set, H2, <<"new">>}}
+    ),
     ?assertEqual(#{<<"x">> => {lww_register, {set, <<"new">>, H2}}}, S1).
 
 field_event_after_revoked_strict_stays_revoked_test() ->
     %% strict_register revoke is terminal.
     H1 = hlc(1, 0),
     H2 = hlc(2, 0),
-    S0 = apply_ev(?MOD:initial_value(),
-                          {remove_field, H1, <<"x">>, strict_register}),
-    S1 = apply_ev(S0,
-                          {field_event, <<"x">>, strict_register, {set, H2, <<"new">>}}),
+    S0 = apply_ev(
+        ?MOD:initial_value(),
+        {remove_field, H1, <<"x">>, strict_register}
+    ),
+    S1 = apply_ev(
+        S0,
+        {field_event, <<"x">>, strict_register, {set, H2, <<"new">>}}
+    ),
     ?assertEqual(#{<<"x">> => {strict_register, {revoked, H2}}}, S1).
 
 %% =============================================================================
@@ -209,8 +268,11 @@ hlc_returns_max_across_fields_test() ->
     S = lists:foldl(
         fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
         ?MOD:initial_value(),
-        [{field_event, <<"a">>, lww_register, {set, H1, <<"av">>}},
-         {field_event, <<"b">>, lww_register, {set, H2, <<"bv">>}}]),
+        [
+            {field_event, <<"a">>, lww_register, {set, H1, <<"av">>}},
+            {field_event, <<"b">>, lww_register, {set, H2, <<"bv">>}}
+        ]
+    ),
     ?assertEqual(H2, ?MOD:hlc(S)).
 
 hlc_includes_cleared_fields_test() ->
@@ -219,8 +281,11 @@ hlc_includes_cleared_fields_test() ->
     S = lists:foldl(
         fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
         ?MOD:initial_value(),
-        [{field_event, <<"a">>, lww_register, {set, H1, <<"av">>}},
-         {remove_field, H2, <<"b">>, lww_register}]),
+        [
+            {field_event, <<"a">>, lww_register, {set, H1, <<"av">>}},
+            {remove_field, H2, <<"b">>, lww_register}
+        ]
+    ),
     ?assertEqual(H2, ?MOD:hlc(S)).
 
 %% =============================================================================
@@ -236,8 +301,11 @@ gc_threshold_max_across_fields_test() ->
     S = lists:foldl(
         fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
         ?MOD:initial_value(),
-        [{field_event, <<"a">>, lww_register, {set, H1, <<"av">>}},
-         {field_event, <<"b">>, lww_register, {set, H2, <<"bv">>}}]),
+        [
+            {field_event, <<"a">>, lww_register, {set, H1, <<"av">>}},
+            {field_event, <<"b">>, lww_register, {set, H2, <<"bv">>}}
+        ]
+    ),
     ?assertEqual(H2, ?MOD:gc_threshold(S)).
 
 %% =============================================================================
@@ -249,8 +317,10 @@ merge_empty_with_empty_test() ->
 
 merge_empty_with_populated_test() ->
     H = hlc(1, 0),
-    S = apply_ev(?MOD:initial_value(),
-                         {field_event, <<"x">>, lww_register, {set, H, <<"v">>}}),
+    S = apply_ev(
+        ?MOD:initial_value(),
+        {field_event, <<"x">>, lww_register, {set, H, <<"v">>}}
+    ),
     ?assertEqual(S, ?MOD:merge_states(#{}, S)),
     ?assertEqual(S, ?MOD:merge_states(S, #{})).
 
@@ -259,8 +329,13 @@ merge_disjoint_field_sets_test() ->
     A = apply_ev(#{}, {field_event, <<"a">>, lww_register, {set, H, <<"av">>}}),
     B = apply_ev(#{}, {field_event, <<"b">>, lww_register, {set, H, <<"bv">>}}),
     Merged = ?MOD:merge_states(A, B),
-    ?assertMatch(#{<<"a">> := {lww_register, _},
-                   <<"b">> := {lww_register, _}}, Merged).
+    ?assertMatch(
+        #{
+            <<"a">> := {lww_register, _},
+            <<"b">> := {lww_register, _}
+        },
+        Merged
+    ).
 
 merge_same_field_same_strategy_test() ->
     H1 = hlc(1, 0),
@@ -276,25 +351,39 @@ merge_cleared_vs_live_lww_test() ->
     H2 = hlc(2, 0),
     A = apply_ev(#{}, {field_event, <<"x">>, lww_register, {set, H1, <<"a">>}}),
     B = apply_ev(#{}, {remove_field, H2, <<"x">>, lww_register}),
-    ?assertEqual(#{<<"x">> => {lww_register, {cleared, H2}}}, ?MOD:merge_states(A, B)),
-    ?assertEqual(#{<<"x">> => {lww_register, {cleared, H2}}}, ?MOD:merge_states(B, A)).
+    ?assertEqual(
+        #{<<"x">> => {lww_register, {cleared, H2}}}, ?MOD:merge_states(A, B)
+    ),
+    ?assertEqual(
+        #{<<"x">> => {lww_register, {cleared, H2}}}, ?MOD:merge_states(B, A)
+    ).
 
 merge_revoked_dominates_strict_register_test() ->
     %% strict_register's revoke is a dominant absorber regardless of HLC.
     H1 = hlc(5, 0),
     H2 = hlc(1, 0),
-    A = apply_ev(#{}, {field_event, <<"x">>, strict_register, {set, H1, <<"a">>}}),
+    A = apply_ev(
+        #{}, {field_event, <<"x">>, strict_register, {set, H1, <<"a">>}}
+    ),
     B = apply_ev(#{}, {remove_field, H2, <<"x">>, strict_register}),
     %% Revoke dominates; max HLC.
-    ?assertEqual(#{<<"x">> => {strict_register, {revoked, H1}}}, ?MOD:merge_states(A, B)),
-    ?assertEqual(#{<<"x">> => {strict_register, {revoked, H1}}}, ?MOD:merge_states(B, A)).
+    ?assertEqual(
+        #{<<"x">> => {strict_register, {revoked, H1}}}, ?MOD:merge_states(A, B)
+    ),
+    ?assertEqual(
+        #{<<"x">> => {strict_register, {revoked, H1}}}, ?MOD:merge_states(B, A)
+    ).
 
 merge_strategy_mismatch_crashes_test() ->
     H = hlc(1, 0),
     A = apply_ev(#{}, {field_event, <<"x">>, lww_register, {set, H, <<"v">>}}),
-    B = apply_ev(#{}, {field_event, <<"x">>, strict_register, {set, H, <<"v">>}}),
-    ?assertError({strategy_mismatch, <<"x">>, lww_register, strict_register},
-                 ?MOD:merge_states(A, B)).
+    B = apply_ev(
+        #{}, {field_event, <<"x">>, strict_register, {set, H, <<"v">>}}
+    ),
+    ?assertError(
+        {strategy_mismatch, <<"x">>, lww_register, strict_register},
+        ?MOD:merge_states(A, B)
+    ).
 
 merge_is_idempotent_test() ->
     H1 = hlc(1, 0),
@@ -302,9 +391,12 @@ merge_is_idempotent_test() ->
     S = lists:foldl(
         fun(Ev, Acc) -> apply_ev(Acc, Ev) end,
         ?MOD:initial_value(),
-        [{field_event, <<"a">>, lww_register, {set, H1, <<"a">>}},
-         {field_event, <<"b">>, strict_register, {set, H2, <<"b">>}},
-         {remove_field, H1, <<"c">>, lww_register}]),
+        [
+            {field_event, <<"a">>, lww_register, {set, H1, <<"a">>}},
+            {field_event, <<"b">>, strict_register, {set, H2, <<"b">>}},
+            {remove_field, H1, <<"c">>, lww_register}
+        ]
+    ),
     ?assertEqual(S, ?MOD:merge_states(S, S)).
 
 %% =============================================================================
@@ -328,19 +420,25 @@ encode_decode_single_cleared_field_test() ->
 encode_decode_all_strategies_test() ->
     H = hlc(1, 0),
     E = hlc(5, 0),
-    S = #{<<"a">> => {lww_register,    {set, <<"av">>, H}},
-          <<"b">> => {strict_register, {set, <<"bv">>, H}},
-          <<"c">> => {ttl_presence,    {issued, H, E, <<"p">>}},
-          <<"d">> => {lww_register,    {cleared, H}}},
+    S = #{
+        <<"a">> => {lww_register, {set, <<"av">>, H}},
+        <<"b">> => {strict_register, {set, <<"bv">>, H}},
+        <<"c">> => {ttl_presence, {issued, H, E, <<"p">>}},
+        <<"d">> => {lww_register, {cleared, H}}
+    },
     ?assertEqual(S, ?MOD:decode_state(?MOD:encode_state(S))).
 
 encode_is_canonical_test() ->
     %% Same state with different insertion orders must encode to identical bytes.
     H = hlc(1, 0),
-    S1 = #{<<"a">> => {lww_register, {set, <<"av">>, H}},
-           <<"b">> => {lww_register, {cleared, H}}},
-    S2 = #{<<"b">> => {lww_register, {cleared, H}},
-           <<"a">> => {lww_register, {set, <<"av">>, H}}},
+    S1 = #{
+        <<"a">> => {lww_register, {set, <<"av">>, H}},
+        <<"b">> => {lww_register, {cleared, H}}
+    },
+    S2 = #{
+        <<"b">> => {lww_register, {cleared, H}},
+        <<"a">> => {lww_register, {set, <<"av">>, H}}
+    },
     ?assertEqual(?MOD:encode_state(S1), ?MOD:encode_state(S2)).
 
 %% =============================================================================
@@ -375,9 +473,12 @@ encode_decode_remove_field_strict_test() ->
 
 encode_event_unsupported_strategy_crashes_test() ->
     H = hlc(1, 0),
-    ?assertError({unsupported_field_strategy, presence_basic},
-                 ?MOD:encode_event({field_event, <<"x">>, presence_basic,
-                                    {create, H, <<"v">>}})).
+    ?assertError(
+        {unsupported_field_strategy, presence_basic},
+        ?MOD:encode_event(
+            {field_event, <<"x">>, presence_basic, {create, H, <<"v">>}}
+        )
+    ).
 
 %% =============================================================================
 %% dispatcher integration

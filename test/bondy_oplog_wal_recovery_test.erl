@@ -33,9 +33,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_rec_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_rec_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -55,7 +62,8 @@ mk_event(Hlc, Seq) ->
     Key = bondy_oplog_event:key(Hlc, origin(), Seq),
     bondy_oplog_event:new(Key, {op, Hlc}, undefined).
 
-generate_events(_HLC, 0, _) -> [];
+generate_events(_HLC, 0, _) ->
+    [];
 generate_events(HLC, N, Seq) ->
     Hlc = bondy_oplog_hlc:now(HLC),
     [mk_event(Hlc, Seq) | generate_events(HLC, N - 1, Seq + 1)].
@@ -88,8 +96,10 @@ with_fresh_wal(Opts, Fun) ->
         AllOpts = maps:merge(#{dir => Dir, origin => origin()}, Opts),
         {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), AllOpts),
         Events =
-            try Fun(Pid)
-            after ok = bondy_oplog_wal:close(Pid)
+            try
+                Fun(Pid)
+            after
+                ok = bondy_oplog_wal:close(Pid)
             end,
         {Dir, Events}
     catch
@@ -301,32 +311,52 @@ orphan_tmp_files_removed_on_open_test() ->
         %% Sprinkle some orphan files in the instance directory.
         ok = file:write_file(
             filename:join(InstDir, ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME),
-            <<"stale">>),
+            <<"stale">>
+        ),
         ok = file:write_file(
             filename:join(InstDir, "000000007.qdata"),
-            <<"stale">>),
+            <<"stale">>
+        ),
         ok = file:write_file(
             filename:join(InstDir, "000000007.qidx"),
-            <<"stale">>),
+            <<"stale">>
+        ),
         ok = file:write_file(
             filename:join(InstDir, "random.tmp"),
-            <<"stale">>),
+            <<"stale">>
+        ),
         %% A non-WAL file that should be left alone.
         ok = file:write_file(
             filename:join(InstDir, "README"),
-            <<"keep me">>),
+            <<"keep me">>
+        ),
         {ok, P2} = bondy_oplog_wal:start_link(instance_id(), Opts),
         ok = bondy_oplog_wal:close(P2),
-        ?assertNot(filelib:is_regular(
-            filename:join(InstDir, ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME))),
-        ?assertNot(filelib:is_regular(
-            filename:join(InstDir, "000000007.qdata"))),
-        ?assertNot(filelib:is_regular(
-            filename:join(InstDir, "000000007.qidx"))),
-        ?assertNot(filelib:is_regular(
-            filename:join(InstDir, "random.tmp"))),
-        ?assert(filelib:is_regular(
-            filename:join(InstDir, "README")))
+        ?assertNot(
+            filelib:is_regular(
+                filename:join(InstDir, ?BONDY_OPLOG_WAL_MANIFEST_TMP_FILENAME)
+            )
+        ),
+        ?assertNot(
+            filelib:is_regular(
+                filename:join(InstDir, "000000007.qdata")
+            )
+        ),
+        ?assertNot(
+            filelib:is_regular(
+                filename:join(InstDir, "000000007.qidx")
+            )
+        ),
+        ?assertNot(
+            filelib:is_regular(
+                filename:join(InstDir, "random.tmp")
+            )
+        ),
+        ?assert(
+            filelib:is_regular(
+                filename:join(InstDir, "README")
+            )
+        )
     after
         rmrf(Dir)
     end.
@@ -377,8 +407,10 @@ sealed_qidx_rebuilt_when_corrupt_test() ->
     try
         Opts = #{dir => Dir, origin => origin(), max_segment_bytes => 200},
         {ok, P1} = bondy_oplog_wal:start_link(instance_id(), Opts),
-        [{ok, _, _} = bondy_oplog_wal:append(P1, E)
-         || E <- generate_events(HLC, 4, 1)],
+        [
+            {ok, _, _} = bondy_oplog_wal:append(P1, E)
+         || E <- generate_events(HLC, 4, 1)
+        ],
         ok = bondy_oplog_wal:close(P1),
         Seg0Idx = filename:join(
             instance_dir(Dir), bondy_oplog_wal_idx:filename(0)
@@ -490,15 +522,16 @@ recover_refuses_instance_id_mismatch_test() ->
         ok = bondy_oplog_wal:close(P),
         InstDir = instance_dir(Dir),
         ?assertMatch(
-            {error,
-                {instance_id_mismatch,
-                    <<"different">>,
-                    _}},
+            {error, {instance_id_mismatch, <<"different">>, _}},
             bondy_oplog_wal_recovery:recover(
-                InstDir, <<"different">>, origin(),
-                #{idx_interval_bytes =>
-                    ?BONDY_OPLOG_WAL_IDX_DEFAULT_INTERVAL_BYTES,
-                  recovery_mode => strict}
+                InstDir,
+                <<"different">>,
+                origin(),
+                #{
+                    idx_interval_bytes =>
+                        ?BONDY_OPLOG_WAL_IDX_DEFAULT_INTERVAL_BYTES,
+                    recovery_mode => strict
+                }
             )
         )
     after
@@ -542,10 +575,14 @@ recover_refuses_manifest_with_current_not_in_live_test() ->
         ?assertMatch(
             {error, {manifest, {current_not_in_live, 0, []}}},
             bondy_oplog_wal_recovery:recover(
-                InstDir, instance_id(), origin(),
-                #{idx_interval_bytes =>
-                    ?BONDY_OPLOG_WAL_IDX_DEFAULT_INTERVAL_BYTES,
-                  recovery_mode => strict}
+                InstDir,
+                instance_id(),
+                origin(),
+                #{
+                    idx_interval_bytes =>
+                        ?BONDY_OPLOG_WAL_IDX_DEFAULT_INTERVAL_BYTES,
+                    recovery_mode => strict
+                }
             )
         ),
         %% C1 says: validation rejects *before* cleanup runs, so the
@@ -581,7 +618,10 @@ recover_refuses_orphan_segment_test() ->
         try
             Got = bondy_oplog_wal:start_link(instance_id(), Opts),
             ?assertMatch({error, {head_segment, 0, _}}, Got),
-            receive {'EXIT', _, _} -> ok after 0 -> ok end
+            receive
+                {'EXIT', _, _} -> ok
+            after 0 -> ok
+            end
         after
             process_flag(trap_exit, OldFlag)
         end
@@ -638,8 +678,11 @@ rescan_recovers_after_body_corruption_test() ->
     try
         {_, F3Off} = lists:nth(3, Positions),
         corrupt_frame_body(SegPath, F3Off),
-        Opts = #{dir => Dir, origin => origin(),
-                 recovery_mode => rescan},
+        Opts = #{
+            dir => Dir,
+            origin => origin(),
+            recovery_mode => rescan
+        },
         {ok, P} = bondy_oplog_wal:start_link(instance_id(), Opts),
         Read = read_all(P),
         ok = bondy_oplog_wal:close(P),
@@ -656,8 +699,11 @@ rescan_recovers_after_magic_corruption_test() ->
     try
         {_, F3Off} = lists:nth(3, Positions),
         zero_frame_magic(SegPath, F3Off),
-        Opts = #{dir => Dir, origin => origin(),
-                 recovery_mode => rescan},
+        Opts = #{
+            dir => Dir,
+            origin => origin(),
+            recovery_mode => rescan
+        },
         {ok, P} = bondy_oplog_wal:start_link(instance_id(), Opts),
         Read = read_all(P),
         ok = bondy_oplog_wal:close(P),
@@ -687,8 +733,11 @@ strict_mode_truncates_at_first_corruption_test() ->
 rescan_with_no_corruption_matches_strict_test() ->
     {Dir, _SegPath, Events, _} = seed_segment(#{}),
     try
-        Opts = #{dir => Dir, origin => origin(),
-                 recovery_mode => rescan},
+        Opts = #{
+            dir => Dir,
+            origin => origin(),
+            recovery_mode => rescan
+        },
         {ok, P} = bondy_oplog_wal:start_link(instance_id(), Opts),
         Read = read_all(P),
         ok = bondy_oplog_wal:close(P),
@@ -705,8 +754,11 @@ rescan_rewrite_makes_segment_contiguous_test() ->
     try
         {_, F3Off} = lists:nth(3, Positions),
         corrupt_frame_body(SegPath, F3Off),
-        OptsRescan = #{dir => Dir, origin => origin(),
-                       recovery_mode => rescan},
+        OptsRescan = #{
+            dir => Dir,
+            origin => origin(),
+            recovery_mode => rescan
+        },
         {ok, P1} = bondy_oplog_wal:start_link(instance_id(), OptsRescan),
         Read1 = read_all(P1),
         ok = bondy_oplog_wal:close(P1),
@@ -728,12 +780,20 @@ rejects_invalid_recovery_mode_test() ->
         try
             Got = bondy_oplog_wal:start_link(
                 instance_id(),
-                #{dir => Dir, origin => origin(),
-                  recovery_mode => not_a_mode}
+                #{
+                    dir => Dir,
+                    origin => origin(),
+                    recovery_mode => not_a_mode
+                }
             ),
-            ?assertMatch({error, {invalid_opt, recovery_mode, not_a_mode}},
-                         Got),
-            receive {'EXIT', _, _} -> ok after 0 -> ok end
+            ?assertMatch(
+                {error, {invalid_opt, recovery_mode, not_a_mode}},
+                Got
+            ),
+            receive
+                {'EXIT', _, _} -> ok
+            after 0 -> ok
+            end
         after
             process_flag(trap_exit, OldFlag)
         end
@@ -751,9 +811,8 @@ recv_recovery_event(Tag) ->
     receive
         {Tag, [bondy_oplog, wal, recovery], Measurements, Metadata} ->
             {Measurements, Metadata}
-    after
-        2000 ->
-            erlang:error(recovery_telemetry_timeout)
+    after 2000 ->
+        erlang:error(recovery_telemetry_timeout)
     end.
 
 %% Attaches a per-test telemetry handler that forwards `recovery`
@@ -783,7 +842,8 @@ recovery_scanned_bytes_reports_head_walked_test() ->
         HeadSize = filelib:file_size(
             filename:join(
                 instance_dir(Dir),
-                bondy_oplog_wal_segment:filename(0))
+                bondy_oplog_wal_segment:filename(0)
+            )
         ),
         %% Exercise: reopen; capture the recovery telemetry event.
         {ok, P2} = bondy_oplog_wal:start_link(instance_id(), Opts),
@@ -810,8 +870,11 @@ recovery_scanned_bytes_includes_rescan_skips_test() ->
     Tag = scanned_bytes_rescan,
     Detach = attach_recovery_handler(Tag),
     try
-        Opts = #{dir => Dir, origin => origin(),
-                 recovery_mode => rescan},
+        Opts = #{
+            dir => Dir,
+            origin => origin(),
+            recovery_mode => rescan
+        },
         {ok, P1} = bondy_oplog_wal:start_link(instance_id(), Opts),
         Events = generate_events(HLC, 6, 1),
         [{ok, _, _} = bondy_oplog_wal:append(P1, E) || E <- Events],

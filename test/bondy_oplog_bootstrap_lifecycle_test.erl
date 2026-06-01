@@ -62,8 +62,10 @@ persistent_seed_true_starts_live_and_persists_flag_test() ->
         }),
         ?assertEqual(live, ?MODL:state(H)),
         Path = ?MODL:flag_path(H),
-        ?assert(filelib:is_regular(Path),
-                "seed:true must persist lifecycle.live")
+        ?assert(
+            filelib:is_regular(Path),
+            "seed:true must persist lifecycle.live"
+        )
     after
         rm_rf(Tmp)
     end.
@@ -217,7 +219,7 @@ rm_rf(Dir0) ->
                 fun(E) ->
                     P = filename:join(Dir, E),
                     case filelib:is_dir(P) of
-                        true  -> rm_rf(P);
+                        true -> rm_rf(P);
                         false -> file:delete(P)
                     end
                 end,

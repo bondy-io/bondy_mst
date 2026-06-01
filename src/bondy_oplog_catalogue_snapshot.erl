@@ -61,22 +61,26 @@ for the consistency contract.
 %% Max binary sentinel for unbounded-high range scans. 256 bytes of
 %% 0xFF — beyond any production catalogue key.
 -define(MAX_KEY_SENTINEL,
-        <<255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-          255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255>>).
+    <<255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255>>
+).
 
 %% Default batch size. Configurable via app env
 %% `catalogue_snapshot_batch_size`.
@@ -101,8 +105,9 @@ init(InstanceId) ->
     {ok, {non_neg_integer(), bondy_oplog_catalogue_cursor:cursor()}}
     | {ok, no_snapshot}.
 
-init(InstanceId, Bucket)
-        when is_binary(InstanceId), is_binary(Bucket) ->
+init(InstanceId, Bucket) when
+    is_binary(InstanceId), is_binary(Bucket)
+->
     %% Step 1 — detect catalogue mode. Single-CRDT mode has a defined
     %% `crdt_module`; catalogue mode does not.
     case bondy_oplog_instance:crdt_module(InstanceId) of
@@ -116,8 +121,11 @@ init(InstanceId, Bucket)
     instance_id(),
     bondy_oplog_catalogue_cursor:cursor()
 ) ->
-    {ok, {batch, {bondy_oplog_catalogue_cursor:cursor(),
-                  [bondy_oplog_transport:cell()]}}}
+    {ok,
+        {batch,
+            {bondy_oplog_catalogue_cursor:cursor(), [
+                bondy_oplog_transport:cell()
+            ]}}}
     | {ok, {done, []}}
     | {error, cursor_expired}
     | {error, term()}.
@@ -127,8 +135,9 @@ Pulls the next batch from the given cursor. The cursor is opaque to
 the initiator and is returned unchanged on `batch` so the caller can
 chain calls without state.
 """).
-next(InstanceId, Cursor)
-        when is_binary(InstanceId), is_binary(Cursor) ->
+next(InstanceId, Cursor) when
+    is_binary(InstanceId), is_binary(Cursor)
+->
     case bondy_oplog_catalogue_cursor:lookup(Cursor) of
         not_found ->
             %% A cursor unknown to the peer means the session was
@@ -139,8 +148,9 @@ next(InstanceId, Cursor)
             {error, cursor_expired};
         expired ->
             {error, cursor_expired};
-        {ok, #{instance_id := SessionId} = _CState}
-                when SessionId =/= InstanceId ->
+        {ok, #{instance_id := SessionId} = _CState} when
+            SessionId =/= InstanceId
+        ->
             %% Cursor belongs to a different instance. Treat as expired
             %% so the initiator restarts cleanly on the correct
             %% instance.
@@ -212,11 +222,13 @@ do_next(Cursor, CState) ->
             {error, cursor_expired};
         {ok, Entry} ->
             Adapter = bondy_db_core_registry:entry_projection_adapter(Entry),
-            Handle  = bondy_db_core_registry:entry_projection_handle(Entry),
-            Low     = next_key_after(LastKey),
-            High    = ?MAX_KEY_SENTINEL,
+            Handle = bondy_db_core_registry:entry_projection_handle(Entry),
+            Low = next_key_after(LastKey),
+            High = ?MAX_KEY_SENTINEL,
             BatchSize = batch_size(),
-            case Adapter:range(Handle, Bucket, Low, High, #{limit => BatchSize}) of
+            case
+                Adapter:range(Handle, Bucket, Low, High, #{limit => BatchSize})
+            of
                 {ok, []} ->
                     ok = bondy_oplog_catalogue_cursor:discard(Cursor),
                     {ok, {done, []}};
@@ -241,8 +253,8 @@ do_next(Cursor, CState) ->
 %% Lexicographic successor for binary keys: `<<K/binary, 0>>` is the
 %% smallest binary strictly greater than `K`. Initial `undefined` maps
 %% to `<<>>` (the smallest possible Low).
-next_key_after(undefined)             -> <<>>;
-next_key_after(K) when is_binary(K)   -> <<K/binary, 0>>.
+next_key_after(undefined) -> <<>>;
+next_key_after(K) when is_binary(K) -> <<K/binary, 0>>.
 
 %% @private
 default_bucket() ->

@@ -60,14 +60,17 @@ read_event_increments_counters() ->
     ?assertEqual(2, counter_value(bondy_db_core_cache_hits_total, Label)),
     ?assertEqual(1, counter_value(bondy_db_core_cache_misses_total, Label)).
 
-
 range_event_increments_counter() ->
     NS = mk_ns(),
     fire_range(NS),
     fire_range(NS),
-    ?assertEqual(2, counter_value(bondy_db_core_ranges_total,
-                                  #{namespace => NS})).
-
+    ?assertEqual(
+        2,
+        counter_value(
+            bondy_db_core_ranges_total,
+            #{namespace => NS}
+        )
+    ).
 
 snapshot_emits_refresh_event_per_namespace() ->
     NS = mk_ns(),
@@ -90,7 +93,6 @@ snapshot_emits_refresh_event_per_namespace() ->
     ?assertEqual(NS, maps:get(namespace, Meta)),
     ?assert(maps:get(interval_ms, Meta) >= 1).
 
-
 cache_hit_rate_is_delta_based() ->
     NS = mk_ns(),
     %% First tick establishes a baseline.
@@ -110,7 +112,6 @@ cache_hit_rate_is_delta_based() ->
     ?assert(is_float(Rate)),
     ?assert(abs(Rate - 0.75) < 1.0e-9).
 
-
 rates_scale_with_window() ->
     NS = mk_ns(),
     ok = bondy_db_core_metrics:snapshot_now(),
@@ -126,7 +127,6 @@ rates_scale_with_window() ->
     %% RPS must be positive and the window ≥ the sleep.
     ?assert(maps:get(read_rps, Meas) > 0),
     ?assert(maps:get(interval_ms, Meta) >= 50).
-
 
 multiple_namespaces_are_independent() ->
     NSA = mk_ns(),
@@ -147,7 +147,6 @@ multiple_namespaces_are_independent() ->
     ?assertEqual(1.0, maps:get(cache_hit_rate, MeasA)),
     ?assertEqual(0.0, maps:get(cache_hit_rate, MeasB)).
 
-
 freshness_lag_is_reported() ->
     %% Register a shard so the metrics module can probe the AE atomic.
     NS = mk_ns(),
@@ -161,22 +160,21 @@ freshness_lag_is_reported() ->
     ?assert(maps:get(current_freshness_lag_max_ms, Meas) > 1_000_000_000),
     Cleanup().
 
-
 info_reports_running_state() ->
     Info = bondy_db_core_metrics:info(),
     ?assert(maps:is_key(enabled, Info)),
     ?assert(maps:is_key(interval_ms, Info)),
     ?assert(maps:is_key(namespaces, Info)).
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
 
 mk_ns() ->
-    list_to_atom("mst_db_metrics_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
-
+    list_to_atom(
+        "mst_db_metrics_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 fire_read(NS, Hit) ->
     bondy_db_core_metrics:handle_event(
@@ -186,7 +184,6 @@ fire_read(NS, Hit) ->
         undefined
     ).
 
-
 fire_range(NS) ->
     bondy_db_core_metrics:handle_event(
         [bondy_db_core, range],
@@ -195,13 +192,11 @@ fire_range(NS) ->
         undefined
     ).
 
-
 counter_value(Name, Label) ->
     case bondy_metrics:value(#{name => Name, label => Label}) of
         undefined -> 0;
         V -> V
     end.
-
 
 capture_refresh_events(Fun) ->
     Self = self(),
@@ -219,14 +214,12 @@ capture_refresh_events(Fun) ->
         telemetry:detach(HandlerId)
     end.
 
-
 drain_refresh(Acc) ->
     receive
         {refresh, M, Md} -> drain_refresh([{M, Md} | Acc])
     after 100 ->
         lists:reverse(Acc)
     end.
-
 
 register_shard(NS) ->
     {ok, CH} = bondy_oplog_cache_ets:init(NS, primary, 0, #{}),

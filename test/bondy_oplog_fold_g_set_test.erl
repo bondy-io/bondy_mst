@@ -71,8 +71,10 @@ older_hlc_event_keeps_max_hlc_test() ->
 
 to_value_returns_ordset_test() ->
     ?assertEqual([], ?MOD:to_value(?MOD:initial_value())),
-    ?assertEqual([<<"a">>, <<"b">>],
-                 ?MOD:to_value({[<<"a">>, <<"b">>], hlc(100, 0)})).
+    ?assertEqual(
+        [<<"a">>, <<"b">>],
+        ?MOD:to_value({[<<"a">>, <<"b">>], hlc(100, 0)})
+    ).
 
 value_equals_state_is_true_test() ->
     ?assertEqual(true, ?MOD:value_equals_state()).
@@ -84,16 +86,22 @@ value_equals_state_is_true_test() ->
 merge_unions_sets_and_takes_max_hlc_test() ->
     A = {[<<"a">>, <<"b">>], hlc(200, 0)},
     B = {[<<"b">>, <<"c">>], hlc(100, 0)},
-    ?assertEqual({[<<"a">>, <<"b">>, <<"c">>], hlc(200, 0)},
-                 ?MOD:merge_states(A, B)),
-    ?assertEqual({[<<"a">>, <<"b">>, <<"c">>], hlc(200, 0)},
-                 ?MOD:merge_states(B, A)).
+    ?assertEqual(
+        {[<<"a">>, <<"b">>, <<"c">>], hlc(200, 0)},
+        ?MOD:merge_states(A, B)
+    ),
+    ?assertEqual(
+        {[<<"a">>, <<"b">>, <<"c">>], hlc(200, 0)},
+        ?MOD:merge_states(B, A)
+    ).
 
 merge_disjoint_sets_test() ->
     A = {[<<"a">>], hlc(100, 0)},
     B = {[<<"z">>], hlc(101, 0)},
-    ?assertEqual({[<<"a">>, <<"z">>], hlc(101, 0)},
-                 ?MOD:merge_states(A, B)).
+    ?assertEqual(
+        {[<<"a">>, <<"z">>], hlc(101, 0)},
+        ?MOD:merge_states(A, B)
+    ).
 
 merge_same_state_is_idempotent_test() ->
     S = {[<<"a">>, <<"b">>], hlc(100, 0)},

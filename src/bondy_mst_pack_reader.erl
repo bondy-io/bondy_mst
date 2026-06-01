@@ -55,11 +55,11 @@ the surrounding state.
 """).
 
 -record(?MODULE, {
-    dir            :: file:filename_all(),
-    manifest       :: bondy_mst_pack_manifest:t(),
+    dir :: file:filename_all(),
+    manifest :: bondy_mst_pack_manifest:t(),
     %% Sealed packs in *descending* pack_id order so `get/2` short-
     %% circuits on the newest packs first.
-    sealed         :: [#sealed_view{}]
+    sealed :: [#sealed_view{}]
 }).
 
 -type t() :: #?MODULE{}.
@@ -255,4 +255,3 @@ open_all_sealed(Dir, Ctx, [PackId | Rest], Acc) ->
             ),
             E
     end.
-

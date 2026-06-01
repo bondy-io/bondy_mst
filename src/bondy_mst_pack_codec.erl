@@ -139,19 +139,19 @@ typed errors into telemetry events and recovery actions.
 -type hash_algo() :: sha256.
 
 -type pack_header() :: #{
-    version       := non_neg_integer(),
-    flags         := non_neg_integer(),
-    pack_id       := non_neg_integer(),
+    version := non_neg_integer(),
+    flags := non_neg_integer(),
+    pack_id := non_neg_integer(),
     instance_hash := non_neg_integer(),
-    hash_algo     := hash_algo(),
-    created_at    := non_neg_integer(),
-    record_count  := non_neg_integer()
+    hash_algo := hash_algo(),
+    created_at := non_neg_integer(),
+    record_count := non_neg_integer()
 }.
 
 -type record_header() :: #{
-    hash      := binary(),
-    page_len  := non_neg_integer(),
-    page_crc  := non_neg_integer()
+    hash := binary(),
+    page_len := non_neg_integer(),
+    page_crc := non_neg_integer()
 }.
 
 -type decode_error() ::
@@ -237,32 +237,35 @@ record count.
 -spec encode_pack_header(pack_header()) -> binary().
 
 encode_pack_header(#{
-    version       := Version,
-    flags         := Flags,
-    pack_id       := PackId,
+    version := Version,
+    flags := Flags,
+    pack_id := PackId,
     instance_hash := InstanceHash,
-    hash_algo     := HashAlgo,
-    created_at    := CreatedAt,
-    record_count  := RecordCount
+    hash_algo := HashAlgo,
+    created_at := CreatedAt,
+    record_count := RecordCount
 }) when
-    is_integer(Version), Version >= 0, Version =< 16#FF,
-    is_integer(Flags), Flags >= 0, Flags =< 16#FFFFFF,
-    is_integer(PackId), PackId >= 0, PackId =< 16#FFFFFFFFFFFFFFFF,
-    is_integer(InstanceHash), InstanceHash >= 0,
-    is_integer(CreatedAt), CreatedAt >= 0,
-    is_integer(RecordCount), RecordCount >= 0
+    is_integer(Version),
+    Version >= 0,
+    Version =< 16#FF,
+    is_integer(Flags),
+    Flags >= 0,
+    Flags =< 16#FFFFFF,
+    is_integer(PackId),
+    PackId >= 0,
+    PackId =< 16#FFFFFFFFFFFFFFFF,
+    is_integer(InstanceHash),
+    InstanceHash >= 0,
+    is_integer(CreatedAt),
+    CreatedAt >= 0,
+    is_integer(RecordCount),
+    RecordCount >= 0
 ->
     AlgoId = hash_algo_id(HashAlgo),
-    <<?MAGIC:32/big-unsigned,
-      Version:8,
-      Flags:24/big-unsigned,
-      PackId:64/big-unsigned,
-      InstanceHash:32/big-unsigned,
-      AlgoId:32/big-unsigned,
-      CreatedAt:64/big-unsigned,
-      RecordCount:32/big-unsigned,
-      0:32,
-      0:64>>.
+    <<?MAGIC:32/big-unsigned, Version:8, Flags:24/big-unsigned,
+        PackId:64/big-unsigned, InstanceHash:32/big-unsigned,
+        AlgoId:32/big-unsigned, CreatedAt:64/big-unsigned,
+        RecordCount:32/big-unsigned, 0:32, 0:64>>.
 
 ?DOC("""
 Decodes a 48-byte pack header. Validates `Magic`, `Version`,
@@ -278,17 +281,13 @@ to open the pack on any error here.
 
 decode_pack_header(Bin) when byte_size(Bin) < ?HEADER_BYTES ->
     {error, truncated_header};
-decode_pack_header(<<?MAGIC:32/big-unsigned,
-                     Version:8,
-                     Flags:24/big-unsigned,
-                     PackId:64/big-unsigned,
-                     InstanceHash:32/big-unsigned,
-                     AlgoId:32/big-unsigned,
-                     CreatedAt:64/big-unsigned,
-                     RecordCount:32/big-unsigned,
-                     _Reserved1:32,
-                     _Reserved2:64,
-                     _Rest/binary>>) ->
+decode_pack_header(
+    <<?MAGIC:32/big-unsigned, Version:8, Flags:24/big-unsigned,
+        PackId:64/big-unsigned, InstanceHash:32/big-unsigned,
+        AlgoId:32/big-unsigned, CreatedAt:64/big-unsigned,
+        RecordCount:32/big-unsigned, _Reserved1:32, _Reserved2:64,
+        _Rest/binary>>
+) ->
     case Version =:= ?VERSION of
         false ->
             {error, {bad_version, Version}};
@@ -296,13 +295,13 @@ decode_pack_header(<<?MAGIC:32/big-unsigned,
             case hash_algo_atom(AlgoId) of
                 {ok, Algo} ->
                     {ok, #{
-                        version       => Version,
-                        flags         => Flags,
-                        pack_id       => PackId,
+                        version => Version,
+                        flags => Flags,
+                        pack_id => PackId,
                         instance_hash => InstanceHash,
-                        hash_algo     => Algo,
-                        created_at    => CreatedAt,
-                        record_count  => RecordCount
+                        hash_algo => Algo,
+                        created_at => CreatedAt,
+                        record_count => RecordCount
                     }};
                 {error, _} = E ->
                     E
@@ -329,7 +328,8 @@ page bytes.
 -spec encode_record(binary(), binary()) -> iodata().
 
 encode_record(Hash, Page) when
-    is_binary(Hash), byte_size(Hash) =:= ?HASH_BYTES,
+    is_binary(Hash),
+    byte_size(Hash) =:= ?HASH_BYTES,
     is_binary(Page)
 ->
     PageLen = byte_size(Page),
@@ -349,10 +349,10 @@ The body bytes are not touched here; the caller pread's
 
 decode_record_header(Bin) when byte_size(Bin) < ?REC_HDR_BYTES ->
     {error, truncated_record_header};
-decode_record_header(<<Hash:?HASH_BYTES/binary,
-                       PageLen:32/big-unsigned,
-                       Crc:32/big-unsigned,
-                       _Rest/binary>>) ->
+decode_record_header(
+    <<Hash:?HASH_BYTES/binary, PageLen:32/big-unsigned, Crc:32/big-unsigned,
+        _Rest/binary>>
+) ->
     {ok, #{hash => Hash, page_len => PageLen, page_crc => Crc}}.
 
 ?DOC("""
@@ -381,7 +381,7 @@ verify_record(#{page_len := PageLen}, Page) when
 verify_record(#{page_crc := Want}, Page) ->
     case erlang:crc32(Page) of
         Want -> ok;
-        Got  -> {error, {crc_mismatch, Got, Want}}
+        Got -> {error, {crc_mismatch, Got, Want}}
     end.
 
 %% =============================================================================
@@ -418,5 +418,5 @@ verify_trailer(BodyIoData, Trailer) ->
     Want = compute_trailer(BodyIoData),
     case Want of
         Trailer -> ok;
-        _       -> {error, {trailer_mismatch, Trailer, Want}}
+        _ -> {error, {trailer_mismatch, Trailer, Want}}
     end.

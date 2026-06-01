@@ -21,32 +21,30 @@
 per_entity_test_() ->
     topology_suite(bondy_db_topology_per_entity).
 
-
 single_bookie_test_() ->
     topology_suite(bondy_db_topology_single_bookie).
 
-
 topology_suite(Topology) ->
     Tag = atom_to_list(Topology),
-    {foreach,
-        fun() -> setup(Topology) end,
-        fun cleanup/1,
-        [
-            test("apply_then_read/" ++ Tag,        fun apply_then_read/1),
-            test("read_missing/" ++ Tag,           fun read_missing/1),
-            test("later_hlc_wins/" ++ Tag,         fun later_hlc_wins/1),
-            test("earlier_hlc_is_rejected/" ++ Tag,
-                 fun earlier_hlc_is_rejected/1),
-            test("clear_then_read/" ++ Tag,        fun clear_then_read/1),
-            test("clear_then_resurrect/" ++ Tag,   fun clear_then_resurrect/1),
-            test("realm_isolation/" ++ Tag,        fun realm_isolation/1),
-            test("range_returns_states/" ++ Tag,   fun range_returns_states/1),
-            test("tick_is_monotonic/" ++ Tag,      fun tick_is_monotonic/1),
-            test("open_table_requires_fold/" ++ Tag,
-                 fun open_table_requires_fold_module/1),
-            test("info/" ++ Tag,                   fun info_db_and_table/1)
-        ]}.
-
+    {foreach, fun() -> setup(Topology) end, fun cleanup/1, [
+        test("apply_then_read/" ++ Tag, fun apply_then_read/1),
+        test("read_missing/" ++ Tag, fun read_missing/1),
+        test("later_hlc_wins/" ++ Tag, fun later_hlc_wins/1),
+        test(
+            "earlier_hlc_is_rejected/" ++ Tag,
+            fun earlier_hlc_is_rejected/1
+        ),
+        test("clear_then_read/" ++ Tag, fun clear_then_read/1),
+        test("clear_then_resurrect/" ++ Tag, fun clear_then_resurrect/1),
+        test("realm_isolation/" ++ Tag, fun realm_isolation/1),
+        test("range_returns_states/" ++ Tag, fun range_returns_states/1),
+        test("tick_is_monotonic/" ++ Tag, fun tick_is_monotonic/1),
+        test(
+            "open_table_requires_fold/" ++ Tag,
+            fun open_table_requires_fold_module/1
+        ),
+        test("info/" ++ Tag, fun info_db_and_table/1)
+    ]}.
 
 test(Title, Fn) ->
     fun(Ctx) -> {Title, fun() -> Fn(Ctx) end} end.
@@ -64,18 +62,17 @@ setup(Topology) ->
     Dir = make_tempdir(),
     {ok, Sup} = bondy_db_leveled_sup:start_link(),
     {ok, Db} = bondy_db:open(my_db, #{
-        topology      => Topology,
+        topology => Topology,
         topology_opts => #{sup => Sup, dir => Dir},
-        shard_count   => 4,
-        fold_module   => ?FOLD
+        shard_count => 4,
+        fold_module => ?FOLD
     }),
     {Db, Sup, Dir}.
-
 
 cleanup({Db, Sup, Dir}) ->
     _ = catch bondy_db:close(Db),
     case is_process_alive(Sup) of
-        true  -> bondy_db_leveled_sup:stop(Sup);
+        true -> bondy_db_leveled_sup:stop(Sup);
         false -> ok
     end,
     rmrf(Dir),
@@ -90,16 +87,16 @@ apply_then_read({Db, _Sup, _Dir}) ->
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     H = bondy_db:tick(T),
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H, <<"v1">>}),
-    ?assertEqual({ok, <<"v1">>, H},
-                 bondy_db:read(T, <<"r1">>, <<"alice">>)),
+    ?assertEqual(
+        {ok, <<"v1">>, H},
+        bondy_db:read(T, <<"r1">>, <<"alice">>)
+    ),
     ok = bondy_db:close_table(T).
-
 
 read_missing({Db, _Sup, _Dir}) ->
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     ?assertEqual(not_found, bondy_db:read(T, <<"r1">>, <<"nobody">>)),
     ok = bondy_db:close_table(T).
-
 
 later_hlc_wins({Db, _Sup, _Dir}) ->
     {ok, T} = bondy_db:open_table(Db, users, #{}),
@@ -108,10 +105,11 @@ later_hlc_wins({Db, _Sup, _Dir}) ->
     H2 = bondy_db:tick(T),
     ?assert(H2 > H1),
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H2, <<"second">>}),
-    ?assertEqual({ok, <<"second">>, H2},
-                 bondy_db:read(T, <<"r1">>, <<"alice">>)),
+    ?assertEqual(
+        {ok, <<"second">>, H2},
+        bondy_db:read(T, <<"r1">>, <<"alice">>)
+    ),
     ok = bondy_db:close_table(T).
-
 
 earlier_hlc_is_rejected({Db, _Sup, _Dir}) ->
     %% LWW: an event with an HLC older than the current cell's HLC must
@@ -123,10 +121,11 @@ earlier_hlc_is_rejected({Db, _Sup, _Dir}) ->
     %% Replay a fabricated older event.
     H1 = H2 - 1,
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H1, <<"older">>}),
-    ?assertEqual({ok, <<"newer">>, H2},
-                 bondy_db:read(T, <<"r1">>, <<"alice">>)),
+    ?assertEqual(
+        {ok, <<"newer">>, H2},
+        bondy_db:read(T, <<"r1">>, <<"alice">>)
+    ),
     ok = bondy_db:close_table(T).
-
 
 clear_then_read({Db, _Sup, _Dir}) ->
     {ok, T} = bondy_db:open_table(Db, users, #{}),
@@ -136,10 +135,11 @@ clear_then_read({Db, _Sup, _Dir}) ->
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {clear, H2}),
     %% lww_register's `to_value({cleared, _}) -> undefined`, so the
     %% read collapses to `not_found`.
-    ?assertEqual(not_found,
-                 bondy_db:read(T, <<"r1">>, <<"alice">>)),
+    ?assertEqual(
+        not_found,
+        bondy_db:read(T, <<"r1">>, <<"alice">>)
+    ),
     ok = bondy_db:close_table(T).
-
 
 clear_then_resurrect({Db, _Sup, _Dir}) ->
     %% LWW: a higher-HLC `set` after a `clear` re-populates the register.
@@ -150,10 +150,11 @@ clear_then_resurrect({Db, _Sup, _Dir}) ->
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {clear, H2}),
     H3 = bondy_db:tick(T),
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H3, <<"v2">>}),
-    ?assertEqual({ok, <<"v2">>, H3},
-                 bondy_db:read(T, <<"r1">>, <<"alice">>)),
+    ?assertEqual(
+        {ok, <<"v2">>, H3},
+        bondy_db:read(T, <<"r1">>, <<"alice">>)
+    ),
     ok = bondy_db:close_table(T).
-
 
 realm_isolation({Db, _Sup, _Dir}) ->
     {ok, T} = bondy_db:open_table(Db, users, #{}),
@@ -161,31 +162,45 @@ realm_isolation({Db, _Sup, _Dir}) ->
     ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H1, <<"v1">>}),
     H2 = bondy_db:tick(T),
     ok = bondy_db:apply(T, <<"r2">>, <<"alice">>, {set, H2, <<"v2">>}),
-    ?assertEqual({ok, <<"v1">>, H1},
-                 bondy_db:read(T, <<"r1">>, <<"alice">>)),
-    ?assertEqual({ok, <<"v2">>, H2},
-                 bondy_db:read(T, <<"r2">>, <<"alice">>)),
+    ?assertEqual(
+        {ok, <<"v1">>, H1},
+        bondy_db:read(T, <<"r1">>, <<"alice">>)
+    ),
+    ?assertEqual(
+        {ok, <<"v2">>, H2},
+        bondy_db:read(T, <<"r2">>, <<"alice">>)
+    ),
     ?assertEqual(not_found, bondy_db:read(T, <<"r3">>, <<"alice">>)),
     ok = bondy_db:close_table(T).
-
 
 range_returns_states({Db, _Sup, _Dir}) ->
     %% range/5 returns user-facing values (post-`to_value/1`).
     {ok, T} = bondy_db:open_table(Db, users, #{}),
-    Keys = [list_to_binary("k" ++ integer_to_list(I))
-            || I <- lists:seq(1, 20)],
+    Keys = [
+        list_to_binary("k" ++ integer_to_list(I))
+     || I <- lists:seq(1, 20)
+    ],
     Written = lists:sort(Keys),
     lists:foreach(
         fun(K) ->
             H = bondy_db:tick(T),
-            ok = bondy_db:apply(T, <<"r1">>, K,
-                                {set, H, <<K/binary, "v">>})
+            ok = bondy_db:apply(
+                T,
+                <<"r1">>,
+                K,
+                {set, H, <<K/binary, "v">>}
+            )
         end,
         Keys
     ),
     Shard = erlang:phash2(hd(Keys), 4),
-    {ok, Rows} = bondy_db:range(T, <<"r1">>, <<"k">>, <<"l">>,
-                                #{shard => Shard, limit => 100}),
+    {ok, Rows} = bondy_db:range(
+        T,
+        <<"r1">>,
+        <<"k">>,
+        <<"l">>,
+        #{shard => Shard, limit => 100}
+    ),
     Got = [K || {K, _Value, _Hlc} <- Rows],
     %% Sorted ascending.
     ?assertEqual(lists:sort(Got), Got),
@@ -194,17 +209,18 @@ range_returns_states({Db, _Sup, _Dir}) ->
     %% Every returned key was written.
     ?assert(lists:all(fun(K) -> lists:member(K, Written) end, Got)),
     %% Every returned value is <<K, "v">> with matching HLC.
-    ?assert(lists:all(
-        fun({K, V, Hlc}) ->
-            V =:= <<K/binary, "v">>
-                andalso is_integer(Hlc)
-        end,
-        Rows
-    )),
+    ?assert(
+        lists:all(
+            fun({K, V, Hlc}) ->
+                V =:= <<K/binary, "v">> andalso
+                    is_integer(Hlc)
+            end,
+            Rows
+        )
+    ),
     %% At least one row came back.
     ?assert(length(Got) >= 1),
     ok = bondy_db:close_table(T).
-
 
 tick_is_monotonic({Db, _Sup, _Dir}) ->
     {ok, T} = bondy_db:open_table(Db, users, #{}),
@@ -214,13 +230,14 @@ tick_is_monotonic({Db, _Sup, _Dir}) ->
     ?assertEqual(length(Hs), sets:size(sets:from_list(Hs))),
     ok = bondy_db:close_table(T).
 
-
 open_table_requires_fold_module({_Db, Sup, Dir}) ->
     {ok, Db2} = bondy_db:open(my_db2, #{
-        topology      => bondy_db_topology_single_bookie,
-        topology_opts => #{sup => Sup,
-                           dir => filename:join(Dir, "no_fold")},
-        shard_count   => 2
+        topology => bondy_db_topology_single_bookie,
+        topology_opts => #{
+            sup => Sup,
+            dir => filename:join(Dir, "no_fold")
+        },
+        shard_count => 2
     }),
     ?assertMatch(
         {error, {missing_required_opt, fold_module}},
@@ -228,19 +245,22 @@ open_table_requires_fold_module({_Db, Sup, Dir}) ->
     ),
     ok = bondy_db:close(Db2).
 
-
 info_db_and_table({Db, _Sup, _Dir}) ->
     DbInfo = bondy_db:info(Db),
     ?assertMatch(#{kind := db, name := my_db}, DbInfo),
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     TInfo = bondy_db:info(T),
     ?assertMatch(
-        #{kind := table, db_name := my_db, entity_type := users,
-          shard_count := 4, fold_module := ?FOLD},
+        #{
+            kind := table,
+            db_name := my_db,
+            entity_type := users,
+            shard_count := 4,
+            fold_module := ?FOLD
+        },
         TInfo
     ),
     ok = bondy_db:close_table(T).
-
 
 %% =============================================================================
 %% Helpers
@@ -255,10 +275,9 @@ make_tempdir() ->
     ok = filelib:ensure_dir(filename:join(Base, ".keep")),
     Base.
 
-
 rmrf(Dir) ->
     case file:del_dir_r(Dir) of
-        ok              -> ok;
+        ok -> ok;
         {error, enoent} -> ok;
-        {error, _}      -> ok
+        {error, _} -> ok
     end.

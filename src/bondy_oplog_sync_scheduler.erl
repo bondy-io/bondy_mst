@@ -232,8 +232,9 @@ also survives a scheduler restart within the same VM lifetime.
 """).
 -spec set_bootstrap_peer_strategy(first | random | round_robin) -> ok.
 
-set_bootstrap_peer_strategy(S)
-when S =:= first; S =:= random; S =:= round_robin ->
+set_bootstrap_peer_strategy(S) when
+    S =:= first; S =:= random; S =:= round_robin
+->
     application:set_env(bondy_mst, bootstrap_peer_strategy, S),
     ok.
 
@@ -472,7 +473,10 @@ cancel_pending_tick(#state{tick_ref = undefined} = State) ->
     State;
 cancel_pending_tick(#state{tick_ref = Ref} = State) ->
     _ = erlang:cancel_timer(Ref, [{async, false}, {info, false}]),
-    receive tick -> ok after 0 -> ok end,
+    receive
+        tick -> ok
+    after 0 -> ok
+    end,
     State#state{tick_ref = undefined}.
 
 %% @private
@@ -547,10 +551,11 @@ maybe_dispatch_bootstrap_cap_check(InstanceId, Peers) ->
 
 %% @private
 dispatch_bootstrap(InstanceId, Peer, Strategy) ->
-    Mode = case bondy_oplog_instance:crdt_module(InstanceId) of
-        undefined -> catalogue;
-        _         -> single_crdt
-    end,
+    Mode =
+        case bondy_oplog_instance:crdt_module(InstanceId) of
+            undefined -> catalogue;
+            _ -> single_crdt
+        end,
     telemetry:execute(
         [bondy_oplog, sync_scheduler, dispatch_bootstrap],
         #{count => 1},
@@ -561,16 +566,17 @@ dispatch_bootstrap(InstanceId, Peer, Strategy) ->
             strategy => Strategy
         }
     ),
-    {ok, Pid} = case Mode of
-        catalogue ->
-            bondy_oplog_sync_session:start_bootstrap_catalogue(
-                InstanceId, Peer, #{}
-            );
-        single_crdt ->
-            bondy_oplog_sync_session:start_bootstrap(
-                InstanceId, Peer, #{}
-            )
-    end,
+    {ok, Pid} =
+        case Mode of
+            catalogue ->
+                bondy_oplog_sync_session:start_bootstrap_catalogue(
+                    InstanceId, Peer, #{}
+                );
+            single_crdt ->
+                bondy_oplog_sync_session:start_bootstrap(
+                    InstanceId, Peer, #{}
+                )
+        end,
     track_inflight(Pid, InstanceId),
     ok.
 
@@ -597,7 +603,7 @@ track_inflight(Pid, InstanceId) ->
 %% round-robin counter is held in a small named ETS table created in
 %% `init/1`; on a cold call (e.g. unit-testing the function in
 %% isolation) the table is created lazily.
-pick_bootstrap_peer(first, _InstanceId, [P|_]) ->
+pick_bootstrap_peer(first, _InstanceId, [P | _]) ->
     P;
 pick_bootstrap_peer(random, _InstanceId, Peers) ->
     lists:nth(rand:uniform(length(Peers)), Peers);
@@ -610,7 +616,7 @@ pick_bootstrap_peer(round_robin, InstanceId, Peers) ->
         ?RR_TAB, InstanceId, {2, 1}, {InstanceId, 0}
     ),
     lists:nth(((Idx - 1) rem N) + 1, Peers);
-pick_bootstrap_peer(_UnknownStrategy, _InstanceId, [P|_]) ->
+pick_bootstrap_peer(_UnknownStrategy, _InstanceId, [P | _]) ->
     P.
 
 %% @private
@@ -619,7 +625,9 @@ ensure_rr_table() ->
         undefined ->
             try
                 ets:new(?RR_TAB, [
-                    named_table, set, public,
+                    named_table,
+                    set,
+                    public,
                     {read_concurrency, true},
                     {write_concurrency, true}
                 ])
@@ -636,7 +644,9 @@ ensure_inflight_table() ->
         undefined ->
             try
                 ets:new(?INFLIGHT_TAB, [
-                    named_table, set, public,
+                    named_table,
+                    set,
+                    public,
                     {read_concurrency, true},
                     {write_concurrency, true}
                 ])
@@ -660,7 +670,9 @@ ensure_backoff_table() ->
         undefined ->
             try
                 ets:new(?BACKOFF_TAB, [
-                    named_table, set, public,
+                    named_table,
+                    set,
+                    public,
                     {read_concurrency, true},
                     {write_concurrency, true}
                 ])
@@ -682,10 +694,11 @@ update_backoff(InstanceId, normal) ->
     ok;
 update_backoff(InstanceId, _Reason) ->
     _ = ensure_backoff_table(),
-    Count = case ets:lookup(?BACKOFF_TAB, InstanceId) of
-        [{InstanceId, _NextMs, N}] -> N + 1;
-        [] -> 1
-    end,
+    Count =
+        case ets:lookup(?BACKOFF_TAB, InstanceId) of
+            [{InstanceId, _NextMs, N}] -> N + 1;
+            [] -> 1
+        end,
     Wait = backoff_wait_ms(Count),
     NextMs = now_ms() + Wait,
     ets:insert(?BACKOFF_TAB, {InstanceId, NextMs, Count}),
@@ -701,10 +714,10 @@ update_backoff(InstanceId, _Reason) ->
 %% optional uniform jitter in [0.5, 1.5].
 backoff_wait_ms(N) when N >= 1 ->
     Base = application:get_env(bondy_mst, bootstrap_retry_base_ms, 500),
-    Max  = application:get_env(bondy_mst, bootstrap_retry_max_ms, 30000),
+    Max = application:get_env(bondy_mst, bootstrap_retry_max_ms, 30000),
     %% 2^31 caps the exponent to avoid overflow on adversarial N.
-    Exp  = min(N - 1, 30),
-    Raw  = min(Base bsl Exp, Max),
+    Exp = min(N - 1, 30),
+    Raw = min(Base bsl Exp, Max),
     case application:get_env(bondy_mst, bootstrap_retry_jitter, true) of
         true ->
             %% uniform float in [0.5, 1.5].
@@ -730,7 +743,7 @@ backoff_remaining(InstanceId) ->
         [{InstanceId, NextMs, Count}] ->
             Remaining = NextMs - now_ms(),
             case Remaining > 0 of
-                true  -> {Remaining, Count};
+                true -> {Remaining, Count};
                 false -> {0, Count}
             end
     end.

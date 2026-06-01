@@ -472,8 +472,9 @@ stays unchanged.
 
 append_many_fast(_InstanceId, []) ->
     [];
-append_many_fast(InstanceId, Items)
-        when is_binary(InstanceId), is_list(Items) ->
+append_many_fast(InstanceId, Items) when
+    is_binary(InstanceId), is_list(Items)
+->
     case bondy_oplog_registry:fast_path(InstanceId) of
         undefined ->
             %% Stateful validator or fast-path torn down — defer to
@@ -498,7 +499,9 @@ do_append_many_fast(InstanceId, FastPath, Items) ->
         max_working_set := MaxWorkingSet
     } = FastPath,
     Delta = length(Items),
-    case fast_admit(InstanceId, Ctrs, MaxEvents, MaxBytes, MaxWorkingSet, Delta) of
+    case
+        fast_admit(InstanceId, Ctrs, MaxEvents, MaxBytes, MaxWorkingSet, Delta)
+    of
         ok ->
             {Events, Keys} = build_events_fast(
                 HLC, SeqRef, Origin, ValidatorMod, ValidatorState, Items
@@ -605,10 +608,11 @@ fast_admit(InstanceId, Ctrs, MaxEvents, MaxBytes, MaxWorkingSet, Delta) ->
 fast_working_set_admit(_InstanceId, _Size, infinity, _Delta) ->
     ok;
 fast_working_set_admit(InstanceId, OverlaySize, Cap, Delta) ->
-    LiveSize = case bondy_oplog_registry:live_size(InstanceId) of
-        undefined -> 0;
-        N -> N
-    end,
+    LiveSize =
+        case bondy_oplog_registry:live_size(InstanceId) of
+            undefined -> 0;
+            N -> N
+        end,
     Total = LiveSize + OverlaySize,
     case Total + Delta =< Cap of
         true ->
@@ -1225,7 +1229,8 @@ mark_live(Pid) when is_pid(Pid) ->
 %% dropped on supervisor restart.
 nudge_applier(InstanceId) ->
     case bondy_oplog_registry:applier_pid(InstanceId) of
-        undefined -> ok;
+        undefined ->
+            ok;
         Pid when is_pid(Pid) ->
             ok = bondy_oplog_applier:notify_drain_resume(Pid),
             ok
@@ -1269,18 +1274,22 @@ Called by `bondy_oplog_sync_session:bootstrap_catalogue/3` between
     [bondy_oplog_transport:cell()]
     | {replace | merge, [bondy_oplog_transport:cell()]}
 ) ->
-    {ok, #{installed := non_neg_integer(),
-           skipped := non_neg_integer(),
-           merged := non_neg_integer(),
-           replaced_no_merge := non_neg_integer()}}
+    {ok, #{
+        installed := non_neg_integer(),
+        skipped := non_neg_integer(),
+        merged := non_neg_integer(),
+        replaced_no_merge := non_neg_integer()
+    }}
     | {error, term()}.
 
-install_catalogue_batch(InstanceId, Cells)
-        when is_binary(InstanceId), is_list(Cells) ->
+install_catalogue_batch(InstanceId, Cells) when
+    is_binary(InstanceId), is_list(Cells)
+->
     install_catalogue_batch(InstanceId, {replace, Cells});
-install_catalogue_batch(InstanceId, {Mode, Cells})
-        when is_binary(InstanceId),
-             (Mode =:= replace orelse Mode =:= merge) ->
+install_catalogue_batch(InstanceId, {Mode, Cells}) when
+    is_binary(InstanceId),
+    (Mode =:= replace orelse Mode =:= merge)
+->
     case bondy_oplog_registry:applier_pid(InstanceId) of
         undefined ->
             {error, instance_not_running};
@@ -1316,10 +1325,12 @@ already; this call is the last-write barrier.)
     WasLive :: boolean()
 ) -> ok.
 
-finalize_catalogue_bootstrap(InstanceId, Watermark, WasLive)
-        when is_binary(InstanceId),
-             is_integer(Watermark), Watermark >= 0,
-             is_boolean(WasLive) ->
+finalize_catalogue_bootstrap(InstanceId, Watermark, WasLive) when
+    is_binary(InstanceId),
+    is_integer(Watermark),
+    Watermark >= 0,
+    is_boolean(WasLive)
+->
     ok = maybe_advance_high_water(InstanceId, Watermark),
     case WasLive of
         true ->
@@ -1646,9 +1657,12 @@ validate_ae_targets(Targets) when is_list(Targets) ->
 validate_ae_targets(Other) ->
     error({invalid_ae_targets, Other}).
 
-assert_ae_target({NS, Index, Shard})
-        when is_atom(NS), is_atom(Index),
-             is_integer(Shard), Shard >= 0 ->
+assert_ae_target({NS, Index, Shard}) when
+    is_atom(NS),
+    is_atom(Index),
+    is_integer(Shard),
+    Shard >= 0
+->
     ok;
 assert_ae_target(Bad) ->
     error({invalid_ae_target, Bad}).
@@ -1713,7 +1727,7 @@ do_handle_call({append, Op, Meta}, _From, State0) ->
                             {reply, Key, State2};
                         {error, wal_unavailable} ->
                             {reply, {error, wal_unavailable},
-                             invalidate_wal_pid(State1)};
+                                invalidate_wal_pid(State1)};
                         {error, _} = Err ->
                             {reply, Err, State1}
                     end;
@@ -1733,7 +1747,7 @@ do_handle_call({append_many, Items}, _From, State0) ->
                             {reply, Keys, State2};
                         {error, wal_unavailable} ->
                             {reply, {error, wal_unavailable},
-                             invalidate_wal_pid(State1)};
+                                invalidate_wal_pid(State1)};
                         {error, _} = Err ->
                             {reply, Err, State1}
                     end;
@@ -1875,7 +1889,8 @@ do_handle_call(instance_size, _From, State) ->
     %% (a concurrent caller appending) but cannot shrink (only this
     %% gen_server's `evict_overlay_batch/2` decrements it). The
     %% returned value is therefore monotone over the read window.
-    Total = State#state.live_size +
+    Total =
+        State#state.live_size +
             atomics:get(State#state.overlay_counters, 1),
     {reply, Total, State};
 do_handle_call(origin, _From, State) ->
@@ -1987,7 +2002,8 @@ do_handle_call(
     %% Cast — best-effort; the next sync tick re-arms the request if
     %% the applier was busy.
     case bondy_oplog_registry:applier_pid(State#state.instance_id) of
-        undefined -> ok;
+        undefined ->
+            ok;
         ApplierPid when is_pid(ApplierPid) ->
             bondy_oplog_applier:replay_cell_events(ApplierPid)
     end,
@@ -2009,8 +2025,11 @@ do_handle_call({compact, PeerRoots}, From, State) ->
     do_compact_async(State, PeerRoots, From);
 do_handle_call({load_snapshot, NewWatermark, Snapshot}, _From, State) ->
     do_load_snapshot(State, NewWatermark, Snapshot);
-do_handle_call(mark_live, _From,
-        #state{lifecycle = LC, instance_id = Id} = State) ->
+do_handle_call(
+    mark_live,
+    _From,
+    #state{lifecycle = LC, instance_id = Id} = State
+) ->
     ok = bondy_oplog_bootstrap_lifecycle:mark_live(LC),
     ok = nudge_applier(Id),
     {reply, ok, State};
@@ -2181,7 +2200,9 @@ unstage_overlay(#state{overlay = Tab, overlay_counters = Ctrs}, Events) ->
 %% for events that went through the WAL; a future eager-push receiver
 %% will insert with `eager_pushed` so the applier's eviction protocol
 %% can distinguish the two (§10.3 of the applier design).
-stage_to_overlay(#state{overlay = Overlay, overlay_counters = Ctrs} = State, Events) ->
+stage_to_overlay(
+    #state{overlay = Overlay, overlay_counters = Ctrs} = State, Events
+) ->
     Rows = [overlay_row(E, local) || E <- Events],
     true = ets:insert(Overlay, Rows),
     overlay_counters_add(Ctrs, Events),
@@ -2240,8 +2261,7 @@ build_events(State0, Items) ->
                 (S0#state.validator_module):sign_event(
                     Event0, S0#state.validator_state
                 ),
-            {[Signed | EvAcc], [Key | KAcc],
-             S0#state{validator_state = VS1}}
+            {[Signed | EvAcc], [Key | KAcc], S0#state{validator_state = VS1}}
         end,
         {[], [], State0},
         Items
@@ -2294,8 +2314,8 @@ install_local_batch(#state{} = State0, Events) ->
 %% @private
 is_fast_install(Event, Origin, MaxSeq) ->
     Key = bondy_oplog_event:key(Event),
-    bondy_oplog_event:key_origin(Key) =:= Origin
-        andalso bondy_oplog_event:key_seq(Key) > MaxSeq.
+    bondy_oplog_event:key_origin(Key) =:= Origin andalso
+        bondy_oplog_event:key_seq(Key) > MaxSeq.
 
 %% @private
 install_slow_events(State, []) ->
@@ -2432,18 +2452,21 @@ evict_overlay_batch(#state{overlay = undefined} = State, _Events) ->
     State;
 evict_overlay_batch(State, []) ->
     State;
-evict_overlay_batch(#state{overlay = Tab, overlay_counters = Ctrs} = State, Events) ->
-    Count = try
-        lists:foreach(
-            fun(E) ->
-                ets:delete(Tab, bondy_oplog_event:key(E))
-            end,
-            Events
-        ),
-        length(Events)
-    catch
-        error:badarg -> 0
-    end,
+evict_overlay_batch(
+    #state{overlay = Tab, overlay_counters = Ctrs} = State, Events
+) ->
+    Count =
+        try
+            lists:foreach(
+                fun(E) ->
+                    ets:delete(Tab, bondy_oplog_event:key(E))
+                end,
+                Events
+            ),
+            length(Events)
+        catch
+            error:badarg -> 0
+        end,
     overlay_counters_sub(Ctrs, Count),
     State.
 
@@ -2532,10 +2555,16 @@ do_append_remote(#state{mst = MST0} = State, Event) ->
             NewValue = value_from_event(Event),
             case bondy_mst:get(MST0, Key) of
                 undefined ->
-                    {ok, install_event(State, Key, NewValue, append_remote, true)};
+                    {ok,
+                        install_event(
+                            State, Key, NewValue, append_remote, true
+                        )};
                 NewValue ->
                     %% Idempotent re-receive (bit-identical).
-                    {ok, install_event(State, Key, NewValue, append_remote, false)};
+                    {ok,
+                        install_event(
+                            State, Key, NewValue, append_remote, false
+                        )};
                 ExistingValue ->
                     record_equivocation(State, Key, ExistingValue, Event),
                     {error, equivocation_detected}
@@ -2713,7 +2742,9 @@ overlay_admit(
         false ->
             case Bytes >= MaxBytes of
                 true ->
-                    emit_overlay_backpressure(Id, bytes, Bytes, MaxBytes, Delta),
+                    emit_overlay_backpressure(
+                        Id, bytes, Bytes, MaxBytes, Delta
+                    ),
                     {error, backpressure};
                 false ->
                     ok
@@ -3234,14 +3265,16 @@ overlay_lookup_tab(Tab, Key) ->
 overlay_range_tab(undefined, _From, _To) ->
     [];
 overlay_range_tab(Tab, From, To) ->
-    MatchSpec = [{
-        {'$1', '$2', '_', '_'},
-        [
-            {'>=', '$1', {const, From}},
-            {'=<', '$1', {const, To}}
-        ],
-        [{{'$1', '$2'}}]
-    }],
+    MatchSpec = [
+        {
+            {'$1', '$2', '_', '_'},
+            [
+                {'>=', '$1', {const, From}},
+                {'=<', '$1', {const, To}}
+            ],
+            [{{'$1', '$2'}}]
+        }
+    ],
     try ets:select(Tab, MatchSpec) of
         Rows -> [{K, event_from_value(K, V)} || {K, V} <- Rows]
     catch
@@ -3289,20 +3322,22 @@ drain_overlay_queue([{_K, Event} | Rest], Fun, Acc) ->
 %% Min over (overlay.first, MST.first). Either can be empty.
 merge_first_key_tab(Tab, MST) ->
     OverlayFirst = overlay_first_key_tab(Tab),
-    MstFirst = case bondy_mst:first(MST) of
-        undefined -> undefined;
-        {K, _V} -> K
-    end,
+    MstFirst =
+        case bondy_mst:first(MST) of
+            undefined -> undefined;
+            {K, _V} -> K
+        end,
     min_key(OverlayFirst, MstFirst).
 
 %% @private
 %% Max over (overlay.last, MST.last). Either can be empty.
 merge_latest_key_tab(Tab, MST) ->
     OverlayLast = overlay_last_key_tab(Tab),
-    MstLast = case bondy_mst:last(MST) of
-        undefined -> undefined;
-        {K, _V} -> K
-    end,
+    MstLast =
+        case bondy_mst:last(MST) of
+            undefined -> undefined;
+            {K, _V} -> K
+        end,
     max_key(OverlayLast, MstLast).
 
 %% @private
@@ -3351,8 +3386,10 @@ release_install_slot(#state{
             %% Just below the cap; the applier was (or may have been)
             %% gated. Resume it.
             case bondy_oplog_registry:applier_pid(InstanceId) of
-                undefined -> ok;
-                ApplierPid -> bondy_oplog_applier:notify_drain_resume(ApplierPid)
+                undefined ->
+                    ok;
+                ApplierPid ->
+                    bondy_oplog_applier:notify_drain_resume(ApplierPid)
             end;
         false ->
             ok
@@ -3367,7 +3404,9 @@ release_install_slot(#state{
 %% `check_drain_waiters`).
 maybe_signal_drain_waiters(#state{drain_waiters = []} = State) ->
     State;
-maybe_signal_drain_waiters(#state{drain_waiters = Waiters, overlay = Tab} = State) ->
+maybe_signal_drain_waiters(
+    #state{drain_waiters = Waiters, overlay = Tab} = State
+) ->
     case overlay_size_tab(Tab) of
         0 ->
             lists:foreach(fun(From) -> gen_server:reply(From, ok) end, Waiters),

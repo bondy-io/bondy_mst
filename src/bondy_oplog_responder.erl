@@ -151,8 +151,9 @@ dispatch(InstanceId, get_snapshot) when is_binary(InstanceId) ->
                 {ok, W, S} -> {ok, W, S}
             end
     end;
-dispatch(InstanceId, get_catalogue_snapshot_init)
-        when is_binary(InstanceId) ->
+dispatch(InstanceId, get_catalogue_snapshot_init) when
+    is_binary(InstanceId)
+->
     case bondy_oplog_instance:whereis(InstanceId) of
         undefined ->
             {error, {instance_not_running, InstanceId}};
@@ -165,16 +166,17 @@ dispatch(InstanceId, get_catalogue_snapshot_init)
                     {ok, {init, {Watermark, Cursor}}}
             end
     end;
-dispatch(InstanceId, {get_catalogue_snapshot_next, Cursor})
-        when is_binary(InstanceId), is_binary(Cursor) ->
+dispatch(InstanceId, {get_catalogue_snapshot_next, Cursor}) when
+    is_binary(InstanceId), is_binary(Cursor)
+->
     case bondy_oplog_instance:whereis(InstanceId) of
         undefined ->
             {error, {instance_not_running, InstanceId}};
         _Pid ->
             case bondy_oplog_catalogue_snapshot:next(InstanceId, Cursor) of
                 {ok, {batch, _} = Batch} -> {ok, Batch};
-                {ok, {done, _} = Done}   -> {ok, Done};
-                {error, _} = E           -> E
+                {ok, {done, _} = Done} -> {ok, Done};
+                {error, _} = E -> E
             end
     end.
 

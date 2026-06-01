@@ -48,14 +48,12 @@ subscribe_receives_notify() ->
     ?assertEqual(payload_1, expect_event(Topic, 200)),
     bondy_db_core_events:unsubscribe(Topic).
 
-
 unsubscribed_does_not_receive() ->
     Topic = mk_topic(),
     ok = bondy_db_core_events:subscribe(Topic),
     ok = bondy_db_core_events:unsubscribe(Topic),
     ok = bondy_db_core_events:notify(Topic, payload_2),
     ?assertEqual(timeout, try_expect_event(Topic, 100)).
-
 
 other_topic_does_not_match() ->
     TopicA = mk_topic(),
@@ -64,7 +62,6 @@ other_topic_does_not_match() ->
     ok = bondy_db_core_events:notify(TopicB, payload_b),
     ?assertEqual(timeout, try_expect_event(TopicA, 100)),
     bondy_db_core_events:unsubscribe(TopicA).
-
 
 duplicate_subscribe_is_idempotent() ->
     Topic = mk_topic(),
@@ -77,24 +74,29 @@ duplicate_subscribe_is_idempotent() ->
     ?assertEqual(timeout, try_expect_event(Topic, 100)),
     bondy_db_core_events:unsubscribe(Topic).
 
-
 subscriber_down_auto_removes() ->
     Topic = mk_topic(),
     Self = self(),
     {Sub, MonRef} = spawn_monitor(fun() ->
         ok = bondy_db_core_events:subscribe(Topic),
         Self ! {subscribed, self()},
-        receive die -> ok end
+        receive
+            die -> ok
+        end
     end),
-    receive {subscribed, Sub} -> ok after 200 -> error(no_subscribe_ack) end,
+    receive
+        {subscribed, Sub} -> ok
+    after 200 -> error(no_subscribe_ack)
+    end,
     %% Subscriber is in the table.
     ?assert(lists:member(Sub, bondy_db_core_events:subscribers(Topic))),
     Sub ! die,
-    receive {'DOWN', MonRef, process, Sub, _} -> ok end,
+    receive
+        {'DOWN', MonRef, process, Sub, _} -> ok
+    end,
     %% Wait for the events module to process the DOWN.
     _ = sys:get_state(bondy_db_core_events),
     ?assertNot(lists:member(Sub, bondy_db_core_events:subscribers(Topic))).
-
 
 %% =============================================================================
 %% Substrate restart-recovery protocol
@@ -106,11 +108,9 @@ registry_emits_started_at_init() ->
     Epoch = bondy_db_core_registry:current_epoch(),
     ?assert(is_reference(Epoch)).
 
-
 dispatcher_emits_started_at_init() ->
     Epoch = bondy_db_core_dispatcher:current_epoch(),
     ?assert(is_reference(Epoch)).
-
 
 current_epoch_matches_broadcast() ->
     %% Subscribe to the started topic, then force a restart of the
@@ -125,7 +125,6 @@ current_epoch_matches_broadcast() ->
     ?assertEqual(Payload, After),
     bondy_db_core_events:unsubscribe(bondy_db_core_registry_started).
 
-
 registry_restart_changes_epoch_and_wakes_subscribers() ->
     ok = bondy_db_core_events:subscribe(bondy_db_core_registry_started),
     Before = bondy_db_core_registry:current_epoch(),
@@ -135,15 +134,15 @@ registry_restart_changes_epoch_and_wakes_subscribers() ->
     ?assert(is_reference(After)),
     bondy_db_core_events:unsubscribe(bondy_db_core_registry_started).
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
 
 mk_topic() ->
-    list_to_atom("topic_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
-
+    list_to_atom(
+        "topic_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 expect_event(Topic, TimeoutMs) ->
     receive
@@ -152,14 +151,12 @@ expect_event(Topic, TimeoutMs) ->
         erlang:error({no_event, Topic})
     end.
 
-
 try_expect_event(Topic, TimeoutMs) ->
     receive
         {bondy_db_core_event, Topic, Payload} -> Payload
     after TimeoutMs ->
         timeout
     end.
-
 
 %% Kill a registered gen_server and wait for the supervisor to restart
 %% it so subsequent calls hit the new pid.
@@ -175,14 +172,16 @@ kill_and_wait(Name) ->
     end,
     wait_for_register(Name, OldPid, 20).
 
-
 wait_for_register(Name, OldPid, 0) ->
     erlang:error({did_not_restart, Name, OldPid});
 wait_for_register(Name, OldPid, Attempts) ->
     case whereis(Name) of
-        undefined -> timer:sleep(25),
-                     wait_for_register(Name, OldPid, Attempts - 1);
-        OldPid    -> timer:sleep(25),
-                     wait_for_register(Name, OldPid, Attempts - 1);
-        _Other    -> ok
+        undefined ->
+            timer:sleep(25),
+            wait_for_register(Name, OldPid, Attempts - 1);
+        OldPid ->
+            timer:sleep(25),
+            wait_for_register(Name, OldPid, Attempts - 1);
+        _Other ->
+            ok
     end.

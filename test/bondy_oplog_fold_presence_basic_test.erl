@@ -74,7 +74,7 @@ live_plus_older_delete_preserves_monotonic_hlc_test() ->
     %% Delete arrives with a causally older HLC than live's; dead's HLC
     %% must be max(live, delete) to preserve monotonicity.
     H_live = hlc(200, 0),
-    H_del  = hlc(100, 0),
+    H_del = hlc(100, 0),
     S0 = {live, H_live, mk_payload(1)},
     ?assertEqual({dead, H_live}, apply_ev(S0, {delete, H_del})).
 
@@ -179,8 +179,12 @@ dispatcher_apply_event_via_shorthand_test() ->
     P = mk_payload(1),
     ?assertEqual(
         {{live, H, P}, P},
-        bondy_oplog_fold:apply_event(presence_basic, empty,
-                                     {create, H, P}, undefined)
+        bondy_oplog_fold:apply_event(
+            presence_basic,
+            empty,
+            {create, H, P},
+            undefined
+        )
     ).
 
 dispatcher_initial_value_via_shorthand_test() ->

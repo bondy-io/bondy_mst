@@ -101,7 +101,9 @@ the wrong instance directory is detected via header mismatch (§4.1).
 """).
 -spec instance_id_hash(instance_id()) -> binary().
 
-instance_id_hash(InstanceId) when is_binary(InstanceId), byte_size(InstanceId) > 0 ->
+instance_id_hash(InstanceId) when
+    is_binary(InstanceId), byte_size(InstanceId) > 0
+->
     Full = crypto:hash(sha256, InstanceId),
     binary:part(Full, 0, ?INSTANCE_HASH_BYTES).
 
@@ -204,8 +206,9 @@ read_header(Fd) ->
             %% Size check first so a too-small file is always reported
             %% as truncated regardless of its contents.
             {error, truncated_header};
-        {ok, <<?MAGIC:32/big-unsigned, Version:8/unsigned,
-                Flags:24/big-unsigned, SegmentId:64/big-unsigned,
+        {ok,
+            <<?MAGIC:32/big-unsigned, Version:8/unsigned, Flags:24/big-unsigned,
+                SegmentId:64/big-unsigned,
                 InstanceHash:?INSTANCE_HASH_BYTES/binary,
                 CreatedAt:64/big-unsigned,
                 Origin:?BONDY_OPLOG_ORIGIN_BYTES/binary>>} ->
@@ -251,8 +254,7 @@ to open and pairs it with its expected segment id separately.
 """).
 -spec verify(t(), instance_id(), bondy_oplog_origin:t()) ->
     ok
-    | {error,
-        {orphan_segment, instance_id_hash_mismatch | origin_mismatch}}.
+    | {error, {orphan_segment, instance_id_hash_mismatch | origin_mismatch}}.
 
 verify(#?MODULE{instance_id_hash = Hash, origin = Origin}, InstanceId, Origin) ->
     Expected = instance_id_hash(InstanceId),

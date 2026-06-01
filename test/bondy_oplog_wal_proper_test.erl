@@ -149,8 +149,11 @@ prop_frame_roundtrip() ->
 prop_frame_bit_flip_detection() ->
     ?FORALL(
         {Body, BitIdx},
-        ?LET(B, non_empty(binary()),
-             {B, choose(32, (?HEADER + byte_size(B)) * 8 - 1)}),
+        ?LET(
+            B,
+            non_empty(binary()),
+            {B, choose(32, (?HEADER + byte_size(B)) * 8 - 1)}
+        ),
         begin
             Frame = iolist_to_binary(bondy_oplog_wal_frame:encode(Body)),
             Corrupt = flip_bit(Frame, BitIdx),
@@ -185,8 +188,10 @@ prop_codec_roundtrip() ->
         {Body, Algo, MinBytes},
         {binary(), oneof([none, zlib]), choose(1, 4096)},
         begin
-            Opts = #{body_compression => Algo,
-                     body_compression_min_bytes => MinBytes},
+            Opts = #{
+                body_compression => Algo,
+                body_compression_min_bytes => MinBytes
+            },
             {Flags, Encoded} =
                 bondy_oplog_wal_codec:encode_body(Body, Opts),
             EncodedBin = iolist_to_binary(Encoded),
@@ -207,21 +212,28 @@ prop_codec_encrypt_roundtrip() ->
         {Body, WithCompression},
         {binary(), boolean()},
         begin
-            Opts0 = #{body_encryption =>
-                          {enabled, bondy_oplog_wal_codec_test}},
-            Opts = case WithCompression of
-                       true ->
-                           Opts0#{body_compression => zlib,
-                                  body_compression_min_bytes => 1};
-                       false ->
-                           Opts0
-                   end,
+            Opts0 = #{
+                body_encryption =>
+                    {enabled, bondy_oplog_wal_codec_test}
+            },
+            Opts =
+                case WithCompression of
+                    true ->
+                        Opts0#{
+                            body_compression => zlib,
+                            body_compression_min_bytes => 1
+                        };
+                    false ->
+                        Opts0
+                end,
             {Flags, Encoded} =
                 bondy_oplog_wal_codec:encode_body(Body, Opts),
             EncodedBin = iolist_to_binary(Encoded),
-            case bondy_oplog_wal_codec:decode_body(
-                EncodedBin, Flags, Opts
-            ) of
+            case
+                bondy_oplog_wal_codec:decode_body(
+                    EncodedBin, Flags, Opts
+                )
+            of
                 {ok, Decoded} -> Decoded =:= Body;
                 _ -> false
             end
@@ -237,8 +249,11 @@ prop_codec_ciphertext_bit_flip_detection() ->
     Opts = #{body_encryption => {enabled, bondy_oplog_wal_codec_test}},
     ?FORALL(
         {Body, BitIdx},
-        ?LET(B, non_empty(binary()),
-             {B, choose(0, 7)}),
+        ?LET(
+            B,
+            non_empty(binary()),
+            {B, choose(0, 7)}
+        ),
         begin
             {?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED, Encoded} =
                 bondy_oplog_wal_codec:encode_body(Body, Opts),
@@ -247,15 +262,19 @@ prop_codec_ciphertext_bit_flip_detection() ->
             %% (ciphertext or tag — both must reject).
             TotalBits = (byte_size(Bin) - 31) * 8,
             case TotalBits > 0 of
-                false -> true; %% Empty payload edge case: skip
+                %% Empty payload edge case: skip
+                false ->
+                    true;
                 true ->
                     Idx = 31 * 8 + (BitIdx rem TotalBits),
                     Corrupted = flip_bit(Bin, Idx),
-                    case bondy_oplog_wal_codec:decode_body(
-                        Corrupted,
-                        ?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED,
-                        Opts
-                    ) of
+                    case
+                        bondy_oplog_wal_codec:decode_body(
+                            Corrupted,
+                            ?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED,
+                            Opts
+                        )
+                    of
                         {error, decrypt_failed} -> true;
                         %% Tolerate `truncated_envelope` if the flip
                         %% lands within the envelope header range —
@@ -320,7 +339,8 @@ prop_idx_v2_seek_in_range_returns_that_entry() ->
 %% Reference v1 seek: returns `{ok, Offset}` for the largest entry
 %% whose FirstHlc =< T, or `none`. Implemented over a sorted-FirstHlcs
 %% list, since the v1-shape entries we generate share that ordering.
-reference_v1_seek([], _T) -> none;
+reference_v1_seek([], _T) ->
+    none;
 reference_v1_seek(Sorted, T) ->
     case [H || H <- Sorted, H =< T] of
         [] -> none;
@@ -346,8 +366,10 @@ idx_spec_with_target() ->
                 %% range. Each entry's FirstHlc = base, LastHlc =
                 %% base + span.
                 Entries =
-                    [{B * 100, B * 100 + S, B * 1000}
-                     || {B, S} <- lists:zip(Sorted, Spans)],
+                    [
+                        {B * 100, B * 100 + S, B * 1000}
+                     || {B, S} <- lists:zip(Sorted, Spans)
+                    ],
                 N = length(Entries),
                 ?LET(
                     Idx,
@@ -381,10 +403,16 @@ prop_frame_v1_v2_decoder_equivalence() ->
             V2Frame = iolist_to_binary(
                 bondy_oplog_wal_frame:encode(Body, [{version, 2}])
             ),
-            case {bondy_oplog_wal_frame:decode(V1Frame),
-                  bondy_oplog_wal_frame:decode(V2Frame)} of
-                {{ok, B1, #{version := 1, flags := 0}},
-                 {ok, B2, #{version := 2, flags := 0}}} ->
+            case
+                {
+                    bondy_oplog_wal_frame:decode(V1Frame),
+                    bondy_oplog_wal_frame:decode(V2Frame)
+                }
+            of
+                {
+                    {ok, B1, #{version := 1, flags := 0}},
+                    {ok, B2, #{version := 2, flags := 0}}
+                } ->
                     B1 =:= Body andalso B2 =:= Body;
                 _ ->
                     false
@@ -425,10 +453,15 @@ prop_wal_single_event_roundtrip() ->
             Recovered = scan_all_segments(
                 Dir, instance_id(), maps:get(current_segment, Info)
             ),
-            length(Results) =:= N
-                andalso lists:all(fun({ok, _, _}) -> true; (_) -> false end,
-                                  Results)
-                andalso Recovered =:= Events
+            length(Results) =:= N andalso
+                lists:all(
+                    fun
+                        ({ok, _, _}) -> true;
+                        (_) -> false
+                    end,
+                    Results
+                ) andalso
+                Recovered =:= Events
         end)
     ).
 
@@ -635,8 +668,11 @@ prop_truncation_safety() ->
             [bondy_oplog_wal:append(P1, E) || E <- Events],
             ok = bondy_oplog_wal:close(P1),
             SegPath = filename:join(
-                [Dir, instance_id(),
-                 bondy_oplog_wal_segment:filename(0)]
+                [
+                    Dir,
+                    instance_id(),
+                    bondy_oplog_wal_segment:filename(0)
+                ]
             ),
             {ok, Size} = file_size(SegPath),
             %% Trim ChopBytes off the tail (but never below the segment
@@ -693,8 +729,8 @@ prop_manifest_atomicity() ->
             %% Recovery must (1) succeed (gen_server up), (2) surface
             %% the original event sequence, and (3) clean the orphan
             %% manifest.tmp.
-            Read =:= Events
-                andalso not filelib:is_regular(TmpPath)
+            Read =:= Events andalso
+                not filelib:is_regular(TmpPath)
         end)
     ).
 
@@ -709,8 +745,11 @@ prop_manifest_atomicity() ->
 prop_consumer_offset_clamping() ->
     ?FORALL(
         {N, BadSeg, BadOff},
-        ?LET(NN, choose(1, 15),
-             {NN, choose(0, 99), choose(0, 1_000_000)}),
+        ?LET(
+            NN,
+            choose(1, 15),
+            {NN, choose(0, 99), choose(0, 1_000_000)}
+        ),
         with_wal_dir(fun(Dir) ->
             HLC = bondy_oplog_hlc:new(),
             Events = generate_events(HLC, N),
@@ -761,8 +800,11 @@ prop_consumer_offset_clamping() ->
             %% Clamped offset is at a frame boundary (one of the
             %% appended positions, the segment header, or head_offset).
             ValidBoundaries =
-                [?SEG_HEADER, HeadOff |
-                 [Off || {S, Off} <- Positions, S =:= HeadSeg]],
+                [
+                    ?SEG_HEADER,
+                    HeadOff
+                    | [Off || {S, Off} <- Positions, S =:= HeadSeg]
+                ],
             AtBoundary = lists:member(ClampedOff, ValidBoundaries),
             InLive andalso WithinBound andalso AtBoundary
         end)
@@ -807,15 +849,18 @@ prop_await_durable_correctness() ->
                 fun(E) ->
                     {ok, _, _} = bondy_oplog_wal:append(Pid, E),
                     Info = bondy_oplog_wal:info(Pid),
-                    {maps:get(current_segment, Info),
-                     maps:get(head_offset, Info)}
+                    {
+                        maps:get(current_segment, Info),
+                        maps:get(head_offset, Info)
+                    }
                 end,
                 Events
             ),
             BeforeSync = [
-                {error, timeout} =:= bondy_oplog_wal:await_durable(
-                    Pid, Pos, 0
-                )
+                {error, timeout} =:=
+                    bondy_oplog_wal:await_durable(
+                        Pid, Pos, 0
+                    )
              || Pos <- EndPositions
             ],
             ok = bondy_oplog_wal:sync(Pid),
@@ -826,9 +871,9 @@ prop_await_durable_correctness() ->
              || Pos <- EndPositions
             ],
             ok = bondy_oplog_wal:close(Pid),
-            DurableAfter =:= LastPos
-                andalso lists:all(fun(X) -> X end, BeforeSync)
-                andalso lists:all(fun(X) -> X end, AfterSync)
+            DurableAfter =:= LastPos andalso
+                lists:all(fun(X) -> X end, BeforeSync) andalso
+                lists:all(fun(X) -> X end, AfterSync)
         end)
     ).
 
@@ -931,12 +976,16 @@ prop_retention_safety() ->
 %% Each `append` ensures monotone progress; sweeps and cursor
 %% advances can fire in any interleaving.
 retention_ops_gen() ->
-    non_empty(list(oneof([
-        {append, choose(1, 2)},
-        {commit_advance, choose(0, 6)},
-        {watermark_advance, choose(0, 12)},
-        sweep
-    ]))).
+    non_empty(
+        list(
+            oneof([
+                {append, choose(1, 2)},
+                {commit_advance, choose(0, 6)},
+                {watermark_advance, choose(0, 12)},
+                sweep
+            ])
+        )
+    ).
 
 %% Replay the operations, asserting the safety invariant after each
 %% retention-relevant step. Returns true if every step preserved the
@@ -951,8 +1000,15 @@ run_retention_ops(Pid, HLC, Ops, MinLive) ->
     CommittedBase = counters:new(1, []),
     lists:all(
         fun(Op) ->
-            step_op(Pid, HLC, Op, SeqRef, WatermarkBase,
-                    CommittedBase, MinLive)
+            step_op(
+                Pid,
+                HLC,
+                Op,
+                SeqRef,
+                WatermarkBase,
+                CommittedBase,
+                MinLive
+            )
         end,
         Ops
     ).
@@ -985,7 +1041,8 @@ step_op(Pid, _HLC, sweep, _SeqRef, _WB, _CB, MinLive) ->
     {ok, _Deleted, _Freed} = bondy_oplog_wal:retention_sweep(Pid),
     invariant(Pre, snapshot_state(Pid), MinLive).
 
-do_appends(_Pid, _HLC, _SeqRef, 0) -> ok;
+do_appends(_Pid, _HLC, _SeqRef, 0) ->
+    ok;
 do_appends(Pid, HLC, SeqRef, N) when N > 0 ->
     counters:add(SeqRef, 1, 1),
     Seq = counters:get(SeqRef, 1),
@@ -1011,9 +1068,11 @@ snapshot_state(Pid) ->
 %%       deletion. The watermark cut is enforced by the
 %%       implementation; checking the committed cut + the floor is
 %%       sufficient for the safety property.
-invariant(#{live := PreLive},
-          #{live := PostLive, committed := Committed},
-          MinLive) ->
+invariant(
+    #{live := PreLive},
+    #{live := PostLive, committed := Committed},
+    MinLive
+) ->
     Floor = length(PostLive) >= MinLive,
     Removed = ordsets:to_list(
         ordsets:subtract(
@@ -1036,9 +1095,7 @@ invariant(#{live := PreLive},
 prop_wal_full() ->
     ?FORALL(
         {Mode, NEvents, CapFrames},
-        {oneof([total_size, live_count]),
-         choose(1, 100),
-         choose(0, 3)},
+        {oneof([total_size, live_count]), choose(1, 100), choose(0, 3)},
         with_wal_dir(fun(Dir) ->
             Opts = wal_full_opts(Dir, Mode, CapFrames),
             {ok, Pid} = bondy_oplog_wal:start_link(instance_id(), Opts),
@@ -1069,8 +1126,10 @@ prop_wal_full() ->
 wal_full_opts(Dir, total_size, CapFrames) ->
     base_wal_opts(Dir, #{
         max_total_wal_size =>
-            max(?SEG_HEADER + 1,
-                ?SEG_HEADER + CapFrames * estimated_frame_size())
+            max(
+                ?SEG_HEADER + 1,
+                ?SEG_HEADER + CapFrames * estimated_frame_size()
+            )
     });
 wal_full_opts(Dir, live_count, CapFrames) ->
     base_wal_opts(Dir, #{
@@ -1085,9 +1144,11 @@ wal_full_opts(Dir, live_count, CapFrames) ->
 %% disabled so the trial is deterministic.
 base_wal_opts(Dir, Extra) ->
     maps:merge(
-        #{dir => Dir,
-          origin => origin(),
-          retention_sweep_interval => 24 * 60 * 60 * 1000},
+        #{
+            dir => Dir,
+            origin => origin(),
+            retention_sweep_interval => 24 * 60 * 60 * 1000
+        },
         Extra
     ).
 
@@ -1159,8 +1220,11 @@ wal_full_invariant(_Pid, {unexpected_error, _}) ->
 prop_bit_flip_magic() ->
     ?FORALL(
         {N, K, BitInMagic},
-        ?LET(NN, choose(2, 12),
-             {NN, choose(0, NN - 1), choose(0, 31)}),
+        ?LET(
+            NN,
+            choose(2, 12),
+            {NN, choose(0, NN - 1), choose(0, 31)}
+        ),
         with_wal_dir(fun(Dir) ->
             HLC = bondy_oplog_hlc:new(),
             Events = generate_events(HLC, N),
@@ -1187,13 +1251,15 @@ prop_bit_flip_magic() ->
             %% start offset should equal the truncated head_offset.
             ExtraEvent = hd(generate_events(HLC, 1)),
             ExtraResult = bondy_oplog_wal:append(P2, ExtraEvent),
-            ExtraOk = case ExtraResult of
-                {ok, _, {_, NewStart}} -> NewStart =:= FrameKStart;
-                _ -> false
-            end,
+            ExtraOk =
+                case ExtraResult of
+                    {ok, _, {_, NewStart}} -> NewStart =:= FrameKStart;
+                    _ -> false
+                end,
             ReadAfter = read_all_events(P2),
-            ResumeOk = ReadAfter =:=
-                lists:sublist(Events, K) ++ [ExtraEvent],
+            ResumeOk =
+                ReadAfter =:=
+                    lists:sublist(Events, K) ++ [ExtraEvent],
             ok = bondy_oplog_wal:close(P2),
             ?WHENFAIL(
                 io:format(
@@ -1202,12 +1268,21 @@ prop_bit_flip_magic() ->
                     "FrameKStart=~p HeadAfter=~p Read=~p "
                     "HeadMatches=~p ReadMatches=~p ExtraOk=~p "
                     "ResumeOk=~p~n",
-                    [N, K, BitInMagic, FrameKStart,
-                     HeadOffAfterRecover, length(Read),
-                     HeadMatches, ReadMatches, ExtraOk, ResumeOk]
+                    [
+                        N,
+                        K,
+                        BitInMagic,
+                        FrameKStart,
+                        HeadOffAfterRecover,
+                        length(Read),
+                        HeadMatches,
+                        ReadMatches,
+                        ExtraOk,
+                        ResumeOk
+                    ]
                 ),
-                HeadMatches andalso ReadMatches
-                    andalso ExtraOk andalso ResumeOk
+                HeadMatches andalso ReadMatches andalso
+                    ExtraOk andalso ResumeOk
             )
         end)
     ).
@@ -1308,11 +1383,14 @@ prop_rotation_atomicity() ->
 prop_partial_write() ->
     ?FORALL(
         {N, M, K, SubFrameOff},
-        ?LET(NN, choose(2, 12),
-             {NN, choose(1, 3), choose(0, NN - 1),
-              %% Pick a small positive sub-frame offset; we'll clamp
-              %% against the actual frame size at runtime.
-              choose(1, 200)}),
+        ?LET(
+            NN,
+            choose(2, 12),
+            {NN, choose(1, 3), choose(0, NN - 1),
+                %% Pick a small positive sub-frame offset; we'll clamp
+                %% against the actual frame size at runtime.
+                choose(1, 200)}
+        ),
         with_wal_dir(fun(Dir) ->
             HLC = bondy_oplog_hlc:new(),
             Events = generate_events(HLC, N),
@@ -1333,9 +1411,7 @@ prop_partial_write() ->
             Info2 = bondy_oplog_wal:info(P2),
             HeadOff = maps:get(head_offset, Info2),
             ExtraEvents = generate_events(HLC, M),
-            ExtraResults = [
-                bondy_oplog_wal:append(P2, E) || E <- ExtraEvents
-            ],
+            ExtraResults = [bondy_oplog_wal:append(P2, E) || E <- ExtraEvents],
             ReadAfter = read_all_events(P2),
             Info3 = bondy_oplog_wal:info(P2),
             ok = bondy_oplog_wal:close(P2),
@@ -1347,7 +1423,10 @@ prop_partial_write() ->
                 Read =:= lists:sublist(Events, K),
             HeadMatches = HeadOff =:= FrameKStart,
             AppendsOk = lists:all(
-                fun({ok, _, _}) -> true; (_) -> false end,
+                fun
+                    ({ok, _, _}) -> true;
+                    (_) -> false
+                end,
                 ExtraResults
             ),
             ResumeMatches =
@@ -1360,12 +1439,23 @@ prop_partial_write() ->
                     "P13 fail: N=~p M=~p K=~p Sub=~p FrameKStart=~p "
                     "FrameKLen=~p Chop=~p TruncTo=~p HeadOff=~p "
                     "Read=~p AppendsOk=~p ResumeMatches=~p~n",
-                    [N, M, K, SubFrameOff, FrameKStart, FrameKLen,
-                     Chop, TruncTo, HeadOff, length(Read), AppendsOk,
-                     ResumeMatches]
+                    [
+                        N,
+                        M,
+                        K,
+                        SubFrameOff,
+                        FrameKStart,
+                        FrameKLen,
+                        Chop,
+                        TruncTo,
+                        HeadOff,
+                        length(Read),
+                        AppendsOk,
+                        ResumeMatches
+                    ]
                 ),
-                ReadMatches andalso HeadMatches andalso AppendsOk
-                    andalso ResumeMatches andalso HeadAdvanced
+                ReadMatches andalso HeadMatches andalso AppendsOk andalso
+                    ResumeMatches andalso HeadAdvanced
             )
         end)
     ).
@@ -1388,8 +1478,11 @@ prop_partial_write() ->
 prop_rescan_recovery() ->
     ?FORALL(
         {N, K, BodyByteOff},
-        ?LET(NN, choose(3, 8),
-             {NN, choose(0, NN - 1), choose(20, 80)}),
+        ?LET(
+            NN,
+            choose(3, 8),
+            {NN, choose(0, NN - 1), choose(20, 80)}
+        ),
         with_wal_dir(fun(Dir) ->
             HLC = bondy_oplog_hlc:new(),
             Events = generate_events(HLC, N),
@@ -1434,11 +1527,17 @@ prop_rescan_recovery() ->
                     user,
                     "prop_rescan_recovery fail: N=~p K=~p Clamped=~p "
                     "FlipByte=~p Read1=~p Read2=~p~n",
-                    [N, K, Clamped, FlipByte,
-                     length(Read1), length(Read2)]
+                    [
+                        N,
+                        K,
+                        Clamped,
+                        FlipByte,
+                        length(Read1),
+                        length(Read2)
+                    ]
                 ),
-                SubsetOk andalso OrderOk andalso StrictRoundTripOk
-                    andalso SurvivalOk
+                SubsetOk andalso OrderOk andalso StrictRoundTripOk andalso
+                    SurvivalOk
             )
         end)
     ).
@@ -1516,9 +1615,20 @@ prop_concurrent_reader_safety() ->
                         "prop_concurrent_reader_safety failed: N=~p "
                         "R=~p Alive=~p PrefixOk=~p FinalOk=~p "
                         "ReaderLens=~p~n",
-                        [N, R, Alive, PrefixOk, FinalOk,
-                         [if is_list(L) -> length(L); true -> L end
-                          || L <- ReaderResults]]
+                        [
+                            N,
+                            R,
+                            Alive,
+                            PrefixOk,
+                            FinalOk,
+                            [
+                                if
+                                    is_list(L) -> length(L);
+                                    true -> L
+                                end
+                             || L <- ReaderResults
+                            ]
+                        ]
                     ),
                     Alive andalso PrefixOk andalso FinalOk
                 )
@@ -1564,9 +1674,8 @@ collect_readers([{Pid, MonRef} | Rest], Acc) ->
         {'DOWN', MonRef, process, Pid, _Reason} ->
             %% A reader crash is a property failure.
             collect_readers(Rest, [{reader_crashed, Pid} | Acc])
-    after
-        30_000 ->
-            collect_readers(Rest, [{reader_timeout, Pid} | Acc])
+    after 30_000 ->
+        collect_readers(Rest, [{reader_timeout, Pid} | Acc])
     end.
 
 %% @private
@@ -1616,16 +1725,19 @@ prop_failed_fsync() ->
                 %% per-call overhead before we actually need the seam.
                 Half = max(1, N div 2),
                 {First, Rest} = lists:split(Half, Events),
-                FirstResults = [
-                    bondy_oplog_wal:append(Pid, E) || E <- First
-                ],
+                FirstResults = [bondy_oplog_wal:append(Pid, E) || E <- First],
                 FirstOk = lists:all(
-                    fun({ok, _, _}) -> true; (_) -> false end,
+                    fun
+                        ({ok, _, _}) -> true;
+                        (_) -> false
+                    end,
                     FirstResults
                 ),
                 InfoBefore = bondy_oplog_wal:info(Pid),
-                #{durable_offset := DurableBefore,
-                  durable_segment := DurSegBefore} = InfoBefore,
+                #{
+                    durable_offset := DurableBefore,
+                    durable_segment := DurSegBefore
+                } = InfoBefore,
                 %% Install meck under the wal_io fault lock — the lock
                 %% serialises any test that mocks `bondy_mst_io`,
                 %% which is necessary because `meck:new/2` swaps the
@@ -1633,36 +1745,41 @@ prop_failed_fsync() ->
                 {FaultResults, Alive, Info2} = with_io_fault_lock(
                     fun() ->
                         ok = meck:expect(
-                            bondy_mst_io, datasync,
+                            bondy_mst_io,
+                            datasync,
                             fun(_Fd) -> {error, eio} end
                         ),
-                        FaultRs = [
-                            bondy_oplog_wal:append(Pid, E) || E <- Rest
-                        ],
+                        FaultRs = [bondy_oplog_wal:append(Pid, E) || E <- Rest],
                         AliveBool = is_process_alive(Pid),
                         Inf = bondy_oplog_wal:info(Pid),
                         {FaultRs, AliveBool, Inf}
                     end
                 ),
                 FaultErrors = lists:all(
-                    fun({error, eio}) -> true; (_) -> false end,
+                    fun
+                        ({error, eio}) -> true;
+                        (_) -> false
+                    end,
                     FaultResults
                 ),
                 DurableUnchanged =
-                    maps:get(durable_offset, Info2) =:= DurableBefore
-                    andalso maps:get(durable_segment, Info2)
-                            =:= DurSegBefore,
+                    maps:get(durable_offset, Info2) =:= DurableBefore andalso
+                        maps:get(durable_segment, Info2) =:=
+                            DurSegBefore,
                 %% E8 — reopen invariant. The fault path pwrite'd the
                 %% bytes but the writer held `durable_offset` back
                 %% because no datasync completed. After close + reopen,
                 %% recovery scans the segment, CRC-verifies every frame,
                 %% and the in-memory state must reflect what is actually
                 %% on disk (WAL_DESIGN §16.3 (b)).
-                try _ = bondy_oplog_wal:close(Pid)
-                catch _:_ -> ok
+                try
+                    _ = bondy_oplog_wal:close(Pid)
+                catch
+                    _:_ -> ok
                 end,
-                {ReopenOk, ReopenDurable, ReopenHead,
-                 PostReopenAppendOk} = reopen_and_probe(Opts, HLC),
+                {ReopenOk, ReopenDurable, ReopenHead, PostReopenAppendOk} = reopen_and_probe(
+                    Opts, HLC
+                ),
                 %% After reopen, the WAL_DESIGN §16.3 (b) invariant is:
                 %% "in-memory state consistent with on-disk". Concretely:
                 %%   1. `durable_offset` must not shrink — every ACK'd
@@ -1686,21 +1803,32 @@ prop_failed_fsync() ->
                         "DurableBefore=~p Info2=~p ReopenOk=~p "
                         "ReopenDurable=~p ReopenHead=~p "
                         "PostReopenAppendOk=~p~n",
-                        [N, FirstOk, FaultErrors, Alive,
-                         DurableUnchanged, DurableBefore, Info2,
-                         ReopenOk, ReopenDurable, ReopenHead,
-                         PostReopenAppendOk]
+                        [
+                            N,
+                            FirstOk,
+                            FaultErrors,
+                            Alive,
+                            DurableUnchanged,
+                            DurableBefore,
+                            Info2,
+                            ReopenOk,
+                            ReopenDurable,
+                            ReopenHead,
+                            PostReopenAppendOk
+                        ]
                     ),
-                    FirstOk andalso FaultErrors
-                        andalso Alive andalso DurableUnchanged
-                        andalso ReopenOk
-                        andalso ReopenDurableSafe
-                        andalso ReopenHeadSafe
-                        andalso PostReopenAppendOk
+                    FirstOk andalso FaultErrors andalso
+                        Alive andalso DurableUnchanged andalso
+                        ReopenOk andalso
+                        ReopenDurableSafe andalso
+                        ReopenHeadSafe andalso
+                        PostReopenAppendOk
                 )
             after
-                try _ = bondy_oplog_wal:close(Pid)
-                catch _:_ -> ok
+                try
+                    _ = bondy_oplog_wal:close(Pid)
+                catch
+                    _:_ -> ok
                 end
             end
         end)
@@ -1748,12 +1876,11 @@ prop_failed_fsync_batched() ->
                 {BatchResults, Alive, Info2} = with_io_fault_lock(
                     fun() ->
                         ok = meck:expect(
-                            bondy_mst_io, datasync,
+                            bondy_mst_io,
+                            datasync,
                             fun(_Fd) -> {error, eio} end
                         ),
-                        BR = [
-                            bondy_oplog_wal:append(Pid, E) || E <- Events
-                        ],
+                        BR = [bondy_oplog_wal:append(Pid, E) || E <- Events],
                         %% Sleep long enough that several `flush_tick`s
                         %% have fired and been rejected.
                         timer:sleep(200),
@@ -1763,7 +1890,10 @@ prop_failed_fsync_batched() ->
                     end
                 ),
                 BatchOk = lists:all(
-                    fun({ok, _, _}) -> true; (_) -> false end,
+                    fun
+                        ({ok, _, _}) -> true;
+                        (_) -> false
+                    end,
                     BatchResults
                 ),
                 DurableHeldBack =
@@ -1776,16 +1906,24 @@ prop_failed_fsync_batched() ->
                         "prop_failed_fsync_batched failed: N=~p "
                         "BatchOk=~p Alive=~p DurableHeldBack=~p "
                         "PendingHeld=~p Info2=~p~n",
-                        [N, BatchOk, Alive, DurableHeldBack,
-                         PendingHeld, Info2]
+                        [
+                            N,
+                            BatchOk,
+                            Alive,
+                            DurableHeldBack,
+                            PendingHeld,
+                            Info2
+                        ]
                     ),
-                    BatchOk andalso Alive
-                        andalso DurableHeldBack
-                        andalso PendingHeld
+                    BatchOk andalso Alive andalso
+                        DurableHeldBack andalso
+                        PendingHeld
                 )
             after
-                try _ = bondy_oplog_wal:close(Pid)
-                catch _:_ -> ok
+                try
+                    _ = bondy_oplog_wal:close(Pid)
+                catch
+                    _:_ -> ok
                 end
             end
         end)
@@ -1845,7 +1983,8 @@ prop_rename_failure() ->
                 {Results, Alive, ManifestAfter, SegAfter} =
                     with_io_fault_lock(fun() ->
                         ok = meck:expect(
-                            bondy_mst_io, rename,
+                            bondy_mst_io,
+                            rename,
                             fun(_From, _To) -> {error, eacces} end
                         ),
                         %% Use safe_append/2: after C1's fix, the
@@ -1855,9 +1994,13 @@ prop_rename_failure() ->
                         Rs = [safe_append(Pid, E) || E <- Events],
                         AliveBool = is_process_alive(Pid),
                         SegA =
-                            try maps:get(current_segment,
-                                         bondy_oplog_wal:info(Pid))
-                            catch _:_ -> SegBefore
+                            try
+                                maps:get(
+                                    current_segment,
+                                    bondy_oplog_wal:info(Pid)
+                                )
+                            catch
+                                _:_ -> SegBefore
                             end,
                         {ok, ManifestA} = file:read_file(ManifestPath),
                         {Rs, AliveBool, ManifestA, SegA}
@@ -1880,8 +2023,10 @@ prop_rename_failure() ->
                         {ok, Pid2} ->
                             Inf = bondy_oplog_wal:info(Pid2),
                             S = maps:get(current_segment, Inf),
-                            try _ = bondy_oplog_wal:close(Pid2)
-                            catch _:_ -> ok
+                            try
+                                _ = bondy_oplog_wal:close(Pid2)
+                            catch
+                                _:_ -> ok
                             end,
                             {true, S};
                         _ ->
@@ -1896,19 +2041,30 @@ prop_rename_failure() ->
                         "ManifestIntact=~p CurrentSegUnchanged=~p "
                         "SegBefore=~p SegAfter=~p Errors=~p "
                         "ReopenOk=~p ReopenSeg=~p~n",
-                        [N, SawRotationError, Alive, ManifestIntact,
-                         CurrentSegUnchanged, SegBefore, SegAfter,
-                         Errors, ReopenOk, ReopenSeg]
+                        [
+                            N,
+                            SawRotationError,
+                            Alive,
+                            ManifestIntact,
+                            CurrentSegUnchanged,
+                            SegBefore,
+                            SegAfter,
+                            Errors,
+                            ReopenOk,
+                            ReopenSeg
+                        ]
                     ),
-                    SawRotationError
-                        andalso ManifestIntact
-                        andalso CurrentSegUnchanged
-                        andalso ReopenOk
-                        andalso ReopenSegConsistent
+                    SawRotationError andalso
+                        ManifestIntact andalso
+                        CurrentSegUnchanged andalso
+                        ReopenOk andalso
+                        ReopenSegConsistent
                 )
             after
-                try _ = bondy_oplog_wal:close(Pid)
-                catch _:_ -> ok
+                try
+                    _ = bondy_oplog_wal:close(Pid)
+                catch
+                    _:_ -> ok
                 end
             end
         end)
@@ -1938,8 +2094,11 @@ prop_rename_failure() ->
 prop_multiproc_convergence() ->
     ?FORALL(
         {N, KillAfter, NumReaders},
-        ?LET(NN, choose(4, 20),
-             {NN, choose(1, NN - 1), choose(0, 3)}),
+        ?LET(
+            NN,
+            choose(4, 20),
+            {NN, choose(1, NN - 1), choose(0, 3)}
+        ),
         with_wal_dir(fun(Dir) ->
             HLC = bondy_oplog_hlc:new(),
             Events = generate_events(HLC, N),
@@ -1966,11 +2125,12 @@ prop_multiproc_convergence() ->
             %% first KillAfter ACKs are durable in per_write mode.
             {AckedHead, RestEvents} =
                 lists:split(KillAfter, Events),
-            AckedResults = [
-                bondy_oplog_wal:append(Pid, E) || E <- AckedHead
-            ],
+            AckedResults = [bondy_oplog_wal:append(Pid, E) || E <- AckedHead],
             AckedOk = lists:all(
-                fun({ok, _, _}) -> true; (_) -> false end,
+                fun
+                    ({ok, _, _}) -> true;
+                    (_) -> false
+                end,
                 AckedResults
             ),
             %% Spawn a worker that races the kill — appends the rest;
@@ -1979,7 +2139,7 @@ prop_multiproc_convergence() ->
             spawn(fun() ->
                 _ = [
                     catch bondy_oplog_wal:append(Pid, E)
-                    || E <- RestEvents
+                 || E <- RestEvents
                 ],
                 Parent ! {WriterDone, done}
             end),
@@ -1990,16 +2150,14 @@ prop_multiproc_convergence() ->
             true = exit(Pid, kill),
             receive
                 {'DOWN', MonRef, process, Pid, killed} -> ok
-            after
-                5_000 -> erlang:demonitor(MonRef, [flush])
+            after 5_000 -> erlang:demonitor(MonRef, [flush])
             end,
             %% Drain the worker's "done" message (it'll get badarg /
             %% noproc on append after the kill — we just await it so
             %% the test doesn't leak processes).
             receive
                 {WriterDone, done} -> ok
-            after
-                5_000 -> ok
+            after 5_000 -> ok
             end,
             _ReaderResults = collect_readers(ReaderRefs, []),
             %% Reopen and verify.
@@ -2009,8 +2167,8 @@ prop_multiproc_convergence() ->
             %% (a) recovery succeeded (we got here without throwing).
             %% (b) every ACKed event is in Recovered.
             AckedPresent =
-                lists:sublist(Events, KillAfter)
-                    =:= lists:sublist(Recovered, KillAfter),
+                lists:sublist(Events, KillAfter) =:=
+                    lists:sublist(Recovered, KillAfter),
             %% (c) Recovered is a prefix of Events.
             PrefixOk = is_prefix(Recovered, Events),
             ?WHENFAIL(
@@ -2019,8 +2177,15 @@ prop_multiproc_convergence() ->
                     "prop_multiproc_convergence failed: N=~p "
                     "KillAfter=~p NumReaders=~p AckedOk=~p "
                     "AckedPresent=~p PrefixOk=~p Recovered=~p~n",
-                    [N, KillAfter, NumReaders, AckedOk,
-                     AckedPresent, PrefixOk, length(Recovered)]
+                    [
+                        N,
+                        KillAfter,
+                        NumReaders,
+                        AckedOk,
+                        AckedPresent,
+                        PrefixOk,
+                        length(Recovered)
+                    ]
                 ),
                 AckedOk andalso AckedPresent andalso PrefixOk
             )
@@ -2031,7 +2196,8 @@ prop_multiproc_convergence() ->
 %% Yields N times to give other runnable processes scheduler turns.
 %% Used by `prop_multiproc_convergence/0` to interleave the async
 %% appender with the killer without depending on wall-clock timing.
-nudge_scheduler(0) -> ok;
+nudge_scheduler(0) ->
+    ok;
 nudge_scheduler(N) when N > 0 ->
     erlang:yield(),
     nudge_scheduler(N - 1).
@@ -2043,8 +2209,7 @@ nudge_scheduler(N) when N > 0 ->
 %% =============================================================================
 
 properties_test_() ->
-    {timeout, 600,
-     fun() ->
+    {timeout, 600, fun() ->
         FrameOpts = [{to_file, user}, {numtests, ?DEFAULT_NUMTESTS}],
         WalOpts = [{to_file, user}, {numtests, ?WAL_NUMTESTS}],
         FrameProps = [
@@ -2087,7 +2252,7 @@ properties_test_() ->
             fun(Prop) -> ?assert(proper:quickcheck(Prop, WalOpts)) end,
             WalProps
         )
-     end}.
+    end}.
 
 %% =============================================================================
 %% Helpers — kept here so subsequent phases can reuse them.
@@ -2125,10 +2290,12 @@ generate_events(HLC, N) ->
 %% ~60–80 bytes; pick 100 to leave slack.
 estimated_frame_size() -> 100.
 
-is_strictly_increasing([_]) -> true;
+is_strictly_increasing([_]) ->
+    true;
 is_strictly_increasing([A, B | Rest]) when A < B ->
     is_strictly_increasing([B | Rest]);
-is_strictly_increasing(_) -> false.
+is_strictly_increasing(_) ->
+    false.
 
 %% --- meck fault-injection lock + reopen helpers -------------------------
 
@@ -2146,8 +2313,10 @@ with_io_fault_lock(Body) ->
         {Lock, self()},
         fun() ->
             ok = meck:new(bondy_mst_io, [passthrough]),
-            try Body()
-            after _ = meck:unload(bondy_mst_io)
+            try
+                Body()
+            after
+                _ = meck:unload(bondy_mst_io)
             end
         end,
         [node()],
@@ -2159,7 +2328,8 @@ with_io_fault_lock(Body) ->
 %% deliberately drive the writer into a state where it stops (e.g. C1 in
 %% `prop_rename_failure/0`).
 safe_append(Pid, Event) ->
-    try bondy_oplog_wal:append(Pid, Event)
+    try
+        bondy_oplog_wal:append(Pid, Event)
     catch
         exit:{noproc, _} -> {error, noproc};
         exit:noproc -> {error, noproc};
@@ -2184,8 +2354,10 @@ reopen_and_probe(Opts, HLC) ->
                     {ok, _, _} -> true;
                     _ -> false
                 end,
-            try _ = bondy_oplog_wal:close(Pid2)
-            catch _:_ -> ok
+            try
+                _ = bondy_oplog_wal:close(Pid2)
+            catch
+                _:_ -> ok
             end,
             {true, Dur, Head, AppendOk};
         _ ->
@@ -2217,9 +2389,16 @@ with_wal_dir(Fun) ->
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_prop_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_prop_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -2259,14 +2438,16 @@ scan_segment_grouped(Dir, InstanceId, SegId) ->
     <<_:?SEG_HEADER/binary, Frames/binary>> = Bin,
     scan_frames_grouped(Frames).
 
-scan_frames(<<>>) -> [];
+scan_frames(<<>>) ->
+    [];
 scan_frames(<<_:32, FrameLen:32, _/binary>> = Bin) ->
     <<Frame:FrameLen/binary, Rest/binary>> = Bin,
     {ok, Body, _} = bondy_oplog_wal_frame:decode(Frame),
     Batch = binary_to_term(Body, [safe]),
     Batch ++ scan_frames(Rest).
 
-scan_frames_grouped(<<>>) -> [];
+scan_frames_grouped(<<>>) ->
+    [];
 scan_frames_grouped(<<_:32, FrameLen:32, _/binary>> = Bin) ->
     <<Frame:FrameLen/binary, Rest/binary>> = Bin,
     {ok, Body, _} = bondy_oplog_wal_frame:decode(Frame),
@@ -2275,7 +2456,8 @@ scan_frames_grouped(<<_:32, FrameLen:32, _/binary>> = Bin) ->
 
 %% Generate `length(Sizes)` batches with strictly-increasing HLCs across
 %% all events.
-generate_batches(_HLC, []) -> [];
+generate_batches(_HLC, []) ->
+    [];
 generate_batches(HLC, [Size | Sizes]) ->
     Batch = [
         begin

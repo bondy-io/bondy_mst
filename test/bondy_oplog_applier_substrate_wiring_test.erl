@@ -27,8 +27,10 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(NS, primary, 0)
-     || NS <- bondy_db_core_registry:namespaces()],
+    [
+        bondy_db_core_registry:unregister(NS, primary, 0)
+     || NS <- bondy_db_core_registry:namespaces()
+    ],
     ok.
 
 wiring_test_() ->
@@ -43,7 +45,6 @@ wiring_test_() ->
         fun ae_targets_share_now_across_one_commit/0,
         fun ae_targets_not_found_is_tolerated/0
     ]}.
-
 
 %% =============================================================================
 %% Publish wiring
@@ -64,7 +65,6 @@ publish_default_is_noop() ->
     ok = bondy_db_core:unsubscribe(SubRef),
     ok = bondy_oplog:stop_instance(Id).
 
-
 publish_forwards_events_to_subscribers() ->
     Id = mk_id(),
     NS = ns_of(Id),
@@ -76,7 +76,7 @@ publish_forwards_events_to_subscribers() ->
     {ok, _} = bondy_oplog:start_instance(Id, #{
         fold_module => lww_register,
         applier => #{
-            publish_ns  => NS,
+            publish_ns => NS,
             publish_fun => Fun
         }
     }),
@@ -96,7 +96,6 @@ publish_forwards_events_to_subscribers() ->
     ok = bondy_db_core:unsubscribe(SubRef),
     ok = bondy_oplog:stop_instance(Id).
 
-
 publish_skip_suppresses_delivery() ->
     Id = mk_id(),
     NS = ns_of(Id),
@@ -105,13 +104,13 @@ publish_skip_suppresses_delivery() ->
     Fun = fun(E) ->
         case bondy_oplog_event:op(E) of
             {set, _, _} = Op -> {<<"k">>, Op};
-            {clear, _}       -> skip
+            {clear, _} -> skip
         end
     end,
     {ok, _} = bondy_oplog:start_instance(Id, #{
         fold_module => lww_register,
         applier => #{
-            publish_ns  => NS,
+            publish_ns => NS,
             publish_fun => Fun
         }
     }),
@@ -126,7 +125,6 @@ publish_skip_suppresses_delivery() ->
     ok = bondy_db_core:unsubscribe(SubRef),
     ok = bondy_oplog:stop_instance(Id).
 
-
 publish_fun_raise_is_tolerated() ->
     Id = mk_id(),
     NS = ns_of(Id),
@@ -134,13 +132,13 @@ publish_fun_raise_is_tolerated() ->
     Fun = fun(E) ->
         case bondy_oplog_event:op(E) of
             {set, 2, _} -> error(boom);
-            Op          -> {<<"k">>, Op}
+            Op -> {<<"k">>, Op}
         end
     end,
     {ok, _} = bondy_oplog:start_instance(Id, #{
         fold_module => lww_register,
         applier => #{
-            publish_ns  => NS,
+            publish_ns => NS,
             publish_fun => Fun
         }
     }),
@@ -154,7 +152,6 @@ publish_fun_raise_is_tolerated() ->
     ?assertEqual([{set, 1, <<"a">>}, {set, 3, <<"c">>}], Ops),
     ok = bondy_db_core:unsubscribe(SubRef),
     ok = bondy_oplog:stop_instance(Id).
-
 
 publish_partial_opts_are_rejected() ->
     %% `publish_ns` without `publish_fun` is rejected at applier init.
@@ -172,7 +169,6 @@ publish_partial_opts_are_rejected() ->
         L -> false = lists:member(Id, L)
     end,
     ok.
-
 
 %% =============================================================================
 %% AE wiring
@@ -198,7 +194,6 @@ ae_default_is_noop() ->
     ?assertEqual(Before, After),
     ok = bondy_db_core_registry:unregister(NS, primary, 0).
 
-
 ae_targets_bump_after_commit() ->
     Id = mk_id(),
     NS = ns_of(Id),
@@ -219,7 +214,6 @@ ae_targets_bump_after_commit() ->
     ?assert(After > Before),
     ok = bondy_oplog:stop_instance(Id),
     ok = bondy_db_core_registry:unregister(NS, primary, 0).
-
 
 ae_targets_share_now_across_one_commit() ->
     %% Two shards under different indices but same NS — a single commit
@@ -247,7 +241,6 @@ ae_targets_share_now_across_one_commit() ->
     ok = bondy_db_core_registry:unregister(NS, primary, 0),
     ok = bondy_db_core_registry:unregister(NS, by_name, 0).
 
-
 ae_targets_not_found_is_tolerated() ->
     Id = mk_id(),
     NS = ns_of(Id),
@@ -259,8 +252,10 @@ ae_targets_not_found_is_tolerated() ->
         fold_module => lww_register,
         applier => #{
             ae_targets =>
-                [{NS, primary, 0},
-                 {missing_ns, primary, 0}],
+                [
+                    {NS, primary, 0},
+                    {missing_ns, primary, 0}
+                ],
             commit_every => 1
         }
     }),
@@ -275,7 +270,6 @@ ae_targets_not_found_is_tolerated() ->
     ok = bondy_oplog:stop_instance(Id),
     ok = bondy_db_core_registry:unregister(NS, primary, 0).
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
@@ -283,33 +277,29 @@ ae_targets_not_found_is_tolerated() ->
 mk_id() ->
     list_to_binary(
         "wiring_" ++
-        integer_to_list(erlang:unique_integer([positive, monotonic]))
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
     ).
-
 
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
-
 
 register_shard(NS, Shard) ->
     register_shard(NS, primary, Shard).
 
 register_shard(NS, Index, Shard) ->
     bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => undefined,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => undefined,
         projection_adapter => bondy_oplog_projection_adapter,
-        projection_handle  => undefined,
-        fold_module        => lww_register,
-        overlay            => disabled
+        projection_handle => undefined,
+        fold_module => lww_register,
+        overlay => disabled
     }).
-
 
 sentinel() ->
     %% Matches `bondy_db_core_registry`'s "infinitely stale" sentinel.
     -(1 bsl 62).
-
 
 wait_for_ae_advance(NS, Index, Shard, Baseline, TimeoutMs) ->
     Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
@@ -324,17 +314,20 @@ wait_for_ae_advance_loop(NS, Index, Shard, Baseline, Deadline) ->
                     erlang:error({ae_did_not_advance, NS, Index, Shard});
                 false ->
                     timer:sleep(5),
-                    wait_for_ae_advance_loop(NS, Index, Shard, Baseline,
-                                             Deadline)
+                    wait_for_ae_advance_loop(
+                        NS,
+                        Index,
+                        Shard,
+                        Baseline,
+                        Deadline
+                    )
             end
     end.
-
 
 derived_key_of({set, H, _V}) ->
     iolist_to_binary(["key:", integer_to_list(H)]);
 derived_key_of({clear, H}) ->
     iolist_to_binary(["key:", integer_to_list(H)]).
-
 
 collect_messages(N, TimeoutMs) ->
     collect_messages(N, TimeoutMs, []).
@@ -348,7 +341,6 @@ collect_messages(N, Timeout, Acc) ->
     after Timeout ->
         lists:reverse(Acc)
     end.
-
 
 recv_one(Timeout) ->
     receive

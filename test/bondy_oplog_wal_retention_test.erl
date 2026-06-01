@@ -32,9 +32,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_retention_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_retention_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -51,10 +58,12 @@ origin() ->
     <<1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16>>.
 
 base_opts() ->
-    #{origin => origin(),
-      %% Disable the periodic timer in the default fixture — tests
-      %% drive sweeps explicitly so they're deterministic.
-      retention_sweep_interval => 24 * 60 * 60 * 1000}.
+    #{
+        origin => origin(),
+        %% Disable the periodic timer in the default fixture — tests
+        %% drive sweeps explicitly so they're deterministic.
+        retention_sweep_interval => 24 * 60 * 60 * 1000
+    }.
 
 with_wal(Opts, Fun) ->
     Dir = mktemp_dir(),
@@ -102,8 +111,10 @@ fill_events_from(Pid, HLC, SeqBase, N) ->
 
 %% Tight segment cap. One event ≈ one segment under this config.
 small_segment_opts() ->
-    #{max_segment_bytes => 256,
-      max_batch_bytes => 200}.
+    #{
+        max_segment_bytes => 256,
+        max_batch_bytes => 200
+    }.
 
 live_segment_ids(Pid) ->
     maps:get(live_segments, bondy_oplog_wal:info(Pid)).
@@ -199,20 +210,39 @@ sweep_deletes_eligible_prefix_test() ->
             Pid, bondy_oplog_hlc:now(HLC) + 1
         ),
         Info = bondy_oplog_wal:info(Pid),
-        ?assertEqual([BoundarySeg, HeadSeg],
-                     maps:get(live_segments, Info)),
-        ?assertEqual(lists:max(ExpectedDeleted),
-                     maps:get(deleted_through, Info)),
+        ?assertEqual(
+            [BoundarySeg, HeadSeg],
+            maps:get(live_segments, Info)
+        ),
+        ?assertEqual(
+            lists:max(ExpectedDeleted),
+            maps:get(deleted_through, Info)
+        ),
         InstanceDir = maps:get(dir, Info),
-        [?assertNot(filelib:is_regular(filename:join(
-            InstanceDir, bondy_oplog_wal_segment:filename(S)
-        ))) || S <- ExpectedDeleted],
-        ?assert(filelib:is_regular(filename:join(
-            InstanceDir, bondy_oplog_wal_segment:filename(BoundarySeg)
-        ))),
-        ?assert(filelib:is_regular(filename:join(
-            InstanceDir, bondy_oplog_wal_segment:filename(HeadSeg)
-        ))),
+        [
+            ?assertNot(
+                filelib:is_regular(
+                    filename:join(
+                        InstanceDir, bondy_oplog_wal_segment:filename(S)
+                    )
+                )
+            )
+         || S <- ExpectedDeleted
+        ],
+        ?assert(
+            filelib:is_regular(
+                filename:join(
+                    InstanceDir, bondy_oplog_wal_segment:filename(BoundarySeg)
+                )
+            )
+        ),
+        ?assert(
+            filelib:is_regular(
+                filename:join(
+                    InstanceDir, bondy_oplog_wal_segment:filename(HeadSeg)
+                )
+            )
+        ),
         %% Explicit `retention_sweep/1` after the implicit sweep is a
         %% no-op: nothing more is eligible.
         ?assertMatch({ok, [], 0}, bondy_oplog_wal:retention_sweep(Pid))
@@ -338,7 +368,10 @@ invalid_min_live_segments_rejected_at_init_test() ->
                 #{dir => Dir, origin => origin(), min_live_segments => 0}
             ),
             ?assertEqual({error, {invalid_opt, min_live_segments, 0}}, Got),
-            receive {'EXIT', _, _} -> ok after 0 -> ok end
+            receive
+                {'EXIT', _, _} -> ok
+            after 0 -> ok
+            end
         after
             process_flag(trap_exit, OldFlag)
         end

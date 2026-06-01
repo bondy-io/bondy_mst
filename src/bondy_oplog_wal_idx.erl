@@ -109,12 +109,12 @@ range bounds every HLC in the segment). After each emit,
 %% Writer-side accumulator: a running list of entries plus the bookkeeping
 %% needed to decide when to emit the next one.
 -record(acc, {
-    interval_bytes    :: pos_integer(),
-    bytes_since_last  :: non_neg_integer(),
+    interval_bytes :: pos_integer(),
+    bytes_since_last :: non_neg_integer(),
     %% Entries are stored newest-first while building so `note_frame/5`
     %% is O(1); `entries/1` reverses to ascending HLC order on emission.
-    entries_rev       :: [entry()],
-    entry_count       :: non_neg_integer()
+    entries_rev :: [entry()],
+    entry_count :: non_neg_integer()
 }).
 
 %% Reader-side index handle: a 1-based tuple of
@@ -283,11 +283,16 @@ and last HLCs).
 
 note_indexed_frame(
     #acc{entries_rev = Rev, entry_count = N} = Acc,
-    FirstHlc, LastHlc, Offset
+    FirstHlc,
+    LastHlc,
+    Offset
 ) when
-    is_integer(FirstHlc), FirstHlc >= 0,
-    is_integer(LastHlc), LastHlc >= FirstHlc,
-    is_integer(Offset), Offset >= 0
+    is_integer(FirstHlc),
+    FirstHlc >= 0,
+    is_integer(LastHlc),
+    LastHlc >= FirstHlc,
+    is_integer(Offset),
+    Offset >= 0
 ->
     Acc#acc{
         entries_rev = [{FirstHlc, LastHlc, Offset} | Rev],
@@ -467,7 +472,8 @@ seek(#idx{entries = E}, TargetHlc) when
 ->
     N = tuple_size(E),
     case N of
-        0 -> none;
+        0 ->
+            none;
         _ ->
             {FirstHlc1, _, _} = element(1, E),
             case FirstHlc1 > TargetHlc of
@@ -490,29 +496,27 @@ handle_entries(#idx{entries = E}) ->
 encode_header(EntryCount) when
     is_integer(EntryCount), EntryCount >= 0, EntryCount =< 16#FFFFFFFF
 ->
-    <<?MAGIC:32/big-unsigned,
-      ?VERSION_CURRENT:8/unsigned,
-      0:24/big-unsigned,
-      EntryCount:32/big-unsigned,
-      0:32/big-unsigned>>.
+    <<?MAGIC:32/big-unsigned, ?VERSION_CURRENT:8/unsigned, 0:24/big-unsigned,
+        EntryCount:32/big-unsigned, 0:32/big-unsigned>>.
 
 %% @private
 %% v2-only encode. v1 files exist on-disk from prior writers; the
 %% reader handles them via the decode path, but writers never produce
 %% v1 again.
 encode_entries(Entries) ->
-    [<<F:64/big-unsigned, L:64/big-unsigned, O:64/big-unsigned>>
-     || {F, L, O} <- Entries].
+    [
+        <<F:64/big-unsigned, L:64/big-unsigned, O:64/big-unsigned>>
+     || {F, L, O} <- Entries
+    ].
 
 %% @private
 decode_file(Bin) when is_binary(Bin), byte_size(Bin) < ?HEADER_BYTES ->
     {error, truncated_header};
-decode_file(<<?MAGIC:32/big-unsigned,
-              Version:8/unsigned,
-              _Flags:24/big-unsigned,
-              EntryCount:32/big-unsigned,
-              _Reserved:32/big-unsigned,
-              EntriesBin/binary>>) ->
+decode_file(
+    <<?MAGIC:32/big-unsigned, Version:8/unsigned, _Flags:24/big-unsigned,
+        EntryCount:32/big-unsigned, _Reserved:32/big-unsigned,
+        EntriesBin/binary>>
+) ->
     case Version of
         ?VERSION_V1 ->
             decode_entries_bin(?ENTRY_BYTES_V1, EntriesBin, EntryCount);
@@ -537,14 +541,19 @@ decode_entries_bin(EntryBytes, Bin, EntryCount) ->
 %% @private
 decode_entries_loop(_EntryBytes, <<>>, Acc) ->
     lists:reverse(Acc);
-decode_entries_loop(?ENTRY_BYTES_V1,
-    <<H:64/big-unsigned, O:64/big-unsigned, Rest/binary>>, Acc) ->
+decode_entries_loop(
+    ?ENTRY_BYTES_V1,
+    <<H:64/big-unsigned, O:64/big-unsigned, Rest/binary>>,
+    Acc
+) ->
     %% v1 fallback: lift the single HLC to a degenerate single-point
     %% range so callers see a uniform 3-tuple shape.
     decode_entries_loop(?ENTRY_BYTES_V1, Rest, [{H, H, O} | Acc]);
-decode_entries_loop(?ENTRY_BYTES_V2,
+decode_entries_loop(
+    ?ENTRY_BYTES_V2,
     <<F:64/big-unsigned, L:64/big-unsigned, O:64/big-unsigned, Rest/binary>>,
-    Acc) ->
+    Acc
+) ->
     decode_entries_loop(?ENTRY_BYTES_V2, Rest, [{F, L, O} | Acc]).
 
 %% @private
@@ -558,7 +567,8 @@ write_and_sync(Fd, Iolist) ->
                 ok -> ok;
                 {error, _} = E -> E
             end;
-        {error, _} = E -> E
+        {error, _} = E ->
+            E
     end.
 
 %% @private

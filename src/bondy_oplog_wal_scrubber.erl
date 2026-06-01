@@ -212,8 +212,9 @@ terminate(_Reason, _State) ->
 arm_timer(#state{interval_ms = 0} = State) ->
     State#state{timer_ref = undefined};
 arm_timer(#state{interval_ms = Interval} = State) when Interval > 0 ->
-    Jitter = erlang:phash2(make_ref(), Interval div 5 + 1)
-        - (Interval div 10),
+    Jitter =
+        erlang:phash2(make_ref(), Interval div 5 + 1) -
+            (Interval div 10),
     Delay = max(1, Interval + Jitter),
     Ref = erlang:send_after(Delay, self(), scrub_tick),
     State#state{timer_ref = Ref}.
@@ -300,7 +301,7 @@ walk_each(InstanceId, WalPid, Dir, Sealed, Alerted, ToWalk) ->
     %% aggregation does not require re-parsing telemetry events.
     Walks = [
         walk_one(InstanceId, WalPid, Dir, SegId)
-        || SegId <- ToWalk
+     || SegId <- ToWalk
     ],
     Alerts = length([Outcome || {Outcome, _} <- Walks, Outcome =:= alert]),
     Agg = aggregate_counts([Counts || {_, Counts} <- Walks]),
@@ -334,9 +335,14 @@ aggregate_counts(Maps) ->
 
 %% @private
 zero_segment_measurements() ->
-    #{frames_checked => 0, bad_crc => 0, bad_magic => 0,
-      truncated_segment => 0, bytes_checked => 0,
-      duration_us => 0}.
+    #{
+        frames_checked => 0,
+        bad_crc => 0,
+        bad_magic => 0,
+        truncated_segment => 0,
+        bytes_checked => 0,
+        duration_us => 0
+    }.
 
 %% @private
 %% Walk a single sealed segment. Opens read-only, scans frame-by-frame,
@@ -389,9 +395,15 @@ walk_one(InstanceId, WalPid, Dir, SegId) ->
 %% bad frame (alert).
 walk_frames(Fd) ->
     walk_frames_loop(
-        Fd, ?SEG_HEADER_BYTES,
-        #{frames_checked => 0, bad_crc => 0, bad_magic => 0,
-          truncated_segment => 0, bytes_checked => 0}
+        Fd,
+        ?SEG_HEADER_BYTES,
+        #{
+            frames_checked => 0,
+            bad_crc => 0,
+            bad_magic => 0,
+            truncated_segment => 0,
+            bytes_checked => 0
+        }
     ).
 
 %% @private
@@ -410,8 +422,7 @@ walk_frames_loop(Fd, Off, Counts) ->
                             },
                             walk_frames_loop(Fd, Off + FrameLen, Counts1);
                         {bad, Class} ->
-                            {{alert, Class},
-                             bump(Counts, class_to_key(Class))}
+                            {{alert, Class}, bump(Counts, class_to_key(Class))}
                     end;
                 {error, bad_magic} ->
                     {{alert, bad_magic}, bump(Counts, bad_magic)};
@@ -478,9 +489,17 @@ emit_segment_event(InstanceId, SegId, Outcome, Measurements) ->
 %% events. `trigger` discriminates `scrub_now/1` calls from periodic
 %% ticks so dashboards can break the two apart.
 emit_run_event(InstanceId, Trigger, Summary) ->
-    Keys = [segments_walked, segments_skipped, alerts_raised,
-            frames_checked, bytes_checked, bad_crc, bad_magic,
-            truncated_segment, duration_us],
+    Keys = [
+        segments_walked,
+        segments_skipped,
+        alerts_raised,
+        frames_checked,
+        bytes_checked,
+        bad_crc,
+        bad_magic,
+        truncated_segment,
+        duration_us
+    ],
     Measurements = maps:with(Keys, Summary),
     telemetry:execute(
         [bondy_oplog, wal, scrub, run],

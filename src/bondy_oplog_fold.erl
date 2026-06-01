@@ -110,13 +110,13 @@ unknown atoms are assumed to be application-defined modules.
     strategy/0
 ]).
 
--type state()       :: any().
--type event()       :: any().
--type fold_value()  :: any().
+-type state() :: any().
+-type event() :: any().
+-type fold_value() :: any().
 -type value_delta() :: any().
--type meta()        :: bondy_oplog_event:event_key() | undefined.
--type hlc()         :: bondy_oplog_hlc:hlc().
--type strategy()    :: module() | atom().
+-type meta() :: bondy_oplog_event:event_key() | undefined.
+-type hlc() :: bondy_oplog_hlc:hlc().
+-type strategy() :: module() | atom().
 
 -type apply_result() ::
     {state() | {conflict, [state()]}, value_delta() | none}.
@@ -144,7 +144,6 @@ unknown atoms are assumed to be application-defined modules.
     mod_of_tag/1,
     validate/1
 ]).
-
 
 %% =============================================================================
 %% BEHAVIOUR CALLBACKS
@@ -207,24 +206,20 @@ from current state.
 %% DISPATCHER API
 %% =============================================================================
 
-
 -spec initial_value(strategy()) -> state().
 
 initial_value(Strategy) ->
     (mod_of(Strategy)):initial_value().
-
 
 -spec apply_event(strategy(), state(), event(), meta()) -> apply_result().
 
 apply_event(Strategy, State, Event, Meta) ->
     (mod_of(Strategy)):apply_event(State, Event, Meta).
 
-
 -spec to_value(strategy(), state()) -> fold_value().
 
 to_value(Strategy, State) ->
     (mod_of(Strategy)):to_value(State).
-
 
 -doc """
 Combine an `OldValue` with a `ValueDelta` (as returned by
@@ -243,10 +238,9 @@ condition.
 apply_value_delta(Strategy, Value, Delta) ->
     Mod = mod_of(Strategy),
     case erlang:function_exported(Mod, apply_value_delta, 2) of
-        true  -> Mod:apply_value_delta(Value, Delta);
+        true -> Mod:apply_value_delta(Value, Delta);
         false -> erlang:error({apply_value_delta_not_supported, Mod})
     end.
-
 
 -doc """
 Returns the fold's declared `value_equals_state/0` value, defaulting to
@@ -259,10 +253,9 @@ as the value bytes on HEAD reads.
 value_equals_state(Strategy) ->
     Mod = mod_of(Strategy),
     case erlang:function_exported(Mod, value_equals_state, 0) of
-        true  -> Mod:value_equals_state();
+        true -> Mod:value_equals_state();
         false -> false
     end.
-
 
 -doc """
 Translate a logical event into a physical event against the current
@@ -279,46 +272,39 @@ the cell's single-applier scope.
 resolve_event(Strategy, State, Event) ->
     Mod = mod_of(Strategy),
     case erlang:function_exported(Mod, resolve_event, 2) of
-        true  -> Mod:resolve_event(State, Event);
+        true -> Mod:resolve_event(State, Event);
         false -> Event
     end.
-
 
 -spec hlc(strategy(), state()) -> hlc().
 
 hlc(Strategy, State) ->
     (mod_of(Strategy)):hlc(State).
 
-
 -spec gc_threshold(strategy(), state()) -> hlc() | undefined.
 
 gc_threshold(Strategy, State) ->
     (mod_of(Strategy)):gc_threshold(State).
-
 
 -spec encode_event(strategy(), event()) -> binary().
 
 encode_event(Strategy, Event) ->
     (mod_of(Strategy)):encode_event(Event).
 
-
 -spec decode_event(strategy(), binary()) -> event().
 
 decode_event(Strategy, Bin) ->
     (mod_of(Strategy)):decode_event(Bin).
-
 
 -spec encode_state(strategy(), state()) -> binary().
 
 encode_state(Strategy, State) ->
     (mod_of(Strategy)):encode_state(State).
 
-
 -spec decode_state(strategy(), binary()) -> state().
 
 decode_state(Strategy, Bin) ->
     (mod_of(Strategy)):decode_state(Bin).
-
 
 -spec merge_states(strategy(), state(), state()) ->
     state() | {conflict, [state()]}.
@@ -332,33 +318,30 @@ merge_states(Strategy, A, B) ->
             erlang:error({merge_states_not_supported, Mod})
     end.
 
-
 -spec page_refs(strategy(), event()) -> [hash()].
 
 page_refs(Strategy, Event) ->
     Mod = mod_of(Strategy),
     case erlang:function_exported(Mod, page_refs, 1) of
-        true  -> Mod:page_refs(Event);
+        true -> Mod:page_refs(Event);
         false -> []
     end.
 
-
 -spec mod_of(strategy()) -> module().
 
-mod_of(presence_basic)  -> bondy_oplog_fold_presence_basic;
-mod_of(lww_register)    -> bondy_oplog_fold_lww_register;
+mod_of(presence_basic) -> bondy_oplog_fold_presence_basic;
+mod_of(lww_register) -> bondy_oplog_fold_lww_register;
 mod_of(strict_register) -> bondy_oplog_fold_strict_register;
-mod_of(orset)           -> bondy_oplog_fold_orset;
-mod_of(ttl_presence)    -> bondy_oplog_fold_ttl_presence;
-mod_of(map_of_fields)   -> bondy_oplog_fold_map_of_fields;
-mod_of(aw_map)          -> bondy_oplog_fold_aw_map;
-mod_of(pn_counter)      -> bondy_oplog_fold_pn_counter;
-mod_of(g_counter)       -> bondy_oplog_fold_g_counter;
-mod_of(max_register)    -> bondy_oplog_fold_max_register;
-mod_of(min_register)    -> bondy_oplog_fold_min_register;
-mod_of(g_set)           -> bondy_oplog_fold_g_set;
+mod_of(orset) -> bondy_oplog_fold_orset;
+mod_of(ttl_presence) -> bondy_oplog_fold_ttl_presence;
+mod_of(map_of_fields) -> bondy_oplog_fold_map_of_fields;
+mod_of(aw_map) -> bondy_oplog_fold_aw_map;
+mod_of(pn_counter) -> bondy_oplog_fold_pn_counter;
+mod_of(g_counter) -> bondy_oplog_fold_g_counter;
+mod_of(max_register) -> bondy_oplog_fold_max_register;
+mod_of(min_register) -> bondy_oplog_fold_min_register;
+mod_of(g_set) -> bondy_oplog_fold_g_set;
 mod_of(Mod) when is_atom(Mod) -> Mod.
-
 
 -doc """
 Returns `true` if `Strategy` is a built-in shorthand atom (e.g.
@@ -369,21 +352,20 @@ behaviour" check.
 """.
 -spec is_known(strategy()) -> boolean().
 
-is_known(presence_basic)  -> true;
-is_known(lww_register)    -> true;
+is_known(presence_basic) -> true;
+is_known(lww_register) -> true;
 is_known(strict_register) -> true;
-is_known(orset)           -> true;
-is_known(ttl_presence)    -> true;
-is_known(map_of_fields)   -> true;
-is_known(aw_map)          -> true;
-is_known(pn_counter)      -> true;
-is_known(g_counter)       -> true;
-is_known(max_register)    -> true;
-is_known(min_register)    -> true;
-is_known(g_set)           -> true;
+is_known(orset) -> true;
+is_known(ttl_presence) -> true;
+is_known(map_of_fields) -> true;
+is_known(aw_map) -> true;
+is_known(pn_counter) -> true;
+is_known(g_counter) -> true;
+is_known(max_register) -> true;
+is_known(min_register) -> true;
+is_known(g_set) -> true;
 is_known(Atom) when is_atom(Atom) -> false;
 is_known(_) -> false.
-
 
 -doc """
 Canonical byte tag for a built-in fold shorthand. Used as the
@@ -400,19 +382,18 @@ treat that as a contract violation, not a runtime condition.
 """.
 -spec tag_of(strategy()) -> non_neg_integer().
 
-tag_of(lww_register)    -> 1;
+tag_of(lww_register) -> 1;
 tag_of(strict_register) -> 2;
 %% 3 reserved
-tag_of(ttl_presence)    -> 4;
-tag_of(g_set)           -> 5;
-tag_of(pn_counter)      -> 6;
-tag_of(g_counter)       -> 7;
-tag_of(max_register)    -> 8;
-tag_of(min_register)    -> 9;
-tag_of(orset)           -> 10;
-tag_of(aw_map)          -> 11;
-tag_of(map_of_fields)   -> 12.
-
+tag_of(ttl_presence) -> 4;
+tag_of(g_set) -> 5;
+tag_of(pn_counter) -> 6;
+tag_of(g_counter) -> 7;
+tag_of(max_register) -> 8;
+tag_of(min_register) -> 9;
+tag_of(orset) -> 10;
+tag_of(aw_map) -> 11;
+tag_of(map_of_fields) -> 12.
 
 -doc """
 Inverse of `tag_of/1`. Decode a sub-strategy byte tag back into its
@@ -422,18 +403,17 @@ release.
 """.
 -spec mod_of_tag(non_neg_integer()) -> strategy().
 
-mod_of_tag(1)  -> lww_register;
-mod_of_tag(2)  -> strict_register;
-mod_of_tag(4)  -> ttl_presence;
-mod_of_tag(5)  -> g_set;
-mod_of_tag(6)  -> pn_counter;
-mod_of_tag(7)  -> g_counter;
-mod_of_tag(8)  -> max_register;
-mod_of_tag(9)  -> min_register;
+mod_of_tag(1) -> lww_register;
+mod_of_tag(2) -> strict_register;
+mod_of_tag(4) -> ttl_presence;
+mod_of_tag(5) -> g_set;
+mod_of_tag(6) -> pn_counter;
+mod_of_tag(7) -> g_counter;
+mod_of_tag(8) -> max_register;
+mod_of_tag(9) -> min_register;
 mod_of_tag(10) -> orset;
 mod_of_tag(11) -> aw_map;
 mod_of_tag(12) -> map_of_fields.
-
 
 -doc """
 Validate that `Strategy` resolves to a module that implements the
@@ -469,11 +449,11 @@ validate(Strategy) when is_atom(Strategy) ->
             ],
             Missing = [
                 FA
-                || {F, A} = FA <- Required,
-                   not erlang:function_exported(Mod, F, A)
+             || {F, A} = FA <- Required,
+                not erlang:function_exported(Mod, F, A)
             ],
             case Missing of
-                []      -> ok;
+                [] -> ok;
                 Missing -> {error, {missing_callbacks, Mod, Missing}}
             end;
         {error, Err} ->

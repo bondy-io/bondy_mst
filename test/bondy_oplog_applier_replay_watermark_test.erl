@@ -28,9 +28,11 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
 
 replay_watermark_test_() ->
@@ -79,7 +81,6 @@ cold_replay_full_fold() ->
         teardown_instance(Id, NS, Cache, Proj)
     end.
 
-
 second_replay_short_circuits_when_root_unchanged() ->
     %% After commit_now/1 advances the watermark to the current root,
     %% an immediate follow-up replay observes `CurrentRoot =:= LastRoot`
@@ -103,9 +104,12 @@ second_replay_short_circuits_when_root_unchanged() ->
         Events = drain_telemetry(SubRef),
         %% At least one of the captured replay events must report
         %% `outcome => no_change` — the no-mutation case.
-        NoChange = [E || E <- Events,
-                         maps:get(outcome, element(3, E), undefined)
-                            =:= no_change],
+        NoChange = [
+            E
+         || E <- Events,
+            maps:get(outcome, element(3, E), undefined) =:=
+                no_change
+        ],
         ?assertNotEqual([], NoChange),
         %% Every no_change must have zero work counters.
         lists:foreach(
@@ -119,7 +123,6 @@ second_replay_short_circuits_when_root_unchanged() ->
         detach_telemetry(SubRef),
         teardown_instance(Id, NS, Cache, Proj)
     end.
-
 
 incremental_replay_skips_already_folded_events() ->
     %% Anchor the watermark with an explicit replay after the first
@@ -146,9 +149,12 @@ incremental_replay_skips_already_folded_events() ->
         ok = bondy_oplog_applier:replay_cell_events(Applier),
         ok = barrier(Id),
         Events = drain_telemetry(SubRef),
-        Applied = [E || E <- Events,
-                        maps:get(outcome, element(3, E), undefined)
-                           =:= applied],
+        Applied = [
+            E
+         || E <- Events,
+            maps:get(outcome, element(3, E), undefined) =:=
+                applied
+        ],
         %% At least one `applied` event must show <=2 pairs (the
         %% diff window between the anchored root and the post-second-
         %% batch root). A larger pair count would mean the watermark
@@ -174,7 +180,6 @@ incremental_replay_skips_already_folded_events() ->
         teardown_instance(Id, NS, Cache, Proj)
     end.
 
-
 sync_replay_blocks_until_projection_updated() ->
     %% `replay_cell_events_sync/1` is the call-variant: it must not
     %% return until the diff fold has been applied to the projection.
@@ -194,7 +199,6 @@ sync_replay_blocks_until_projection_updated() ->
         teardown_instance(Id, NS, Cache, Proj)
     end.
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
@@ -202,28 +206,25 @@ sync_replay_blocks_until_projection_updated() ->
 mk_id() ->
     list_to_binary(
         "replay_wm_" ++
-        integer_to_list(erlang:unique_integer([positive, monotonic]))
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
     ).
-
 
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
 
-
 register_shard(NS, Index, Shard) ->
     {ok, Cache} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
-    {ok, Proj}  = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
+    {ok, Proj} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => Cache,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => Cache,
         projection_adapter => bondy_oplog_projection_ets,
-        projection_handle  => Proj,
-        fold_module        => lww_register,
-        overlay            => disabled
+        projection_handle => Proj,
+        fold_module => lww_register,
+        overlay => disabled
     }),
     {Cache, Proj}.
-
 
 setup_instance() ->
     Id = mk_id(),
@@ -239,7 +240,6 @@ setup_instance() ->
     true = is_pid(Applier),
     {Id, NS, Cache, Proj, Applier}.
 
-
 teardown_instance(Id, NS, Cache, Proj) ->
     ok = bondy_oplog:stop_instance(Id),
     ok = bondy_db_core_registry:unregister(NS, primary, 0),
@@ -247,14 +247,12 @@ teardown_instance(Id, NS, Cache, Proj) ->
     ok = bondy_oplog_cache_ets:close(Cache),
     ok.
 
-
 barrier(Id) ->
     %% Sync barrier through the applier mailbox so prior casts have
     %% been processed before the next assertion. The projection value
     %% is ignored — we care only about the synchronisation effect.
     _ = bondy_oplog:projection(Id),
     ok.
-
 
 append_n(_Id, _Key, 0) ->
     ok;
@@ -266,11 +264,9 @@ append_n(Id, Key, N) when is_integer(N), N > 0 ->
         _ -> append_n(Id, Key, N - 1)
     end.
 
-
 append_one(Id, Key, Hlc, Value) ->
     _ = bondy_oplog:append(Id, {cell_apply, ?B, Key, {set, Hlc, Value}}),
     ok.
-
 
 %% @private
 %% telemetry test handler — every replay event lands in the test
@@ -290,11 +286,9 @@ attach_telemetry() ->
     ),
     Ref.
 
-
 detach_telemetry(Ref) ->
     telemetry:detach({?MODULE, Ref}),
     ok.
-
 
 drain_telemetry(Ref) ->
     drain_telemetry(Ref, []).

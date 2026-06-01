@@ -50,17 +50,20 @@ proper_pack_codec_test_() ->
     Opts = [{numtests, 50}, {to_file, user}],
     [
         {timeout, 30,
-         ?_assert(proper:quickcheck(prop_pack_header_roundtrip(), Opts))},
+            ?_assert(proper:quickcheck(prop_pack_header_roundtrip(), Opts))},
         {timeout, 30,
-         ?_assert(proper:quickcheck(prop_record_roundtrip(), Opts))},
+            ?_assert(proper:quickcheck(prop_record_roundtrip(), Opts))},
         {timeout, 30,
-         ?_assert(proper:quickcheck(prop_record_body_bit_flip_detection(), Opts))},
+            ?_assert(
+                proper:quickcheck(prop_record_body_bit_flip_detection(), Opts)
+            )},
         {timeout, 30,
-         ?_assert(proper:quickcheck(prop_trailer_bit_flip_detection(), Opts))},
+            ?_assert(
+                proper:quickcheck(prop_trailer_bit_flip_detection(), Opts)
+            )},
+        {timeout, 30, ?_assert(proper:quickcheck(prop_idx_roundtrip(), Opts))},
         {timeout, 30,
-         ?_assert(proper:quickcheck(prop_idx_roundtrip(), Opts))},
-        {timeout, 30,
-         ?_assert(proper:quickcheck(prop_bloom_no_false_negatives(), Opts))}
+            ?_assert(proper:quickcheck(prop_bloom_no_false_negatives(), Opts))}
     ].
 
 %% =============================================================================
@@ -74,7 +77,8 @@ prop_pack_header_roundtrip() ->
         begin
             Bin = bondy_mst_pack_codec:encode_pack_header(H),
             case bondy_mst_pack_codec:decode_pack_header(Bin) of
-                {ok, H} -> true;
+                {ok, H} ->
+                    true;
                 Other ->
                     io:format("decode mismatch: ~p~n", [Other]),
                     false
@@ -103,8 +107,11 @@ prop_record_roundtrip() ->
 prop_record_body_bit_flip_detection() ->
     ?FORALL(
         {Page, BitIdx},
-        ?LET(B, non_empty(binary()),
-             {B, choose(0, byte_size(B) * 8 - 1)}),
+        ?LET(
+            B,
+            non_empty(binary()),
+            {B, choose(0, byte_size(B) * 8 - 1)}
+        ),
         begin
             Hash = crypto:hash(sha256, Page),
             Bin = iolist_to_binary(
@@ -122,8 +129,11 @@ prop_record_body_bit_flip_detection() ->
 prop_trailer_bit_flip_detection() ->
     ?FORALL(
         {Body, BitIdx},
-        ?LET(B, non_empty(binary()),
-             {B, choose(0, byte_size(B) * 8 - 1)}),
+        ?LET(
+            B,
+            non_empty(binary()),
+            {B, choose(0, byte_size(B) * 8 - 1)}
+        ),
         begin
             Trailer = bondy_mst_pack_codec:compute_trailer(Body),
             BadBody = flip_bit(Body, BitIdx),
@@ -162,8 +172,11 @@ prop_idx_roundtrip() ->
 prop_bloom_no_false_negatives() ->
     ?FORALL(
         Hashes,
-        ?LET(N, choose(0, 200),
-             vector(N, binary(32))),
+        ?LET(
+            N,
+            choose(0, 200),
+            vector(N, binary(32))
+        ),
         begin
             case Hashes of
                 [] ->
@@ -193,18 +206,20 @@ prop_bloom_no_false_negatives() ->
 header_gen() ->
     ?LET(
         {PackId, InstanceHash, CreatedAt, RecordCount},
-        {non_neg_integer(),
-         non_neg_integer(),
-         non_neg_integer(),
-         non_neg_integer()},
+        {
+            non_neg_integer(),
+            non_neg_integer(),
+            non_neg_integer(),
+            non_neg_integer()
+        },
         #{
-            version       => 1,
-            flags         => 0,
-            pack_id       => PackId rem (1 bsl 64),
+            version => 1,
+            flags => 0,
+            pack_id => PackId rem (1 bsl 64),
             instance_hash => InstanceHash rem (1 bsl 32),
-            hash_algo     => sha256,
-            created_at    => CreatedAt rem (1 bsl 64),
-            record_count  => RecordCount rem (1 bsl 32)
+            hash_algo => sha256,
+            created_at => CreatedAt rem (1 bsl 64),
+            record_count => RecordCount rem (1 bsl 32)
         }
     ).
 

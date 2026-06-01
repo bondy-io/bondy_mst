@@ -81,19 +81,19 @@ keeps reads parallel.
 -define(TABLE, bondy_db_core_registry_tab).
 
 -record(entry, {
-    key                :: shard_key(),
-    shard_count        :: pos_integer(),
-    cache_adapter      :: module(),
-    cache_handle       :: term(),
+    key :: shard_key(),
+    shard_count :: pos_integer(),
+    cache_adapter :: module(),
+    cache_handle :: term(),
     projection_adapter :: module(),
-    projection_handle  :: term(),
-    overlay            :: disabled | bondy_oplog_db_overlay:tid(),
-    fold_module        :: bondy_oplog_fold:strategy(),
+    projection_handle :: term(),
+    overlay :: disabled | bondy_oplog_db_overlay:tid(),
+    fold_module :: bondy_oplog_fold:strategy(),
     %% Per-shard freshness counter, written by the applier on each
     %% projection commit (or by anti-entropy on each successful round).
     %% Stored as `monotonic_time(millisecond)`; read wait-free by
     %% `ensure_fresh/2` (`MST_DB_DESIGN.md` §11).
-    ae_atomics         :: atomics:atomics_ref(),
+    ae_atomics :: atomics:atomics_ref(),
     %% Per-shard high-water HLC mark
     %% (`bondy_oplog_high_water`). Tracks the highest HLC of any
     %% `cell_apply` event the applier has materialised into the
@@ -101,13 +101,13 @@ keeps reads parallel.
     %% the applier (writer) and read-only consumers
     %% (catalogue-freshness reporting, bootstrap finalisation) without
     %% threading through the applier's process state.
-    high_water_ref     :: bondy_oplog_high_water:ref(),
+    high_water_ref :: bondy_oplog_high_water:ref(),
     %% Per-namespace policy (§15). `ap` (default) places no constraint
     %% on reads; `cp` rejects `eventual`-consistency batch reads to
     %% prevent unfenced staleness. Owners pass this on `register/4`;
     %% the substrate trusts the value to be consistent across shards
     %% of the same namespace (consumer responsibility).
-    consistency_class  :: ap | cp
+    consistency_class :: ap | cp
 }).
 
 -record(state, {
@@ -122,9 +122,9 @@ keeps reads parallel.
     epoch :: reference()
 }).
 
--type shard_key()   :: {atom(), atom(), non_neg_integer()}.
+-type shard_key() :: {atom(), atom(), non_neg_integer()}.
 -type shard_entry() :: #entry{}.
--type config()      :: #{
+-type config() :: #{
     shard_count := pos_integer(),
     cache_adapter := module(),
     cache_handle := term(),
@@ -193,8 +193,14 @@ keeps reads parallel.
 %% Namespace-level consistency_class lookup (`MST_DB_DESIGN.md` §15).
 -export([consistency_class/1]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
-         code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 %% =============================================================================
 %% API
@@ -210,10 +216,8 @@ child_spec() ->
         modules => [?MODULE]
     }.
 
-
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-
 
 -spec register(
     Namespace :: atom(),
@@ -222,9 +226,13 @@ start_link() ->
     Config :: config()
 ) -> ok | {error, {missing_required_field, atom()}}.
 
-register(NS, Index, Shard, Config)
-        when is_atom(NS), is_atom(Index), is_integer(Shard), Shard >= 0,
-             is_map(Config) ->
+register(NS, Index, Shard, Config) when
+    is_atom(NS),
+    is_atom(Index),
+    is_integer(Shard),
+    Shard >= 0,
+    is_map(Config)
+->
     %% Validate required keys here, before the gen_server call. A bad
     %% config crashing inside the gen_server would wipe the monitor
     %% bookkeeping for every other registration on the node — a
@@ -233,48 +241,47 @@ register(NS, Index, Shard, Config)
     case validate_config(Config) of
         ok ->
             Owner = maps:get(owner, Config, self()),
-            gen_server:call(?MODULE, {register, NS, Index, Shard, Owner, Config});
+            gen_server:call(
+                ?MODULE, {register, NS, Index, Shard, Owner, Config}
+            );
         {error, _} = Err ->
             Err
     end.
-
 
 -spec unregister(atom(), atom(), non_neg_integer()) -> ok.
 
 unregister(NS, Index, Shard) ->
     gen_server:call(?MODULE, {unregister, {NS, Index, Shard}}).
 
-
--doc("""
+-doc """
 Return the current epoch reference. A new epoch is allocated on each
 gen_server start and broadcast on
 `bondy_db_core_events:notify(bondy_db_core_registry_started, Epoch)`.
 Owners cache the epoch they last saw and treat any change as
 "registry was restarted; re-register every shard I own".
-""").
+""".
 -spec current_epoch() -> reference().
 
 current_epoch() ->
     gen_server:call(?MODULE, current_epoch).
 
-
--doc("""
+-doc """
 Atomic snapshot of `(ETS entries, mon_to_key, key_to_mon)` for
 invariant-checking callers. Runs inside the gen_server so the ETS
 read and the in-memory maps come from the same instant — an outside
 observer combining `sys:get_state/1` with `lookup/3` would race against
 DOWN handlers and unregister calls. Intended for tests and operator
 diagnostics; ordinary callers should use `lookup/3`.
-""").
--spec snapshot_for_invariants() -> #{
-    entries     := [shard_entry()],
-    mon_to_key  := #{reference() := shard_key()},
-    key_to_mon  := #{shard_key() := reference()}
-}.
+""".
+-spec snapshot_for_invariants() ->
+    #{
+        entries := [shard_entry()],
+        mon_to_key := #{reference() := shard_key()},
+        key_to_mon := #{shard_key() := reference()}
+    }.
 
 snapshot_for_invariants() ->
     gen_server:call(?MODULE, snapshot_for_invariants).
-
 
 -spec lookup(atom(), atom(), non_neg_integer()) ->
     {ok, shard_entry()} | not_found.
@@ -285,49 +292,47 @@ lookup(NS, Index, Shard) ->
         [] -> not_found
     end.
 
-
 -spec shard_count(atom(), atom()) -> {ok, pos_integer()} | not_found.
 
 shard_count(NS, Index) ->
-    MS = [{
-        #entry{
-            key = {NS, Index, '_'},
-            shard_count = '$1',
-            _ = '_'
-        },
-        [],
-        ['$1']
-    }],
+    MS = [
+        {
+            #entry{
+                key = {NS, Index, '_'},
+                shard_count = '$1',
+                _ = '_'
+            },
+            [],
+            ['$1']
+        }
+    ],
     case ets:select(?TABLE, MS, 1) of
         {[Count], _} -> {ok, Count};
         '$end_of_table' -> not_found
     end.
-
 
 -spec list() -> [shard_entry()].
 
 list() ->
     ets:select(?TABLE, [{'_', [], ['$_']}]).
 
-
--doc("""
+-doc """
 Record on the shard's atomics counter that the shard has just had a
 fresh round of applier activity (or anti-entropy convergence). Wait-free.
 
 Uses `erlang:monotonic_time(millisecond)` as the bump timestamp. For
 applier loops that bump several shards in one logical step and want
 to reuse the same "now" across them, see `bump_ae/4`.
-""").
+""".
 -spec bump_ae(atom(), atom(), non_neg_integer()) -> ok | not_found.
 
 bump_ae(NS, Index, Shard) ->
     bump_ae(NS, Index, Shard, erlang:monotonic_time(millisecond)).
 
-
--doc("""
+-doc """
 Like `bump_ae/3` but caller supplies the monotonic millisecond
 timestamp so the same "now" can be reused across a batch of shards.
-""").
+""".
 -spec bump_ae(atom(), atom(), non_neg_integer(), integer()) ->
     ok | not_found.
 
@@ -340,8 +345,7 @@ bump_ae(NS, Index, Shard, Now) when is_integer(Now) ->
             not_found
     end.
 
-
--doc("""
+-doc """
 Read the per-shard high-water HLC mark
 (`bondy_oplog_high_water`).
 
@@ -353,7 +357,7 @@ registered under the given key.
 
 The watermark is *not* durable across instance restarts — see
 `bondy_oplog_high_water` module docs.
-""").
+""".
 -spec high_water_hlc(atom(), atom(), non_neg_integer()) ->
     {ok, non_neg_integer()} | {ok, no_watermark} | not_found.
 
@@ -365,13 +369,12 @@ high_water_hlc(NS, Index, Shard) ->
             not_found
     end.
 
-
--doc("""
+-doc """
 Bump every shard in `Targets` with a single shared
 `erlang:monotonic_time(millisecond)` so the batch observes the same
 "now". Returns `{Bumped, NotFound}` counts for telemetry. An empty
 list is a strict no-op and returns `{0, 0}`.
-""").
+""".
 -spec bump_ae_targets([shard_key()]) ->
     {non_neg_integer(), non_neg_integer()}.
 
@@ -380,13 +383,12 @@ bump_ae_targets([]) ->
 bump_ae_targets(Targets) when is_list(Targets) ->
     bump_ae_targets(Targets, erlang:monotonic_time(millisecond)).
 
-
--doc("""
+-doc """
 Like `bump_ae_targets/1` but caller supplies the monotonic
 millisecond timestamp so the same "now" can be reused across multiple
 target lists (e.g., when both the applier and an AE round complete in
 the same logical tick).
-""").
+""".
 -spec bump_ae_targets([shard_key()], integer()) ->
     {non_neg_integer(), non_neg_integer()}.
 
@@ -396,7 +398,7 @@ bump_ae_targets(Targets, Now) when is_list(Targets), is_integer(Now) ->
     lists:foldl(
         fun({NS, Index, Shard}, {B, NF}) ->
             case bump_ae(NS, Index, Shard, Now) of
-                ok        -> {B + 1, NF};
+                ok -> {B + 1, NF};
                 not_found -> {B, NF + 1}
             end
         end,
@@ -404,8 +406,7 @@ bump_ae_targets(Targets, Now) when is_list(Targets), is_integer(Now) ->
         Targets
     ).
 
-
--doc("""
+-doc """
 Return the monotonic millisecond timestamp of the shard's last AE bump.
 Wait-free.
 
@@ -415,7 +416,7 @@ positive number regardless of the node's `monotonic_time` offset).
 The sentinel ensures un-bumped shards reliably fail any finite
 `max_lag` check until the applier or AE has driven the counter
 forward at least once.
-""").
+""".
 -spec last_ae_at(atom(), atom(), non_neg_integer()) ->
     integer() | not_found.
 
@@ -427,43 +428,44 @@ last_ae_at(NS, Index, Shard) ->
             not_found
     end.
 
-
--doc("""
+-doc """
 Return all entries registered for the namespace. Used by callers that
 need the atomics ref directly to avoid the second `lookup/3`.
-""").
+""".
 -spec shards_for(atom()) -> [shard_entry()].
 
 shards_for(NS) when is_atom(NS) ->
-    MS = [{
-        #entry{
-            key = {NS, '_', '_'},
-            _ = '_'
-        },
-        [],
-        ['$_']
-    }],
+    MS = [
+        {
+            #entry{
+                key = {NS, '_', '_'},
+                _ = '_'
+            },
+            [],
+            ['$_']
+        }
+    ],
     ets:select(?TABLE, MS).
 
-
--doc("""
+-doc """
 List of all distinct namespaces registered. Used by callers that want
 to apply a freshness check over "every namespace this node knows about"
 without spelling them out.
-""").
+""".
 -spec namespaces() -> [atom()].
 
 namespaces() ->
-    MS = [{
-        #entry{
-            key = {'$1', '_', '_'},
-            _ = '_'
-        },
-        [],
-        ['$1']
-    }],
+    MS = [
+        {
+            #entry{
+                key = {'$1', '_', '_'},
+                _ = '_'
+            },
+            [],
+            ['$1']
+        }
+    ],
     lists:usort(ets:select(?TABLE, MS)).
-
 
 %% =============================================================================
 %% Accessors
@@ -481,30 +483,30 @@ entry_ae_atomics(#entry{ae_atomics = V}) -> V.
 entry_high_water_ref(#entry{high_water_ref = V}) -> V.
 entry_consistency_class(#entry{consistency_class = V}) -> V.
 
-
--doc("""
+-doc """
 Return the consistency class declared for the namespace. Reads it from
 any registered shard of the namespace (the substrate trusts the value
 to be consistent across shards — see `register/4`). Returns `ap` for an
 unknown namespace, matching the default.
-""").
+""".
 -spec consistency_class(atom()) -> ap | cp.
 
 consistency_class(NS) when is_atom(NS) ->
-    MS = [{
-        #entry{
-            key = {NS, '_', '_'},
-            consistency_class = '$1',
-            _ = '_'
-        },
-        [],
-        ['$1']
-    }],
+    MS = [
+        {
+            #entry{
+                key = {NS, '_', '_'},
+                consistency_class = '$1',
+                _ = '_'
+            },
+            [],
+            ['$1']
+        }
+    ],
     case ets:select(?TABLE, MS, 1) of
         {[Class], _} -> Class;
         '$end_of_table' -> ap
     end.
-
 
 %% =============================================================================
 %% gen_server callbacks
@@ -532,20 +534,21 @@ handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
     %% before installing the new owner.
     State1 = drop_monitor_for_key(Key, State0),
     Mon = erlang:monitor(process, Owner),
-    Ae = case maps:find(ae_atomics, Config) of
-        {ok, ExistingRef} ->
-            ExistingRef;
-        error ->
-            NewRef = atomics:new(1, [{signed, true}]),
-            %% Initialise to a "very stale" sentinel so that on a node
-            %% where `monotonic_time(millisecond)` is large-negative
-            %% (the default offset), `Now - sentinel` is always huge,
-            %% i.e. an un-bumped shard fails any finite freshness
-            %% check. -(1 bsl 62) leaves plenty of headroom above the
-            %% signed-int64 floor for subtraction not to wrap.
-            ok = atomics:put(NewRef, 1, -(1 bsl 62)),
-            NewRef
-    end,
+    Ae =
+        case maps:find(ae_atomics, Config) of
+            {ok, ExistingRef} ->
+                ExistingRef;
+            error ->
+                NewRef = atomics:new(1, [{signed, true}]),
+                %% Initialise to a "very stale" sentinel so that on a node
+                %% where `monotonic_time(millisecond)` is large-negative
+                %% (the default offset), `Now - sentinel` is always huge,
+                %% i.e. an un-bumped shard fails any finite freshness
+                %% check. -(1 bsl 62) leaves plenty of headroom above the
+                %% signed-int64 floor for subtraction not to wrap.
+                ok = atomics:put(NewRef, 1, -(1 bsl 62)),
+                NewRef
+        end,
     HighWater = bondy_oplog_high_water:new(),
     Entry = #entry{
         key = Key,
@@ -566,23 +569,19 @@ handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
         key_to_mon = maps:put(Key, Mon, State1#state.key_to_mon)
     },
     {reply, ok, State2};
-
 handle_call({unregister, Key}, _From, State0) ->
     State1 = drop_monitor_for_key(Key, State0),
     true = ets:delete(?TABLE, Key),
     {reply, ok, State1};
-
 handle_call(current_epoch, _From, #state{epoch = E} = State) ->
     {reply, E, State};
-
 handle_call(snapshot_for_invariants, _From, State) ->
     Snapshot = #{
-        entries    => ets:select(?TABLE, [{'_', [], ['$_']}]),
+        entries => ets:select(?TABLE, [{'_', [], ['$_']}]),
         mon_to_key => State#state.mon_to_key,
         key_to_mon => State#state.key_to_mon
     },
     {reply, Snapshot, State};
-
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown}, State}.
 
@@ -616,22 +615,25 @@ handle_info(_, State) ->
 terminate(_, _) -> ok.
 code_change(_, State, _) -> {ok, State}.
 
-
 %% =============================================================================
 %% Internal
 %% =============================================================================
 
 -define(REQUIRED_FIELDS, [
-    shard_count, cache_adapter, cache_handle,
-    projection_adapter, projection_handle, fold_module, overlay
+    shard_count,
+    cache_adapter,
+    cache_handle,
+    projection_adapter,
+    projection_handle,
+    fold_module,
+    overlay
 ]).
 
 validate_config(Config) ->
     case [K || K <- ?REQUIRED_FIELDS, not maps:is_key(K, Config)] of
-        []      -> validate_consistency_class(Config);
+        [] -> validate_consistency_class(Config);
         [K | _] -> {error, {missing_required_field, K}}
     end.
-
 
 validate_consistency_class(Config) ->
     case maps:find(consistency_class, Config) of
@@ -639,7 +641,6 @@ validate_consistency_class(Config) ->
         {ok, Bad} -> {error, {invalid_consistency_class, Bad}};
         error -> ok
     end.
-
 
 drop_monitor_for_key(Key, State) ->
     case maps:take(Key, State#state.key_to_mon) of

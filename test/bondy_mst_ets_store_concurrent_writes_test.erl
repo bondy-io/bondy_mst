@@ -39,7 +39,6 @@ capabilities_advertises_concurrent_writes_test() ->
     ?assertEqual(true, maps:get(concurrent_writes, Caps, false)),
     ok = bondy_mst_ets_store:destroy(Store).
 
-
 non_owner_can_insert_into_store_tab_test() ->
     %% The substrate fix that landed for the Jepsen OR-set work made
     %% the store's ETS table `public` unconditionally so the sync
@@ -83,7 +82,6 @@ non_owner_can_insert_into_store_tab_test() ->
     ok = bondy_mst_ets_store:destroy(Store),
     ?assertEqual(ok, Outcome).
 
-
 concurrent_writers_do_not_interfere_test() ->
     %% Two non-owner processes putting different pages must both
     %% succeed. `public` ETS allows this; `protected` would deny both.
@@ -101,12 +99,14 @@ concurrent_writers_do_not_interfere_test() ->
         spawn_writer(Self, Store, PageB)
     ],
     Results = [
-        receive {outcome, Pid, R} -> R after 1_000 -> timeout end
-        || Pid <- Workers
+        receive
+            {outcome, Pid, R} -> R
+        after 1_000 -> timeout
+        end
+     || Pid <- Workers
     ],
     ok = bondy_mst_ets_store:destroy(Store),
     ?assertEqual([ok, ok], Results).
-
 
 %% =============================================================================
 %% Helpers

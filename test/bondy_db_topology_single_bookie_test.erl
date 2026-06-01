@@ -18,23 +18,20 @@
 %% =============================================================================
 
 topology_test_() ->
-    {foreach,
-        fun setup/0,
-        fun cleanup/1,
-        [
-            fun init_with_valid_opts_starts_bookie/1,
-            fun init_rejects_missing_sup/1,
-            fun init_rejects_missing_dir/1,
-            fun open_table_does_not_start_new_bookie/1,
-            fun open_two_tables_share_one_bookie/1,
-            fun route_returns_adapter_and_bookie_handle/1,
-            fun bucket_for_composes_realm_and_entity/1,
-            fun bucket_for_distinct_entities_distinct_buckets/1,
-            fun close_table_is_a_noop/1,
-            fun shutdown_stops_bookie_and_supervisor/1,
-            fun end_to_end_put_get_through_topology/1,
-            fun bucket_isolation_across_realms_via_key/1
-        ]}.
+    {foreach, fun setup/0, fun cleanup/1, [
+        fun init_with_valid_opts_starts_bookie/1,
+        fun init_rejects_missing_sup/1,
+        fun init_rejects_missing_dir/1,
+        fun open_table_does_not_start_new_bookie/1,
+        fun open_two_tables_share_one_bookie/1,
+        fun route_returns_adapter_and_bookie_handle/1,
+        fun bucket_for_composes_realm_and_entity/1,
+        fun bucket_for_distinct_entities_distinct_buckets/1,
+        fun close_table_is_a_noop/1,
+        fun shutdown_stops_bookie_and_supervisor/1,
+        fun end_to_end_put_get_through_topology/1,
+        fun bucket_isolation_across_realms_via_key/1
+    ]}.
 
 %% =============================================================================
 %% Setup / teardown
@@ -49,7 +46,7 @@ setup() ->
 
 cleanup({Sup, Dir}) ->
     case is_process_alive(Sup) of
-        true  -> bondy_db_leveled_sup:stop(Sup);
+        true -> bondy_db_leveled_sup:stop(Sup);
         false -> ok
     end,
     rmrf(Dir),
@@ -67,7 +64,6 @@ init_with_valid_opts_starts_bookie({Sup, Dir}) ->
         ?assert(is_process_alive(Bookie))
     end.
 
-
 init_rejects_missing_sup({_Sup, Dir}) ->
     fun() ->
         ?assertMatch(
@@ -75,7 +71,6 @@ init_rejects_missing_sup({_Sup, Dir}) ->
             ?MOD:init(my_db, #{dir => Dir})
         )
     end.
-
 
 init_rejects_missing_dir({Sup, _Dir}) ->
     fun() ->
@@ -85,7 +80,6 @@ init_rejects_missing_dir({Sup, _Dir}) ->
         )
     end.
 
-
 open_table_does_not_start_new_bookie({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
@@ -94,20 +88,18 @@ open_table_does_not_start_new_bookie({Sup, Dir}) ->
         ?assertEqual(BookieBefore, maps:get(bookie, T))
     end.
 
-
 open_two_tables_share_one_bookie({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
-        {ok, T1, _} = ?MOD:open_table(users,  8, #{}, S0),
+        {ok, T1, _} = ?MOD:open_table(users, 8, #{}, S0),
         {ok, T2, _} = ?MOD:open_table(tokens, 8, #{}, S0),
         ?assertEqual(maps:get(bookie, T1), maps:get(bookie, T2))
     end.
 
-
 route_returns_adapter_and_bookie_handle({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
-        {ok, T,  _} = ?MOD:open_table(users, 8, #{}, S0),
+        {ok, T, _} = ?MOD:open_table(users, 8, #{}, S0),
         {ok, Adapter, Handle} = ?MOD:route(0, T),
         ?assertEqual(bondy_oplog_projection_leveled, Adapter),
         %% Bucket is supplied per-call via `bucket_for/3`; the handle
@@ -115,7 +107,6 @@ route_returns_adapter_and_bookie_handle({Sup, Dir}) ->
         ?assertMatch(#{bookie := _}, Handle),
         ?assertNot(maps:is_key(bucket, Handle))
     end.
-
 
 bucket_for_composes_realm_and_entity({Sup, Dir}) ->
     fun() ->
@@ -129,17 +120,15 @@ bucket_for_composes_realm_and_entity({Sup, Dir}) ->
         )
     end.
 
-
 bucket_for_distinct_entities_distinct_buckets({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
-        {ok, Users,  _} = ?MOD:open_table(users,  8, #{}, S0),
+        {ok, Users, _} = ?MOD:open_table(users, 8, #{}, S0),
         {ok, Tokens, _} = ?MOD:open_table(tokens, 8, #{}, S0),
-        UB = ?MOD:bucket_for(users,  <<"realm-1">>, Users),
+        UB = ?MOD:bucket_for(users, <<"realm-1">>, Users),
         TB = ?MOD:bucket_for(tokens, <<"realm-1">>, Tokens),
         ?assertNotEqual(UB, TB)
     end.
-
 
 close_table_is_a_noop({Sup, Dir}) ->
     fun() ->
@@ -151,7 +140,6 @@ close_table_is_a_noop({Sup, Dir}) ->
         ?assert(is_process_alive(Bookie))
     end.
 
-
 shutdown_stops_bookie_and_supervisor({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
@@ -160,19 +148,19 @@ shutdown_stops_bookie_and_supervisor({Sup, Dir}) ->
         wait_until_dead([Sup, Bookie], 5_000)
     end.
 
-
 end_to_end_put_get_through_topology({Sup, Dir}) ->
     fun() ->
         {ok, S0} = ?MOD:init(my_db, #{sup => Sup, dir => Dir}),
-        {ok, T,  _} = ?MOD:open_table(users, 8, #{}, S0),
+        {ok, T, _} = ?MOD:open_table(users, 8, #{}, S0),
         {ok, Adapter, Handle} = ?MOD:route(0, T),
         Bucket = ?MOD:bucket_for(users, <<"realm-1">>, T),
         F = mk_frame(<<"frame">>),
         ok = Adapter:put_batch(Handle, [{Bucket, <<"alice">>, F}]),
-        ?assertEqual({ok, F},
-                     Adapter:get(Handle, Bucket, <<"alice">>))
+        ?assertEqual(
+            {ok, F},
+            Adapter:get(Handle, Bucket, <<"alice">>)
+        )
     end.
-
 
 bucket_isolation_across_realms_via_key({Sup, Dir}) ->
     fun() ->
@@ -195,10 +183,8 @@ bucket_isolation_across_realms_via_key({Sup, Dir}) ->
         ?assertEqual({ok, F2}, Adapter:get(Handle, B2, <<"alice">>))
     end.
 
-
 mk_frame(Bytes) when is_binary(Bytes) ->
     bondy_oplog_cell_frame:encode(0, Bytes, Bytes, false).
-
 
 %% =============================================================================
 %% Helpers
@@ -213,14 +199,12 @@ make_tempdir() ->
     ok = filelib:ensure_dir(filename:join(Base, ".keep")),
     Base.
 
-
 rmrf(Dir) ->
     case file:del_dir_r(Dir) of
-        ok              -> ok;
+        ok -> ok;
         {error, enoent} -> ok;
-        {error, _}      -> ok
+        {error, _} -> ok
     end.
-
 
 wait_until_dead([], _Deadline) ->
     ok;

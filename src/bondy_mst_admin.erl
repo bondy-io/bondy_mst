@@ -83,14 +83,15 @@ Events emitted on the path `[bondy_mst, admin, ...]`:
 -define(MANIFEST_FILE, "manifest.etf").
 -define(MANIFEST_TAG, backup_v1).
 -define(HASH_ALGO, sha256).
--define(COPY_CHUNK, 1048576). %% 1 MiB
+%% 1 MiB
+-define(COPY_CHUNK, 1048576).
 
 -type manifest() :: #{
-    created_at  := non_neg_integer(),
-    source_dir  := binary(),
-    file_count  := non_neg_integer(),
+    created_at := non_neg_integer(),
+    source_dir := binary(),
+    file_count := non_neg_integer(),
     total_bytes := non_neg_integer(),
-    files       := [{binary(), non_neg_integer(), binary()}]
+    files := [{binary(), non_neg_integer(), binary()}]
 }.
 
 -export_type([manifest/0]).
@@ -141,14 +142,22 @@ backup(SourceDir, BackupDir, Opts) when is_map(Opts) ->
     DurationUs = erlang:monotonic_time(microsecond) - Start,
     case Result of
         {ok, #{file_count := FC, total_bytes := TB} = Manifest} ->
-            emit([backup, complete],
-                 #{file_count => FC, total_bytes => TB,
-                   duration_us => DurationUs},
-                 #{source => Source, target => Target}),
+            emit(
+                [backup, complete],
+                #{
+                    file_count => FC,
+                    total_bytes => TB,
+                    duration_us => DurationUs
+                },
+                #{source => Source, target => Target}
+            ),
             {ok, Manifest};
         {error, R} ->
-            emit([backup, failed], #{duration_us => DurationUs},
-                 #{source => Source, target => Target, reason => R}),
+            emit(
+                [backup, failed],
+                #{duration_us => DurationUs},
+                #{source => Source, target => Target, reason => R}
+            ),
             {error, R}
     end.
 
@@ -179,14 +188,22 @@ verify(BackupDir) ->
     DurationUs = erlang:monotonic_time(microsecond) - Start,
     case Result of
         {ok, #{file_count := FC, total_bytes := TB} = M} ->
-            emit([verify, complete],
-                 #{file_count => FC, total_bytes => TB,
-                   duration_us => DurationUs},
-                 #{target => Target}),
+            emit(
+                [verify, complete],
+                #{
+                    file_count => FC,
+                    total_bytes => TB,
+                    duration_us => DurationUs
+                },
+                #{target => Target}
+            ),
             {ok, M};
         {error, R} ->
-            emit([verify, failed], #{duration_us => DurationUs},
-                 #{target => Target, reason => R}),
+            emit(
+                [verify, failed],
+                #{duration_us => DurationUs},
+                #{target => Target, reason => R}
+            ),
             {error, R}
     end.
 
@@ -230,14 +247,22 @@ restore(BackupDir, TargetDir, Opts) when is_map(Opts) ->
     DurationUs = erlang:monotonic_time(microsecond) - Start,
     case Result of
         {ok, #{file_count := FC, total_bytes := TB} = M} ->
-            emit([restore, complete],
-                 #{file_count => FC, total_bytes => TB,
-                   duration_us => DurationUs},
-                 #{source => Source, target => Target}),
+            emit(
+                [restore, complete],
+                #{
+                    file_count => FC,
+                    total_bytes => TB,
+                    duration_us => DurationUs
+                },
+                #{source => Source, target => Target}
+            ),
             {ok, M};
         {error, R} ->
-            emit([restore, failed], #{duration_us => DurationUs},
-                 #{source => Source, target => Target, reason => R}),
+            emit(
+                [restore, failed],
+                #{duration_us => DurationUs},
+                #{source => Source, target => Target, reason => R}
+            ),
             {error, R}
     end.
 
@@ -290,11 +315,11 @@ do_backup(Source, Target) ->
             Files
         ),
     Manifest = #{
-        created_at  => erlang:system_time(microsecond),
-        source_dir  => Source,
-        file_count  => length(Entries),
+        created_at => erlang:system_time(microsecond),
+        source_dir => Source,
+        file_count => length(Entries),
         total_bytes => TotalBytes,
-        files       => lists:reverse(Entries)
+        files => lists:reverse(Entries)
     },
     ok = write_manifest(Target, Manifest),
     {ok, Manifest}.
@@ -311,9 +336,9 @@ walk(Root) ->
     Prefix = RootList ++ "/",
     lists:sort([
         list_to_binary(strip_prefix(F, Prefix))
-        || F <- All,
-           filelib:is_regular(F),
-           filename:basename(F) =/= ?MANIFEST_FILE
+     || F <- All,
+        filelib:is_regular(F),
+        filename:basename(F) =/= ?MANIFEST_FILE
     ]).
 
 %% @private
@@ -481,7 +506,8 @@ write_and_sync(TmpPath, Bin) ->
             after
                 _ = prim_file:close(Fd)
             end;
-        {error, _} = E -> E
+        {error, _} = E ->
+            E
     end.
 
 %% =============================================================================

@@ -96,8 +96,9 @@ orphan-deleted, and manifest-flip cases.
     HashAlgo :: atom()
 ) -> {ok, recover_outcome()} | {error, recover_error()}.
 
-recover(Dir, InstanceId, HashAlgo)
-    when is_binary(InstanceId), is_atom(HashAlgo) ->
+recover(Dir, InstanceId, HashAlgo) when
+    is_binary(InstanceId), is_atom(HashAlgo)
+->
     case bondy_mst_pack_manifest:read(Dir) of
         {ok, M} ->
             Declared = bondy_mst_pack_manifest:incoming_pack(M),
@@ -123,7 +124,6 @@ do_recover(_Dir, _InstanceId, _HashAlgo, _M, absent, Path, true) ->
         {error, R} ->
             {error, {orphan_delete, R}}
     end;
-
 %% Case B: manifest says yes, file missing → flip manifest to absent.
 do_recover(Dir, _InstanceId, _HashAlgo, M, present, _Path, false) ->
     case flip_manifest_to_absent(Dir, M) of
@@ -133,11 +133,9 @@ do_recover(Dir, _InstanceId, _HashAlgo, M, present, _Path, false) ->
         {error, R} ->
             {error, {manifest, R}}
     end;
-
 %% Case C/D: manifest says yes, file exists → scan and repair in place.
 do_recover(Dir, InstanceId, HashAlgo, M, present, Path, true) ->
     scan_and_repair(Dir, InstanceId, HashAlgo, M, Path);
-
 %% Fully consistent: nothing to do. The writer never returns
 %% `needs_recovery` for this shape, but be defensive.
 do_recover(_Dir, _InstanceId, _HashAlgo, _M, absent, _Path, false) ->
@@ -164,8 +162,15 @@ run_scan(Dir, M, Path, Fd, InstanceHash, HashAlgo) ->
             HeaderBytes = bondy_mst_pack_codec:header_bytes(),
             case check_header(Fd, InstanceHash, HashAlgo, HeaderBytes) of
                 ok ->
-                    scan_records_loop(Fd, HeaderBytes, HeaderBytes, 0,
-                                      OrigSize, Path, Dir);
+                    scan_records_loop(
+                        Fd,
+                        HeaderBytes,
+                        HeaderBytes,
+                        0,
+                        OrigSize,
+                        Path,
+                        Dir
+                    );
                 header_bad ->
                     reset_incoming(Dir, Path, OrigSize, M)
             end;
@@ -177,8 +182,9 @@ check_header(Fd, ExpectedInstanceHash, ExpectedAlgo, HeaderBytes) ->
     case prim_file:pread(Fd, 0, HeaderBytes) of
         {ok, HBin} when byte_size(HBin) =:= HeaderBytes ->
             case bondy_mst_pack_codec:decode_pack_header(HBin) of
-                {ok, #{instance_hash := IH, hash_algo := A}}
-                    when IH =:= ExpectedInstanceHash, A =:= ExpectedAlgo ->
+                {ok, #{instance_hash := IH, hash_algo := A}} when
+                    IH =:= ExpectedInstanceHash, A =:= ExpectedAlgo
+                ->
                     ok;
                 _ ->
                     header_bad
@@ -203,15 +209,33 @@ scan_records_loop(Fd, Offset, LastValidEnd, RecCount, OrigSize, Path, Dir) ->
                     case verify_body(Fd, BodyOffset, L, Header, H) of
                         ok ->
                             scan_records_loop(
-                                Fd, BodyOffset + L, BodyOffset + L,
-                                RecCount + 1, OrigSize, Path, Dir);
+                                Fd,
+                                BodyOffset + L,
+                                BodyOffset + L,
+                                RecCount + 1,
+                                OrigSize,
+                                Path,
+                                Dir
+                            );
                         torn ->
-                            truncate_to(Fd, Dir, Path, LastValidEnd,
-                                        OrigSize, RecCount)
+                            truncate_to(
+                                Fd,
+                                Dir,
+                                Path,
+                                LastValidEnd,
+                                OrigSize,
+                                RecCount
+                            )
                     end;
                 {error, _} ->
-                    truncate_to(Fd, Dir, Path, LastValidEnd,
-                                OrigSize, RecCount)
+                    truncate_to(
+                        Fd,
+                        Dir,
+                        Path,
+                        LastValidEnd,
+                        OrigSize,
+                        RecCount
+                    )
             end;
         {error, _} ->
             truncate_to(Fd, Dir, Path, LastValidEnd, OrigSize, RecCount)
@@ -222,7 +246,7 @@ verify_body(_Fd, _BodyOffset, 0, Header, Hash) ->
         ok ->
             case crypto:hash(sha256, <<>>) of
                 Hash -> ok;
-                _    -> torn
+                _ -> torn
             end;
         {error, _} ->
             torn
@@ -234,7 +258,7 @@ verify_body(Fd, BodyOffset, L, Header, Hash) ->
                 ok ->
                     case crypto:hash(sha256, Body) of
                         Hash -> ok;
-                        _    -> torn
+                        _ -> torn
                     end;
                 {error, _} ->
                     torn
@@ -252,22 +276,31 @@ verify_body(Fd, BodyOffset, L, Header, Hash) ->
 %% If `LastValidEnd < OrigSize` there are trailing bytes that don't
 %% form a record (e.g. zero-pad from a torn write that ended on
 %% nothing parseable). Truncate.
-finish_scan(_Fd, _Dir, _Path, LastValidEnd, OrigSize, RecCount)
-    when LastValidEnd =:= OrigSize ->
+finish_scan(_Fd, _Dir, _Path, LastValidEnd, OrigSize, RecCount) when
+    LastValidEnd =:= OrigSize
+->
     outcome([], 0, RecCount, present, present);
 finish_scan(Fd, Dir, Path, LastValidEnd, OrigSize, RecCount) ->
     truncate_to(Fd, Dir, Path, LastValidEnd, OrigSize, RecCount).
 
-truncate_to(_Fd, _Dir, _Path, NewSize, OrigSize, RecCount)
-    when NewSize =:= OrigSize ->
+truncate_to(_Fd, _Dir, _Path, NewSize, OrigSize, RecCount) when
+    NewSize =:= OrigSize
+->
     outcome([], 0, RecCount, present, present);
 truncate_to(Fd, Dir, Path, NewSize, OrigSize, RecCount) ->
     case do_truncate(Fd, Dir, NewSize) of
         ok ->
-            log_action(trailing_records_truncated,
-                       #{path => Path, from => OrigSize, to => NewSize}),
-            outcome([trailing_records_truncated],
-                    OrigSize - NewSize, RecCount, present, present);
+            log_action(
+                trailing_records_truncated,
+                #{path => Path, from => OrigSize, to => NewSize}
+            ),
+            outcome(
+                [trailing_records_truncated],
+                OrigSize - NewSize,
+                RecCount,
+                present,
+                present
+            );
         {error, R} ->
             {error, {incoming, R}}
     end.
@@ -287,8 +320,10 @@ finalise_reset(Dir, Path, OrigSize, M, Pre) ->
         ok ->
             case Pre of
                 [header_reset] ->
-                    log_action(header_reset,
-                               #{path => Path, from => OrigSize});
+                    log_action(
+                        header_reset,
+                        #{path => Path, from => OrigSize}
+                    );
                 _ ->
                     ok
             end,
@@ -323,15 +358,15 @@ flip_manifest_to_absent(Dir, M) ->
 
 outcome(Actions, BytesTruncated, RecCount, Before, After) ->
     {ok, #{
-        actions               => Actions,
-        bytes_truncated       => BytesTruncated,
-        records_recovered     => RecCount,
+        actions => Actions,
+        bytes_truncated => BytesTruncated,
+        records_recovered => RecCount,
         incoming_state_before => Before,
-        incoming_state_after  => After
+        incoming_state_after => After
     }}.
 
 log_action(Action, Ctx) ->
     ?LOG_NOTICE(Ctx#{
-        event  => mst_pack_recovery_action,
+        event => mst_pack_recovery_action,
         action => Action
     }).

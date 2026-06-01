@@ -118,16 +118,20 @@ revoked_plus_older_set_idempotent_test() ->
 revoked_plus_revoke_bumps_hlc_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
-    ?assertEqual({revoked, H2},
-                 apply_ev({revoked, H1}, {revoke, H2})).
+    ?assertEqual(
+        {revoked, H2},
+        apply_ev({revoked, H1}, {revoke, H2})
+    ).
 
 revoked_plus_resolve_stays_revoked_test() ->
     %% Even admin resolve cannot escape revoked (terminal).
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
     S0 = {revoked, H1},
-    ?assertEqual({revoked, H2},
-                 apply_ev(S0, {resolve, H2, mk_value(1)})).
+    ?assertEqual(
+        {revoked, H2},
+        apply_ev(S0, {resolve, H2, mk_value(1)})
+    ).
 
 %% =============================================================================
 %% Resolve semantics
@@ -142,8 +146,10 @@ set_plus_newer_resolve_overrides_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
     S0 = {set, mk_value(1), H1},
-    ?assertEqual({set, mk_value(2), H2},
-                 apply_ev(S0, {resolve, H2, mk_value(2)})).
+    ?assertEqual(
+        {set, mk_value(2), H2},
+        apply_ev(S0, {resolve, H2, mk_value(2)})
+    ).
 
 set_plus_older_resolve_rejected_test() ->
     H1 = hlc(200, 0),
@@ -177,18 +183,24 @@ conflict_plus_resolve_at_or_above_max_collapses_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
     S0 = {conflict, [{<<"a">>, H1}, {<<"z">>, H1}]},
-    ?assertEqual({set, mk_value(7), H2},
-                 apply_ev(S0, {resolve, H2, mk_value(7)})),
+    ?assertEqual(
+        {set, mk_value(7), H2},
+        apply_ev(S0, {resolve, H2, mk_value(7)})
+    ),
     %% Tied HLC: resolve still accepted at >= max.
-    ?assertEqual({set, mk_value(7), H1},
-                 apply_ev(S0, {resolve, H1, mk_value(7)})).
+    ?assertEqual(
+        {set, mk_value(7), H1},
+        apply_ev(S0, {resolve, H1, mk_value(7)})
+    ).
 
 conflict_plus_resolve_below_max_rejected_test() ->
     H_max = hlc(200, 0),
     H_old = hlc(100, 0),
     S0 = {conflict, [{<<"a">>, H_max}, {<<"z">>, H_max}]},
-    ?assertEqual(S0,
-                 apply_ev(S0, {resolve, H_old, mk_value(7)})).
+    ?assertEqual(
+        S0,
+        apply_ev(S0, {resolve, H_old, mk_value(7)})
+    ).
 
 conflict_plus_revoke_at_or_above_max_terminates_test() ->
     H1 = hlc(100, 0),
@@ -221,8 +233,10 @@ hlc_of_revoked_is_state_hlc_test() ->
 hlc_of_conflict_is_max_entry_hlc_test() ->
     H1 = hlc(100, 0),
     H2 = hlc(200, 0),
-    ?assertEqual(H2,
-                 ?MOD:hlc({conflict, [{<<"a">>, H1}, {<<"b">>, H2}]})).
+    ?assertEqual(
+        H2,
+        ?MOD:hlc({conflict, [{<<"a">>, H1}, {<<"b">>, H2}]})
+    ).
 
 %% =============================================================================
 %% gc_threshold/1
@@ -280,7 +294,8 @@ merge_set_and_conflict_folds_into_conflict_test() ->
     H = hlc(100, 0),
     Set = {set, <<"x">>, H},
     Conf = {conflict, [{<<"a">>, H}, {<<"z">>, H}]},
-    Expected = {conflict, lists:usort([{<<"a">>, H}, {<<"x">>, H}, {<<"z">>, H}])},
+    Expected =
+        {conflict, lists:usort([{<<"a">>, H}, {<<"x">>, H}, {<<"z">>, H}])},
     ?assertEqual(Expected, ?MOD:merge_states(Set, Conf)),
     ?assertEqual(Expected, ?MOD:merge_states(Conf, Set)).
 
@@ -288,7 +303,8 @@ merge_two_conflicts_unions_entries_test() ->
     H = hlc(100, 0),
     A = {conflict, [{<<"a">>, H}, {<<"b">>, H}]},
     B = {conflict, [{<<"b">>, H}, {<<"c">>, H}]},
-    Expected = {conflict, lists:usort([{<<"a">>, H}, {<<"b">>, H}, {<<"c">>, H}])},
+    Expected =
+        {conflict, lists:usort([{<<"a">>, H}, {<<"b">>, H}, {<<"c">>, H}])},
     ?assertEqual(Expected, ?MOD:merge_states(A, B)),
     ?assertEqual(Expected, ?MOD:merge_states(B, A)).
 
@@ -361,8 +377,12 @@ dispatcher_apply_event_via_shorthand_test() ->
     V = mk_value(1),
     ?assertEqual(
         {{set, V, H}, V},
-        bondy_oplog_fold:apply_event(strict_register, undefined,
-                                     {set, H, V}, undefined)
+        bondy_oplog_fold:apply_event(
+            strict_register,
+            undefined,
+            {set, H, V},
+            undefined
+        )
     ).
 
 dispatcher_merge_states_via_shorthand_test() ->

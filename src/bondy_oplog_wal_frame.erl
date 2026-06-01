@@ -145,8 +145,8 @@ encode(Body, Opts) when is_list(Opts) ->
     Version = proplists:get_value(version, Opts, ?VERSION_CURRENT),
     Flags = proplists:get_value(flags, Opts, 0),
     valid_version(Version) orelse error({badarg, {version, Version}}),
-    valid_flags(Version, Flags)
-        orelse error({badarg, {flags, Flags}}),
+    valid_flags(Version, Flags) orelse
+        error({badarg, {flags, Flags}}),
     BodySize = iolist_size(Body),
     FrameLen = ?HEADER_BYTES + BodySize,
     %% Layout: Magic(4) | FrameLen(4) | Crc(4) | Version(1) | Flags(3) | Body.
@@ -158,8 +158,12 @@ encode(Body, Opts) when is_list(Opts) ->
     Crc = default_crc(
         [<<FrameLen:32/big-unsigned>>, VerFlags, Body]
     ),
-    [<<?MAGIC:32/big-unsigned, FrameLen:32/big-unsigned,
-        Crc:32/big-unsigned>>, VerFlags, Body].
+    [
+        <<?MAGIC:32/big-unsigned, FrameLen:32/big-unsigned,
+            Crc:32/big-unsigned>>,
+        VerFlags,
+        Body
+    ].
 
 ?DOC("""
 Decodes a single frame from `Binary`. The binary must contain **exactly
@@ -194,9 +198,10 @@ decode(Bin) when is_binary(Bin), byte_size(Bin) < ?HEADER_BYTES ->
     %% Size check is first so a too-short input is reported as
     %% truncated regardless of whatever bytes it happens to contain.
     {error, truncated_header};
-decode(<<?MAGIC:32/big-unsigned, FrameLen:32/big-unsigned,
-        Crc:32/big-unsigned, Version:8/unsigned, Flags:24/big-unsigned,
-        Rest/binary>>) ->
+decode(
+    <<?MAGIC:32/big-unsigned, FrameLen:32/big-unsigned, Crc:32/big-unsigned,
+        Version:8/unsigned, Flags:24/big-unsigned, Rest/binary>>
+) ->
     decode_validated(FrameLen, Crc, Version, Flags, Rest);
 decode(<<Magic:32/big-unsigned, _/binary>>) when Magic =/= ?MAGIC ->
     {error, bad_magic}.
@@ -225,9 +230,8 @@ and call `decode/1` for full validation.
 decode_header(Bin) when is_binary(Bin), byte_size(Bin) < ?HEADER_BYTES ->
     {error, truncated_header};
 decode_header(
-    <<?MAGIC:32/big-unsigned, FrameLen:32/big-unsigned,
-        Crc:32/big-unsigned, Version:8/unsigned, Flags:24/big-unsigned,
-        _/binary>>
+    <<?MAGIC:32/big-unsigned, FrameLen:32/big-unsigned, Crc:32/big-unsigned,
+        Version:8/unsigned, Flags:24/big-unsigned, _/binary>>
 ) when FrameLen >= ?HEADER_BYTES ->
     {ok, #{
         frame_len => FrameLen,
@@ -235,8 +239,11 @@ decode_header(
         version => Version,
         flags => Flags
     }};
-decode_header(<<?MAGIC:32/big-unsigned, FrameLen:32/big-unsigned, _/binary>>)
-    when FrameLen < ?HEADER_BYTES ->
+decode_header(
+    <<?MAGIC:32/big-unsigned, FrameLen:32/big-unsigned, _/binary>>
+) when
+    FrameLen < ?HEADER_BYTES
+->
     {error, length_invalid};
 decode_header(<<Magic:32/big-unsigned, _/binary>>) when Magic =/= ?MAGIC ->
     {error, bad_magic}.
@@ -274,16 +281,17 @@ verify_crc_and_decode(Crc, Version, Flags, FrameLen, Body) ->
         false ->
             {error, unsupported_version};
         true ->
-            LenVerFlags = <<FrameLen:32/big-unsigned, Version:8/unsigned,
-                            Flags:24/big-unsigned>>,
+            LenVerFlags =
+                <<FrameLen:32/big-unsigned, Version:8/unsigned,
+                    Flags:24/big-unsigned>>,
             Algo = crc_algo(Version, Flags),
             case compute_crc(Algo, [LenVerFlags, Body]) of
                 Crc ->
                     case valid_flags(Version, Flags) of
-                        false -> {error, unknown_flag};
+                        false ->
+                            {error, unknown_flag};
                         true ->
-                            {ok, Body,
-                                #{version => Version, flags => Flags}}
+                            {ok, Body, #{version => Version, flags => Flags}}
                     end;
                 _ ->
                     {error, crc_mismatch}

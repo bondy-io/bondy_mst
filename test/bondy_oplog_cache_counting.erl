@@ -57,7 +57,7 @@ new_counter() ->
 close_count(Counter) ->
     case ets:lookup(Counter, close_calls) of
         [{_, N}] -> N;
-        []       -> 0
+        [] -> 0
     end.
 
 delete_counter(Counter) ->

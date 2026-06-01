@@ -115,7 +115,7 @@ is fetched on demand to reconstruct the full V2 frame.
 
 %% Lexicographically minimal/maximal SubKey sentinels for prefix scans
 %% over a single Key (encompasses ?SK_STATE and ?SK_VALUE).
--define(SK_LOW,  <<>>).
+-define(SK_LOW, <<>>).
 -define(SK_HIGH, <<255, 255, 255, 255>>).
 
 -type handle() :: #{bookie := pid()}.
@@ -133,16 +133,13 @@ is fetched on demand to reconstruct the full V2 frame.
 
 open(_NS, _Index, _Shard, #{bookie := Pid} = _Opts) when is_pid(Pid) ->
     {ok, #{bookie => Pid}};
-
 open(_NS, _Index, _Shard, Opts) when is_map(Opts) ->
     {error, {invalid_opts, Opts}}.
-
 
 -spec close(handle()) -> ok.
 
 close(#{bookie := _Pid}) ->
     ok.
-
 
 -doc """
 Full-cell read. Returns the V2 cell frame reconstructed from both
@@ -158,8 +155,9 @@ and surfaces here as not_found).
 -spec get(handle(), Bucket :: binary(), Key :: binary()) ->
     {ok, Frame :: binary()} | not_found.
 
-get(#{bookie := Pid}, Bucket, Key)
-        when is_binary(Bucket), is_binary(Key) ->
+get(#{bookie := Pid}, Bucket, Key) when
+    is_binary(Bucket), is_binary(Key)
+->
     case read_state_subkey(Pid, Bucket, Key) of
         not_found ->
             not_found;
@@ -171,14 +169,17 @@ get(#{bookie := Pid}, Bucket, Key)
             %% encode/4 used.
             case read_value_subkey(Pid, Bucket, Key) of
                 not_found ->
-                    {ok, bondy_oplog_cell_frame:encode(
-                        Hlc, StateBytes, undefined, true)};
+                    {ok,
+                        bondy_oplog_cell_frame:encode(
+                            Hlc, StateBytes, undefined, true
+                        )};
                 {ok, _Hlc, ValueBytes} ->
-                    {ok, bondy_oplog_cell_frame:encode(
-                        Hlc, StateBytes, ValueBytes, false)}
+                    {ok,
+                        bondy_oplog_cell_frame:encode(
+                            Hlc, StateBytes, ValueBytes, false
+                        )}
             end
     end.
-
 
 -doc """
 HEAD fast-path read. Returns the value subkey's payload as-is — it
@@ -194,8 +195,9 @@ mechanism can skip the export and let the caller fall back to
 -spec head(handle(), Bucket :: binary(), Key :: binary()) ->
     {ok, HeadBytes :: binary()} | not_found.
 
-head(#{bookie := Pid}, Bucket, Key)
-        when is_binary(Bucket), is_binary(Key) ->
+head(#{bookie := Pid}, Bucket, Key) when
+    is_binary(Bucket), is_binary(Key)
+->
     case leveled_bookie:book_headonly(Pid, Bucket, Key, ?SK_VALUE) of
         {ok, HeadBytes} ->
             {ok, HeadBytes};
@@ -206,10 +208,9 @@ head(#{bookie := Pid}, Bucket, Key)
             %% (StateBytes doubles as ValueBytes for these folds).
             case leveled_bookie:book_headonly(Pid, Bucket, Key, ?SK_STATE) of
                 {ok, HeadBytes} -> {ok, HeadBytes};
-                not_found       -> not_found
+                not_found -> not_found
             end
     end.
-
 
 -doc """
 Batched cell write. Decodes each V2 frame into `{Hlc, State, Value}`,
@@ -228,14 +229,12 @@ typically receives N entries and issues ONE gen_server roundtrip.
 
 put_batch(_Handle, []) ->
     ok;
-
 put_batch(#{bookie := Pid}, Entries) when is_list(Entries) ->
     ObjectSpecs = build_object_specs(Entries, []),
     case leveled_bookie:book_mput(Pid, ObjectSpecs) of
-        ok    -> ok;
+        ok -> ok;
         pause -> ok
     end.
-
 
 -doc """
 Range read over the value subkeys. Returns up to `Limit`
@@ -254,9 +253,12 @@ keylist fold below filters out the matching key.
     Opts :: bondy_oplog_projection_adapter:range_opts()
 ) -> {ok, [{Key :: binary(), Frame :: binary()}]} | {error, term()}.
 
-range(#{bookie := Pid}, Bucket, Low, High, Opts)
-        when is_binary(Bucket), is_binary(Low), is_binary(High),
-             is_map(Opts) ->
+range(#{bookie := Pid}, Bucket, Low, High, Opts) when
+    is_binary(Bucket),
+    is_binary(Low),
+    is_binary(High),
+    is_map(Opts)
+->
     Limit = maps:get(limit, Opts, 1000),
     Direction = maps:get(direction, Opts, asc),
     %% Range over the {Key, SubKey} composite that brackets every
@@ -266,22 +268,24 @@ range(#{bookie := Pid}, Bucket, Low, High, Opts)
     {async, Folder} = leveled_bookie:book_keylist(
         Pid, ?HEAD_TAG, Bucket, KeyRange, {FoldFun, {0, []}}
     ),
-    {_N, KeysRev} = try Folder() catch
-        throw:{limit_reached, S} -> S
-    end,
+    {_N, KeysRev} =
+        try
+            Folder()
+        catch
+            throw:{limit_reached, S} -> S
+        end,
     KeysAsc = lists:reverse(KeysRev),
     %% Fetch the state subkey for each key found, reconstruct the V2
     %% frame. Returns [] if Reader fails on any key (treats as not_found).
     Pairs = [
-        {K, F} ||
-        K <- KeysAsc,
+        {K, F}
+     || K <- KeysAsc,
         {ok, F} <- [get(#{bookie => Pid}, Bucket, K)]
     ],
     case Direction of
-        asc  -> {ok, Pairs};
+        asc -> {ok, Pairs};
         desc -> {ok, lists:reverse(Pairs)}
     end.
-
 
 -doc """
 Delete both subkeys for `(Bucket, Key)` atomically via `book_mput/2`
@@ -289,17 +293,17 @@ with `remove` ops.
 """.
 -spec delete(handle(), Bucket :: binary(), Key :: binary()) -> ok.
 
-delete(#{bookie := Pid}, Bucket, Key)
-        when is_binary(Bucket), is_binary(Key) ->
+delete(#{bookie := Pid}, Bucket, Key) when
+    is_binary(Bucket), is_binary(Key)
+->
     ObjectSpecs = [
         {remove, Bucket, Key, ?SK_STATE, null},
         {remove, Bucket, Key, ?SK_VALUE, null}
     ],
     case leveled_bookie:book_mput(Pid, ObjectSpecs) of
-        ok    -> ok;
+        ok -> ok;
         pause -> ok
     end.
-
 
 -spec info(handle()) -> #{atom() => term()}.
 
@@ -311,7 +315,6 @@ info(#{bookie := Pid}) ->
         subkey_state => ?SK_STATE,
         subkey_value => ?SK_VALUE
     }.
-
 
 %% =============================================================================
 %% PRIVATE
@@ -355,14 +358,16 @@ build_object_specs([{Bucket, Key, Frame} | Rest], Acc) ->
     HlcLen = byte_size(HlcBin),
     StatePayload = <<HlcLen:16/big-unsigned, HlcBin/binary, StateBytes/binary>>,
     Acc1 = [{add, Bucket, Key, ?SK_STATE, StatePayload} | Acc],
-    Acc2 = case ValueBytesOpt of
-        undefined ->
-            Acc1;
-        ValueBytes ->
-            ValuePayload =
-                <<HlcLen:16/big-unsigned, HlcBin/binary, ValueBytes/binary>>,
-            [{add, Bucket, Key, ?SK_VALUE, ValuePayload} | Acc1]
-    end,
+    Acc2 =
+        case ValueBytesOpt of
+            undefined ->
+                Acc1;
+            ValueBytes ->
+                ValuePayload =
+                    <<HlcLen:16/big-unsigned, HlcBin/binary,
+                        ValueBytes/binary>>,
+                [{add, Bucket, Key, ?SK_VALUE, ValuePayload} | Acc1]
+        end,
     build_object_specs(Rest, Acc2).
 
 %% Fold fun for keylist over `{Key, ?SK_VALUE}` composite keys.
@@ -375,7 +380,7 @@ make_value_keylist_fold(Limit, High) ->
                 N1 = N + 1,
                 State = {N1, [K | Items]},
                 case N1 >= Limit of
-                    true  -> throw({limit_reached, State});
+                    true -> throw({limit_reached, State});
                     false -> State
                 end;
             _ ->

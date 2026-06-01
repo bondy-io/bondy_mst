@@ -40,10 +40,16 @@ range_all_test_() ->
 
 empty_namespace_returns_empty_list() ->
     NS = mk_ns(),
-    ?assertEqual({ok, []},
-                 bondy_db_core:range_all(NS, primary, <<>>,
-                                         {<<"a">>, <<"z">>}, #{})).
-
+    ?assertEqual(
+        {ok, []},
+        bondy_db_core:range_all(
+            NS,
+            primary,
+            <<>>,
+            {<<"a">>, <<"z">>},
+            #{}
+        )
+    ).
 
 single_shard_matches_single_shard_range() ->
     %% With one shard the scatter is a no-op — same result as
@@ -52,15 +58,21 @@ single_shard_matches_single_shard_range() ->
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0, 1, lww_register),
     materialise(PH, <<"a">>, {set, <<"va">>, 10}, 10),
     materialise(PH, <<"b">>, {set, <<"vb">>, 20}, 20),
-    {ok, R} = bondy_db_core:range_all(NS, primary, <<>>,
-                                      {<<"a">>, <<"z">>}, #{}),
+    {ok, R} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<>>,
+        {<<"a">>, <<"z">>},
+        #{}
+    ),
     ?assertEqual(
-        [{<<"a">>, <<"va">>, 10},
-         {<<"b">>, <<"vb">>, 20}],
+        [
+            {<<"a">>, <<"va">>, 10},
+            {<<"b">>, <<"vb">>, 20}
+        ],
         R
     ),
     teardown_shard(Setup).
-
 
 multi_shard_merges_globally_sorted() ->
     %% Three shards, interleaved keys. Result must be ascending across
@@ -76,12 +88,16 @@ multi_shard_merges_globally_sorted() ->
     place(Setups, 2, <<"c">>, 30),
     place(Setups, 0, <<"d">>, 40),
     place(Setups, 1, <<"e">>, 50),
-    {ok, R} = bondy_db_core:range_all(NS, primary, <<>>,
-                                      {<<"a">>, <<"z">>}, #{}),
+    {ok, R} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<>>,
+        {<<"a">>, <<"z">>},
+        #{}
+    ),
     Keys = [K || {K, _, _} <- R],
     ?assertEqual([<<"a">>, <<"b">>, <<"c">>, <<"d">>, <<"e">>], Keys),
     teardown_shards(Setups).
-
 
 multi_shard_respects_limit() ->
     NS = mk_ns(),
@@ -90,13 +106,16 @@ multi_shard_respects_limit() ->
     place(Setups, 1, <<"b">>, 20),
     place(Setups, 2, <<"c">>, 30),
     place(Setups, 3, <<"d">>, 40),
-    {ok, R} = bondy_db_core:range_all(NS, primary, <<>>,
-                                      {<<"a">>, <<"z">>},
-                                      #{limit => 2}),
+    {ok, R} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<>>,
+        {<<"a">>, <<"z">>},
+        #{limit => 2}
+    ),
     Keys = [K || {K, _, _} <- R],
     ?assertEqual([<<"a">>, <<"b">>], Keys),
     teardown_shards(Setups).
-
 
 multi_shard_direction_desc() ->
     NS = mk_ns(),
@@ -104,13 +123,16 @@ multi_shard_direction_desc() ->
     place(Setups, 0, <<"a">>, 10),
     place(Setups, 1, <<"b">>, 20),
     place(Setups, 2, <<"c">>, 30),
-    {ok, R} = bondy_db_core:range_all(NS, primary, <<>>,
-                                      {<<"a">>, <<"z">>},
-                                      #{direction => desc}),
+    {ok, R} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<>>,
+        {<<"a">>, <<"z">>},
+        #{direction => desc}
+    ),
     Keys = [K || {K, _, _} <- R],
     ?assertEqual([<<"c">>, <<"b">>, <<"a">>], Keys),
     teardown_shards(Setups).
-
 
 multi_shard_propagates_include_overlay_false() ->
     %% Overlay-only cells must be dropped from every shard when the
@@ -122,17 +144,24 @@ multi_shard_propagates_include_overlay_false() ->
     %% Shard 1: overlay-only cell.
     overlay_place(Setups, 1, <<"b">>, 20),
     %% With include_overlay=true both surface.
-    {ok, With} = bondy_db_core:range_all(NS, primary, <<>>,
-                                          {<<"a">>, <<"z">>},
-                                          #{include_overlay => true}),
+    {ok, With} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<>>,
+        {<<"a">>, <<"z">>},
+        #{include_overlay => true}
+    ),
     ?assertEqual([<<"a">>, <<"b">>], [K || {K, _, _} <- With]),
     %% With include_overlay=false the overlay cell is excluded.
-    {ok, Without} = bondy_db_core:range_all(NS, primary, <<>>,
-                                            {<<"a">>, <<"z">>},
-                                            #{include_overlay => false}),
+    {ok, Without} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<>>,
+        {<<"a">>, <<"z">>},
+        #{include_overlay => false}
+    ),
     ?assertEqual([<<"a">>], [K || {K, _, _} <- Without]),
     teardown_shards(Setups).
-
 
 multi_shard_propagates_fence() ->
     %% Per-shard `fence` must clip overlay events to `=< Fence` for
@@ -142,12 +171,15 @@ multi_shard_propagates_fence() ->
     overlay_place(Setups, 0, <<"a">>, 5),
     overlay_place(Setups, 1, <<"b">>, 15),
     %% Fence = 10 excludes the HLC=15 event in shard 1.
-    {ok, R} = bondy_db_core:range_all(NS, primary, <<>>,
-                                      {<<"a">>, <<"z">>},
-                                      #{fence => 10}),
+    {ok, R} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<>>,
+        {<<"a">>, <<"z">>},
+        #{fence => 10}
+    ),
     ?assertEqual([<<"a">>], [K || {K, _, _} <- R]),
     teardown_shards(Setups).
-
 
 bucket_isolation_within_shard() ->
     %% A shard hosts more than one bucket. `range_all` must only return
@@ -156,14 +188,23 @@ bucket_isolation_within_shard() ->
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0, 1, lww_register),
     materialise_bucket(PH, <<"b1">>, <<"k">>, {set, <<"v1">>, 10}, 10),
     materialise_bucket(PH, <<"b2">>, <<"k">>, {set, <<"v2">>, 20}, 20),
-    {ok, R1} = bondy_db_core:range_all(NS, primary, <<"b1">>,
-                                       {<<"a">>, <<"z">>}, #{}),
+    {ok, R1} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<"b1">>,
+        {<<"a">>, <<"z">>},
+        #{}
+    ),
     ?assertEqual([{<<"k">>, <<"v1">>, 10}], R1),
-    {ok, R2} = bondy_db_core:range_all(NS, primary, <<"b2">>,
-                                       {<<"a">>, <<"z">>}, #{}),
+    {ok, R2} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<"b2">>,
+        {<<"a">>, <<"z">>},
+        #{}
+    ),
     ?assertEqual([{<<"k">>, <<"v2">>, 20}], R2),
     teardown_shard(Setup).
-
 
 range_all_4_defaults_to_empty_bucket() ->
     %% The `/4` alias hits the default `<<>>` bucket.
@@ -171,13 +212,21 @@ range_all_4_defaults_to_empty_bucket() ->
     {Setup, #{projection := PH}} = setup_shard(NS, primary, 0, 1, lww_register),
     materialise(PH, <<"a">>, {set, <<"v">>, 10}, 10),
     ?assertEqual(
-        bondy_db_core:range_all(NS, primary, <<>>,
-                                 {<<"a">>, <<"z">>}, #{}),
-        bondy_db_core:range_all(NS, primary,
-                                 {<<"a">>, <<"z">>}, #{})
+        bondy_db_core:range_all(
+            NS,
+            primary,
+            <<>>,
+            {<<"a">>, <<"z">>},
+            #{}
+        ),
+        bondy_db_core:range_all(
+            NS,
+            primary,
+            {<<"a">>, <<"z">>},
+            #{}
+        )
     ),
     teardown_shard(Setup).
-
 
 other_index_not_scanned() ->
     %% Shards under a different Index must not surface in the result —
@@ -187,20 +236,26 @@ other_index_not_scanned() ->
     {S2, #{projection := PH2}} = setup_shard(NS, by_name, 0, 1, lww_register),
     materialise(PH1, <<"a">>, {set, <<"primary">>, 10}, 10),
     materialise(PH2, <<"a">>, {set, <<"secondary">>, 20}, 20),
-    {ok, R} = bondy_db_core:range_all(NS, primary, <<>>,
-                                      {<<"a">>, <<"z">>}, #{}),
+    {ok, R} = bondy_db_core:range_all(
+        NS,
+        primary,
+        <<>>,
+        {<<"a">>, <<"z">>},
+        #{}
+    ),
     ?assertEqual([{<<"a">>, <<"primary">>, 10}], R),
     teardown_shard(S1),
     teardown_shard(S2).
-
 
 %% =============================================================================
 %% Helpers
 %% =============================================================================
 
 mk_ns() ->
-    list_to_atom("mst_db_range_all_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
+    list_to_atom(
+        "mst_db_range_all_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 mk_event(Hlc, Origin, Seq, Op) ->
     K = bondy_oplog_event:key(Hlc, Origin, Seq),
@@ -230,22 +285,37 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
         overlay => OV,
         fold_module => Strategy
     }),
-    Setup = #{ns => NS, index => Index, shard => Shard,
-              cache_handle => CH, projection => PH, overlay => OV},
+    Setup = #{
+        ns => NS,
+        index => Index,
+        shard => Shard,
+        cache_handle => CH,
+        projection => PH,
+        overlay => OV
+    },
     {Setup, Setup}.
 
-teardown_shard(#{ns := NS, index := Index, shard := Shard,
-                 cache_handle := CH, projection := PH, overlay := OV}) ->
+teardown_shard(#{
+    ns := NS,
+    index := Index,
+    shard := Shard,
+    cache_handle := CH,
+    projection := PH,
+    overlay := OV
+}) ->
     ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),
     ok = bondy_oplog_db_overlay:delete(OV).
 
 setup_n_shards(NS, Index, ShardCount, _NShards, Strategy) ->
-    [begin
-         {S, _} = setup_shard(NS, Index, Sh, ShardCount, Strategy),
-         S
-     end || Sh <- lists:seq(0, ShardCount - 1)].
+    [
+        begin
+            {S, _} = setup_shard(NS, Index, Sh, ShardCount, Strategy),
+            S
+        end
+     || Sh <- lists:seq(0, ShardCount - 1)
+    ].
 
 teardown_shards(Setups) ->
     [teardown_shard(S) || S <- Setups],

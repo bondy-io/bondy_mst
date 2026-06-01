@@ -39,7 +39,7 @@ origin_resolution_test_() ->
 
 explicit_origin_wins() ->
     Dir = mktemp_dir("sup_origin_explicit_"),
-    Id  = unique_id(<<"explicit">>),
+    Id = unique_id(<<"explicit">>),
     %% Origin is opaque to the lib but the WAL segment header is a
     %% fixed-width slot — must be exactly ?BONDY_OPLOG_ORIGIN_BYTES.
     Explicit = <<"explicit-orig-01">>,
@@ -66,7 +66,7 @@ explicit_origin_wins() ->
 
 storage_path_origin_persists() ->
     Dir = mktemp_dir("sup_origin_persist_"),
-    Id  = unique_id(<<"persist">>),
+    Id = unique_id(<<"persist">>),
     try
         {ok, _} = bondy_oplog:start_instance(Id, #{
             storage_path => unicode:characters_to_binary(Dir),
@@ -90,7 +90,7 @@ storage_path_origin_survives_restart() ->
     %% Stop the instance, restart with the same storage_path, assert the
     %% origin is unchanged. This is the kill+restart scenario PR-J4 hit.
     Dir = mktemp_dir("sup_origin_restart_"),
-    Id  = unique_id(<<"restart">>),
+    Id = unique_id(<<"restart">>),
     Opts = #{
         storage_path => unicode:characters_to_binary(Dir),
         path_strategy => bondy_oplog_path_flat,

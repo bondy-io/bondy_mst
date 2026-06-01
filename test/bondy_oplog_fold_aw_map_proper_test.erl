@@ -42,8 +42,11 @@
 %% =============================================================================
 
 hlc_gen() ->
-    ?LET({Phys, Log}, {integer(0, 1000), integer(0, 1023)},
-         bondy_oplog_hlc:encode(Phys, Log)).
+    ?LET(
+        {Phys, Log},
+        {integer(0, 1000), integer(0, 1023)},
+        bondy_oplog_hlc:encode(Phys, Log)
+    ).
 
 origin_gen() ->
     oneof([<<"n1">>, <<"n2">>, <<"n3">>]).
@@ -61,24 +64,36 @@ dot_gen() ->
 %% Per-Origin Seq is assigned in arrival order by `renumber_seqs/1` so
 %% the substrate Seq invariant holds across the generated sequence.
 rich_event_gen() ->
-    {hlc_gen(), origin_gen(),
-     oneof([
-        {put, key_gen(), value_gen()},
-        {apply_set, key_gen(), value_gen()},
-        ?LET(N, integer(0, 3),
-             {remove, key_gen(), vector(N, dot_gen())})
-     ])}.
+    {
+        hlc_gen(),
+        origin_gen(),
+        oneof([
+            {put, key_gen(), value_gen()},
+            {apply_set, key_gen(), value_gen()},
+            ?LET(
+                N,
+                integer(0, 3),
+                {remove, key_gen(), vector(N, dot_gen())}
+            )
+        ])
+    }.
 
 rich_events_gen() ->
-    ?LET(Events, list(rich_event_gen()),
-         renumber_seqs(Events)).
+    ?LET(
+        Events,
+        list(rich_event_gen()),
+        renumber_seqs(Events)
+    ).
 
 renumber_seqs(Events) ->
     {Out, _} = lists:mapfoldl(
         fun({H, O, P}, Seqs) ->
             S = maps:get(O, Seqs, 0) + 1,
             {{H, O, S, P}, Seqs#{O => S}}
-        end, #{}, Events),
+        end,
+        #{},
+        Events
+    ),
     Out.
 
 apply_events(Events) ->
@@ -90,7 +105,8 @@ apply_events(Events) ->
             NewState
         end,
         ?MOD:initial_value(),
-        Events).
+        Events
+    ).
 
 to_physical_event(H, {put, K, V}) ->
     {put, K, ?SUB_FOLD, {set, V, H}};
@@ -104,15 +120,24 @@ state_gen() ->
 
 %% A standalone event with valid Meta for property testing.
 event_with_meta_gen() ->
-    ?LET({H, O, S, P},
-         {hlc_gen(), origin_gen(), integer(1, 50),
-          oneof([
-             {put, key_gen(), value_gen()},
-             {apply_set, key_gen(), value_gen()},
-             ?LET(N, integer(0, 3),
-                  {remove, key_gen(), vector(N, dot_gen())})
-          ])},
-        {bondy_oplog_event:key(H, O, S), to_physical_event(H, P)}).
+    ?LET(
+        {H, O, S, P},
+        {
+            hlc_gen(),
+            origin_gen(),
+            integer(1, 50),
+            oneof([
+                {put, key_gen(), value_gen()},
+                {apply_set, key_gen(), value_gen()},
+                ?LET(
+                    N,
+                    integer(0, 3),
+                    {remove, key_gen(), vector(N, dot_gen())}
+                )
+            ])
+        },
+        {bondy_oplog_event:key(H, O, S), to_physical_event(H, P)}
+    ).
 
 encodeable_event_gen() ->
     ?LET({_Meta, Event}, event_with_meta_gen(), Event).
@@ -122,54 +147,72 @@ encodeable_event_gen() ->
 %% =============================================================================
 
 prop_apply_event_idempotent() ->
-    ?FORALL({State, {Meta, Event}},
-            {state_gen(), event_with_meta_gen()},
+    ?FORALL(
+        {State, {Meta, Event}},
+        {state_gen(), event_with_meta_gen()},
         begin
             {S1, _} = ?MOD:apply_event(State, Event, Meta),
             {S2, _} = ?MOD:apply_event(S1, Event, Meta),
             S1 =:= S2
-        end).
+        end
+    ).
 
 prop_apply_event_hlc_monotonic() ->
-    ?FORALL({State, {Meta, Event}},
-            {state_gen(), event_with_meta_gen()},
+    ?FORALL(
+        {State, {Meta, Event}},
+        {state_gen(), event_with_meta_gen()},
         begin
             H0 = ?MOD:hlc(State),
             {NewState, _} = ?MOD:apply_event(State, Event, Meta),
             ?MOD:hlc(NewState) >= H0
-        end).
+        end
+    ).
 
 prop_merge_states_commutative() ->
-    ?FORALL({A, B}, {state_gen(), state_gen()},
-        ?MOD:merge_states(A, B) =:= ?MOD:merge_states(B, A)).
+    ?FORALL(
+        {A, B},
+        {state_gen(), state_gen()},
+        ?MOD:merge_states(A, B) =:= ?MOD:merge_states(B, A)
+    ).
 
 prop_merge_states_associative() ->
-    ?FORALL({A, B, C}, {state_gen(), state_gen(), state_gen()},
+    ?FORALL(
+        {A, B, C},
+        {state_gen(), state_gen(), state_gen()},
         begin
             L = ?MOD:merge_states(?MOD:merge_states(A, B), C),
             R = ?MOD:merge_states(A, ?MOD:merge_states(B, C)),
             L =:= R
-        end).
+        end
+    ).
 
 prop_merge_states_idempotent() ->
-    ?FORALL(A, state_gen(),
-        ?MOD:merge_states(A, A) =:= A).
+    ?FORALL(
+        A,
+        state_gen(),
+        ?MOD:merge_states(A, A) =:= A
+    ).
 
 prop_encode_state_roundtrip() ->
-    ?FORALL(State, state_gen(),
-        ?MOD:decode_state(?MOD:encode_state(State)) =:= State).
+    ?FORALL(
+        State,
+        state_gen(),
+        ?MOD:decode_state(?MOD:encode_state(State)) =:= State
+    ).
 
 prop_encode_event_roundtrip() ->
-    ?FORALL(Event, encodeable_event_gen(),
-        ?MOD:decode_event(?MOD:encode_event(Event)) =:= Event).
+    ?FORALL(
+        Event,
+        encodeable_event_gen(),
+        ?MOD:decode_event(?MOD:encode_event(Event)) =:= Event
+    ).
 
 %% =============================================================================
 %% EUnit wrapper
 %% =============================================================================
 
 properties_test_() ->
-    {timeout, 240,
-     fun() ->
+    {timeout, 240, fun() ->
         Opts = [{to_file, user}, {numtests, ?DEFAULT_NUMTESTS}],
         Props = [
             prop_apply_event_idempotent(),
@@ -184,4 +227,4 @@ properties_test_() ->
             fun(Prop) -> ?assert(proper:quickcheck(Prop, Opts)) end,
             Props
         )
-     end}.
+    end}.

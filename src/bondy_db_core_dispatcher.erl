@@ -77,9 +77,9 @@ does not police this.
 -define(TABLE, bondy_db_core_dispatcher_tab).
 
 -record(sub, {
-    ref     :: reference(),
-    ns      :: atom(),
-    pid     :: pid(),
+    ref :: reference(),
+    ns :: atom(),
+    pid :: pid(),
     monitor :: reference(),
     pattern :: pattern()
 }).
@@ -92,10 +92,11 @@ does not police this.
     epoch :: reference()
 }).
 
--type pattern() :: all
-                 | {prefix, binary() | list()}
-                 | {match, fun((term()) -> boolean())}
-                 | {exact, term()}.
+-type pattern() ::
+    all
+    | {prefix, binary() | list()}
+    | {match, fun((term()) -> boolean())}
+    | {exact, term()}.
 
 -export_type([pattern/0]).
 
@@ -111,8 +112,14 @@ does not police this.
 %% Restart-recovery protocol (`MST_DB_DESIGN.md` §12.3, §18 item 11).
 -export([current_epoch/0]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
-         code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 %% =============================================================================
 %% API
@@ -128,28 +135,24 @@ child_spec() ->
         modules => [?MODULE]
     }.
 
-
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
-
 
 -spec subscribe(atom(), pattern()) -> {ok, reference()}.
 
 subscribe(NS, Pattern) when is_atom(NS) ->
     gen_server:call(?MODULE, {subscribe, NS, self(), Pattern}).
 
-
 -spec unsubscribe(reference()) -> ok.
 
 unsubscribe(Ref) when is_reference(Ref) ->
     gen_server:call(?MODULE, {unsubscribe, Ref}).
 
-
--doc("""
+-doc """
 Publish an event to every matching subscriber. Walk runs in the caller
 process — no gen_server round-trip. Returns `ok` whether or not any
 subscriber was matched.
-""").
+""".
 -spec publish(atom(), term(), bondy_oplog_hlc:hlc(), term()) -> ok.
 
 publish(NS, Key, Hlc, Op) ->
@@ -158,7 +161,7 @@ publish(NS, Key, Hlc, Op) ->
     lists:foreach(
         fun(#sub{pid = Pid, pattern = Pat}) ->
             case matches(Pat, Key) of
-                true  -> Pid ! Msg;
+                true -> Pid ! Msg;
                 false -> ok
             end
         end,
@@ -166,18 +169,16 @@ publish(NS, Key, Hlc, Op) ->
     ),
     ok.
 
-
 -spec subscription_count() -> non_neg_integer().
 
 subscription_count() ->
     ets:info(?TABLE, size).
 
-
--doc("""
+-doc """
 Number of live subscriptions for the given namespace. The walk uses the
 same match-spec as the per-publish select, so this is `O(table_size)`
 in the worst case; intended for low-frequency callers (metrics tick).
-""").
+""".
 -spec subscription_count(atom()) -> non_neg_integer().
 
 subscription_count(NS) when is_atom(NS) ->
@@ -186,19 +187,17 @@ subscription_count(NS) when is_atom(NS) ->
         [{#sub{ns = NS, _ = '_'}, [], [true]}]
     ).
 
-
--doc("""
+-doc """
 Return the current epoch reference. A new epoch is allocated on each
 gen_server start and broadcast on
 `bondy_db_core_events:notify(bondy_db_core_dispatcher_started, Epoch)`.
 Subscribers cache the epoch and treat any change as "dispatcher was
 restarted; re-subscribe".
-""").
+""".
 -spec current_epoch() -> reference().
 
 current_epoch() ->
     gen_server:call(?MODULE, current_epoch).
-
 
 %% =============================================================================
 %% Telemetry (`MST_DB_DESIGN.md` §16)
@@ -210,18 +209,18 @@ emit_subscribe_event(NS, Pattern) ->
     telemetry:execute(
         [bondy_db_core, subscribe],
         #{},
-        #{namespace => NS,
-          pattern_type => PatType,
-          current_subscribers => Current}
+        #{
+            namespace => NS,
+            pattern_type => PatType,
+            current_subscribers => Current
+        }
     ).
 
-
-pattern_type(all)            -> all;
-pattern_type({prefix, _})    -> prefix;
-pattern_type({match, _})     -> match;
-pattern_type({exact, _})     -> exact;
-pattern_type(_)              -> unknown.
-
+pattern_type(all) -> all;
+pattern_type({prefix, _}) -> prefix;
+pattern_type({match, _}) -> match;
+pattern_type({exact, _}) -> exact;
+pattern_type(_) -> unknown.
 
 %% =============================================================================
 %% Pattern matching
@@ -238,8 +237,8 @@ matches({prefix, _}, _Key) ->
     false;
 matches({match, F}, Key) when is_function(F, 1) ->
     try F(Key) of
-        true  -> true;
-        _     -> false
+        true -> true;
+        _ -> false
     catch
         _:_ -> false
     end;
@@ -247,7 +246,6 @@ matches({exact, T}, Key) ->
     Key =:= T;
 matches(_, _) ->
     false.
-
 
 %% =============================================================================
 %% gen_server callbacks
@@ -278,7 +276,6 @@ handle_call({subscribe, NS, Pid, Pattern}, _From, State) ->
     true = ets:insert(?TABLE, Row),
     emit_subscribe_event(NS, Pattern),
     {reply, {ok, Ref}, State};
-
 handle_call({unsubscribe, Ref}, _From, State) ->
     case ets:lookup(?TABLE, Ref) of
         [#sub{monitor = Mon}] ->
@@ -288,10 +285,8 @@ handle_call({unsubscribe, Ref}, _From, State) ->
             ok
     end,
     {reply, ok, State};
-
 handle_call(current_epoch, _From, #state{epoch = E} = State) ->
     {reply, E, State};
-
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown}, State}.
 

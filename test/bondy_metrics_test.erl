@@ -42,13 +42,11 @@ counter_increments() ->
     ?assertEqual(3, bondy_metrics:value(#{name => Name})),
     bondy_metrics:delete(#{name => Name}).
 
-
 counter_default_delta_is_one() ->
     Name = mk_name(),
     ok = bondy_metrics:counter(#{name => Name}),
     ?assertEqual(1, bondy_metrics:value(#{name => Name})),
     bondy_metrics:delete(#{name => Name}).
-
 
 counter_with_explicit_delta() ->
     Name = mk_name(),
@@ -57,18 +55,22 @@ counter_with_explicit_delta() ->
     ?assertEqual(12, bondy_metrics:value(#{name => Name})),
     bondy_metrics:delete(#{name => Name}).
 
-
 counter_label_isolation() ->
     Name = mk_name(),
     LA = #{namespace => a},
     LB = #{namespace => b},
-    [bondy_metrics:counter(#{name => Name, label => LA}) || _ <- lists:seq(1, 4)],
-    [bondy_metrics:counter(#{name => Name, label => LB}) || _ <- lists:seq(1, 9)],
+    [
+        bondy_metrics:counter(#{name => Name, label => LA})
+     || _ <- lists:seq(1, 4)
+    ],
+    [
+        bondy_metrics:counter(#{name => Name, label => LB})
+     || _ <- lists:seq(1, 9)
+    ],
     ?assertEqual(4, bondy_metrics:value(#{name => Name, label => LA})),
     ?assertEqual(9, bondy_metrics:value(#{name => Name, label => LB})),
     bondy_metrics:delete(#{name => Name, label => LA}),
     bondy_metrics:delete(#{name => Name, label => LB}).
-
 
 gauge_writes_absolute_value() ->
     Name = mk_name(),
@@ -79,19 +81,18 @@ gauge_writes_absolute_value() ->
     ?assertEqual(42, bondy_metrics:value(#{name => Name})),
     bondy_metrics:delete(#{name => Name}).
 
-
 value_returns_undefined_for_unknown() ->
     Name = mk_name(),
     ?assertEqual(undefined, bondy_metrics:value(#{name => Name})).
 
-
 type_clash_returns_error() ->
     Name = mk_name(),
     ok = bondy_metrics:counter(#{name => Name}),
-    ?assertMatch({error, {wrong_type, counter}},
-                 bondy_metrics:gauge(#{name => Name, value => 1})),
+    ?assertMatch(
+        {error, {wrong_type, counter}},
+        bondy_metrics:gauge(#{name => Name, value => 1})
+    ),
     bondy_metrics:delete(#{name => Name}).
-
 
 with_name_returns_all_labels() ->
     Name = mk_name(),
@@ -105,7 +106,6 @@ with_name_returns_all_labels() ->
     bondy_metrics:delete(#{name => Name, label => #{ns => a}}),
     bondy_metrics:delete(#{name => Name, label => #{ns => b}}).
 
-
 delete_drops_the_metric() ->
     Name = mk_name(),
     ok = bondy_metrics:counter(#{name => Name, delta => 9}),
@@ -113,16 +113,18 @@ delete_drops_the_metric() ->
     ok = bondy_metrics:delete(#{name => Name}),
     ?assertEqual(undefined, bondy_metrics:value(#{name => Name})).
 
-
 all_returns_every_metric() ->
     Name1 = mk_name(),
     Name2 = mk_name(),
     ok = bondy_metrics:counter(#{name => Name1, delta => 2}),
     ok = bondy_metrics:gauge(#{name => Name2, value => 17}),
     All = bondy_metrics:all(),
-    Matching = [R || R <- All,
-                     maps:get(name, R) =:= Name1 orelse
-                     maps:get(name, R) =:= Name2],
+    Matching = [
+        R
+     || R <- All,
+        maps:get(name, R) =:= Name1 orelse
+            maps:get(name, R) =:= Name2
+    ],
     ?assertEqual(2, length(Matching)),
     %% Verify the shape: each entry has name, label, type, value.
     lists:foreach(
@@ -137,7 +139,6 @@ all_returns_every_metric() ->
     bondy_metrics:delete(#{name => Name1}),
     bondy_metrics:delete(#{name => Name2}).
 
-
 info_returns_metadata_without_reading_value() ->
     Name = mk_name(),
     ok = bondy_metrics:counter(#{name => Name, delta => 5}),
@@ -147,11 +148,12 @@ info_returns_metadata_without_reading_value() ->
     ?assertEqual(not_found, bondy_metrics:info(#{name => never_registered_x})),
     bondy_metrics:delete(#{name => Name}).
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
 
 mk_name() ->
-    list_to_atom("metric_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
+    list_to_atom(
+        "metric_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).

@@ -93,7 +93,7 @@ The encoding is canonical: elements are stored in ordset order so two
 -export([encode_event/1]).
 -export([decode_event/1]).
 
--type elem()  :: binary().
+-type elem() :: binary().
 -type set_t() :: ordsets:ordset(elem()).
 -type state() :: {set_t(), bondy_oplog_hlc:hlc()}.
 -type event() :: {add, elem()}.
@@ -109,12 +109,12 @@ The encoding is canonical: elements are stored in ordset order so two
 initial_value() ->
     {[], 0}.
 
-
 -spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
     bondy_oplog_fold:apply_result().
 
-apply_event({Set, H0}, {add, Elem}, Meta)
-        when is_binary(Elem), Meta =/= undefined ->
+apply_event({Set, H0}, {add, Elem}, Meta) when
+    is_binary(Elem), Meta =/= undefined
+->
     H = bondy_oplog_event:key_hlc(Meta),
     NewState = {ordsets:add_element(Elem, Set), erlang:max(H0, H)},
     %% `value_equals_state/0 -> true`: substrate omits the value
@@ -122,51 +122,40 @@ apply_event({Set, H0}, {add, Elem}, Meta)
     %% double as the value bytes.
     {NewState, none}.
 
-
 -spec to_value(state()) -> set_t().
 
 to_value({Set, _H}) -> Set.
 
-
 -spec value_equals_state() -> true.
 
 value_equals_state() -> true.
-
 
 -spec merge_states(state(), state()) -> state().
 
 merge_states({Sa, Ha}, {Sb, Hb}) ->
     {ordsets:union(Sa, Sb), erlang:max(Ha, Hb)}.
 
-
 -spec hlc(state()) -> bondy_oplog_hlc:hlc().
 
 hlc({_S, H}) -> H.
-
 
 -spec gc_threshold(state()) -> bondy_oplog_hlc:hlc() | undefined.
 
 gc_threshold({[], 0}) -> undefined;
 gc_threshold({_S, H}) -> H.
 
-
 -spec encode_state(state()) -> binary().
 
 encode_state({Set, H}) when is_integer(H) ->
     NumElems = length(Set),
     ElemsBin = iolist_to_binary([encode_elem(E) || E <- Set]),
-    <<H:64/big-unsigned,
-      NumElems:32/big-unsigned,
-      ElemsBin/binary>>.
-
+    <<H:64/big-unsigned, NumElems:32/big-unsigned, ElemsBin/binary>>.
 
 -spec decode_state(binary()) -> state().
 
-decode_state(<<H:64/big-unsigned,
-               NumElems:32/big-unsigned, Rest0/binary>>) ->
+decode_state(<<H:64/big-unsigned, NumElems:32/big-unsigned, Rest0/binary>>) ->
     {Elems, <<>>} = decode_elems(NumElems, Rest0, []),
     {Elems, H}.
-
 
 -spec encode_event(event()) -> binary().
 
@@ -174,12 +163,10 @@ encode_event({add, Elem}) when is_binary(Elem) ->
     ElemSize = byte_size(Elem),
     <<1, ElemSize:32/big-unsigned, Elem/binary>>.
 
-
 -spec decode_event(binary()) -> event().
 
 decode_event(<<1, ElemSize:32/big-unsigned, Elem:ElemSize/binary>>) ->
     {add, Elem}.
-
 
 %% =============================================================================
 %% INTERNAL
@@ -191,6 +178,9 @@ encode_elem(Elem) when is_binary(Elem) ->
 
 decode_elems(0, Rest, Acc) ->
     {lists:reverse(Acc), Rest};
-decode_elems(N, <<ElemSize:32/big-unsigned, Elem:ElemSize/binary, Rest/binary>>,
-             Acc) when N > 0 ->
+decode_elems(
+    N,
+    <<ElemSize:32/big-unsigned, Elem:ElemSize/binary, Rest/binary>>,
+    Acc
+) when N > 0 ->
     decode_elems(N - 1, Rest, [Elem | Acc]).

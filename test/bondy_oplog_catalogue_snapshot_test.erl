@@ -28,9 +28,11 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
 
 catalogue_snapshot_test_() ->
@@ -43,7 +45,6 @@ catalogue_snapshot_test_() ->
         fun unknown_cursor_returns_expired/0,
         fun cursor_for_other_instance_returns_expired/0
     ]}.
-
 
 fresh_shard_init_returns_no_watermark_cursor() ->
     {Id, _NS, _, _} = setup_instance(),
@@ -58,7 +59,6 @@ fresh_shard_init_returns_no_watermark_cursor() ->
     ),
     teardown(Id).
 
-
 init_returns_watermark_after_cells() ->
     {Id, _NS, _, _} = setup_instance(),
     _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"a">>, {set, 10, <<"va">>}}),
@@ -70,12 +70,13 @@ init_returns_watermark_after_cells() ->
     ?assert(is_binary(Cursor)),
     teardown(Id).
 
-
 next_returns_batch_then_done() ->
     {Id, _NS, _, _} = setup_instance(),
     Keys = [<<"k0">>, <<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>],
-    [bondy_oplog:append(Id, {cell_apply, ?B, K, {set, 10 + I, <<I>>}})
-     || {I, K} <- lists:zip(lists:seq(1, length(Keys)), Keys)],
+    [
+        bondy_oplog:append(Id, {cell_apply, ?B, K, {set, 10 + I, <<I>>}})
+     || {I, K} <- lists:zip(lists:seq(1, length(Keys)), Keys)
+    ],
     _ = barrier(Id),
     {ok, {_W, Cursor}} = bondy_oplog_catalogue_snapshot:init(Id),
     {ok, {batch, {Cursor, Cells}}} =
@@ -91,16 +92,19 @@ next_returns_batch_then_done() ->
     ),
     teardown(Id).
 
-
 next_paginates_with_small_batch_size() ->
     %% Force a tiny batch size so we observe pagination.
     application:set_env(bondy_mst, catalogue_snapshot_batch_size, 2),
     try
         {Id, _NS, _, _} = setup_instance(),
-        Keys = [<<"k", (integer_to_binary(I))/binary>>
-                || I <- lists:seq(0, 6)],
-        [bondy_oplog:append(Id, {cell_apply, ?B, K, {set, 10 + I, <<I>>}})
-         || {I, K} <- lists:zip(lists:seq(1, length(Keys)), Keys)],
+        Keys = [
+            <<"k", (integer_to_binary(I))/binary>>
+         || I <- lists:seq(0, 6)
+        ],
+        [
+            bondy_oplog:append(Id, {cell_apply, ?B, K, {set, 10 + I, <<I>>}})
+         || {I, K} <- lists:zip(lists:seq(1, length(Keys)), Keys)
+        ],
         _ = barrier(Id),
         {ok, {_W, Cursor}} = bondy_oplog_catalogue_snapshot:init(Id),
         AllCells = pull_all(Id, Cursor, []),
@@ -110,7 +114,6 @@ next_paginates_with_small_batch_size() ->
     after
         application:unset_env(bondy_mst, catalogue_snapshot_batch_size)
     end.
-
 
 single_crdt_instance_returns_no_snapshot() ->
     Id = mk_id(),
@@ -126,7 +129,6 @@ single_crdt_instance_returns_no_snapshot() ->
         bondy_oplog:stop_instance(Id)
     end.
 
-
 unknown_cursor_returns_expired() ->
     {Id, _NS, _, _} = setup_instance(),
     Bogus = crypto:strong_rand_bytes(16),
@@ -135,7 +137,6 @@ unknown_cursor_returns_expired() ->
         bondy_oplog_catalogue_snapshot:next(Id, Bogus)
     ),
     teardown(Id).
-
 
 cursor_for_other_instance_returns_expired() ->
     {Id1, _, _, _} = setup_instance(),
@@ -148,7 +149,6 @@ cursor_for_other_instance_returns_expired() ->
     ),
     teardown(Id1),
     teardown(Id2).
-
 
 %% =============================================================================
 %% Helpers (mirror bondy_oplog_applier_high_water_test)
@@ -166,29 +166,28 @@ setup_instance() ->
     }),
     {Id, NS, Cache, Proj}.
 
-
 teardown(Id) ->
     bondy_oplog:stop_instance(Id),
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
-
 
 register_shard(NS, Index, Shard) ->
     {ok, Cache} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
-    {ok, Proj}  = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
+    {ok, Proj} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => Cache,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => Cache,
         projection_adapter => bondy_oplog_projection_ets,
-        projection_handle  => Proj,
-        overlay            => disabled,
-        fold_module        => lww_register
+        projection_handle => Proj,
+        overlay => disabled,
+        fold_module => lww_register
     }),
     {Cache, Proj}.
-
 
 mk_id() ->
     iolist_to_binary([
@@ -196,14 +195,11 @@ mk_id() ->
         integer_to_binary(erlang:unique_integer([positive]))
     ]).
 
-
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
 
-
 barrier(Id) ->
     bondy_oplog:projection(Id).
-
 
 pull_all(Id, Cursor, Acc) ->
     case bondy_oplog_catalogue_snapshot:next(Id, Cursor) of

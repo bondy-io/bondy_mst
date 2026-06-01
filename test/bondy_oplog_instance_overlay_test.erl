@@ -78,8 +78,13 @@ fold_range_merges_overlay_and_mst() ->
     First = lists:nth(1, AllKeys),
     Last = lists:last(AllKeys),
     EventsOut = lists:reverse(
-        bondy_oplog:fold_range(Id, First, Last,
-                               fun(E, A) -> [E | A] end, [])
+        bondy_oplog:fold_range(
+            Id,
+            First,
+            Last,
+            fun(E, A) -> [E | A] end,
+            []
+        )
     ),
     Ops = [bondy_oplog_event:op(E) || E <- EventsOut],
     Expected =

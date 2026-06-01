@@ -82,10 +82,10 @@ watermark, preserving rows that arrived after the batch was assembled.
 -export_type([bucket/0]).
 -export_type([key/0]).
 
--type tid()        :: ets:tid().
--type bucket()     :: binary().
--type cell_key()        :: binary().
--type after_hlc()  :: bondy_oplog_hlc:hlc().
+-type tid() :: ets:tid().
+-type bucket() :: binary().
+-type cell_key() :: binary().
+-type after_hlc() :: bondy_oplog_hlc:hlc().
 
 %% =============================================================================
 %% API
@@ -102,7 +102,6 @@ new() ->
         {decentralized_counters, true}
     ]).
 
-
 -spec insert(tid(), bucket(), cell_key(), bondy_oplog_event:t()) -> ok.
 
 insert(Tab, Bucket, Key, Event) ->
@@ -111,30 +110,30 @@ insert(Tab, Bucket, Key, Event) ->
     true = ets:insert(Tab, {{{Bucket, Key}, EventHlc, EventKey}, Event}),
     ok.
 
-
--doc("""
+-doc """
 Return overlay events for `(Bucket, Key)` whose HLC is strictly greater
 than `AfterHlc`, in HLC order (ascending). Caller typically passes the
 projection's last-applied HLC as `AfterHlc`.
-""").
+""".
 -spec events_for(tid(), bucket(), cell_key(), after_hlc()) ->
     [bondy_oplog_event:t()].
 
 events_for(Tab, Bucket, Key, AfterHlc) ->
-    MS = [{
-        {{{Bucket, Key}, '$1', '_'}, '$2'},
-        [{'>', '$1', AfterHlc}],
-        ['$2']
-    }],
+    MS = [
+        {
+            {{{Bucket, Key}, '$1', '_'}, '$2'},
+            [{'>', '$1', AfterHlc}],
+            ['$2']
+        }
+    ],
     ets:select(Tab, MS).
 
-
--doc("""
+-doc """
 Like `events_for/4` but additionally bounded above by `MaxHlc`
 (inclusive). Used by the fence-aware read paths (`read_batch/2`,
 `read_at_hlc/3`) to exclude overlay events that have moved past the
 caller's as-of point.
-""").
+""".
 -spec events_for_window(
     tid(),
     bucket(),
@@ -144,24 +143,25 @@ caller's as-of point.
 ) -> [bondy_oplog_event:t()].
 
 events_for_window(Tab, Bucket, Key, AfterHlc, MaxHlc) ->
-    MS = [{
-        {{{Bucket, Key}, '$1', '_'}, '$2'},
-        [
-            {'>',  '$1', AfterHlc},
-            {'=<', '$1', MaxHlc}
-        ],
-        ['$2']
-    }],
+    MS = [
+        {
+            {{{Bucket, Key}, '$1', '_'}, '$2'},
+            [
+                {'>', '$1', AfterHlc},
+                {'=<', '$1', MaxHlc}
+            ],
+            ['$2']
+        }
+    ],
     ets:select(Tab, MS).
 
-
--doc("""
+-doc """
 Range scan: return all overlay rows in `Bucket` whose `Key` is in
 `[KeyLow, KeyHigh)` and whose HLC is strictly greater than `AfterHlc`.
 Result is a list of `{Key, Event}` tuples in `(Key, HLC)` ascending
 order. `Bucket` is constant across the scan, so it is not repeated in
 each result tuple.
-""").
+""".
 -spec range(
     tid(),
     bucket(),
@@ -171,19 +171,20 @@ each result tuple.
 ) -> [{cell_key(), bondy_oplog_event:t()}].
 
 range(Tab, Bucket, KeyLow, KeyHigh, AfterHlc) ->
-    MS = [{
-        {{{Bucket, '$1'}, '$2', '_'}, '$3'},
-        [
-            {'>=', '$1', {const, KeyLow}},
-            {'<',  '$1', {const, KeyHigh}},
-            {'>',  '$2', AfterHlc}
-        ],
-        [{{'$1', '$3'}}]
-    }],
+    MS = [
+        {
+            {{{Bucket, '$1'}, '$2', '_'}, '$3'},
+            [
+                {'>=', '$1', {const, KeyLow}},
+                {'<', '$1', {const, KeyHigh}},
+                {'>', '$2', AfterHlc}
+            ],
+            [{{'$1', '$3'}}]
+        }
+    ],
     ets:select(Tab, MS).
 
-
--doc("""
+-doc """
 Range scan bounded above by `MaxHlc` (inclusive). All overlay rows in
 `Bucket` whose `Key` is in `[KeyLow, KeyHigh)` and whose HLC is
 `=< MaxHlc` are returned. `MaxHlc = infinity` removes the upper bound.
@@ -191,7 +192,7 @@ Range scan bounded above by `MaxHlc` (inclusive). All overlay rows in
 Used by `bondy_db_core:range/4` (`MST_DB_DESIGN.md` §9) for fence-aware
 range scans where the per-cell `> ProjHlc` filter is applied at the
 merge step.
-""").
+""".
 -spec range_window(
     tid(),
     bucket(),
@@ -203,23 +204,24 @@ merge step.
 range_window(Tab, Bucket, KeyLow, KeyHigh, infinity) ->
     range(Tab, Bucket, KeyLow, KeyHigh, 0);
 range_window(Tab, Bucket, KeyLow, KeyHigh, MaxHlc) when is_integer(MaxHlc) ->
-    MS = [{
-        {{{Bucket, '$1'}, '$2', '_'}, '$3'},
-        [
-            {'>=', '$1', {const, KeyLow}},
-            {'<',  '$1', {const, KeyHigh}},
-            {'=<', '$2', MaxHlc}
-        ],
-        [{{'$1', '$3'}}]
-    }],
+    MS = [
+        {
+            {{{Bucket, '$1'}, '$2', '_'}, '$3'},
+            [
+                {'>=', '$1', {const, KeyLow}},
+                {'<', '$1', {const, KeyHigh}},
+                {'=<', '$2', MaxHlc}
+            ],
+            [{{'$1', '$3'}}]
+        }
+    ],
     ets:select(Tab, MS).
 
-
--doc("""
+-doc """
 Evict rows that have been promoted to the projection. Deletes every row
 whose `(EventHlc, EventKey)` is `=<` the supplied watermark. Returns
 the number of rows deleted (`select_delete/2`'s native return).
-""").
+""".
 -spec evict_to(
     tid(),
     AppliedHlc :: bondy_oplog_hlc:hlc(),
@@ -227,25 +229,23 @@ the number of rows deleted (`select_delete/2`'s native return).
 ) -> non_neg_integer().
 
 evict_to(Tab, AppliedHlc, AppliedEventKey) ->
-    MS = [{
-        {{'_', '$1', '$2'}, '_'},
-        [
-            {'orelse',
-                {'<', '$1', AppliedHlc},
-                {'andalso',
-                    {'=:=', '$1', AppliedHlc},
-                    {'=<', '$2', {const, AppliedEventKey}}}}
-        ],
-        [true]
-    }],
+    MS = [
+        {
+            {{'_', '$1', '$2'}, '_'},
+            [
+                {'orelse', {'<', '$1', AppliedHlc},
+                    {'andalso', {'=:=', '$1', AppliedHlc},
+                        {'=<', '$2', {const, AppliedEventKey}}}}
+            ],
+            [true]
+        }
+    ],
     ets:select_delete(Tab, MS).
-
 
 -spec size(tid()) -> non_neg_integer().
 
 size(Tab) ->
     ets:info(Tab, size).
-
 
 -spec delete(tid()) -> ok.
 

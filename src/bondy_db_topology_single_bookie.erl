@@ -93,18 +93,24 @@ init(DbName, Opts) when is_atom(DbName), is_map(Opts) ->
             case maps:find(dir, Opts) of
                 {ok, Dir0} ->
                     Dir = normalise_dir(Dir0),
-                    BookOptsFun = maps:get(book_opts_fun, Opts,
-                                           fun default_book_opts/1),
+                    BookOptsFun = maps:get(
+                        book_opts_fun,
+                        Opts,
+                        fun default_book_opts/1
+                    ),
                     case ensure_dir(Dir) of
                         ok ->
-                            case bondy_db_leveled_sup:start_bookie(
-                                    Sup, BookOptsFun(Dir)) of
+                            case
+                                bondy_db_leveled_sup:start_bookie(
+                                    Sup, BookOptsFun(Dir)
+                                )
+                            of
                                 {ok, Bookie} ->
                                     {ok, #{
                                         db_name => DbName,
-                                        sup     => Sup,
-                                        dir     => Dir,
-                                        bookie  => Bookie
+                                        sup => Sup,
+                                        dir => Dir,
+                                        bookie => Bookie
                                     }};
                                 {error, _} = Err ->
                                     Err
@@ -119,10 +125,14 @@ init(DbName, Opts) when is_atom(DbName), is_map(Opts) ->
             {error, {missing_required_opt, sup}}
     end.
 
-
-open_table(EntityType, _ShardCount, _TableOpts,
-           #{bookie := Bookie} = State)
-        when is_atom(EntityType) ->
+open_table(
+    EntityType,
+    _ShardCount,
+    _TableOpts,
+    #{bookie := Bookie} = State
+) when
+    is_atom(EntityType)
+->
     %% Single_bookie ignores ShardCount at the physical level (there is
     %% only one Bookie); the facade still hashes keys into `shard_count`
     %% slots, but every shard for this topology routes to the same
@@ -130,32 +140,29 @@ open_table(EntityType, _ShardCount, _TableOpts,
     %% composes `(EntityType, Realm)` since neither the Bookie nor the
     %% NS isolates them.
     TableState = #{
-        bookie      => Bookie,
+        bookie => Bookie,
         entity_type => EntityType
     },
     {ok, TableState, State}.
-
 
 route(_Shard, #{bookie := Bookie}) ->
     Handle = #{bookie => Bookie},
     {ok, ?PROJECTION_ADAPTER, Handle}.
 
-
--doc("""
+-doc """
 Single-bookie topology: one Bookie holds every table for every realm.
 The Bucket must therefore disambiguate both — `<<Realm, "/", EntityType>>`.
-""").
-bucket_for(EntityType, Realm, #{entity_type := EntityType})
-        when is_binary(Realm) ->
+""".
+bucket_for(EntityType, Realm, #{entity_type := EntityType}) when
+    is_binary(Realm)
+->
     <<Realm/binary, "/", (atom_to_binary(EntityType, utf8))/binary>>.
-
 
 close_table(_TableState, State) ->
     %% No-op: the Bookie is shared and outlives table close. Stopping
     %% the Bookie here would break every other table that has not yet
     %% been closed.
     {ok, State}.
-
 
 shutdown(#{sup := Sup, bookie := Bookie}) ->
     %% Tell leveled to flush + close before bringing the supervisor
@@ -165,7 +172,6 @@ shutdown(#{sup := Sup, bookie := Bookie}) ->
     _ = catch leveled_bookie:book_close(Bookie),
     bondy_db_leveled_sup:stop(Sup).
 
-
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
@@ -173,10 +179,8 @@ shutdown(#{sup := Sup, bookie := Bookie}) ->
 ensure_dir(Dir) ->
     filelib:ensure_dir(filename:join(Dir, ".keep")).
 
-
 normalise_dir(Dir) when is_binary(Dir) -> binary_to_list(Dir);
-normalise_dir(Dir) when is_list(Dir)   -> Dir.
-
+normalise_dir(Dir) when is_list(Dir) -> Dir.
 
 default_book_opts(Dir) ->
     %% `head_only=with_lookup` enables `book_mput/2` (atomic batched
@@ -185,8 +189,10 @@ default_book_opts(Dir) ->
     %% Per the leveled head_only contract, `book_get` and `book_put`
     %% are NOT supported once this flag is on; the adapter uses
     %% `book_headonly` + `book_mput` exclusively.
-    [{root_path, Dir},
-     {cache_size, 2000},
-     {max_journalsize, 100_000_000},
-     {sync_strategy, none},
-     {head_only, with_lookup}].
+    [
+        {root_path, Dir},
+        {cache_size, 2000},
+        {max_journalsize, 100_000_000},
+        {sync_strategy, none},
+        {head_only, with_lookup}
+    ].

@@ -162,31 +162,33 @@ process-bound side effects for the same reason.
 """).
 
 -define(FLAG_COMPRESSED, ?BONDY_OPLOG_WAL_FRAME_FLAG_COMPRESSED).
--define(FLAG_ENCRYPTED,  ?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED).
+-define(FLAG_ENCRYPTED, ?BONDY_OPLOG_WAL_FRAME_FLAG_ENCRYPTED).
 -define(ALGO_ZLIB, ?BONDY_OPLOG_WAL_CODEC_ALGO_ZLIB).
--define(ALGO_LZ4,  ?BONDY_OPLOG_WAL_CODEC_ALGO_LZ4).
+-define(ALGO_LZ4, ?BONDY_OPLOG_WAL_CODEC_ALGO_LZ4).
 -define(CIPHER_AES_256_GCM, ?BONDY_OPLOG_WAL_CODEC_CIPHER_AES_256_GCM).
--define(IV_BYTES,           ?BONDY_OPLOG_WAL_CODEC_IV_BYTES).
--define(TAG_BYTES,          ?BONDY_OPLOG_WAL_CODEC_TAG_BYTES).
--define(KEY_BYTES,          ?BONDY_OPLOG_WAL_CODEC_KEY_BYTES).
+-define(IV_BYTES, ?BONDY_OPLOG_WAL_CODEC_IV_BYTES).
+-define(TAG_BYTES, ?BONDY_OPLOG_WAL_CODEC_TAG_BYTES).
+-define(KEY_BYTES, ?BONDY_OPLOG_WAL_CODEC_KEY_BYTES).
 -define(ENCRYPT_HEADER_BYTES,
-        ?BONDY_OPLOG_WAL_CODEC_ENCRYPT_HEADER_BYTES).
+    ?BONDY_OPLOG_WAL_CODEC_ENCRYPT_HEADER_BYTES
+).
 -define(MIN_BYTES_DEFAULT,
-        ?BONDY_OPLOG_WAL_BODY_COMPRESSION_MIN_BYTES_DEFAULT).
+    ?BONDY_OPLOG_WAL_BODY_COMPRESSION_MIN_BYTES_DEFAULT
+).
 
 -type algorithm() :: none | zlib | lz4.
 -type encryption() :: disabled | {enabled, module()}.
 
 -type encode_opts() :: #{
-    body_compression           => algorithm(),
+    body_compression => algorithm(),
     body_compression_min_bytes => pos_integer(),
-    body_encryption            => encryption(),
-    instance_id                => instance_id() | undefined
+    body_encryption => encryption(),
+    instance_id => instance_id() | undefined
 }.
 
 -type decode_opts() :: #{
     body_encryption => encryption(),
-    instance_id     => instance_id() | undefined
+    instance_id => instance_id() | undefined
 }.
 
 -type decode_error() ::
@@ -309,8 +311,9 @@ decode_body(Body, Flags, Opts) ->
     end.
 
 %% @private
-decode_compressed(Body, Flags, _Opts)
-  when Flags band ?FLAG_COMPRESSED =:= 0 ->
+decode_compressed(Body, Flags, _Opts) when
+    Flags band ?FLAG_COMPRESSED =:= 0
+->
     {ok, Body};
 decode_compressed(<<>>, _Flags, _Opts) ->
     %% The flag claims a compressed body but there isn't even an
@@ -335,8 +338,9 @@ project today). Any other value is `{error, {invalid_opt,
 body_compression, V}}`.
 """).
 -spec validate_algorithm(term()) ->
-    ok | {error, {invalid_opt, body_compression, term()}}
-       | {error, {unsupported_codec, lz4}}.
+    ok
+    | {error, {invalid_opt, body_compression, term()}}
+    | {error, {unsupported_codec, lz4}}.
 
 validate_algorithm(none) -> ok;
 validate_algorithm(zlib) -> ok;
@@ -378,8 +382,7 @@ validate_encryption({enabled, Module}) when is_atom(Module) ->
                     {error, {key_registry_bad_current_key, Other}}
             catch
                 Class:Reason ->
-                    {error,
-                     {key_registry_bad_current_key, {Class, Reason}}}
+                    {error, {key_registry_bad_current_key, {Class, Reason}}}
             end;
         {error, _} = E ->
             E
@@ -392,8 +395,8 @@ ensure_registry_callable(Module) ->
     case code:ensure_loaded(Module) of
         {module, _} ->
             case
-                erlang:function_exported(Module, current_key, 0)
-                andalso erlang:function_exported(Module, lookup_key, 1)
+                erlang:function_exported(Module, current_key, 0) andalso
+                    erlang:function_exported(Module, lookup_key, 1)
             of
                 true -> ok;
                 false -> {error, {key_registry_unloadable, Module}}
@@ -509,8 +512,12 @@ emit_encrypt(InstanceId, KeyId, In, Out, Dur) ->
 emit_decrypt(InstanceId, KeyId, In, Out, Dur, TagMismatches) ->
     telemetry:execute(
         [bondy_oplog, wal, codec, decrypt],
-        #{input_bytes => In, output_bytes => Out, duration_us => Dur,
-          tag_mismatches => TagMismatches},
+        #{
+            input_bytes => In,
+            output_bytes => Out,
+            duration_us => Dur,
+            tag_mismatches => TagMismatches
+        },
         meta(InstanceId, aes_256_gcm, KeyId)
     ).
 
@@ -545,10 +552,14 @@ encrypt_now(Body, Registry, Opts) ->
         aes_256_gcm, Key, IV, BodyBin, <<>>, ?TAG_BYTES, true
     ),
     T1 = erlang:monotonic_time(microsecond),
-    Envelope = <<?CIPHER_AES_256_GCM:8, KeyId:16/big-unsigned,
-                 IV/binary, Tag/binary, Ciphertext/binary>>,
+    Envelope =
+        <<?CIPHER_AES_256_GCM:8, KeyId:16/big-unsigned, IV/binary, Tag/binary,
+            Ciphertext/binary>>,
     emit_encrypt(
-        InstanceId, KeyId, byte_size(BodyBin), byte_size(Envelope),
+        InstanceId,
+        KeyId,
+        byte_size(BodyBin),
+        byte_size(Envelope),
         T1 - T0
     ),
     Envelope.
@@ -560,9 +571,11 @@ encrypt_now(Body, Registry, Opts) ->
 %% telemetry event so dashboards can alert on the rate.
 decrypt(Body, _Opts) when byte_size(Body) < ?ENCRYPT_HEADER_BYTES ->
     {error, truncated_envelope};
-decrypt(<<Algo:8, KeyId:16/big-unsigned, IV:?IV_BYTES/binary,
-          Tag:?TAG_BYTES/binary, Ciphertext/binary>>,
-        Opts) ->
+decrypt(
+    <<Algo:8, KeyId:16/big-unsigned, IV:?IV_BYTES/binary, Tag:?TAG_BYTES/binary,
+        Ciphertext/binary>>,
+    Opts
+) ->
     case cipher_atom(Algo) of
         {ok, aes_256_gcm} ->
             decrypt_aes_gcm(KeyId, IV, Tag, Ciphertext, Opts);
@@ -596,8 +609,12 @@ do_decrypt_aes_gcm(Key, KeyId, IV, Tag, Ciphertext, Opts) ->
             {error, decrypt_failed};
         Plaintext when is_binary(Plaintext) ->
             emit_decrypt(
-                InstanceId, KeyId, byte_size(Ciphertext),
-                byte_size(Plaintext), Dur, 0
+                InstanceId,
+                KeyId,
+                byte_size(Ciphertext),
+                byte_size(Plaintext),
+                Dur,
+                0
             ),
             {ok, Plaintext}
     end.

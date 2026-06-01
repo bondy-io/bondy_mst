@@ -14,39 +14,46 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("kernel/include/file.hrl").
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
 
 mk_tmp_dir() ->
-    Base = lists:flatten(io_lib:format(
-        "/tmp/bondy_mst_pack_reader_rebuild_test_~p_~p",
-        [erlang:system_time(microsecond),
-         erlang:unique_integer([positive])])),
+    Base = lists:flatten(
+        io_lib:format(
+            "/tmp/bondy_mst_pack_reader_rebuild_test_~p_~p",
+            [
+                erlang:system_time(microsecond),
+                erlang:unique_integer([positive])
+            ]
+        )
+    ),
     ok = filelib:ensure_path(Base),
     Base.
 
-
-rmrf(Dir) -> _ = file:del_dir_r(Dir), ok.
-
+rmrf(Dir) ->
+    _ = file:del_dir_r(Dir),
+    ok.
 
 mk_instance_id() ->
     list_to_binary(
         "reader_rebuild_test_" ++
-        integer_to_list(erlang:unique_integer([positive]))).
-
+            integer_to_list(erlang:unique_integer([positive]))
+    ).
 
 open_pack_store(Dir, InstanceId) ->
-    bondy_mst_pack_store:open(sha256,
-        #{dir => Dir, instance_id => InstanceId,
-          auto_seal_records => infinity,
-          auto_seal_bytes   => infinity}).
-
+    bondy_mst_pack_store:open(
+        sha256,
+        #{
+            dir => Dir,
+            instance_id => InstanceId,
+            auto_seal_records => infinity,
+            auto_seal_bytes => infinity
+        }
+    ).
 
 mk_page(K, V) ->
     bondy_mst_page:new(0, undefined, [{K, V, undefined}]).
-
 
 %% Seed N pages, seal once, close the store. Returns
 %% {Dir, InstanceId, PackId, [{Hash, Page}]}.
@@ -62,20 +69,18 @@ seed_and_seal(N) ->
             {H, S2} = bondy_mst_pack_store:put(S, P),
             {S2, [{H, P} | Acc]}
         end,
-        {S0, []}, lists:seq(1, N)
+        {S0, []},
+        lists:seq(1, N)
     ),
     {ok, S2} = bondy_mst_pack_store:seal(S1),
     [PackId] = bondy_mst_pack_store:sealed_pack_ids(S2),
     ok = bondy_mst_pack_store:close(S2),
     {Dir, InstanceId, PackId, lists:reverse(HashPages)}.
 
-
 idx_path(Dir, PackId) ->
     bondy_mst_pack_paths:sealed_idx_path(Dir, PackId).
 
-
 is_regular(Path) -> filelib:is_regular(Path).
-
 
 %% Wraps the body in a per-test handler that captures all
 %% idx_rebuild telemetry events into the test's mailbox.
@@ -89,13 +94,16 @@ with_telemetry(Fun) ->
     HandlerId = {?MODULE, erlang:unique_integer([positive])},
     Events = [[bondy_mst, page_store, idx_rebuild]],
     ok = telemetry:attach_many(
-        HandlerId, Events,
+        HandlerId,
+        Events,
         fun(E, M, Meta, _Cfg) -> Self ! {telemetry, E, M, Meta} end,
-        #{}),
-    try Fun()
-    after telemetry:detach(HandlerId)
+        #{}
+    ),
+    try
+        Fun()
+    after
+        telemetry:detach(HandlerId)
     end.
-
 
 drain_telemetry() ->
     receive
@@ -103,14 +111,12 @@ drain_telemetry() ->
     after 0 -> ok
     end.
 
-
 recv_rebuild_event() ->
     receive
         {telemetry, [bondy_mst, page_store, idx_rebuild], M, Meta} ->
             {M, Meta}
     after 100 -> none
     end.
-
 
 %% =============================================================================
 %% Tests
@@ -137,8 +143,10 @@ reader_rebuilds_missing_idx() ->
             %% in bondy_mst_pack_idx_rebuild_test.
             lists:foreach(
                 fun({H, _P}) ->
-                    ?assertMatch({ok, B} when is_binary(B),
-                                 bondy_mst_pack_reader:get(R, H))
+                    ?assertMatch(
+                        {ok, B} when is_binary(B),
+                        bondy_mst_pack_reader:get(R, H)
+                    )
                 end,
                 HashPages
             ),
@@ -154,7 +162,6 @@ reader_rebuilds_missing_idx() ->
             rmrf(Dir)
         end
     end).
-
 
 reader_clean_open_emits_no_event_test_() ->
     {timeout, 30, fun reader_clean_open_emits_no_event/0}.

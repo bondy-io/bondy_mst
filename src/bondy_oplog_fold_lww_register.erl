@@ -93,13 +93,13 @@ Events use the same leading-tag pattern.
 
 -type register_value() :: binary().
 -type state() ::
-        undefined
-        | {set, register_value(), bondy_oplog_hlc:hlc()}
-        | {cleared, bondy_oplog_hlc:hlc()}.
+    undefined
+    | {set, register_value(), bondy_oplog_hlc:hlc()}
+    | {cleared, bondy_oplog_hlc:hlc()}.
 
 -type event() ::
-        {set, bondy_oplog_hlc:hlc(), register_value()}
-        | {clear, bondy_oplog_hlc:hlc()}.
+    {set, bondy_oplog_hlc:hlc(), register_value()}
+    | {clear, bondy_oplog_hlc:hlc()}.
 
 -export_type([state/0, event/0, value/0]).
 
@@ -112,80 +112,72 @@ Events use the same leading-tag pattern.
 initial_value() ->
     undefined.
 
-
 -spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
     bondy_oplog_fold:apply_result().
 
 apply_event(undefined, {set, H, V}, _Meta) when is_binary(V) ->
     {{set, V, H}, V};
-
 apply_event(undefined, {clear, H}, _Meta) ->
     {{cleared, H}, none};
-
 %% set vs current set:
-apply_event({set, _OldV, OldH}, {set, H, V}, _Meta)
-        when H > OldH, is_binary(V) ->
+apply_event({set, _OldV, OldH}, {set, H, V}, _Meta) when
+    H > OldH, is_binary(V)
+->
     {{set, V, H}, V};
-
-apply_event({set, OldV, OldH} = S, {set, H, V}, _Meta)
-        when H == OldH, is_binary(V) ->
+apply_event({set, OldV, OldH} = S, {set, H, V}, _Meta) when
+    H == OldH, is_binary(V)
+->
     %% Tie at same HLC — deterministic resolution on the payload.
     case V > OldV of
-        true  -> {{set, V, OldH}, V};
+        true -> {{set, V, OldH}, V};
         false -> {S, none}
     end;
-
 apply_event({set, _, _} = S, {set, _, _}, _Meta) ->
     %% Older HLC; rejected.
     {S, none};
-
 %% set vs incoming clear:
 apply_event({set, _OldV, OldH}, {clear, H}, _Meta) when H > OldH ->
     {{cleared, H}, undefined};
-
 apply_event({set, _OldV, OldH}, {clear, H}, _Meta) when H == OldH ->
     %% Tie — cleared deterministically wins.
     {{cleared, OldH}, undefined};
-
 apply_event({set, _, _} = S, {clear, _}, _Meta) ->
     %% Older clear; rejected.
     {S, none};
-
 %% cleared vs incoming set:
-apply_event({cleared, OldH}, {set, H, V}, _Meta)
-        when H > OldH, is_binary(V) ->
+apply_event({cleared, OldH}, {set, H, V}, _Meta) when
+    H > OldH, is_binary(V)
+->
     %% Later-HLC set resurrects the register (LWW: latest wins).
     {{set, V, H}, V};
-
 apply_event({cleared, OldH} = S, {set, H, _}, _Meta) when H =< OldH ->
     %% Older or tied set; cleared retains (cleared wins at tie).
     {S, none};
-
 %% cleared vs incoming clear:
 apply_event({cleared, OldH}, {clear, H}, _Meta) ->
     {{cleared, erlang:max(OldH, H)}, none}.
 
-
 -spec to_value(state()) -> undefined | register_value().
 
-to_value(undefined)        -> undefined;
-to_value({set, V, _H})     -> V;
-to_value({cleared, _H})    -> undefined.
+to_value(undefined) -> undefined;
+to_value({set, V, _H}) -> V;
+to_value({cleared, _H}) -> undefined.
 
-
--spec apply_value_delta(undefined | register_value(),
-                        undefined | register_value()) ->
+-spec apply_value_delta(
+    undefined | register_value(),
+    undefined | register_value()
+) ->
     undefined | register_value().
 
 apply_value_delta(_OldValue, NewValue) ->
     NewValue.
 
-
 -spec merge_states(state(), state()) -> state().
 
-merge_states(undefined, B) -> B;
-merge_states(A, undefined) -> A;
-
+merge_states(undefined, B) ->
+    B;
+merge_states(A, undefined) ->
+    A;
 %% set vs set
 merge_states({set, _, Ha} = A, {set, _, Hb}) when Ha > Hb -> A;
 merge_states({set, _, Ha}, {set, _, Hb} = B) when Hb > Ha -> B;
@@ -194,11 +186,9 @@ merge_states({set, Va, H} = A, {set, Vb, H} = B) ->
         true -> B;
         false -> A
     end;
-
 %% cleared vs cleared
 merge_states({cleared, Ha}, {cleared, Hb}) ->
     {cleared, erlang:max(Ha, Hb)};
-
 %% set vs cleared (and reverse)
 merge_states({set, _, Hs}, {cleared, Hc}) when Hc > Hs ->
     {cleared, Hc};
@@ -214,60 +204,48 @@ merge_states({set, _, H}, {cleared, H}) ->
 merge_states({cleared, H}, {set, _, H}) ->
     {cleared, H}.
 
-
 -spec hlc(state()) -> bondy_oplog_hlc:hlc().
 
-hlc(undefined)         -> 0;
-hlc({set, _, H})       -> H;
-hlc({cleared, H})      -> H.
-
+hlc(undefined) -> 0;
+hlc({set, _, H}) -> H;
+hlc({cleared, H}) -> H.
 
 -spec gc_threshold(state()) -> bondy_oplog_hlc:hlc() | undefined.
 
-gc_threshold(undefined)        -> undefined;
-gc_threshold({set, _, H})      -> H;
-gc_threshold({cleared, H})     -> H.
-
+gc_threshold(undefined) -> undefined;
+gc_threshold({set, _, H}) -> H;
+gc_threshold({cleared, H}) -> H.
 
 -spec encode_state(state()) -> binary().
 
 encode_state(undefined) ->
     <<0>>;
-
 encode_state({set, V, H}) when is_binary(V), is_integer(H) ->
     VSize = byte_size(V),
     <<1, H:64/big-unsigned, VSize:32/big-unsigned, V/binary>>;
-
 encode_state({cleared, H}) when is_integer(H) ->
     <<2, H:64/big-unsigned>>.
-
 
 -spec decode_state(binary()) -> state().
 
 decode_state(<<0>>) ->
     undefined;
-
 decode_state(<<1, H:64/big-unsigned, VSize:32/big-unsigned, V:VSize/binary>>) ->
     {set, V, H};
-
 decode_state(<<2, H:64/big-unsigned>>) ->
     {cleared, H}.
-
 
 -spec encode_event(event()) -> binary().
 
 encode_event({set, H, V}) when is_integer(H), is_binary(V) ->
     VSize = byte_size(V),
     <<1, H:64/big-unsigned, VSize:32/big-unsigned, V/binary>>;
-
 encode_event({clear, H}) when is_integer(H) ->
     <<2, H:64/big-unsigned>>.
-
 
 -spec decode_event(binary()) -> event().
 
 decode_event(<<1, H:64/big-unsigned, VSize:32/big-unsigned, V:VSize/binary>>) ->
     {set, H, V};
-
 decode_event(<<2, H:64/big-unsigned>>) ->
     {clear, H}.

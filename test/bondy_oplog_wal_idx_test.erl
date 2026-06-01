@@ -33,9 +33,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_idx_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_idx_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -47,8 +54,10 @@ rmrf(Dir) ->
 
 with_tmp_dir(Fun) ->
     Dir = mktemp_dir(),
-    try Fun(Dir)
-    after rmrf(Dir)
+    try
+        Fun(Dir)
+    after
+        rmrf(Dir)
     end.
 
 %% =============================================================================
@@ -135,8 +144,10 @@ entries_are_hlc_ascending_test() ->
 note_indexed_frame_rejects_last_below_first_test() ->
     %% Guard on `note_indexed_frame/4`: LastHlc must be >= FirstHlc.
     Acc = bondy_oplog_wal_idx:new(1000),
-    ?assertError(function_clause,
-        bondy_oplog_wal_idx:note_indexed_frame(Acc, 200, 100, 48)).
+    ?assertError(
+        function_clause,
+        bondy_oplog_wal_idx:note_indexed_frame(Acc, 200, 100, 48)
+    ).
 
 interval_resets_on_emit_test() ->
     Acc0 = bondy_oplog_wal_idx:new(500),
@@ -175,8 +186,8 @@ write_produces_v2_header_test() ->
         Path = filename:join(Dir, "000000000.qidx"),
         ok = bondy_oplog_wal_idx:write_file(Path, [{100, 105, 48}]),
         {ok, Bin} = file:read_file(Path),
-        <<_Magic:32/big, Version:8, _:24, EntryCount:32/big, _:32,
-          Body/binary>> = Bin,
+        <<_Magic:32/big, Version:8, _:24, EntryCount:32/big, _:32, Body/binary>> =
+            Bin,
         ?assertEqual(?VERSION_V2, Version),
         ?assertEqual(1, EntryCount),
         ?assertEqual(?ENTRY_V2, byte_size(Body))
@@ -188,10 +199,12 @@ read_v1_lifts_entries_to_v2_shape_test() ->
         %% Hand-craft a v1 file: header version = 1, 16-byte entries
         %% (HLC + Offset). Mixes a single-HLC range and a "v1 batch"
         %% (which v2 readers see as a single-point range).
-        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V1:8/unsigned,
-                   0:24/big-unsigned, 2:32/big-unsigned, 0:32/big-unsigned>>,
-        V1Entries = <<100:64/big-unsigned, 48:64/big-unsigned,
-                      200:64/big-unsigned, 1024:64/big-unsigned>>,
+        Header =
+            <<?MAGIC:32/big-unsigned, ?VERSION_V1:8/unsigned, 0:24/big-unsigned,
+                2:32/big-unsigned, 0:32/big-unsigned>>,
+        V1Entries =
+            <<100:64/big-unsigned, 48:64/big-unsigned, 200:64/big-unsigned,
+                1024:64/big-unsigned>>,
         ok = file:write_file(Path, [Header, V1Entries]),
         %% Reader lifts each `(H, Off)` to `(H, H, Off)`.
         ?assertEqual(
@@ -206,20 +219,22 @@ read_v1_via_open_seeks_correctly_test() ->
     %% single point).
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V1:8/unsigned,
-                   0:24/big-unsigned, 3:32/big-unsigned, 0:32/big-unsigned>>,
-        V1Entries = <<100:64/big-unsigned,  48:64/big-unsigned,
-                      200:64/big-unsigned, 1024:64/big-unsigned,
-                      300:64/big-unsigned, 2048:64/big-unsigned>>,
+        Header =
+            <<?MAGIC:32/big-unsigned, ?VERSION_V1:8/unsigned, 0:24/big-unsigned,
+                3:32/big-unsigned, 0:32/big-unsigned>>,
+        V1Entries =
+            <<100:64/big-unsigned, 48:64/big-unsigned, 200:64/big-unsigned,
+                1024:64/big-unsigned, 300:64/big-unsigned,
+                2048:64/big-unsigned>>,
         ok = file:write_file(Path, [Header, V1Entries]),
         {ok, Handle} = bondy_oplog_wal_idx:open(Path),
-        ?assertEqual(none,        bondy_oplog_wal_idx:seek(Handle, 50)),
-        ?assertEqual({ok, 48},    bondy_oplog_wal_idx:seek(Handle, 100)),
-        ?assertEqual({ok, 48},    bondy_oplog_wal_idx:seek(Handle, 150)),
-        ?assertEqual({ok, 1024},  bondy_oplog_wal_idx:seek(Handle, 200)),
-        ?assertEqual({ok, 1024},  bondy_oplog_wal_idx:seek(Handle, 299)),
-        ?assertEqual({ok, 2048},  bondy_oplog_wal_idx:seek(Handle, 300)),
-        ?assertEqual({ok, 2048},  bondy_oplog_wal_idx:seek(Handle, 99999))
+        ?assertEqual(none, bondy_oplog_wal_idx:seek(Handle, 50)),
+        ?assertEqual({ok, 48}, bondy_oplog_wal_idx:seek(Handle, 100)),
+        ?assertEqual({ok, 48}, bondy_oplog_wal_idx:seek(Handle, 150)),
+        ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 200)),
+        ?assertEqual({ok, 1024}, bondy_oplog_wal_idx:seek(Handle, 299)),
+        ?assertEqual({ok, 2048}, bondy_oplog_wal_idx:seek(Handle, 300)),
+        ?assertEqual({ok, 2048}, bondy_oplog_wal_idx:seek(Handle, 99999))
     end).
 
 read_nonexistent_file_returns_enoent_test() ->
@@ -241,8 +256,9 @@ read_truncated_header_test() ->
 read_bad_magic_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        ok = file:write_file(Path, <<0, 0, 0, 0,  0, 0, 0, 0,
-                                     0, 0, 0, 0,  0, 0, 0, 0>>),
+        ok = file:write_file(
+            Path, <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>
+        ),
         ?assertEqual({error, bad_magic}, bondy_oplog_wal_idx:read_file(Path))
     end).
 
@@ -263,9 +279,11 @@ read_truncated_entries_v2_test() ->
         Path = filename:join(Dir, "000000000.qidx"),
         %% Header claims 2 entries but only 1 entry's worth of bytes
         %% follows.
-        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V2:8/unsigned, 0:24,
-                   2:32/big-unsigned, 0:32/big-unsigned>>,
-        Entry = <<100:64/big-unsigned, 105:64/big-unsigned, 48:64/big-unsigned>>,
+        Header =
+            <<?MAGIC:32/big-unsigned, ?VERSION_V2:8/unsigned, 0:24,
+                2:32/big-unsigned, 0:32/big-unsigned>>,
+        Entry =
+            <<100:64/big-unsigned, 105:64/big-unsigned, 48:64/big-unsigned>>,
         ok = file:write_file(Path, [Header, Entry]),
         ?assertEqual(
             {error, truncated_entries},
@@ -276,8 +294,9 @@ read_truncated_entries_v2_test() ->
 read_truncated_entries_v1_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V1:8/unsigned, 0:24,
-                   2:32/big-unsigned, 0:32/big-unsigned>>,
+        Header =
+            <<?MAGIC:32/big-unsigned, ?VERSION_V1:8/unsigned, 0:24,
+                2:32/big-unsigned, 0:32/big-unsigned>>,
         Entry = <<100:64/big-unsigned, 48:64/big-unsigned>>,
         ok = file:write_file(Path, [Header, Entry]),
         ?assertEqual(
@@ -289,8 +308,9 @@ read_truncated_entries_v1_test() ->
 read_trailing_bytes_test() ->
     with_tmp_dir(fun(Dir) ->
         Path = filename:join(Dir, "000000000.qidx"),
-        Header = <<?MAGIC:32/big-unsigned, ?VERSION_V2:8/unsigned, 0:24,
-                   0:32/big-unsigned, 0:32/big-unsigned>>,
+        Header =
+            <<?MAGIC:32/big-unsigned, ?VERSION_V2:8/unsigned, 0:24,
+                0:32/big-unsigned, 0:32/big-unsigned>>,
         ok = file:write_file(Path, [Header, <<"garbage">>]),
         ?assertEqual(
             {error, trailing_bytes},

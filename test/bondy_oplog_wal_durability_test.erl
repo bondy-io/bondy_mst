@@ -42,9 +42,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_durability_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_durability_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -99,7 +106,10 @@ expect_open_error(Expected, Fun) ->
     try
         Got = Fun(),
         ?assertEqual({error, Expected}, Got),
-        receive {'EXIT', _, _} -> ok after 0 -> ok end
+        receive
+            {'EXIT', _, _} -> ok
+        after 0 -> ok
+        end
     after
         process_flag(trap_exit, OldFlag)
     end.
@@ -158,7 +168,8 @@ batched_append_defers_fsync_test() ->
     HLC = bondy_oplog_hlc:new(),
     Opts = #{
         fsync_mode => batched,
-        batched_fsync_interval => 10_000,    %% effectively disabled
+        %% effectively disabled
+        batched_fsync_interval => 10_000,
         batched_fsync_bytes => 100 * 1024 * 1024
     },
     with_wal(Opts, fun(Pid, _Dir) ->
@@ -361,14 +372,19 @@ batched_sync_advances_durable_and_resets_pending_test() ->
     },
     with_wal(Opts, fun(Pid, _Dir) ->
         {_, _, EndPos} = append_one(Pid, HLC, 1),
-        ?assert(maps:get(
-            pending_fsync_bytes, bondy_oplog_wal:info(Pid)
-        ) > 0),
+        ?assert(
+            maps:get(
+                pending_fsync_bytes, bondy_oplog_wal:info(Pid)
+            ) > 0
+        ),
         ?assertEqual(ok, bondy_oplog_wal:sync(Pid)),
         ?assertEqual(EndPos, bondy_oplog_wal:durable_position(Pid)),
-        ?assertEqual(0, maps:get(
-            pending_fsync_bytes, bondy_oplog_wal:info(Pid)
-        ))
+        ?assertEqual(
+            0,
+            maps:get(
+                pending_fsync_bytes, bondy_oplog_wal:info(Pid)
+            )
+        )
     end).
 
 batched_rotation_advances_durable_test() ->
@@ -430,7 +446,8 @@ batched_close_fsyncs_pending_test() ->
     Dir = mktemp_dir(),
     try
         Opts = #{
-            dir => Dir, origin => origin(),
+            dir => Dir,
+            origin => origin(),
             fsync_mode => batched,
             batched_fsync_interval => 10_000,
             batched_fsync_bytes => 100 * 1024 * 1024
@@ -485,9 +502,12 @@ invalid_batched_interval_rejected_test() ->
             fun() ->
                 bondy_oplog_wal:start_link(
                     instance_id(),
-                    #{dir => Dir, origin => origin(),
-                      fsync_mode => batched,
-                      batched_fsync_interval => 0}
+                    #{
+                        dir => Dir,
+                        origin => origin(),
+                        fsync_mode => batched,
+                        batched_fsync_interval => 0
+                    }
                 )
             end
         )
@@ -503,9 +523,12 @@ invalid_batched_bytes_rejected_test() ->
             fun() ->
                 bondy_oplog_wal:start_link(
                     instance_id(),
-                    #{dir => Dir, origin => origin(),
-                      fsync_mode => batched,
-                      batched_fsync_bytes => 0}
+                    #{
+                        dir => Dir,
+                        origin => origin(),
+                        fsync_mode => batched,
+                        batched_fsync_bytes => 0
+                    }
                 )
             end
         )

@@ -80,54 +80,54 @@ stateful-PropEr fault-injection harness are still to land.
 %% `state.waiters` so satisfying on a durable advance is a
 %% `lists:splitwith/2` over the head of the list.
 -record(waiter, {
-    id    :: reference(),
-    pos   :: {bondy_oplog_wal_segment:segment_id(), non_neg_integer()},
-    from  :: gen_server:from(),
+    id :: reference(),
+    pos :: {bondy_oplog_wal_segment:segment_id(), non_neg_integer()},
+    from :: gen_server:from(),
     %% `infinity` ⇒ no deadline; otherwise the timer ref the writer
     %% will receive on timeout (and cancel on satisfy).
-    tref  :: reference() | infinity
+    tref :: reference() | infinity
 }).
 
 -record(state, {
-    instance_id        :: instance_id(),
-    dir                :: file:filename_all(),
-    origin             :: bondy_oplog_origin:t(),
-    max_segment_bytes  :: pos_integer(),
+    instance_id :: instance_id(),
+    dir :: file:filename_all(),
+    origin :: bondy_oplog_origin:t(),
+    max_segment_bytes :: pos_integer(),
     %% Hard cap on the encoded body of a single atomic batch. Bounds
     %% worst-case memory for `term_to_binary/2` of the batch list and
     %% guarantees a single frame can always fit in a fresh segment.
     %% Validated against `max_segment_bytes` at init.
-    max_batch_bytes    :: pos_integer(),
-    retention          :: [{atom(), term()}],
-    head_fd            :: file:fd() | undefined,
-    segment_id         :: bondy_oplog_wal_segment:segment_id(),
-    current_offset     :: non_neg_integer(),
-    first_hlc          :: bondy_oplog_hlc:hlc() | undefined,
-    last_hlc           :: bondy_oplog_hlc:hlc() | undefined,
-    append_count       :: non_neg_integer(),
+    max_batch_bytes :: pos_integer(),
+    retention :: [{atom(), term()}],
+    head_fd :: file:fd() | undefined,
+    segment_id :: bondy_oplog_wal_segment:segment_id(),
+    current_offset :: non_neg_integer(),
+    first_hlc :: bondy_oplog_hlc:hlc() | undefined,
+    last_hlc :: bondy_oplog_hlc:hlc() | undefined,
+    append_count :: non_neg_integer(),
     %% In-memory shadow of the on-disk manifest. Updated in place on
     %% rotation; flushed atomically via `bondy_oplog_wal_manifest:write/2`
     %% (tmp + datasync + rename + dir-fsync) so on-disk and in-memory
     %% never diverge.
-    manifest           :: bondy_oplog_wal_manifest:t() | undefined,
+    manifest :: bondy_oplog_wal_manifest:t() | undefined,
     %% Two-slot atomics ref published to tail readers (`bondy_oplog_wal_reader`).
     %% Slot 1: head segment id. Slot 2: head offset within that segment.
     %% Updated in this order on rotation so a reader who races never sees
     %% the new offset paired with the old segment id; see
     %% `publish_head_pos/3` and `publish_head_offset/2`.
-    head_pos_ref       :: atomics:atomics_ref() | undefined,
+    head_pos_ref :: atomics:atomics_ref() | undefined,
     %% Sparse-index accumulator (§7) for the current head segment.
     %% Entries are flushed to `.qidx` on rotation (sealed segment) and
     %% on `terminate/2` (live head segment). Per-frame I/O cost is zero —
     %% entries live in memory until a flush boundary.
-    idx_acc            :: bondy_oplog_wal_idx:accumulator() | undefined,
+    idx_acc :: bondy_oplog_wal_idx:accumulator() | undefined,
     idx_interval_bytes :: pos_integer(),
     %% --- Durability state -----------------------------------------------------
     %% `per_write`: each `append/2` includes a `prim_file:datasync/1`
     %% and returns durable. `batched`: appends accumulate until the
     %% size threshold or the interval timer fires; durability is
     %% reached at a fsync boundary or via `sync/1`/`await_durable/3`.
-    fsync_mode         :: per_write | batched,
+    fsync_mode :: per_write | batched,
     %% Batched-mode timer interval (ms) — bound on the lag between a
     %% successful `append/2` and the next fsync.
     batched_fsync_interval :: pos_integer(),
@@ -138,10 +138,10 @@ stateful-PropEr fault-injection harness are still to land.
     pending_fsync_bytes :: non_neg_integer(),
     %% Monotonic timestamp of the most recent fsync, used by
     %% `last_fsync_at` in `info/1` and lag-monitoring telemetry.
-    last_fsync_at      :: integer() | undefined,
+    last_fsync_at :: integer() | undefined,
     %% Active `send_after/3` timer that will fire `flush_tick`. Set when
     %% pending bytes accrue in batched mode; cancelled on fsync.
-    flush_timer        :: reference() | undefined,
+    flush_timer :: reference() | undefined,
     %% Two-slot atomics ref mirroring `head_pos_ref`'s shape but carrying
     %% the durable position (slot 1: durable segment id, slot 2:
     %% durable byte offset). Tail readers / appliers may poll this
@@ -149,18 +149,18 @@ stateful-PropEr fault-injection harness are still to land.
     %% `head_pos_ref` (see comment on `publish_durable_pos/3`). For a
     %% coherent snapshot use `durable_position/1` which reads in-memory
     %% state through the writer's gen_server.
-    durable_pos_ref    :: atomics:atomics_ref() | undefined,
+    durable_pos_ref :: atomics:atomics_ref() | undefined,
     %% In-memory mirror of the durable position. The authoritative copy
     %% for `durable_position/1` and `await_durable/3` (both serialise
     %% through the gen_server). Advances on fsync; on rotation jumps to
     %% the new segment's header boundary (the new segment file is
     %% datasync'd at create time).
     durable_segment_id :: bondy_oplog_wal_segment:segment_id(),
-    durable_offset     :: non_neg_integer(),
+    durable_offset :: non_neg_integer(),
     %% Pending `await_durable/3` callers, sorted ascending by `#waiter.pos`.
     %% Walked head-first on durable advance; replaced wholesale on each
     %% advance via `satisfy_waiters_up_to/2`.
-    waiters            :: [#waiter{}],
+    waiters :: [#waiter{}],
     %% --- Retention state (§10) ------------------------------------------------
     %% Largest HLC covered by a compaction snapshot. `undefined` until
     %% the first `advance_snapshot_watermark/2` lands. Persisted to
@@ -172,24 +172,24 @@ stateful-PropEr fault-injection harness are still to land.
     %% deleted. The consumer-commit machinery lands later; for now this
     %% defaults to `max(deleted_through, 0)` and is mutated by the
     %% test/stub interface only.
-    committed_segment  :: non_neg_integer(),
+    committed_segment :: non_neg_integer(),
     %% Lower bound on the size of `live_segments` after a sweep — the
     %% sweep refuses to delete a segment if doing so would drop the
     %% live-segment count below this threshold. Operator override
     %% via the `min_live_segments` opt.
-    min_live_segments  :: pos_integer(),
+    min_live_segments :: pos_integer(),
     %% Periodic sweep cadence (ms) and the active timer reference. The
     %% timer is rearmed at the end of every sweep so a long sweep
     %% doesn't pile up overlapping tick messages.
     retention_sweep_interval :: pos_integer(),
-    retention_timer    :: reference() | undefined,
+    retention_timer :: reference() | undefined,
     %% --- Backpressure (§14, §15) ----------------------------------------------
     %% Running sum of `.qdata` bytes across all live segments (head and
     %% sealed). Updated on every successful frame write, every rotation,
     %% and every retention sweep. Authoritative source for the
     %% `bytes_total` info/telemetry field and for the hard
     %% `max_total_wal_size` backpressure check.
-    bytes_total        :: non_neg_integer(),
+    bytes_total :: non_neg_integer(),
     %% Cached `length(manifest:live_segments)`. Kept in step with the
     %% manifest by `bootstrap/1`, `install_recovery/2`,
     %% `open_next_segment/1`, and `apply_deletable/2`. Avoids the O(N)
@@ -201,7 +201,7 @@ stateful-PropEr fault-injection harness are still to land.
     %% wal, wal_full]` telemetry event. Defaults from WAL_DESIGN §14
     %% (8 GiB / 256 segments).
     max_total_wal_size :: pos_integer(),
-    max_live_segments  :: pos_integer(),
+    max_live_segments :: pos_integer(),
     %% Most recent `monotonic_time(millisecond)` at which a `wal_full`
     %% telemetry event was emitted. The next emission is suppressed
     %% until at least `wal_full_telemetry_debounce_ms` has elapsed —
@@ -211,7 +211,7 @@ stateful-PropEr fault-injection harness are still to land.
     %% Monotonic-millisecond timestamp of the most recent successful
     %% append (single or batch). Drives the `head_lag_ms` gauge in
     %% `info/1`. `undefined` until the first append lands.
-    last_append_at_ms  :: integer() | undefined,
+    last_append_at_ms :: integer() | undefined,
     %% --- Body codec -----------------------------------------------------------
     %% Compression algorithm applied to each frame's body before
     %% `bondy_oplog_wal_frame:encode/2`. `none` is the v1-compatible
@@ -219,7 +219,7 @@ stateful-PropEr fault-injection harness are still to land.
     %% Flag bit 0 on the frame advertises that a body has been
     %% compressed; the algorithm id lives in the first byte of the
     %% compressed body envelope.
-    body_compression          :: bondy_oplog_wal_codec:algorithm(),
+    body_compression :: bondy_oplog_wal_codec:algorithm(),
     body_compression_min_bytes :: pos_integer(),
     %% Body encryption. `disabled` is the default and means the writer
     %% emits cleartext bodies; `{enabled, Module}` makes every body go
@@ -227,7 +227,7 @@ stateful-PropEr fault-injection harness are still to land.
     %% writer's current key (resolved on each write via
     %% `Module:current_key/0`). Readers consult the same module via
     %% `Module:lookup_key/1` to resolve historic frames.
-    body_encryption           :: bondy_oplog_wal_codec:encryption()
+    body_encryption :: bondy_oplog_wal_codec:encryption()
 }).
 
 -type opts() :: #{
@@ -561,8 +561,11 @@ already covered.
     ok | {error, timeout} | {error, term()}.
 
 await_durable(Pid, {Seg, Off} = Pos, Timeout) when
-    is_pid(Pid), is_integer(Seg), Seg >= 0,
-    is_integer(Off), Off >= 0,
+    is_pid(Pid),
+    is_integer(Seg),
+    Seg >= 0,
+    is_integer(Off),
+    Off >= 0,
     (Timeout =:= infinity orelse (is_integer(Timeout) andalso Timeout >= 0))
 ->
     %% Use a client-side `infinity` `gen_server:call/3` timeout —
@@ -800,7 +803,8 @@ init({InstanceId, Opts}) ->
             end,
             ok = bondy_oplog_registry:set_wal_pid(InstanceId, self()),
             {ok, arm_retention_timer(State)};
-        {error, Reason} -> {stop, Reason}
+        {error, Reason} ->
+            {stop, Reason}
     end.
 
 handle_call({append_batch, Events}, _From, State0) ->
@@ -835,9 +839,8 @@ handle_call(sync, _From, #state{head_fd = Fd} = State) when Fd =/= undefined ->
         {error, _} = E -> {reply, E, State}
     end;
 handle_call(durable_position, _From, State) ->
-    {reply,
-     {State#state.durable_segment_id, State#state.durable_offset},
-     State};
+    {reply, {State#state.durable_segment_id, State#state.durable_offset},
+        State};
 handle_call({await_durable, Pos, Timeout}, From, State) ->
     handle_await_durable(Pos, Timeout, From, State);
 handle_call(info, _From, State) ->
@@ -913,26 +916,32 @@ terminate(_Reason, #state{head_fd = undefined} = State) ->
     _ = cancel_flush_timer(State),
     _ = cancel_retention_timer(State),
     ok;
-terminate(_Reason, #state{head_fd = Fd,
-                          segment_id = Seg,
-                          current_offset = Off} = State0) ->
+terminate(
+    _Reason,
+    #state{
+        head_fd = Fd,
+        segment_id = Seg,
+        current_offset = Off
+    } = State0
+) ->
     _ = cancel_retention_timer(State0),
-    State = case bondy_mst_io:datasync(Fd) of
-        ok ->
-            %% The head fd is now durable up to `current_offset`.
-            %% Advance the durable boundary so any waiter at or below
-            %% head receives `ok` (their position IS durable) before
-            %% the writer exits; pollers of `durable_pos_ref` see the
-            %% accurate final state instead of a stale snapshot. Above-
-            %% head waiters get the natural `noproc` exit (their
-            %% position is unreachable in this writer's lifetime). The
-            %% call also cancels the flush timer as part of its
-            %% bookkeeping.
-            advance_durable(State0, Seg, Off);
-        {error, _} ->
-            _ = cancel_flush_timer(State0),
-            State0
-    end,
+    State =
+        case bondy_mst_io:datasync(Fd) of
+            ok ->
+                %% The head fd is now durable up to `current_offset`.
+                %% Advance the durable boundary so any waiter at or below
+                %% head receives `ok` (their position IS durable) before
+                %% the writer exits; pollers of `durable_pos_ref` see the
+                %% accurate final state instead of a stale snapshot. Above-
+                %% head waiters get the natural `noproc` exit (their
+                %% position is unreachable in this writer's lifetime). The
+                %% call also cancels the flush timer as part of its
+                %% bookkeeping.
+                advance_durable(State0, Seg, Off);
+            {error, _} ->
+                _ = cancel_flush_timer(State0),
+                State0
+        end,
     %% Flush the head segment's sparse index. Best-effort: on failure we
     %% log and continue closing the fd. Recovery rebuilds the `.qidx`
     %% from a segment scan if it's missing or stale.
@@ -945,7 +954,8 @@ terminate(_Reason, #state{head_fd = Fd,
 %% with `flush_timer = undefined`. Pending `await_durable/3` waiters
 %% are not replied to here — clients' `gen_server:call/3` raises with
 %% the writer's exit signal, which is the natural shutdown contract.
-cancel_flush_timer(#state{flush_timer = undefined} = S) -> S;
+cancel_flush_timer(#state{flush_timer = undefined} = S) ->
+    S;
 cancel_flush_timer(#state{flush_timer = TRef} = S) when is_reference(TRef) ->
     _ = erlang:cancel_timer(TRef),
     S#state{flush_timer = undefined}.
@@ -954,9 +964,10 @@ cancel_flush_timer(#state{flush_timer = TRef} = S) when is_reference(TRef) ->
 %% Cancel any active periodic retention timer; idempotent. Used on
 %% terminate and on rearm (where the just-fired tick is already
 %% accounted for in the caller).
-cancel_retention_timer(#state{retention_timer = undefined} = S) -> S;
-cancel_retention_timer(#state{retention_timer = TRef} = S)
-    when is_reference(TRef)
+cancel_retention_timer(#state{retention_timer = undefined} = S) ->
+    S;
+cancel_retention_timer(#state{retention_timer = TRef} = S) when
+    is_reference(TRef)
 ->
     _ = erlang:cancel_timer(TRef),
     S#state{retention_timer = undefined}.
@@ -965,8 +976,8 @@ cancel_retention_timer(#state{retention_timer = TRef} = S)
 %% Arm the periodic retention timer. Idempotent: if a timer is already
 %% pending, leave it alone. The tick handler clears the ref before
 %% running the sweep so a second arm is always safe.
-arm_retention_timer(#state{retention_timer = T} = S)
-    when is_reference(T)
+arm_retention_timer(#state{retention_timer = T} = S) when
+    is_reference(T)
 ->
     S;
 arm_retention_timer(#state{retention_sweep_interval = Ms} = S) ->
@@ -1112,13 +1123,15 @@ validate_body_encryption(Opts) ->
 %% on first batched-mode timer arming or oversize-batch comparison.
 validate_durability_opts(Opts) ->
     case maps:get(fsync_mode, Opts, ?BONDY_OPLOG_WAL_FSYNC_MODE_DEFAULT) of
-        per_write -> validate_batch_opts(Opts);
+        per_write ->
+            validate_batch_opts(Opts);
         batched ->
             case validate_batched_opts(Opts) of
                 ok -> validate_batch_opts(Opts);
                 {error, _} = E -> E
             end;
-        Other -> {error, {invalid_opt, fsync_mode, Other}}
+        Other ->
+            {error, {invalid_opt, fsync_mode, Other}}
     end.
 
 %% @private
@@ -1140,15 +1153,18 @@ validate_batch_opts(Opts) ->
 %% @private
 validate_batched_opts(Opts) ->
     Interval = maps:get(
-        batched_fsync_interval, Opts,
+        batched_fsync_interval,
+        Opts,
         ?BONDY_OPLOG_WAL_BATCHED_FSYNC_INTERVAL_DEFAULT_MS
     ),
     Bytes = maps:get(
-        batched_fsync_bytes, Opts,
+        batched_fsync_bytes,
+        Opts,
         ?BONDY_OPLOG_WAL_BATCHED_FSYNC_BYTES_DEFAULT
     ),
     case is_integer(Interval) andalso Interval >= 1 of
-        false -> {error, {invalid_opt, batched_fsync_interval, Interval}};
+        false ->
+            {error, {invalid_opt, batched_fsync_interval, Interval}};
         true ->
             case is_integer(Bytes) andalso Bytes >= 1 of
                 false -> {error, {invalid_opt, batched_fsync_bytes, Bytes}};
@@ -1179,33 +1195,40 @@ open_after_opts_validated(InstanceId, Origin, Opts) ->
                 fsync_mode, Opts, ?BONDY_OPLOG_WAL_FSYNC_MODE_DEFAULT
             ),
             Interval = maps:get(
-                batched_fsync_interval, Opts,
+                batched_fsync_interval,
+                Opts,
                 ?BONDY_OPLOG_WAL_BATCHED_FSYNC_INTERVAL_DEFAULT_MS
             ),
             Bytes = maps:get(
-                batched_fsync_bytes, Opts,
+                batched_fsync_bytes,
+                Opts,
                 ?BONDY_OPLOG_WAL_BATCHED_FSYNC_BYTES_DEFAULT
             ),
             MinLive = maps:get(
-                min_live_segments, Opts,
+                min_live_segments,
+                Opts,
                 ?BONDY_OPLOG_WAL_MIN_LIVE_SEGMENTS_DEFAULT
             ),
             SweepInterval = maps:get(
-                retention_sweep_interval, Opts,
+                retention_sweep_interval,
+                Opts,
                 ?BONDY_OPLOG_WAL_RETENTION_SWEEP_INTERVAL_DEFAULT_MS
             ),
             MaxTotal = maps:get(
-                max_total_wal_size, Opts,
+                max_total_wal_size,
+                Opts,
                 ?BONDY_OPLOG_WAL_MAX_TOTAL_WAL_SIZE_DEFAULT
             ),
             MaxLive = maps:get(
-                max_live_segments, Opts,
+                max_live_segments,
+                Opts,
                 ?BONDY_OPLOG_WAL_MAX_LIVE_SEGMENTS_DEFAULT
             ),
             RecoveryMode = maps:get(recovery_mode, Opts, strict),
             BodyCompression = maps:get(body_compression, Opts, none),
             BodyCompressionMin = maps:get(
-                body_compression_min_bytes, Opts,
+                body_compression_min_bytes,
+                Opts,
                 ?BONDY_OPLOG_WAL_BODY_COMPRESSION_MIN_BYTES_DEFAULT
             ),
             BodyEncryption = maps:get(body_encryption, Opts, disabled),
@@ -1246,8 +1269,13 @@ open_after_opts_validated(InstanceId, Origin, Opts) ->
                 body_encryption = BodyEncryption
             },
             open_or_recover(
-                Dir, InstanceId, Origin, IdxInterval, RecoveryMode,
-                BodyEncryption, State0
+                Dir,
+                InstanceId,
+                Origin,
+                IdxInterval,
+                RecoveryMode,
+                BodyEncryption,
+                State0
             );
         error ->
             {error, {missing_opt, dir}}
@@ -1263,8 +1291,15 @@ open_after_opts_validated(InstanceId, Origin, Opts) ->
 %%   clean orphans, scan and truncate the head segment, rebuild missing
 %%   `.qidx` files, and clamp the consumer offset to a real frame
 %%   boundary.
-open_or_recover(Dir, InstanceId, Origin, IdxInterval, RecoveryMode,
-                BodyEncryption, State0) ->
+open_or_recover(
+    Dir,
+    InstanceId,
+    Origin,
+    IdxInterval,
+    RecoveryMode,
+    BodyEncryption,
+    State0
+) ->
     case filelib:ensure_path(Dir) of
         ok ->
             ManifestPath = filename:join(
@@ -1277,12 +1312,18 @@ open_or_recover(Dir, InstanceId, Origin, IdxInterval, RecoveryMode,
                         {error, _} = E -> E
                     end;
                 true ->
-                    case bondy_oplog_wal_recovery:recover(
-                        Dir, InstanceId, Origin,
-                        #{idx_interval_bytes => IdxInterval,
-                          recovery_mode => RecoveryMode,
-                          body_encryption => BodyEncryption}
-                    ) of
+                    case
+                        bondy_oplog_wal_recovery:recover(
+                            Dir,
+                            InstanceId,
+                            Origin,
+                            #{
+                                idx_interval_bytes => IdxInterval,
+                                recovery_mode => RecoveryMode,
+                                body_encryption => BodyEncryption
+                            }
+                        )
+                    of
                         {ok, Result} ->
                             case install_recovery(State0, Result) of
                                 {ok, State} -> {ok, State, Result};
@@ -1396,9 +1437,11 @@ read_snapshot_watermark_lenient(Dir) ->
 bootstrap(#state{} = State) ->
     SegId = State#state.segment_id,
     SegPath = segment_path(State#state.dir, SegId),
-    case bondy_oplog_wal_segment:create(
-        SegPath, SegId, State#state.instance_id, State#state.origin
-    ) of
+    case
+        bondy_oplog_wal_segment:create(
+            SegPath, SegId, State#state.instance_id, State#state.origin
+        )
+    of
         {ok, Fd, _Header} ->
             Manifest = bondy_oplog_wal_manifest:new(
                 State#state.instance_id, SegId, State#state.retention
@@ -1454,9 +1497,7 @@ segment_path(Dir, SegId) ->
 %% that want strict segment sizing should set `max_batch_bytes =<
 %% max_segment_bytes - SEG_HEADER_BYTES - FRAME_HEADER_BYTES`.
 do_append_batch(#state{max_batch_bytes = MaxBatch} = State0, Events) ->
-    Hlcs = [
-        bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)) || E <- Events
-    ],
+    Hlcs = [bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)) || E <- Events],
     case is_strictly_increasing(Hlcs) of
         false ->
             {error, {invalid_batch, hlc_not_monotonic}};
@@ -1488,8 +1529,11 @@ do_append_batch(#state{max_batch_bytes = MaxBatch} = State0, Events) ->
                             case maybe_rotate(State0, FrameLen) of
                                 {ok, State1} ->
                                     write_batch_frame(
-                                        State1, EncodedBody, Flags,
-                                        FrameLen, Hlcs
+                                        State1,
+                                        EncodedBody,
+                                        Flags,
+                                        FrameLen,
+                                        Hlcs
                                     );
                                 {fatal, _, _} = Fatal ->
                                     Fatal;
@@ -1507,9 +1551,12 @@ do_append_batch(#state{max_batch_bytes = MaxBatch} = State0, Events) ->
 %% pure — it takes config + body in, returns flag + bytes out — so
 %% rebuilding this map per append is a few-key copy with no
 %% allocations beyond the map itself.
-codec_opts(#state{instance_id = Id, body_compression = Algo,
-                  body_compression_min_bytes = Min,
-                  body_encryption = Enc}) ->
+codec_opts(#state{
+    instance_id = Id,
+    body_compression = Algo,
+    body_compression_min_bytes = Min,
+    body_encryption = Enc
+}) ->
     #{
         instance_id => Id,
         body_compression => Algo,
@@ -1545,10 +1592,12 @@ check_backpressure(_State, _FrameLen) ->
 %% `append_batch/2` contract that HLCs within a batch are monotonic; a
 %% violation would silently corrupt the segment's `(first,last)` HLC
 %% bracket and the sparse-index seek invariant.
-is_strictly_increasing([_]) -> true;
+is_strictly_increasing([_]) ->
+    true;
 is_strictly_increasing([A, B | Rest]) when A < B ->
     is_strictly_increasing([B | Rest]);
-is_strictly_increasing(_) -> false.
+is_strictly_increasing(_) ->
+    false.
 
 %% @private
 %% Pre-rotate when the encoded batch frame wouldn't fit in the current
@@ -1586,9 +1635,11 @@ maybe_rotate(State, _FrameLen) ->
 %%                               stop the gen_server using this state so
 %%                               `terminate/2` doesn't datasync a closed
 %%                               fd.
-rotate(#state{
-    head_fd = OldFd, segment_id = OldSegId, current_offset = OldOff
-} = State0) ->
+rotate(
+    #state{
+        head_fd = OldFd, segment_id = OldSegId, current_offset = OldOff
+    } = State0
+) ->
     T0 = erlang:monotonic_time(microsecond),
     case bondy_mst_io:datasync(OldFd) of
         {error, _} = E ->
@@ -1619,8 +1670,12 @@ rotate(#state{
                 {ok, State3} ->
                     Duration = erlang:monotonic_time(microsecond) - T0,
                     emit_rotate_telemetry(
-                        State3, OldSegId, State3#state.segment_id,
-                        OldOff, Duration, size
+                        State3,
+                        OldSegId,
+                        State3#state.segment_id,
+                        OldOff,
+                        Duration,
+                        size
                     ),
                     {ok, State3};
                 {error, Reason} ->
@@ -1649,21 +1704,25 @@ close_sealed_segment(Fd, SegId) ->
     end.
 
 %% @private
-open_next_segment(#state{
-    segment_id = OldSegId,
-    first_hlc = OldFirstHlc,
-    dir = Dir,
-    instance_id = InstanceId,
-    origin = Origin,
-    head_pos_ref = HeadRef,
-    durable_pos_ref = DurableRef,
-    idx_interval_bytes = IdxInterval
-} = State) ->
+open_next_segment(
+    #state{
+        segment_id = OldSegId,
+        first_hlc = OldFirstHlc,
+        dir = Dir,
+        instance_id = InstanceId,
+        origin = Origin,
+        head_pos_ref = HeadRef,
+        durable_pos_ref = DurableRef,
+        idx_interval_bytes = IdxInterval
+    } = State
+) ->
     NewSegId = OldSegId + 1,
     NewPath = segment_path(Dir, NewSegId),
-    case bondy_oplog_wal_segment:create(
-        NewPath, NewSegId, InstanceId, Origin
-    ) of
+    case
+        bondy_oplog_wal_segment:create(
+            NewPath, NewSegId, InstanceId, Origin
+        )
+    of
         {ok, NewFd, _Header} ->
             case commit_rotation(State, NewSegId, OldFirstHlc) of
                 {ok, NewManifest} ->
@@ -1738,9 +1797,17 @@ commit_rotation(
 %% — the applier must `await_durable/3` before committing past them
 %% (per WAL_DESIGN.md §8.2).
 write_batch_frame(
-    #state{head_fd = Fd, current_offset = Off, segment_id = Seg,
-           head_pos_ref = HeadRef, idx_acc = Acc0} = State0,
-    Body, Flags, FrameLen, Hlcs
+    #state{
+        head_fd = Fd,
+        current_offset = Off,
+        segment_id = Seg,
+        head_pos_ref = HeadRef,
+        idx_acc = Acc0
+    } = State0,
+    Body,
+    Flags,
+    FrameLen,
+    Hlcs
 ) ->
     Frame = bondy_oplog_wal_frame:encode(Body, [{flags, Flags}]),
     case prim_file:write(Fd, Frame) of
@@ -1906,10 +1973,11 @@ sweep_swallowing_errors(State0, Trigger) ->
 %% if the manifest rewrite fails (no files are touched in that case).
 do_retention_sweep(#state{} = State0) ->
     T0 = erlang:monotonic_time(microsecond),
-    Result = case compute_deletable(State0) of
-        [] -> {ok, [], 0, State0};
-        Deletable -> apply_deletable(State0, Deletable)
-    end,
+    Result =
+        case compute_deletable(State0) of
+            [] -> {ok, [], 0, State0};
+            Deletable -> apply_deletable(State0, Deletable)
+        end,
     case Result of
         {ok, Deleted, Freed, State1} ->
             Duration = erlang:monotonic_time(microsecond) - T0,
@@ -1946,9 +2014,10 @@ compute_deletable(#state{
     LiveIds = [Id || {Id, _} <- Live],
     MaxDeletable = max(0, length(LiveIds) - MinLive),
     Eligible = [
-        Id || Id <- LiveIds,
-              Id < CommittedSeg,
-              Id < WatermarkSeg
+        Id
+     || Id <- LiveIds,
+        Id < CommittedSeg,
+        Id < WatermarkSeg
     ],
     lists:sublist(Eligible, MaxDeletable).
 
@@ -1959,10 +2028,13 @@ compute_deletable(#state{
 patch_head_first_hlc(Live, _HeadSegId, undefined) ->
     Live;
 patch_head_first_hlc(Live, HeadSegId, HeadFirstHlc) ->
-    [case Id of
-        HeadSegId -> {Id, HeadFirstHlc};
-        _ -> Entry
-     end || {Id, _} = Entry <- Live].
+    [
+        case Id of
+            HeadSegId -> {Id, HeadFirstHlc};
+            _ -> Entry
+        end
+     || {Id, _} = Entry <- Live
+    ].
 
 %% @private
 %% Snapshot-watermark→segment mapping (per §10.1, with the design's
@@ -1986,8 +2058,10 @@ patch_head_first_hlc(Live, HeadSegId, HeadFirstHlc) ->
 %% watermark prevent all deletions. We use `=<` here so the
 %% retention behaviour matches the prose ("largest segment whose
 %% entire content is HLC-covered by the watermark").
-snapshot_watermark_segment(_Live, undefined) -> 0;
-snapshot_watermark_segment([], _Watermark) -> 0;
+snapshot_watermark_segment(_Live, undefined) ->
+    0;
+snapshot_watermark_segment([], _Watermark) ->
+    0;
 snapshot_watermark_segment(Live, Watermark) ->
     walk_watermark(Live, Watermark, 0).
 
@@ -2020,8 +2094,11 @@ walk_watermark([_This | Rest], Watermark, Best) ->
 %% Stage 2 of the sweep: rewrite the manifest, then unlink the files.
 apply_deletable(#state{manifest = M, dir = Dir} = State0, Deletable) ->
     Live0 = bondy_oplog_wal_manifest:live_segments(M),
-    Survivors = [{Id, FH} || {Id, FH} <- Live0,
-                             not lists:member(Id, Deletable)],
+    Survivors = [
+        {Id, FH}
+     || {Id, FH} <- Live0,
+        not lists:member(Id, Deletable)
+    ],
     NewDeletedThrough = max(
         bondy_oplog_wal_manifest:deleted_through(M),
         lists:max(Deletable)
@@ -2036,9 +2113,11 @@ apply_deletable(#state{manifest = M, dir = Dir} = State0, Deletable) ->
                 bytes_total =
                     max(0, State0#state.bytes_total - FreedBytes),
                 live_segments_count =
-                    max(0,
-                        State0#state.live_segments_count
-                        - length(Deletable))
+                    max(
+                        0,
+                        State0#state.live_segments_count -
+                            length(Deletable)
+                    )
             },
             {ok, Deletable, FreedBytes, State1};
         {error, _} = E ->
@@ -2075,10 +2154,11 @@ unlink_segment(Dir, Id) ->
 %% Reads file size, then attempts delete. Returns the size iff the
 %% delete succeeded (so failed deletes don't inflate `FreedBytes`).
 delete_and_size(Path, Kind) ->
-    Size = case prim_file:read_file_info(Path) of
-        {ok, #file_info{size = S}} -> S;
-        _ -> 0
-    end,
+    Size =
+        case prim_file:read_file_info(Path) of
+            {ok, #file_info{size = S}} -> S;
+            _ -> 0
+        end,
     case delete_or_log(Path, Kind) of
         ok -> Size;
         _ -> 0
@@ -2089,8 +2169,10 @@ delete_and_size(Path, Kind) ->
 %% are logged at WARNING and returned so the caller can react.
 delete_or_log(Path, Kind) ->
     case prim_file:delete(Path) of
-        ok -> ok;
-        {error, enoent} -> ok;
+        ok ->
+            ok;
+        {error, enoent} ->
+            ok;
         {error, Reason} = E ->
             ?LOG_WARNING(#{
                 description =>
@@ -2113,8 +2195,12 @@ delete_or_log(Path, Kind) ->
 %% `sync/1`, by per_write append, and by batched-mode fsyncs (size and
 %% timer-triggered via `maybe_batched_fsync/1`).
 do_fsync_head(
-    #state{head_fd = Fd, segment_id = Seg, current_offset = Off,
-           pending_fsync_bytes = Pending} = State
+    #state{
+        head_fd = Fd,
+        segment_id = Seg,
+        current_offset = Off,
+        pending_fsync_bytes = Pending
+    } = State
 ) when Fd =/= undefined ->
     T0 = erlang:monotonic_time(microsecond),
     case bondy_mst_io:datasync(Fd) of
@@ -2144,16 +2230,17 @@ maybe_size_trigger_fsync(State) ->
 %% best-effort and leaves the pending bytes for a later attempt.
 maybe_batched_fsync(#state{pending_fsync_bytes = 0} = S) -> {ok, S};
 maybe_batched_fsync(#state{head_fd = undefined} = S) -> {ok, S};
-maybe_batched_fsync(State) ->
-    do_fsync_head(State).
+maybe_batched_fsync(State) -> do_fsync_head(State).
 
 %% @private
 %% Arm a `flush_tick` interval timer if one isn't already scheduled and
 %% there are pending bytes. Per_write callers are a no-op (they never
 %% accumulate pending bytes; defensive guard).
-maybe_arm_flush_timer(#state{fsync_mode = per_write} = S) -> S;
+maybe_arm_flush_timer(#state{fsync_mode = per_write} = S) ->
+    S;
 maybe_arm_flush_timer(#state{flush_timer = T} = S) when is_reference(T) -> S;
-maybe_arm_flush_timer(#state{pending_fsync_bytes = 0} = S) -> S;
+maybe_arm_flush_timer(#state{pending_fsync_bytes = 0} = S) ->
+    S;
 maybe_arm_flush_timer(#state{batched_fsync_interval = Ms} = S) ->
     TRef = erlang:send_after(Ms, self(), flush_tick),
     S#state{flush_timer = TRef}.
@@ -2164,7 +2251,8 @@ maybe_arm_flush_timer(#state{batched_fsync_interval = Ms} = S) ->
 %% `await_durable/3` waiters at or below the new position.
 advance_durable(
     #state{durable_segment_id = DSeg, durable_offset = DOff} = State,
-    Seg, Off
+    Seg,
+    Off
 ) when {DSeg, DOff} >= {Seg, Off} ->
     %% Idempotent / monotonic: the durable boundary only moves
     %% forward. A redundant call (e.g. `sync/1` with no new bytes) is
@@ -2220,7 +2308,9 @@ satisfy_waiters_up_to(DurablePos, Waiters) ->
 %% returns `{noreply, _}` so the caller blocks until satisfied or the
 %% timer fires.
 handle_await_durable(
-    {Seg, Off}, _Timeout, _From,
+    {Seg, Off},
+    _Timeout,
+    _From,
     #state{durable_segment_id = DSeg, durable_offset = DOff} = State
 ) when {Seg, Off} =< {DSeg, DOff} ->
     {reply, ok, State};
@@ -2231,12 +2321,13 @@ handle_await_durable(_Pos, 0, _From, State) ->
     {reply, {error, timeout}, State};
 handle_await_durable(Pos, Timeout, From, State) ->
     WaiterId = make_ref(),
-    TRef = case Timeout of
-        infinity ->
-            infinity;
-        T when is_integer(T), T > 0 ->
-            erlang:start_timer(T, self(), {await_timeout, WaiterId})
-    end,
+    TRef =
+        case Timeout of
+            infinity ->
+                infinity;
+            T when is_integer(T), T > 0 ->
+                erlang:start_timer(T, self(), {await_timeout, WaiterId})
+        end,
     W = #waiter{id = WaiterId, pos = Pos, from = From, tref = TRef},
     NewWaiters = insert_waiter(W, State#state.waiters),
     {noreply, State#state{waiters = NewWaiters}}.
@@ -2256,9 +2347,11 @@ insert_waiter(#waiter{pos = WPos} = New, Waiters) ->
 %% the waiter is still in the list; no-op if it was satisfied between
 %% the timer firing and this handler running.
 expire_waiter(WaiterId, #state{waiters = Ws} = State) ->
-    case lists:partition(
-        fun(#waiter{id = Id}) -> Id =:= WaiterId end, Ws
-    ) of
+    case
+        lists:partition(
+            fun(#waiter{id = Id}) -> Id =:= WaiterId end, Ws
+        )
+    of
         {[#waiter{from = From}], Rest} ->
             gen_server:reply(From, {error, timeout}),
             State#state{waiters = Rest};
@@ -2271,16 +2364,21 @@ expire_waiter(WaiterId, #state{waiters = Ws} = State) ->
 %% be reset uniformly. Accepts the three possible field values:
 %% `undefined` (no timer set), `infinity` (sentinel for "no deadline" on
 %% a `#waiter{}`), and a real `reference()` from `erlang:start_timer/3`.
-cancel_and_clear_timer(undefined) -> undefined;
-cancel_and_clear_timer(infinity) -> undefined;
+cancel_and_clear_timer(undefined) ->
+    undefined;
+cancel_and_clear_timer(infinity) ->
+    undefined;
 cancel_and_clear_timer(TRef) when is_reference(TRef) ->
     _ = erlang:cancel_timer(TRef),
     undefined.
 
 %% @private
 build_info(#state{} = State) ->
-    LiveIds = [Id || {Id, _} <-
-        bondy_oplog_wal_manifest:live_segments(State#state.manifest)],
+    LiveIds = [
+        Id
+     || {Id, _} <-
+            bondy_oplog_wal_manifest:live_segments(State#state.manifest)
+    ],
     #{
         instance_id => State#state.instance_id,
         dir => State#state.dir,
@@ -2340,7 +2438,8 @@ current_backpressure(_) ->
 %% before the first append. Feeds the operator's freshness gauges per
 %% WAL_DESIGN §15. The delta is always ≥0 because both timestamps come
 %% from `erlang:monotonic_time/1`, which never goes backwards.
-head_lag_ms(#state{last_append_at_ms = undefined}) -> undefined;
+head_lag_ms(#state{last_append_at_ms = undefined}) ->
+    undefined;
 head_lag_ms(#state{last_append_at_ms = T}) ->
     erlang:monotonic_time(millisecond) - T.
 
@@ -2392,8 +2491,7 @@ build_reader_view(#state{manifest = Manifest} = State) ->
 
 %% @private
 head_idx_entries(#state{idx_acc = undefined}) -> [];
-head_idx_entries(#state{idx_acc = Acc}) ->
-    bondy_oplog_wal_idx:entries(Acc).
+head_idx_entries(#state{idx_acc = Acc}) -> bondy_oplog_wal_idx:entries(Acc).
 
 %% @private
 %% Writes the in-memory index accumulator for the just-sealed segment to
@@ -2473,7 +2571,8 @@ idx_path(Dir, SegId) ->
 %% "my segment is sealed; read it to EOF", which is true since the
 %% writer has already datasynced and closed the previous fd before
 %% calling here (see `rotate/1` → `close_sealed_segment/2`).
-publish_head_pos(undefined, _SegId, _Offset) -> ok;
+publish_head_pos(undefined, _SegId, _Offset) ->
+    ok;
 publish_head_pos(Ref, SegId, Offset) ->
     ok = atomics:put(Ref, 1, SegId),
     ok = atomics:put(Ref, 2, Offset).
@@ -2483,8 +2582,7 @@ publish_head_pos(Ref, SegId, Offset) ->
 %% segment-id update — that's only done on rotation via
 %% `publish_head_pos/3`.
 publish_head_offset(undefined, _Offset) -> ok;
-publish_head_offset(Ref, Offset) ->
-    ok = atomics:put(Ref, 2, Offset).
+publish_head_offset(Ref, Offset) -> ok = atomics:put(Ref, 2, Offset).
 
 %% @private
 %% Publishes a full (SegId, Offset) durable position. Mirrors
@@ -2499,7 +2597,8 @@ publish_head_offset(Ref, Offset) ->
 %% is exposed for future hot-path consumers (the applier) which
 %% compare against their own sub-segment positions and tolerate
 %% same-segment monotonic reads.
-publish_durable_pos(undefined, _SegId, _Offset) -> ok;
+publish_durable_pos(undefined, _SegId, _Offset) ->
+    ok;
 publish_durable_pos(Ref, SegId, Offset) ->
     ok = atomics:put(Ref, 1, SegId),
     ok = atomics:put(Ref, 2, Offset).
@@ -2588,8 +2687,14 @@ emit_durable_telemetry(#state{} = State, Seg, Off) ->
 %% measured from the entry of `rotate/1`. `reason` is currently always
 %% `size` — only size-triggered rotation exists today; age-triggered
 %% rotation lands later.
-emit_rotate_telemetry(#state{} = State, OldSegId, NewSegId,
-                      OldSizeBytes, DurationUs, Reason) ->
+emit_rotate_telemetry(
+    #state{} = State,
+    OldSegId,
+    NewSegId,
+    OldSizeBytes,
+    DurationUs,
+    Reason
+) ->
     Metadata = base_metadata(State, #{
         old_segment => OldSegId,
         new_segment => NewSegId,

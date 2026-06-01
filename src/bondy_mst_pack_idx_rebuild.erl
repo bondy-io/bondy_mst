@@ -73,8 +73,8 @@ the new `.idx`.
 
 -type outcome() :: #{
     records_recovered := non_neg_integer(),
-    pack_bytes        := non_neg_integer(),
-    idx_bytes         := non_neg_integer()
+    pack_bytes := non_neg_integer(),
+    idx_bytes := non_neg_integer()
 }.
 
 -type pack_error() ::
@@ -82,8 +82,7 @@ the new `.idx`.
     | {stat, term()}
     | {short_header, non_neg_integer()}
     | {header_decode, term()}
-    | {instance_mismatch, Got :: non_neg_integer(),
-                          Want :: non_neg_integer()}
+    | {instance_mismatch, Got :: non_neg_integer(), Want :: non_neg_integer()}
     | {hash_algo_mismatch, Got :: atom(), Want :: atom()}
     | {short_record_header, non_neg_integer()}
     | {record_header_decode, non_neg_integer(), term()}
@@ -106,16 +105,19 @@ the new `.idx`.
 %% =============================================================================
 
 -spec rebuild(
-    Dir          :: file:filename_all(),
-    PackId       :: non_neg_integer(),
+    Dir :: file:filename_all(),
+    PackId :: non_neg_integer(),
     InstanceHash :: non_neg_integer(),
-    HashAlgo     :: atom()
+    HashAlgo :: atom()
 ) -> {ok, outcome()} | {error, reason()}.
 
-rebuild(Dir, PackId, InstanceHash, HashAlgo)
-    when is_integer(PackId), PackId >= 0,
-         is_integer(InstanceHash), InstanceHash >= 0,
-         is_atom(HashAlgo) ->
+rebuild(Dir, PackId, InstanceHash, HashAlgo) when
+    is_integer(PackId),
+    PackId >= 0,
+    is_integer(InstanceHash),
+    InstanceHash >= 0,
+    is_atom(HashAlgo)
+->
     PackPath = bondy_mst_pack_paths:sealed_pack_path(Dir, PackId),
     case scan_pack(PackPath, InstanceHash, HashAlgo) of
         {ok, Entries, PackBytes} ->
@@ -141,7 +143,7 @@ scan_pack(PackPath, InstanceHash, HashAlgo) ->
     end.
 
 do_scan(Fd, InstanceHash, HashAlgo) ->
-    HeaderBytes  = bondy_mst_pack_codec:header_bytes(),
+    HeaderBytes = bondy_mst_pack_codec:header_bytes(),
     TrailerBytes = bondy_mst_pack_codec:trailer_bytes(),
     case prim_file:position(Fd, eof) of
         {ok, FileSize} when FileSize < HeaderBytes + TrailerBytes ->
@@ -151,8 +153,16 @@ do_scan(Fd, InstanceHash, HashAlgo) ->
                 {ok, HBin} ->
                     Ctx0 = crypto:hash_update(crypto:hash_init(sha256), HBin),
                     BodyEnd = FileSize - TrailerBytes,
-                    scan_records(Fd, HeaderBytes, BodyEnd, Ctx0, [], 0,
-                                 FileSize, TrailerBytes);
+                    scan_records(
+                        Fd,
+                        HeaderBytes,
+                        BodyEnd,
+                        Ctx0,
+                        [],
+                        0,
+                        FileSize,
+                        TrailerBytes
+                    );
                 {error, _} = E ->
                     E
             end;
@@ -181,12 +191,24 @@ read_header(Fd, HeaderBytes, InstanceHash, HashAlgo) ->
             {error, {pack, {header_decode, R}}}
     end.
 
-scan_records(Fd, Offset, BodyEnd, Ctx, Acc, RecCount, FileSize, TrailerBytes)
-    when Offset =:= BodyEnd ->
+scan_records(
+    Fd, Offset, BodyEnd, Ctx, Acc, RecCount, FileSize, TrailerBytes
+) when
+    Offset =:= BodyEnd
+->
     finalise(Fd, Ctx, Acc, RecCount, FileSize, TrailerBytes);
-scan_records(_Fd, Offset, BodyEnd, _Ctx, _Acc, _RecCount, _FileSize,
-             _TrailerBytes)
-    when Offset > BodyEnd ->
+scan_records(
+    _Fd,
+    Offset,
+    BodyEnd,
+    _Ctx,
+    _Acc,
+    _RecCount,
+    _FileSize,
+    _TrailerBytes
+) when
+    Offset > BodyEnd
+->
     %% Last record's body advanced us past `BodyEnd`: the trailing
     %% bytes don't form a complete record framed by the trailer.
     {error, {pack, {short_record_body, BodyEnd - Offset}}};
@@ -197,14 +219,22 @@ scan_records(Fd, Offset, BodyEnd, Ctx, Acc, RecCount, FileSize, TrailerBytes) ->
             case bondy_mst_pack_codec:decode_record_header(HBin) of
                 {ok, #{hash := Hash, page_len := PageLen} = Header} ->
                     BodyOffset = Offset + HdrBytes,
-                    case read_and_verify_body(Fd, BodyOffset, PageLen, Header) of
+                    case
+                        read_and_verify_body(Fd, BodyOffset, PageLen, Header)
+                    of
                         {ok, Body} ->
                             Ctx1 = crypto:hash_update(Ctx, HBin),
                             Ctx2 = crypto:hash_update(Ctx1, Body),
                             scan_records(
-                                Fd, BodyOffset + PageLen, BodyEnd,
-                                Ctx2, [{Hash, Offset} | Acc],
-                                RecCount + 1, FileSize, TrailerBytes);
+                                Fd,
+                                BodyOffset + PageLen,
+                                BodyEnd,
+                                Ctx2,
+                                [{Hash, Offset} | Acc],
+                                RecCount + 1,
+                                FileSize,
+                                TrailerBytes
+                            );
                         {error, _} = E ->
                             E
                     end;
@@ -221,15 +251,15 @@ scan_records(Fd, Offset, BodyEnd, Ctx, Acc, RecCount, FileSize, TrailerBytes) ->
 
 read_and_verify_body(_Fd, _BodyOffset, 0, Header) ->
     case bondy_mst_pack_codec:verify_record(Header, <<>>) of
-        ok          -> {ok, <<>>};
-        {error, R}  -> {error, {pack, {record_crc, 0, R}}}
+        ok -> {ok, <<>>};
+        {error, R} -> {error, {pack, {record_crc, 0, R}}}
     end;
 read_and_verify_body(Fd, BodyOffset, PageLen, Header) ->
     case prim_file:pread(Fd, BodyOffset, PageLen) of
         {ok, Body} when byte_size(Body) =:= PageLen ->
             case bondy_mst_pack_codec:verify_record(Header, Body) of
-                ok          -> {ok, Body};
-                {error, R}  -> {error, {pack, {record_crc, BodyOffset, R}}}
+                ok -> {ok, Body};
+                {error, R} -> {error, {pack, {record_crc, BodyOffset, R}}}
             end;
         {ok, Short} ->
             {error, {pack, {short_record_body, byte_size(Short)}}};
@@ -268,14 +298,19 @@ write_idx(Dir, PackId, Entries, PackBytes) ->
             Bin = iolist_to_binary(IoData),
             case write_and_install(Dir, PackId, Bin) of
                 ok ->
-                    log_action(rebuilt,
-                               #{dir => Dir, pack_id => PackId,
-                                 idx_bytes => byte_size(Bin),
-                                 records => length(Entries)}),
+                    log_action(
+                        rebuilt,
+                        #{
+                            dir => Dir,
+                            pack_id => PackId,
+                            idx_bytes => byte_size(Bin),
+                            records => length(Entries)
+                        }
+                    ),
                     {ok, #{
                         records_recovered => length(Entries),
-                        pack_bytes        => PackBytes,
-                        idx_bytes         => byte_size(Bin)
+                        pack_bytes => PackBytes,
+                        idx_bytes => byte_size(Bin)
                     }};
                 {error, R} ->
                     {error, {idx_write, R}}
@@ -285,7 +320,7 @@ write_idx(Dir, PackId, Entries, PackBytes) ->
     end.
 
 write_and_install(Dir, PackId, Bin) ->
-    TmpPath   = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, PackId),
+    TmpPath = bondy_mst_pack_paths:sealed_idx_tmp_path(Dir, PackId),
     FinalPath = bondy_mst_pack_paths:sealed_idx_path(Dir, PackId),
     _ = prim_file:delete(TmpPath),
     case prim_file:open(TmpPath, [write, raw, binary, exclusive]) of
@@ -324,6 +359,6 @@ write_and_sync(Fd, Bin) ->
 
 log_action(Action, Ctx) ->
     ?LOG_NOTICE(Ctx#{
-        event  => mst_pack_idx_rebuild_action,
+        event => mst_pack_idx_rebuild_action,
         action => Action
     }).

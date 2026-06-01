@@ -87,15 +87,15 @@ read / write functions touch the filesystem.
 
 -record(?MODULE, {
     manifest_version = ?BONDY_MST_PACK_MANIFEST_VERSION :: pos_integer(),
-    instance_id          :: binary(),
-    hash_algo            :: atom(),
-    current_root         :: hash() | undefined,
-    sealed_packs    = [] :: [non_neg_integer()],
-    deleted_through = 0  :: non_neg_integer(),
-    incoming_pack   = absent :: present | absent,
-    schema_version  = 1  :: pos_integer(),
-    created_at           :: non_neg_integer(),
-    last_compacted_at    :: non_neg_integer()
+    instance_id :: binary(),
+    hash_algo :: atom(),
+    current_root :: hash() | undefined,
+    sealed_packs = [] :: [non_neg_integer()],
+    deleted_through = 0 :: non_neg_integer(),
+    incoming_pack = absent :: present | absent,
+    schema_version = 1 :: pos_integer(),
+    created_at :: non_neg_integer(),
+    last_compacted_at :: non_neg_integer()
 }).
 
 -type t() :: #?MODULE{}.
@@ -167,13 +167,13 @@ new(InstanceId, HashAlgo) when
 ->
     Now = erlang:system_time(millisecond),
     #?MODULE{
-        instance_id       = InstanceId,
-        hash_algo         = HashAlgo,
-        current_root      = undefined,
-        sealed_packs      = [],
-        deleted_through   = 0,
-        incoming_pack     = absent,
-        created_at        = Now,
+        instance_id = InstanceId,
+        hash_algo = HashAlgo,
+        current_root = undefined,
+        sealed_packs = [],
+        deleted_through = 0,
+        incoming_pack = absent,
+        created_at = Now,
         last_compacted_at = Now
     }.
 
@@ -238,15 +238,15 @@ proposed bytes before committing them.
 
 encode(#?MODULE{} = M) ->
     Terms = [
-        {manifest_version,  M#?MODULE.manifest_version},
-        {instance_id,       M#?MODULE.instance_id},
-        {hash_algo,         M#?MODULE.hash_algo},
-        {current_root,      M#?MODULE.current_root},
-        {sealed_packs,      M#?MODULE.sealed_packs},
-        {deleted_through,   M#?MODULE.deleted_through},
-        {incoming_pack,     M#?MODULE.incoming_pack},
-        {schema_version,    M#?MODULE.schema_version},
-        {created_at,        M#?MODULE.created_at},
+        {manifest_version, M#?MODULE.manifest_version},
+        {instance_id, M#?MODULE.instance_id},
+        {hash_algo, M#?MODULE.hash_algo},
+        {current_root, M#?MODULE.current_root},
+        {sealed_packs, M#?MODULE.sealed_packs},
+        {deleted_through, M#?MODULE.deleted_through},
+        {incoming_pack, M#?MODULE.incoming_pack},
+        {schema_version, M#?MODULE.schema_version},
+        {created_at, M#?MODULE.created_at},
         {last_compacted_at, M#?MODULE.last_compacted_at}
     ],
     iolist_to_binary(
@@ -282,15 +282,15 @@ decode(Terms) when is_list(Terms) ->
                 CreatedAt = maps:get(created_at, Map, 0),
                 LastCompactedAt = maps:get(last_compacted_at, Map, CreatedAt),
                 {ok, #?MODULE{
-                    manifest_version  = ManifestVersion,
-                    instance_id       = InstanceId,
-                    hash_algo         = HashAlgo,
-                    current_root      = CurrentRoot,
-                    sealed_packs      = SealedPacks,
-                    deleted_through   = DeletedThrough,
-                    incoming_pack     = Incoming,
-                    schema_version    = SchemaVersion,
-                    created_at        = CreatedAt,
+                    manifest_version = ManifestVersion,
+                    instance_id = InstanceId,
+                    hash_algo = HashAlgo,
+                    current_root = CurrentRoot,
+                    sealed_packs = SealedPacks,
+                    deleted_through = DeletedThrough,
+                    incoming_pack = Incoming,
+                    schema_version = SchemaVersion,
+                    created_at = CreatedAt,
                     last_compacted_at = LastCompactedAt
                 }}
             catch
@@ -387,10 +387,11 @@ remove_sealed_packs(
 ) when is_list(Retired) ->
     RetiredSet = sets:from_list(Retired),
     Remaining = [P || P <- Packs, not sets:is_element(P, RetiredSet)],
-    NewDT = case Retired of
-        [] -> DT;
-        _  -> max(DT, lists:max(Retired))
-    end,
+    NewDT =
+        case Retired of
+            [] -> DT;
+            _ -> max(DT, lists:max(Retired))
+        end,
     M#?MODULE{sealed_packs = Remaining, deleted_through = NewDT}.
 
 -spec with_incoming_pack(t(), present | absent) -> t().
@@ -424,16 +425,17 @@ tmp_path(Dir) ->
 %% @private
 to_map(Terms) ->
     try
-        {ok, lists:foldl(
-            fun
-                ({K, V}, Acc) when is_atom(K) ->
-                    Acc#{K => V};
-                (Other, _Acc) ->
-                    throw({not_proplist, Other})
-            end,
-            #{},
-            Terms
-        )}
+        {ok,
+            lists:foldl(
+                fun
+                    ({K, V}, Acc) when is_atom(K) ->
+                        Acc#{K => V};
+                    (Other, _Acc) ->
+                        throw({not_proplist, Other})
+                end,
+                #{},
+                Terms
+            )}
     catch
         throw:{not_proplist, _} ->
             {error, not_proplist}
@@ -443,7 +445,7 @@ to_map(Terms) ->
 required(Key, Map) ->
     case maps:find(Key, Map) of
         {ok, V} -> V;
-        error   -> throw({error, {missing_field, Key}})
+        error -> throw({error, {missing_field, Key}})
     end.
 
 %% @private
@@ -463,29 +465,35 @@ validate_hash_algo(sha256) -> ok;
 validate_hash_algo(V) -> throw({error, {bad_hash_algo, V}}).
 
 %% @private
-validate_current_root(undefined) -> ok;
+validate_current_root(undefined) ->
+    ok;
 validate_current_root(V) when
     is_binary(V), byte_size(V) =:= ?BONDY_MST_PACK_HASH_BYTES
 ->
     ok;
-validate_current_root(V) -> throw({error, {bad_current_root, V}}).
+validate_current_root(V) ->
+    throw({error, {bad_current_root, V}}).
 
 %% @private
 %% Must be a strictly ascending list of non-negative integers. Empty
 %% list is the fresh-store state.
-validate_sealed_packs([]) -> ok;
+validate_sealed_packs([]) ->
+    ok;
 validate_sealed_packs([First | _] = L) when is_integer(First), First >= 0 ->
     case is_strictly_ascending(L) of
-        true  -> ok;
+        true -> ok;
         false -> throw({error, {bad_sealed_packs, L}})
     end;
-validate_sealed_packs(V) -> throw({error, {bad_sealed_packs, V}}).
+validate_sealed_packs(V) ->
+    throw({error, {bad_sealed_packs, V}}).
 
 %% @private
-is_strictly_ascending([_]) -> true;
+is_strictly_ascending([_]) ->
+    true;
 is_strictly_ascending([A, B | Rest]) when is_integer(B), A < B ->
     is_strictly_ascending([B | Rest]);
-is_strictly_ascending(_) -> false.
+is_strictly_ascending(_) ->
+    false.
 
 %% @private
 validate_deleted_through(V) when is_integer(V), V >= 0 -> ok;
@@ -493,7 +501,7 @@ validate_deleted_through(V) -> throw({error, {bad_deleted_through, V}}).
 
 %% @private
 validate_incoming_pack(present) -> ok;
-validate_incoming_pack(absent)  -> ok;
+validate_incoming_pack(absent) -> ok;
 validate_incoming_pack(V) -> throw({error, {bad_incoming_pack, V}}).
 
 %% @private

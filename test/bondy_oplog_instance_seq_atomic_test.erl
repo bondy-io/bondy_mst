@@ -46,7 +46,6 @@ seq_atomic_test_() ->
         {timeout, 10, fun peer_loopback_foreign_origin_does_not_bump_seq/0}
     ]}.
 
-
 install_local_batch_bumps_seq_atomic() ->
     %% Fresh instance: SeqRef seeded to 0. Cast a synthetic batch
     %% with seqs 1..5 (mimicking a WAL replay rebuilding the MST
@@ -59,7 +58,7 @@ install_local_batch_bumps_seq_atomic() ->
 
     Events = [
         synth_event(N * 10, Origin, N)
-        || N <- lists:seq(1, 5)
+     || N <- lists:seq(1, 5)
     ],
     ok = gen_server:cast(Pid, {install_local_batch, Events}),
     ok = bondy_oplog:await_apply(Id),
@@ -70,7 +69,6 @@ install_local_batch_bumps_seq_atomic() ->
     ?assertEqual(6, bondy_oplog_event:key_seq(NewKey)),
 
     bondy_oplog:stop_instance(Id).
-
 
 peer_loopback_local_origin_bumps_seq_atomic() ->
     %% Simulate a peer shipping back an event we issued ourselves
@@ -92,7 +90,6 @@ peer_loopback_local_origin_bumps_seq_atomic() ->
     ?assert(bondy_oplog_event:key_seq(NewKey) > 7),
 
     bondy_oplog:stop_instance(Id).
-
 
 peer_loopback_foreign_origin_does_not_bump_seq() ->
     %% Symmetric check: a peer event whose Origin is NOT this instance
@@ -118,7 +115,6 @@ peer_loopback_foreign_origin_does_not_bump_seq() ->
 
     bondy_oplog:stop_instance(Id).
 
-
 synthetic_replay_below_current_seq_is_noop() ->
     %% Append two local events naturally (allocate seqs 1, 2). Then
     %% cast a "replay" of seqs 1..2 again — the bump should be a
@@ -134,7 +130,7 @@ synthetic_replay_below_current_seq_is_noop() ->
     Pid = bondy_oplog_registry:instance_pid(Id),
     Events = [
         synth_event(N * 10, Origin, N)
-        || N <- lists:seq(1, 2)
+     || N <- lists:seq(1, 2)
     ],
     ok = gen_server:cast(Pid, {install_local_batch, Events}),
     ok = bondy_oplog:await_apply(Id),
@@ -144,7 +140,6 @@ synthetic_replay_below_current_seq_is_noop() ->
 
     bondy_oplog:stop_instance(Id).
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
@@ -152,7 +147,6 @@ synthetic_replay_below_current_seq_is_noop() ->
 synth_event(Hlc, Origin, Seq) ->
     K = bondy_oplog_event:key(Hlc, Origin, Seq),
     bondy_oplog_event:new(K, {custom, <<"synth">>}, #{}).
-
 
 mk_id() ->
     iolist_to_binary([

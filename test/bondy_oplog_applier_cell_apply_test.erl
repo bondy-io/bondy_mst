@@ -37,9 +37,11 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
 
 cell_apply_test_() ->
@@ -63,8 +65,9 @@ apply_writes_projection() ->
     %% Single cell_apply event must produce a frame in the projection
     %% adapter whose HLC and decoded state match the LWW fold's contract.
     {Id, NS, Cache, Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"alice">>,
-                                {set, 1, <<"v1">>}}),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"alice">>, {set, 1, <<"v1">>}}
+    ),
     _ = barrier(Id),
     {ok, Frame} = bondy_oplog_projection_ets:get(Proj, ?B, <<"alice">>),
     {Hlc, Body, _} = bondy_oplog_cell_frame:decode_full(Frame),
@@ -73,31 +76,29 @@ apply_writes_projection() ->
     ?assertEqual(1, Hlc),
     teardown_instance(Id, NS, Cache, Proj).
 
-
 apply_round_trips_through_db_core_read() ->
     %% Substrate read must see the frame the applier just wrote and
     %% return the user-facing value (post-§3.6 the read API returns
     %% `to_value/1`).
     {Id, NS, Cache, Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"bob">>,
-                                {set, 42, <<"v">>}}),
+    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"bob">>, {set, 42, <<"v">>}}),
     _ = barrier(Id),
     Result = bondy_db_core:read(NS, primary, <<"bob">>),
     ?assertEqual({<<"v">>, 42}, Result),
     teardown_instance(Id, NS, Cache, Proj).
 
-
 later_hlc_wins() ->
     {Id, NS, Cache, Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
-                                {set, 1, <<"first">>}}),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
-                                {set, 2, <<"second">>}}),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"k">>, {set, 1, <<"first">>}}
+    ),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"k">>, {set, 2, <<"second">>}}
+    ),
     _ = barrier(Id),
     {<<"second">>, 2} =
         bondy_db_core:read(NS, primary, <<"k">>),
     teardown_instance(Id, NS, Cache, Proj).
-
 
 earlier_hlc_is_absorbed() ->
     %% Applying an HLC-older event after a newer one must leave the
@@ -106,28 +107,26 @@ earlier_hlc_is_absorbed() ->
     %% fold; this proves the read-modify-write loop reads the current
     %% state instead of blindly overwriting.
     {Id, NS, Cache, Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
-                                {set, 5, <<"newer">>}}),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
-                                {set, 3, <<"older">>}}),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"k">>, {set, 5, <<"newer">>}}
+    ),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"k">>, {set, 3, <<"older">>}}
+    ),
     _ = barrier(Id),
     {<<"newer">>, 5} =
         bondy_db_core:read(NS, primary, <<"k">>),
     teardown_instance(Id, NS, Cache, Proj).
 
-
 clear_then_resurrect() ->
     {Id, NS, Cache, Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
-                                {set, 1, <<"v1">>}}),
+    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>, {set, 1, <<"v1">>}}),
     _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>, {clear, 2}}),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
-                                {set, 3, <<"v2">>}}),
+    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>, {set, 3, <<"v2">>}}),
     _ = barrier(Id),
     {<<"v2">>, 3} =
         bondy_db_core:read(NS, primary, <<"k">>),
     teardown_instance(Id, NS, Cache, Proj).
-
 
 cell_apply_does_not_feed_per_instance_fold() ->
     %% The applier filters cell_apply events out of `apply_fold_batch/2`
@@ -135,15 +134,12 @@ cell_apply_does_not_feed_per_instance_fold() ->
     %% at `initial_value` regardless of how many cell_apply events
     %% have been appended.
     {Id, NS, Cache, Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k1">>,
-                                {set, 1, <<"v1">>}}),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k2">>,
-                                {set, 2, <<"v2">>}}),
+    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k1">>, {set, 1, <<"v1">>}}),
+    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k2">>, {set, 2, <<"v2">>}}),
     _ = barrier(Id),
     %% lww_register's `initial_value/0` is `undefined`.
     ?assertEqual({ok, undefined}, bondy_oplog:projection(Id)),
     teardown_instance(Id, NS, Cache, Proj).
-
 
 missing_target_means_strict_noop() ->
     %% Without `cell_apply_target` the cell_apply events do not crash
@@ -159,13 +155,13 @@ missing_target_means_strict_noop() ->
     {ok, _} = bondy_oplog:start_instance(Id, #{
         fold_module => lww_register
     }),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>,
-                                {set, 1, <<"v">>}}),
+    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>, {set, 1, <<"v">>}}),
     _ = barrier(Id),
-    ?assertEqual(undefined,
-                 bondy_db_core:read(NS, primary, <<"k">>)),
+    ?assertEqual(
+        undefined,
+        bondy_db_core:read(NS, primary, <<"k">>)
+    ),
     teardown_instance(Id, NS, Cache, Proj).
-
 
 unregistered_target_fails_init() ->
     %% Pointing `cell_apply_target` at a triple that is not registered
@@ -183,7 +179,6 @@ unregistered_target_fails_init() ->
         })
     ).
 
-
 invalid_target_shape_rejected() ->
     %% `cell_apply_target` must be a `{atom(), atom(), non_neg_integer()}`
     %% triple. Anything else fails validation before the applier is
@@ -199,7 +194,6 @@ invalid_target_shape_rejected() ->
         })
     ).
 
-
 %% =============================================================================
 %% Helpers
 %% =============================================================================
@@ -207,31 +201,28 @@ invalid_target_shape_rejected() ->
 mk_id() ->
     list_to_binary(
         "cellapply_" ++
-        integer_to_list(erlang:unique_integer([positive, monotonic]))
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
     ).
-
 
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
-
 
 %% Provision + register an `(NS, primary, 0)` shard backed by an ETS
 %% cache + ETS projection adapter, both opened fresh for this call.
 %% Returns the handles so the caller can `close/1` them at teardown.
 register_shard(NS, Index, Shard) ->
     {ok, Cache} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
-    {ok, Proj}  = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
+    {ok, Proj} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => Cache,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => Cache,
         projection_adapter => bondy_oplog_projection_ets,
-        projection_handle  => Proj,
-        fold_module        => lww_register,
-        overlay            => disabled
+        projection_handle => Proj,
+        fold_module => lww_register,
+        overlay => disabled
     }),
     {Cache, Proj}.
-
 
 %% Common setup: fresh instance id, fresh namespace, fresh shard with
 %% ETS cache + projection, instance started with cell_apply_target
@@ -248,14 +239,12 @@ setup_instance() ->
     }),
     {Id, NS, Cache, Proj}.
 
-
 teardown_instance(Id, NS, Cache, Proj) ->
     ok = bondy_oplog:stop_instance(Id),
     ok = bondy_db_core_registry:unregister(NS, primary, 0),
     ok = bondy_oplog_projection_ets:close(Proj),
     ok = bondy_oplog_cache_ets:close(Cache),
     ok.
-
 
 %% Synchronous barrier through the applier mailbox. The
 %% `gen_server:call` to `projection/1` queues after every prior

@@ -125,5 +125,5 @@ custom_module_name_works_as_fold() ->
 mk_id() ->
     list_to_binary(
         "fold_" ++
-        integer_to_list(erlang:unique_integer([positive, monotonic]))
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
     ).

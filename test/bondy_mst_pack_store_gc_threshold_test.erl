@@ -14,58 +14,63 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
-
 %% =============================================================================
 %% Test helpers (mirror the patterns in bondy_mst_pack_store_test)
 %% =============================================================================
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp",
-         io_lib:format("bondy_mst_pack_store_gc_threshold_~p_~p",
-                       [erlang:system_time(microsecond),
-                        erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_mst_pack_store_gc_threshold_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
     Dir.
 
-
 rmrf(Dir) ->
     _ = file:del_dir_r(Dir),
     ok.
 
-
 with_tmp_dir(Fun) ->
     Dir = mktemp_dir(),
-    try Fun(Dir)
-    after rmrf(Dir)
+    try
+        Fun(Dir)
+    after
+        rmrf(Dir)
     end.
-
 
 open_store_with(Dir, Extra) ->
     bondy_mst_store:open(
-        bondy_mst_pack_store, sha256,
-        maps:merge(#{dir => Dir,
-                     instance_id => <<"pack-store-gc-threshold-test">>},
-                   Extra)
+        bondy_mst_pack_store,
+        sha256,
+        maps:merge(
+            #{
+                dir => Dir,
+                instance_id => <<"pack-store-gc-threshold-test">>
+            },
+            Extra
+        )
     ).
-
 
 mk_page(Key, Value) ->
     bondy_mst_page:new(0, undefined, [{Key, Value, undefined}]).
-
 
 seal(S) ->
     {bondy_mst_store, _, Backend, _} = S,
     {ok, B1} = bondy_mst_pack_store:seal(Backend),
     setelement(3, S, B1).
 
-
 pack_ids(S) ->
     {bondy_mst_store, _, Backend, _} = S,
     bondy_mst_pack_store:sealed_pack_ids(Backend).
-
 
 put_many(S, KVs) ->
     lists:foldl(
@@ -76,7 +81,6 @@ put_many(S, KVs) ->
         {[], S},
         KVs
     ).
-
 
 %% =============================================================================
 %% Default behaviour: threshold=0.0 → any drop compacts (regression)
@@ -91,15 +95,19 @@ default_threshold_compacts_any_drop_test() ->
         ?assertEqual([1], pack_ids(S2)),
         {S3, Meta} = bondy_mst_store:gc(S2, [H1]),
         try
-            ?assertMatch(#{compacted := true,
-                           retired   := [1],
-                           kept      := 1,
-                           dropped   := 2}, Meta)
+            ?assertMatch(
+                #{
+                    compacted := true,
+                    retired := [1],
+                    kept := 1,
+                    dropped := 2
+                },
+                Meta
+            )
         after
             _ = bondy_mst_store:close(S3)
         end
     end).
-
 
 %% =============================================================================
 %% Threshold gates single-pack rewrite when dead fraction is too low
@@ -117,10 +125,15 @@ high_threshold_skips_low_dead_fraction_test() ->
         %% Keep all but the first hash → drops exactly 1.
         {S3, Meta} = bondy_mst_store:gc(S2, KeepRest),
         try
-            ?assertMatch(#{compacted := false,
-                           reason    := below_threshold,
-                           kept      := 9,
-                           dropped   := 1}, Meta),
+            ?assertMatch(
+                #{
+                    compacted := false,
+                    reason := below_threshold,
+                    kept := 9,
+                    dropped := 1
+                },
+                Meta
+            ),
             %% The pack is still there, untouched.
             ?assertEqual([1], pack_ids(S3)),
             %% And the "dropped" page is still gettable (it survived
@@ -130,7 +143,6 @@ high_threshold_skips_low_dead_fraction_test() ->
             _ = bondy_mst_store:close(S3)
         end
     end).
-
 
 %% =============================================================================
 %% Threshold lets rewrite through when dead fraction is high enough
@@ -147,17 +159,21 @@ high_threshold_fires_when_fraction_met_test() ->
         Keep = lists:sublist(lists:reverse(Hs), 4),
         {S3, Meta} = bondy_mst_store:gc(S2, Keep),
         try
-            ?assertMatch(#{compacted := true,
-                           retired   := [1],
-                           new_pack  := 2,
-                           kept      := 4,
-                           dropped   := 6}, Meta),
+            ?assertMatch(
+                #{
+                    compacted := true,
+                    retired := [1],
+                    new_pack := 2,
+                    kept := 4,
+                    dropped := 6
+                },
+                Meta
+            ),
             ?assertEqual([2], pack_ids(S3))
         after
             _ = bondy_mst_store:close(S3)
         end
     end).
-
 
 %% =============================================================================
 %% Multi-pack coalescing ignores the threshold
@@ -175,17 +191,21 @@ multi_pack_always_coalesces_test() ->
         ?assertEqual([2, 1], pack_ids(S4)),
         {S5, Meta} = bondy_mst_store:gc(S4, [H1, H2]),
         try
-            ?assertMatch(#{compacted := true,
-                           retired   := [1, 2],
-                           new_pack  := 3,
-                           kept      := 2,
-                           dropped   := 0}, Meta),
+            ?assertMatch(
+                #{
+                    compacted := true,
+                    retired := [1, 2],
+                    new_pack := 3,
+                    kept := 2,
+                    dropped := 0
+                },
+                Meta
+            ),
             ?assertEqual([3], pack_ids(S5))
         after
             _ = bondy_mst_store:close(S5)
         end
     end).
-
 
 %% =============================================================================
 %% Multi-pack with low-fraction drops still merges
@@ -204,15 +224,19 @@ multi_pack_with_drops_below_threshold_still_merges_test() ->
         [_HDropped | Keep] = AllHs,
         {S5, Meta} = bondy_mst_store:gc(S4, Keep),
         try
-            ?assertMatch(#{compacted := true,
-                           kept      := 9,
-                           dropped   := 1}, Meta),
+            ?assertMatch(
+                #{
+                    compacted := true,
+                    kept := 9,
+                    dropped := 1
+                },
+                Meta
+            ),
             ?assertEqual([3], pack_ids(S5))
         after
             _ = bondy_mst_store:close(S5)
         end
     end).
-
 
 %% =============================================================================
 %% Single-pack with zero drops is still no-op regardless of threshold
@@ -226,14 +250,15 @@ single_pack_zero_drops_still_no_op_test() ->
         {S3, Meta} = bondy_mst_store:gc(S2, lists:reverse(Hs)),
         try
             ?assertMatch(#{compacted := false}, Meta),
-            ?assertNotEqual(#{reason => below_threshold},
-                            #{reason => maps:get(reason, Meta, undefined)}),
+            ?assertNotEqual(
+                #{reason => below_threshold},
+                #{reason => maps:get(reason, Meta, undefined)}
+            ),
             ?assertEqual([1], pack_ids(S3))
         after
             _ = bondy_mst_store:close(S3)
         end
     end).
-
 
 %% =============================================================================
 %% Boundary: 0 / 1 integer aliasing
@@ -248,7 +273,6 @@ integer_zero_and_one_accepted_test() ->
         S0 = open_store_with(Dir2, #{gc_threshold_dead_fraction => 1}),
         _ = bondy_mst_store:close(S0)
     end).
-
 
 %% =============================================================================
 %% Validation: bad values rejected at open time
@@ -270,7 +294,6 @@ bad_threshold_rejected_at_open_test() ->
         )
     end).
 
-
 %% =============================================================================
 %% Threshold exactly at boundary fires the rewrite
 %% =============================================================================
@@ -284,9 +307,14 @@ threshold_at_exact_boundary_fires_test() ->
         Keep = lists:sublist(lists:reverse(Hs), 2),
         {S3, Meta} = bondy_mst_store:gc(S2, Keep),
         try
-            ?assertMatch(#{compacted := true,
-                           kept      := 2,
-                           dropped   := 2}, Meta)
+            ?assertMatch(
+                #{
+                    compacted := true,
+                    kept := 2,
+                    dropped := 2
+                },
+                Meta
+            )
         after
             _ = bondy_mst_store:close(S3)
         end

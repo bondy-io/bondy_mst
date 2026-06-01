@@ -42,8 +42,11 @@
 %% bounded ranges and the fold's behaviour does not depend on absolute
 %% magnitude.
 hlc_gen() ->
-    ?LET({Phys, Log}, {integer(0, 1000), integer(0, 1023)},
-         bondy_oplog_hlc:encode(Phys, Log)).
+    ?LET(
+        {Phys, Log},
+        {integer(0, 1000), integer(0, 1023)},
+        bondy_oplog_hlc:encode(Phys, Log)
+    ).
 
 payload_gen() ->
     %% Opaque binary; small to keep shrinks readable.
@@ -66,23 +69,40 @@ event_gen() ->
 events_gen() ->
     oneof([
         [],
-        ?LET({H, P}, {hlc_gen(), payload_gen()},
-             [{create, H, P}]),
-        ?LET(H, hlc_gen(),
-             [{delete, H}]),
-        ?LET({HC, P, Diff}, {hlc_gen(), payload_gen(), integer(1, 100)},
-             [{create, HC, P}, {delete, HC + Diff}]),
-        ?LET({HC, P, Diff}, {hlc_gen(), payload_gen(), integer(1, 100)},
-             [{delete, HC + Diff}, {create, HC, P}])
+        ?LET(
+            {H, P},
+            {hlc_gen(), payload_gen()},
+            [{create, H, P}]
+        ),
+        ?LET(
+            H,
+            hlc_gen(),
+            [{delete, H}]
+        ),
+        ?LET(
+            {HC, P, Diff},
+            {hlc_gen(), payload_gen(), integer(1, 100)},
+            [{create, HC, P}, {delete, HC + Diff}]
+        ),
+        ?LET(
+            {HC, P, Diff},
+            {hlc_gen(), payload_gen(), integer(1, 100)},
+            [{delete, HC + Diff}, {create, HC, P}]
+        )
     ]).
 
 %% A fold state produced by folding a fresh event sequence. Reaches
 %% every reachable state (empty, live, dead) with realistic distribution.
 state_gen() ->
-    ?LET(Events, events_gen(),
-         lists:foldl(fun(E, S) -> apply_ev(S, E) end,
-                     ?MOD:initial_value(),
-                     Events)).
+    ?LET(
+        Events,
+        events_gen(),
+        lists:foldl(
+            fun(E, S) -> apply_ev(S, E) end,
+            ?MOD:initial_value(),
+            Events
+        )
+    ).
 
 %% =============================================================================
 %% Properties
@@ -91,31 +111,43 @@ state_gen() ->
 %% §5.1 — apply_event is idempotent: applying the same event twice
 %% produces the same state as applying it once.
 prop_apply_event_idempotent() ->
-    ?FORALL({State, Event}, {state_gen(), event_gen()},
+    ?FORALL(
+        {State, Event},
+        {state_gen(), event_gen()},
         begin
             S1 = apply_ev(State, Event),
             S2 = apply_ev(S1, Event),
             S1 =:= S2
-        end).
+        end
+    ).
 
 %% §5.2 — hlc/1 is non-decreasing under apply_event/3.
 prop_apply_event_hlc_monotonic() ->
-    ?FORALL({State, Event}, {state_gen(), event_gen()},
+    ?FORALL(
+        {State, Event},
+        {state_gen(), event_gen()},
         begin
             H0 = ?MOD:hlc(State),
             H1 = ?MOD:hlc(apply_ev(State, Event)),
             H1 >= H0
-        end).
+        end
+    ).
 
 %% §5.4 — encode_state/decode_state is a bijection on reachable states.
 prop_encode_state_roundtrip() ->
-    ?FORALL(State, state_gen(),
-        ?MOD:decode_state(?MOD:encode_state(State)) =:= State).
+    ?FORALL(
+        State,
+        state_gen(),
+        ?MOD:decode_state(?MOD:encode_state(State)) =:= State
+    ).
 
 %% §5.4 — encode_event/decode_event is a bijection on events.
 prop_encode_event_roundtrip() ->
-    ?FORALL(Event, event_gen(),
-        ?MOD:decode_event(?MOD:encode_event(Event)) =:= Event).
+    ?FORALL(
+        Event,
+        event_gen(),
+        ?MOD:decode_event(?MOD:encode_event(Event)) =:= Event
+    ).
 
 %% §5.5 — GC safety: after folding events, dropping events with HLC
 %% at-or-below gc_threshold and replaying the remainder on top of the
@@ -127,24 +159,32 @@ prop_encode_event_roundtrip() ->
 %% the replayed-from-S sub-fold is idempotent on already-absorbed
 %% events.
 prop_gc_safe() ->
-    ?FORALL(Events, events_gen(),
+    ?FORALL(
+        Events,
+        events_gen(),
         begin
-            S = lists:foldl(fun(E, Acc) -> apply_ev(Acc, E) end,
-                            ?MOD:initial_value(), Events),
+            S = lists:foldl(
+                fun(E, Acc) -> apply_ev(Acc, E) end,
+                ?MOD:initial_value(),
+                Events
+            ),
             Threshold = ?MOD:gc_threshold(S),
             Remaining = [E || E <- Events, event_hlc(E) > as_int(Threshold)],
-            S2 = lists:foldl(fun(E, Acc) -> apply_ev(Acc, E) end,
-                             S, Remaining),
+            S2 = lists:foldl(
+                fun(E, Acc) -> apply_ev(Acc, E) end,
+                S,
+                Remaining
+            ),
             S =:= S2
-        end).
+        end
+    ).
 
 %% =============================================================================
 %% EUnit wrapper — keeps the property suite in CI.
 %% =============================================================================
 
 properties_test_() ->
-    {timeout, 120,
-     fun() ->
+    {timeout, 120, fun() ->
         Opts = [{to_file, user}, {numtests, ?DEFAULT_NUMTESTS}],
         Props = [
             prop_apply_event_idempotent(),
@@ -157,14 +197,14 @@ properties_test_() ->
             fun(Prop) -> ?assert(proper:quickcheck(Prop, Opts)) end,
             Props
         )
-     end}.
+    end}.
 
 %% =============================================================================
 %% Internal helpers
 %% =============================================================================
 
 event_hlc({create, H, _}) -> H;
-event_hlc({delete, H})    -> H.
+event_hlc({delete, H}) -> H.
 
 %% gc_threshold returns `undefined` on `empty`; treat that as -1 so the
 %% "remaining" filter keeps everything (any non-negative HLC is > -1).

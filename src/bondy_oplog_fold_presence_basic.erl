@@ -91,13 +91,13 @@ already-serialised binaries.
 
 -type payload() :: binary().
 -type state() ::
-        empty
-        | {live, bondy_oplog_hlc:hlc(), payload()}
-        | {dead, bondy_oplog_hlc:hlc()}.
+    empty
+    | {live, bondy_oplog_hlc:hlc(), payload()}
+    | {dead, bondy_oplog_hlc:hlc()}.
 
 -type event() ::
-        {create, bondy_oplog_hlc:hlc(), payload()}
-        | {delete, bondy_oplog_hlc:hlc()}.
+    {create, bondy_oplog_hlc:hlc(), payload()}
+    | {delete, bondy_oplog_hlc:hlc()}.
 
 -export_type([state/0, event/0, payload/0]).
 
@@ -110,52 +110,42 @@ already-serialised binaries.
 initial_value() ->
     empty.
 
-
 -spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
     bondy_oplog_fold:apply_result().
 
 apply_event(empty, {create, H, P}, _Meta) ->
     {{live, H, P}, P};
-
 apply_event(empty, {delete, H}, _Meta) ->
     %% Delete arriving before its corresponding create — record a
     %% tombstone so a later-arriving create with smaller HLC cannot
     %% silently resurrect the cell. Value stays undefined.
     {{dead, H}, none};
-
 apply_event({live, OldH, _OldP} = S, {create, H, _}, _Meta) when H < OldH ->
     %% Older-HLC create on live state — out-of-order, rejected.
     {S, none};
-
 apply_event({live, _, OldP}, {create, H, P}, _Meta) when P =:= OldP ->
     %% Idempotent absorb (same payload) — only HLC moves, value unchanged.
     {{live, H, P}, none};
-
 apply_event({live, _, _}, {create, H, P}, _Meta) ->
     %% H >= OldH and payload changed: supersede.
     {{live, H, P}, P};
-
 apply_event({live, OldH, _}, {delete, H}, _Meta) ->
     %% Delete moves the cell to terminal `dead`. Preserve HLC
     %% monotonicity even if the delete is causally older.
     {{dead, erlang:max(OldH, H)}, undefined};
-
 apply_event({dead, OldH}, {create, H, _}, _Meta) ->
     %% Terminal — do not resurrect. Bump the cell HLC to reflect that
     %% we have observed an event with this HLC. Value unchanged.
     {{dead, erlang:max(OldH, H)}, none};
-
 apply_event({dead, OldH}, {delete, H}, _Meta) ->
     %% Terminal — bump HLC on duplicate or late-arriving delete.
     {{dead, erlang:max(OldH, H)}, none}.
 
-
 -spec to_value(state()) -> undefined | payload().
 
-to_value(empty)          -> undefined;
-to_value({live, _H, P})  -> P;
-to_value({dead, _H})     -> undefined.
-
+to_value(empty) -> undefined;
+to_value({live, _H, P}) -> P;
+to_value({dead, _H}) -> undefined.
 
 -spec apply_value_delta(undefined | payload(), undefined | payload()) ->
     undefined | payload().
@@ -163,60 +153,48 @@ to_value({dead, _H})     -> undefined.
 apply_value_delta(_OldValue, NewValue) ->
     NewValue.
 
-
 -spec hlc(state()) -> bondy_oplog_hlc:hlc().
 
-hlc(empty)         -> 0;
-hlc({live, H, _})  -> H;
-hlc({dead, H})     -> H.
-
+hlc(empty) -> 0;
+hlc({live, H, _}) -> H;
+hlc({dead, H}) -> H.
 
 -spec gc_threshold(state()) -> bondy_oplog_hlc:hlc() | undefined.
 
-gc_threshold(empty)        -> undefined;
+gc_threshold(empty) -> undefined;
 gc_threshold({live, H, _}) -> H;
-gc_threshold({dead, H})    -> H.
-
+gc_threshold({dead, H}) -> H.
 
 -spec encode_state(state()) -> binary().
 
 encode_state(empty) ->
     <<0>>;
-
 encode_state({live, H, P}) when is_integer(H), is_binary(P) ->
     PSize = byte_size(P),
     <<1, H:64/big-unsigned, PSize:32/big-unsigned, P/binary>>;
-
 encode_state({dead, H}) when is_integer(H) ->
     <<3, H:64/big-unsigned>>.
-
 
 -spec decode_state(binary()) -> state().
 
 decode_state(<<0>>) ->
     empty;
-
 decode_state(<<1, H:64/big-unsigned, PSize:32/big-unsigned, P:PSize/binary>>) ->
     {live, H, P};
-
 decode_state(<<3, H:64/big-unsigned>>) ->
     {dead, H}.
-
 
 -spec encode_event(event()) -> binary().
 
 encode_event({create, H, P}) when is_integer(H), is_binary(P) ->
     PSize = byte_size(P),
     <<1, H:64/big-unsigned, PSize:32/big-unsigned, P/binary>>;
-
 encode_event({delete, H}) when is_integer(H) ->
     <<2, H:64/big-unsigned>>.
-
 
 -spec decode_event(binary()) -> event().
 
 decode_event(<<1, H:64/big-unsigned, PSize:32/big-unsigned, P:PSize/binary>>) ->
     {create, H, P};
-
 decode_event(<<2, H:64/big-unsigned>>) ->
     {delete, H}.

@@ -32,13 +32,10 @@ dangling_page_test_() ->
             {ok, _} = application:ensure_all_started(bondy_mst),
             ok
         end,
-        fun(_) -> ok end,
-        [
+        fun(_) -> ok end, [
             {timeout, 10, fun split_with_dangling_hash_does_not_crash/0},
             {timeout, 10, fun merge_aux_with_dangling_root_does_not_crash/0}
-        ]
-    }.
-
+        ]}.
 
 %% A `split` call whose target Hash is not in any store should return
 %% the `{undefined, undefined, Store}` triple — the same shape it
@@ -66,7 +63,6 @@ split_with_dangling_hash_does_not_crash() ->
     Result = bondy_mst:put(T1, key(50), value(50)),
     ?assert(is_tuple(Result)),
     ok.
-
 
 %% A `merge` whose A-side root has been knocked out of A's store
 %% should:
@@ -103,7 +99,6 @@ merge_aux_with_dangling_root_does_not_crash() ->
     %% B's keys are now reachable from the merged tree.
     ?assertEqual(value(101), bondy_mst:get(Merged, key(101))),
     ok.
-
 
 %% -------------------------------------------------------------------
 %% Helpers

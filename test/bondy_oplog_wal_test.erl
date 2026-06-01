@@ -25,9 +25,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -75,13 +82,20 @@ mk_event(Hlc, Seq) ->
 open_creates_dir_and_segment_test() ->
     with_wal(#{}, fun(Pid, Dir) ->
         ?assert(filelib:is_dir(filename:join(Dir, instance_id()))),
-        ?assert(filelib:is_regular(
-            filename:join([Dir, instance_id(),
-                           ?BONDY_OPLOG_WAL_MANIFEST_FILENAME])
-        )),
-        ?assert(filelib:is_regular(
-            filename:join([Dir, instance_id(), "000000000.qdata"])
-        )),
+        ?assert(
+            filelib:is_regular(
+                filename:join([
+                    Dir,
+                    instance_id(),
+                    ?BONDY_OPLOG_WAL_MANIFEST_FILENAME
+                ])
+            )
+        ),
+        ?assert(
+            filelib:is_regular(
+                filename:join([Dir, instance_id(), "000000000.qdata"])
+            )
+        ),
         Info = bondy_oplog_wal:info(Pid),
         ?assertEqual(instance_id(), maps:get(instance_id, Info)),
         ?assertEqual(0, maps:get(current_segment, Info)),
@@ -100,7 +114,10 @@ expect_open_error(Expected, Fun) ->
         Got = Fun(),
         ?assertEqual({error, Expected}, Got),
         %% Drain any linked EXIT delivered by the failing gen_server.
-        receive {'EXIT', _, _} -> ok after 0 -> ok end
+        receive
+            {'EXIT', _, _} -> ok
+        after 0 -> ok
+        end
     after
         process_flag(trap_exit, OldFlag)
     end.
@@ -235,9 +252,10 @@ hlc_returned_matches_event_test() ->
         Pairs = [
             begin
                 {ok, ReturnedHlc, _} = bondy_oplog_wal:append(Pid, E),
-                {ReturnedHlc, bondy_oplog_event:key_hlc(
-                    bondy_oplog_event:key(E)
-                )}
+                {ReturnedHlc,
+                    bondy_oplog_event:key_hlc(
+                        bondy_oplog_event:key(E)
+                    )}
             end
          || E <- Events
         ],
@@ -264,12 +282,17 @@ rotation_creates_new_segment_test() ->
         ?assertEqual(3, maps:get(current_segment, Info)),
         %% Four .qdata files on disk.
         [
-            ?assert(filelib:is_regular(
-                filename:join(
-                    [Dir, instance_id(),
-                     bondy_oplog_wal_segment:filename(S)]
+            ?assert(
+                filelib:is_regular(
+                    filename:join(
+                        [
+                            Dir,
+                            instance_id(),
+                            bondy_oplog_wal_segment:filename(S)
+                        ]
+                    )
                 )
-            ))
+            )
          || S <- [0, 1, 2, 3]
         ],
         %% Each segment holds exactly one event.
@@ -295,7 +318,7 @@ manifest_updated_after_rotation_test() ->
         %% (N+1)th HLC in the sequence).
         Hlcs = [
             bondy_oplog_event:key_hlc(bondy_oplog_event:key(E))
-            || E <- Events
+         || E <- Events
         ],
         ?assertEqual(lists:nth(1, Hlcs), proplists:get_value(0, Live)),
         ?assertEqual(lists:nth(2, Hlcs), proplists:get_value(1, Live)),
@@ -349,10 +372,12 @@ generate_events(HLC, N, Seq) ->
     Hlc = bondy_oplog_hlc:now(HLC),
     [mk_event(Hlc, Seq) | generate_events(HLC, N - 1, Seq + 1)].
 
-is_strictly_increasing([_]) -> true;
+is_strictly_increasing([_]) ->
+    true;
 is_strictly_increasing([A, B | Rest]) when A < B ->
     is_strictly_increasing([B | Rest]);
-is_strictly_increasing(_) -> false.
+is_strictly_increasing(_) ->
+    false.
 
 %% Reads a segment file, skips the 48-byte segment header, walks the
 %% frame stream using `bondy_oplog_wal_frame:decode/1`, and returns the

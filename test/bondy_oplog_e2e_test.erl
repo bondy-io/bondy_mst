@@ -95,8 +95,8 @@ wal_crash_restarts_subtree() ->
     ok = wait_until(
         fun() ->
             P = bondy_oplog_registry:wal_pid(Id),
-            is_pid(P) andalso P =/= WalPid
-                andalso bondy_oplog:size(Id) =:= length(Keys)
+            is_pid(P) andalso P =/= WalPid andalso
+                bondy_oplog:size(Id) =:= length(Keys)
         end,
         10000
     ),
@@ -123,7 +123,8 @@ wait_until(Pred, Remaining, _StepMs) when Remaining =< 0 ->
     end;
 wait_until(Pred, Remaining, StepMs) ->
     case Pred() of
-        true -> ok;
+        true ->
+            ok;
         false ->
             timer:sleep(StepMs),
             wait_until(Pred, Remaining - StepMs, StepMs)

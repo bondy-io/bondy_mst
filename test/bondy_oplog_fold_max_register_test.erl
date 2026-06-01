@@ -38,8 +38,10 @@ initial_value_is_undefined_test() ->
 
 first_set_records_value_and_hlc_test() ->
     H = hlc(100, 0),
-    ?assertEqual({5, H},
-                 apply_ev(undefined, {set, 5}, key(H))).
+    ?assertEqual(
+        {5, H},
+        apply_ev(undefined, {set, 5}, key(H))
+    ).
 
 higher_value_supersedes_test() ->
     H1 = hlc(100, 0),
@@ -63,8 +65,10 @@ equal_value_idempotent_on_value_test() ->
 negative_values_accepted_test() ->
     H = hlc(100, 0),
     ?assertEqual({-1, H}, apply_ev(undefined, {set, -1}, key(H))),
-    ?assertEqual({0, H},
-                 apply_ev({-3, H}, {set, 0}, key(H))).
+    ?assertEqual(
+        {0, H},
+        apply_ev({-3, H}, {set, 0}, key(H))
+    ).
 
 %% =============================================================================
 %% to_value/1
@@ -84,8 +88,10 @@ merge_undefined_returns_other_test() ->
     A = {5, hlc(100, 0)},
     ?assertEqual(A, ?MOD:merge_states(undefined, A)),
     ?assertEqual(A, ?MOD:merge_states(A, undefined)),
-    ?assertEqual(undefined,
-                 ?MOD:merge_states(undefined, undefined)).
+    ?assertEqual(
+        undefined,
+        ?MOD:merge_states(undefined, undefined)
+    ).
 
 merge_takes_max_value_and_max_hlc_test() ->
     A = {5, hlc(200, 0)},

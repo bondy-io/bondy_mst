@@ -74,13 +74,11 @@ init(_NS, _Index, _Shard, Opts) ->
     ok = maybe_set_max_entries(Tab, Opts),
     {ok, Tab}.
 
-
 -spec close(ets:tid()) -> ok.
 
 close(Tab) ->
     true = ets:delete(Tab),
     ok.
-
 
 -spec get(ets:tid(), Bucket :: term(), Key :: term()) ->
     {ok, {Value :: term(), Hlc :: bondy_oplog_hlc:hlc()}} | not_found.
@@ -90,7 +88,6 @@ get(Tab, Bucket, Key) ->
         [] -> not_found;
         [{_, Value, Hlc}] -> {ok, {Value, Hlc}}
     end.
-
 
 -spec put(
     ets:tid(),
@@ -104,20 +101,17 @@ put(Tab, Bucket, Key, {Value, Hlc}) ->
     ok = maybe_evict(Tab),
     ok.
 
-
 -spec delete(ets:tid(), Bucket :: term(), Key :: term()) -> ok.
 
 delete(Tab, Bucket, Key) ->
     true = ets:delete(Tab, {Bucket, Key}),
     ok.
 
-
 -spec invalidate_all(ets:tid()) -> ok.
 
 invalidate_all(Tab) ->
     true = ets:delete_all_objects(Tab),
     ok.
-
 
 -spec info(ets:tid()) -> #{atom() => term()}.
 
@@ -128,13 +122,13 @@ info(Tab) ->
         max_entries => persistent_max_entries(Tab)
     }.
 
-
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
 
-maybe_set_max_entries(Tab, #{max_entries := N})
-        when is_integer(N), N > 0 ->
+maybe_set_max_entries(Tab, #{max_entries := N}) when
+    is_integer(N), N > 0
+->
     %% Stash the bound in the table itself under a reserved key so the
     %% adapter is self-contained (no persistent_term, no parallel ETS).
     true = ets:insert(Tab, {'$max_entries', N}),
@@ -142,13 +136,11 @@ maybe_set_max_entries(Tab, #{max_entries := N})
 maybe_set_max_entries(_Tab, _Opts) ->
     ok.
 
-
 persistent_max_entries(Tab) ->
     case ets:lookup(Tab, '$max_entries') of
         [{_, N}] -> N;
         [] -> infinity
     end.
-
 
 maybe_evict(Tab) ->
     case persistent_max_entries(Tab) of
@@ -158,7 +150,6 @@ maybe_evict(Tab) ->
             %% Subtract one to account for the reserved '$max_entries' row.
             evict_until(Tab, N)
     end.
-
 
 evict_until(Tab, N) ->
     case ets:info(Tab, size) of
@@ -172,7 +163,8 @@ evict_until(Tab, N) ->
                     ok;
                 '$max_entries' ->
                     case ets:next(Tab, '$max_entries') of
-                        '$end_of_table' -> ok;
+                        '$end_of_table' ->
+                            ok;
                         Next ->
                             true = ets:delete(Tab, Next),
                             evict_until(Tab, N)

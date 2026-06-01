@@ -37,8 +37,14 @@ is_known_rejects_non_atoms_test() ->
 validate_accepts_all_builtin_shorthands_test() ->
     lists:foreach(
         fun(S) -> ?assertEqual(ok, bondy_oplog_fold:validate(S)) end,
-        [presence_basic, lww_register, strict_register, orset,
-         ttl_presence, map_of_fields]
+        [
+            presence_basic,
+            lww_register,
+            strict_register,
+            orset,
+            ttl_presence,
+            map_of_fields
+        ]
     ).
 
 validate_accepts_resolved_module_names_test() ->
@@ -49,8 +55,10 @@ validate_accepts_resolved_module_names_test() ->
 
 validate_rejects_unloadable_module_test() ->
     Result = bondy_oplog_fold:validate(nonexistent_fold_module_xyz),
-    ?assertMatch({error, {module_not_loadable, nonexistent_fold_module_xyz, _}},
-                 Result).
+    ?assertMatch(
+        {error, {module_not_loadable, nonexistent_fold_module_xyz, _}},
+        Result
+    ).
 
 validate_rejects_module_missing_callbacks_test() ->
     %% `bondy_oplog_merge_strict_uniqueness` is a real loadable module

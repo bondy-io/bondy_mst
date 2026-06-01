@@ -410,10 +410,10 @@ projection(InstanceId) when is_binary(InstanceId) ->
                     try
                         bondy_oplog_applier:projection(Pid)
                     catch
-                        exit:{noproc, _}  -> {error, instance_unavailable};
-                        exit:noproc       -> {error, instance_unavailable};
-                        exit:{normal, _}  -> {error, instance_unavailable};
-                        exit:{shutdown, _}-> {error, instance_unavailable}
+                        exit:{noproc, _} -> {error, instance_unavailable};
+                        exit:noproc -> {error, instance_unavailable};
+                        exit:{normal, _} -> {error, instance_unavailable};
+                        exit:{shutdown, _} -> {error, instance_unavailable}
                     end
             end;
         {error, _} ->
@@ -643,20 +643,24 @@ inputs by other means.
 -spec retention_decision(retention_inputs()) -> retention_advice().
 
 retention_decision(#{scrubber_alerts := [_ | _] = Alerts} = Inputs) ->
-    Rationale = list_to_binary(io_lib:format(
-        "scrubber alert outstanding on ~p segment(s); resolve via "
-        "re-derivation or magic-rescan before changing retention",
-        [length(Alerts)]
-    )),
+    Rationale = list_to_binary(
+        io_lib:format(
+            "scrubber alert outstanding on ~p segment(s); resolve via "
+            "re-derivation or magic-rescan before changing retention",
+            [length(Alerts)]
+        )
+    ),
     advice(none, Rationale, Inputs);
 retention_decision(#{pressure := P} = Inputs) ->
     BytesR = maps:get(bytes_ratio, P),
     SegsR = maps:get(segments_ratio, P),
     case max(BytesR, SegsR) < ?LOW_PRESSURE_THRESHOLD of
         true ->
-            advice(none,
+            advice(
+                none,
                 <<"retention pressure is low; no action recommended">>,
-                Inputs);
+                Inputs
+            );
         false ->
             HasSnapshot = maps:get(has_snapshot, Inputs),
             Bootstrap = maps:get(bootstrap_consumers, Inputs),
@@ -665,33 +669,51 @@ retention_decision(#{pressure := P} = Inputs) ->
 
 %% @private
 non_low_pressure_decision(true, Bootstrap, Inputs) when Bootstrap > 0 ->
-    advice(compact,
-        <<"bootstrap consumers active; compact preserves the snapshot "
-          "watermark and will not orphan them">>,
-        Inputs);
+    advice(
+        compact,
+        <<
+            "bootstrap consumers active; compact preserves the snapshot "
+            "watermark and will not orphan them"
+        >>,
+        Inputs
+    );
 non_low_pressure_decision(false, Bootstrap, Inputs) when Bootstrap > 0 ->
-    advice(none,
-        <<"bootstrap consumers active but no snapshot exists; "
-          "truncate_prefix would orphan them and compact has nothing "
-          "to fold — wait for bootstrap to finish or take a snapshot "
-          "first">>,
-        Inputs);
+    advice(
+        none,
+        <<
+            "bootstrap consumers active but no snapshot exists; "
+            "truncate_prefix would orphan them and compact has nothing "
+            "to fold — wait for bootstrap to finish or take a snapshot "
+            "first"
+        >>,
+        Inputs
+    );
 non_low_pressure_decision(true, _Bootstrap, Inputs) ->
-    advice(compact,
-        <<"snapshot exists; compact reclaims space without loss of "
-          "history visible to peers">>,
-        Inputs);
+    advice(
+        compact,
+        <<
+            "snapshot exists; compact reclaims space without loss of "
+            "history visible to peers"
+        >>,
+        Inputs
+    );
 non_low_pressure_decision(false, _Bootstrap, Inputs) ->
-    advice(truncate_prefix,
-        <<"no snapshot available; truncate_prefix at an "
-          "operator-chosen watermark is the only retention lever">>,
-        Inputs).
+    advice(
+        truncate_prefix,
+        <<
+            "no snapshot available; truncate_prefix at an "
+            "operator-chosen watermark is the only retention lever"
+        >>,
+        Inputs
+    ).
 
 %% @private
 advice(Action, Rationale, Inputs) ->
-    #{recommended_action => Action,
-      rationale => Rationale,
-      inputs => Inputs}.
+    #{
+        recommended_action => Action,
+        rationale => Rationale,
+        inputs => Inputs
+    }.
 
 %% @private
 build_inputs(WalInfo, Snapshot, BootstrapConsumers) ->
@@ -711,11 +733,13 @@ build_inputs(WalInfo, Snapshot, BootstrapConsumers) ->
         backpressure => Backpressure
     },
     {HasSnapshot, Watermark} = snapshot_summary(Snapshot),
-    #{pressure => Pressure,
-      has_snapshot => HasSnapshot,
-      snapshot_watermark => Watermark,
-      scrubber_alerts => ScrubberAlerts,
-      bootstrap_consumers => BootstrapConsumers}.
+    #{
+        pressure => Pressure,
+        has_snapshot => HasSnapshot,
+        snapshot_watermark => Watermark,
+        scrubber_alerts => ScrubberAlerts,
+        bootstrap_consumers => BootstrapConsumers
+    }.
 
 %% @private
 safe_ratio(_, Max) when Max =< 0 -> 0.0;

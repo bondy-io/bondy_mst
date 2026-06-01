@@ -46,7 +46,9 @@ read_test_() ->
 
 shard_for_returns_no_shards_when_unregistered() ->
     NS = mk_ns(),
-    ?assertEqual({error, no_shards}, bondy_db_core:shard_for(NS, primary, <<"k">>)).
+    ?assertEqual(
+        {error, no_shards}, bondy_db_core:shard_for(NS, primary, <<"k">>)
+    ).
 
 read_returns_shard_not_registered_for_unknown_shard() ->
     %% Register one shard for NS/primary; then read a key that lands on
@@ -56,8 +58,10 @@ read_returns_shard_not_registered_for_unknown_shard() ->
     {Setup, _} = setup_shard(NS, primary, 0, 4, lww_register),
     %% Find a key whose phash2 lands on shard 1..3.
     Key = pick_key_for_shard(NS, primary, 1),
-    ?assertEqual({error, shard_not_registered},
-                 bondy_db_core:read(NS, primary, Key)),
+    ?assertEqual(
+        {error, shard_not_registered},
+        bondy_db_core:read(NS, primary, Key)
+    ),
     teardown_shard(Setup).
 
 read_returns_undefined_when_projection_and_overlay_empty() ->
@@ -76,8 +80,10 @@ read_returns_projection_value_when_no_overlay() ->
     State = {set, <<"v">>, 42},
     Frame = bondy_oplog_test_helpers:frame(lww_register, State, 42),
     ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, <<"k">>, Frame}]),
-    ?assertEqual({<<"v">>, 42},
-                 bondy_db_core:read(NS, primary, <<"k">>)),
+    ?assertEqual(
+        {<<"v">>, 42},
+        bondy_db_core:read(NS, primary, <<"k">>)
+    ),
     teardown_shard(Setup).
 
 read_merges_overlay_with_projection() ->
@@ -92,8 +98,10 @@ read_merges_overlay_with_projection() ->
     %% Overlay carries a newer event at HLC=20.
     Event = mk_event(20, <<"o">>, 0, {set, 20, <<"new">>}),
     ok = bondy_oplog_db_overlay:insert(OV, ?B, <<"k">>, Event),
-    ?assertEqual({<<"new">>, 20},
-                 bondy_db_core:read(NS, primary, <<"k">>)),
+    ?assertEqual(
+        {<<"new">>, 20},
+        bondy_db_core:read(NS, primary, <<"k">>)
+    ),
     teardown_shard(Setup).
 
 read_hits_cache_after_first_slow_read() ->
@@ -106,8 +114,10 @@ read_hits_cache_after_first_slow_read() ->
     ok = bondy_oplog_projection_ets:put_batch(PH, [{?B, <<"k">>, Frame}]),
     %% First read: slow path populates the cache with the user-facing value.
     {<<"v">>, 7} = bondy_db_core:read(NS, primary, <<"k">>),
-    ?assertMatch({ok, {<<"v">>, 7}},
-                 bondy_oplog_cache_ets:get(CH, ?B, <<"k">>)),
+    ?assertMatch(
+        {ok, {<<"v">>, 7}},
+        bondy_oplog_cache_ets:get(CH, ?B, <<"k">>)
+    ),
     teardown_shard(Setup).
 
 cache_returns_value_unchanged_when_set() ->
@@ -119,8 +129,10 @@ cache_returns_value_unchanged_when_set() ->
     %% would return `undefined`). After §3.6 the cache stores values
     %% (not states).
     ok = bondy_oplog_cache_ets:put(CH, ?B, <<"k">>, {<<"v">>, 99}),
-    ?assertEqual({<<"v">>, 99},
-                 bondy_db_core:read(NS, primary, <<"k">>)),
+    ?assertEqual(
+        {<<"v">>, 99},
+        bondy_db_core:read(NS, primary, <<"k">>)
+    ),
     teardown_shard(Setup).
 
 write_through_invalidates_existing_cache_entry() ->
@@ -151,8 +163,10 @@ write_through_skips_when_key_not_cached() ->
 %% =============================================================================
 
 mk_ns() ->
-    list_to_atom("mst_db_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
+    list_to_atom(
+        "mst_db_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 mk_event(Hlc, Origin, Seq, Op) ->
     K = bondy_oplog_event:key(Hlc, Origin, Seq),
@@ -171,12 +185,24 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
         overlay => OV,
         fold_module => Strategy
     }),
-    Setup = #{ns => NS, index => Index, shard => Shard,
-              cache_handle => CH, projection => PH, overlay => OV},
+    Setup = #{
+        ns => NS,
+        index => Index,
+        shard => Shard,
+        cache_handle => CH,
+        projection => PH,
+        overlay => OV
+    },
     {Setup, Setup}.
 
-teardown_shard(#{ns := NS, index := Index, shard := Shard,
-                 cache_handle := CH, projection := PH, overlay := OV}) ->
+teardown_shard(#{
+    ns := NS,
+    index := Index,
+    shard := Shard,
+    cache_handle := CH,
+    projection := PH,
+    overlay := OV
+}) ->
     ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),

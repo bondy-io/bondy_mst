@@ -115,8 +115,14 @@ modules can notify on their first init.
 -export([topics/0]).
 -export([subscribers/1]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 %% =============================================================================
 %% API
@@ -132,12 +138,10 @@ child_spec() ->
         modules => [?MODULE]
     }.
 
-
 -spec start_link() -> {ok, pid()} | {error, term()}.
 
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
-
 
 ?DOC("""
 Subscribe the calling process to `Topic`. Idempotent: subscribing twice
@@ -148,7 +152,6 @@ from the same process leaves a single subscription in place.
 subscribe(Topic) when is_atom(Topic) ->
     gen_server:call(?SERVER, {subscribe, Topic, self()}).
 
-
 ?DOC("""
 Drop the calling process's subscription to `Topic`. Idempotent: removing
 an absent subscription is a no-op.
@@ -157,7 +160,6 @@ an absent subscription is a no-op.
 
 unsubscribe(Topic) when is_atom(Topic) ->
     gen_server:call(?SERVER, {unsubscribe, Topic, self()}).
-
 
 ?DOC("""
 Broadcast `Payload` to every process subscribed to `Topic`. Each
@@ -178,7 +180,6 @@ notify(Topic, Payload) when is_atom(Topic) ->
     lists:foreach(fun(Pid) -> Pid ! Msg end, Subs),
     ok.
 
-
 ?DOC("""
 List every topic that has at least one subscriber. Intended for
 diagnostics.
@@ -189,7 +190,6 @@ topics() ->
     MS = [{#sub{key = {'$1', '_'}, _ = '_'}, [], ['$1']}],
     lists:usort(ets:select(?TAB, MS)).
 
-
 ?DOC("""
 Return the subscribers for a topic. Intended for diagnostics and tests.
 """).
@@ -197,7 +197,6 @@ Return the subscribers for a topic. Intended for diagnostics and tests.
 
 subscribers(Topic) when is_atom(Topic) ->
     ets:select(?TAB, [{#sub{key = {Topic, '$1'}, _ = '_'}, [], ['$1']}]).
-
 
 %% =============================================================================
 %% gen_server callbacks
@@ -212,7 +211,6 @@ init([]) ->
         {read_concurrency, true}
     ]),
     {ok, #state{}}.
-
 
 handle_call({subscribe, Topic, Pid}, _From, State) ->
     case ets:lookup(?TAB, {Topic, Pid}) of
@@ -236,10 +234,8 @@ handle_call({unsubscribe, Topic, Pid}, _From, State) ->
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
-
 handle_cast(_Msg, State) ->
     {noreply, State}.
-
 
 handle_info({'DOWN', Mon, process, _Pid, _Reason}, State) ->
     %% Drop every row whose monitor matches; a single process can be
@@ -253,10 +249,8 @@ handle_info({'DOWN', Mon, process, _Pid, _Reason}, State) ->
 handle_info(_, State) ->
     {noreply, State}.
 
-
 terminate(_Reason, _State) ->
     ok.
-
 
 code_change(_, State, _) ->
     {ok, State}.

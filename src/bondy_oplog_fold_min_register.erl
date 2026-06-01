@@ -60,8 +60,8 @@ property carries over with `max` replaced by `min` on the value field.
 -export([decode_event/1]).
 
 -type state() ::
-        undefined
-      | {integer(), bondy_oplog_hlc:hlc()}.
+    undefined
+    | {integer(), bondy_oplog_hlc:hlc()}.
 
 -type event() :: {set, integer()}.
 
@@ -76,57 +76,51 @@ property carries over with `max` replaced by `min` on the value field.
 initial_value() ->
     undefined.
 
-
 -spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
     bondy_oplog_fold:apply_result().
 
-apply_event(undefined, {set, V}, Meta)
-        when is_integer(V), Meta =/= undefined ->
+apply_event(undefined, {set, V}, Meta) when
+    is_integer(V), Meta =/= undefined
+->
     {{V, bondy_oplog_event:key_hlc(Meta)}, V};
-
-apply_event({Old, OldH}, {set, V}, Meta)
-        when is_integer(V), Meta =/= undefined ->
+apply_event({Old, OldH}, {set, V}, Meta) when
+    is_integer(V), Meta =/= undefined
+->
     H = bondy_oplog_event:key_hlc(Meta),
     NewV = erlang:min(Old, V),
     NewState = {NewV, erlang:max(OldH, H)},
-    Delta = case NewV =:= Old of
-        true  -> none;
-        false -> NewV
-    end,
+    Delta =
+        case NewV =:= Old of
+            true -> none;
+            false -> NewV
+        end,
     {NewState, Delta}.
-
 
 -spec to_value(state()) -> undefined | integer().
 
-to_value(undefined)  -> undefined;
-to_value({V, _H})    -> V.
-
+to_value(undefined) -> undefined;
+to_value({V, _H}) -> V.
 
 -spec apply_value_delta(undefined | integer(), integer()) -> integer().
 
 apply_value_delta(_OldValue, NewValue) ->
     NewValue.
 
-
 -spec merge_states(state(), state()) -> state().
 
 merge_states(undefined, B) -> B;
 merge_states(A, undefined) -> A;
-merge_states({Va, Ha}, {Vb, Hb}) ->
-    {erlang:min(Va, Vb), erlang:max(Ha, Hb)}.
-
+merge_states({Va, Ha}, {Vb, Hb}) -> {erlang:min(Va, Vb), erlang:max(Ha, Hb)}.
 
 -spec hlc(state()) -> bondy_oplog_hlc:hlc().
 
 hlc(undefined) -> 0;
-hlc({_V, H})   -> H.
-
+hlc({_V, H}) -> H.
 
 -spec gc_threshold(state()) -> bondy_oplog_hlc:hlc() | undefined.
 
 gc_threshold(undefined) -> undefined;
-gc_threshold({_V, H})   -> H.
-
+gc_threshold({_V, H}) -> H.
 
 -spec encode_state(state()) -> binary().
 
@@ -135,7 +129,6 @@ encode_state(undefined) ->
 encode_state({V, H}) when is_integer(V), is_integer(H) ->
     <<1, V:64/big-signed, H:64/big-unsigned>>.
 
-
 -spec decode_state(binary()) -> state().
 
 decode_state(<<0>>) ->
@@ -143,12 +136,10 @@ decode_state(<<0>>) ->
 decode_state(<<1, V:64/big-signed, H:64/big-unsigned>>) ->
     {V, H}.
 
-
 -spec encode_event(event()) -> binary().
 
 encode_event({set, V}) when is_integer(V) ->
     <<1, V:64/big-signed>>.
-
 
 -spec decode_event(binary()) -> event().
 

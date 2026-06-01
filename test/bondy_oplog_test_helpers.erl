@@ -29,17 +29,14 @@
 frame(Strategy, State, Hlc) ->
     frame(Strategy, State, Hlc, bondy_oplog_fold:value_equals_state(Strategy)).
 
-
 frame(Strategy, State, Hlc, true) ->
     StateBytes = bondy_oplog_fold:encode_state(Strategy, State),
     bondy_oplog_cell_frame:encode(Hlc, StateBytes, undefined, true);
-
 frame(Strategy, State, Hlc, false) ->
     StateBytes = bondy_oplog_fold:encode_state(Strategy, State),
     Value = bondy_oplog_fold:to_value(Strategy, State),
     ValueBytes = term_to_binary(Value),
     bondy_oplog_cell_frame:encode(Hlc, StateBytes, ValueBytes, false).
-
 
 %% Convenience: the value that `bondy_db_core:read/3` is expected to
 %% return for `State`.

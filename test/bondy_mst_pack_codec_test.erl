@@ -41,8 +41,10 @@ hash_algo_id_round_trip_test() ->
     ?assertEqual({ok, sha256}, bondy_mst_pack_codec:hash_algo_atom(1)).
 
 hash_algo_unknown_id_test() ->
-    ?assertEqual({error, {bad_hash_algo, 99}},
-                 bondy_mst_pack_codec:hash_algo_atom(99)).
+    ?assertEqual(
+        {error, {bad_hash_algo, 99}},
+        bondy_mst_pack_codec:hash_algo_atom(99)
+    ).
 
 %% =============================================================================
 %% Pack header round-trip
@@ -66,8 +68,10 @@ pack_header_truncated_test() ->
     Truncated = binary:part(
         bondy_mst_pack_codec:encode_pack_header(sample_header()), 0, 40
     ),
-    ?assertEqual({error, truncated_header},
-                 bondy_mst_pack_codec:decode_pack_header(Truncated)).
+    ?assertEqual(
+        {error, truncated_header},
+        bondy_mst_pack_codec:decode_pack_header(Truncated)
+    ).
 
 pack_header_bad_magic_test() ->
     %% Replace the magic with something else; everything else
@@ -75,23 +79,29 @@ pack_header_bad_magic_test() ->
     <<_:32, Tail/binary>> =
         bondy_mst_pack_codec:encode_pack_header(sample_header()),
     Bad = <<16#DEADBEEF:32, Tail/binary>>,
-    ?assertEqual({error, bad_magic},
-                 bondy_mst_pack_codec:decode_pack_header(Bad)).
+    ?assertEqual(
+        {error, bad_magic},
+        bondy_mst_pack_codec:decode_pack_header(Bad)
+    ).
 
 pack_header_bad_version_test() ->
     <<Magic:32, _Version:8, Rest/binary>> =
         bondy_mst_pack_codec:encode_pack_header(sample_header()),
     Bad = <<Magic:32, 99:8, Rest/binary>>,
-    ?assertEqual({error, {bad_version, 99}},
-                 bondy_mst_pack_codec:decode_pack_header(Bad)).
+    ?assertEqual(
+        {error, {bad_version, 99}},
+        bondy_mst_pack_codec:decode_pack_header(Bad)
+    ).
 
 pack_header_bad_hash_algo_test() ->
     %% Field at offset 20 (4-byte algo id).
     Encoded = bondy_mst_pack_codec:encode_pack_header(sample_header()),
     <<Head:20/binary, _AlgoId:32, Tail/binary>> = Encoded,
     Bad = <<Head/binary, 7:32/big-unsigned, Tail/binary>>,
-    ?assertEqual({error, {bad_hash_algo, 7}},
-                 bondy_mst_pack_codec:decode_pack_header(Bad)).
+    ?assertEqual(
+        {error, {bad_hash_algo, 7}},
+        bondy_mst_pack_codec:decode_pack_header(Bad)
+    ).
 
 pack_header_record_count_carries_through_test() ->
     H0 = sample_header(),
@@ -150,12 +160,16 @@ record_verify_rejects_wrong_length_test() ->
         bondy_mst_pack_codec:encode_record(Hash, Page)
     ),
     {ok, Header} = bondy_mst_pack_codec:decode_record_header(Bin),
-    ?assertMatch({error, {bad_page_len, _}},
-                 bondy_mst_pack_codec:verify_record(Header, <<"shorter">>)).
+    ?assertMatch(
+        {error, {bad_page_len, _}},
+        bondy_mst_pack_codec:verify_record(Header, <<"shorter">>)
+    ).
 
 record_header_truncated_test() ->
-    ?assertEqual({error, truncated_record_header},
-                 bondy_mst_pack_codec:decode_record_header(<<"too short">>)).
+    ?assertEqual(
+        {error, truncated_record_header},
+        bondy_mst_pack_codec:decode_record_header(<<"too short">>)
+    ).
 
 record_size_test() ->
     ?assertEqual(40, bondy_mst_pack_codec:record_size(0)),
@@ -185,18 +199,24 @@ trailer_verify_rejects_bit_flip_test() ->
     Body = <<"pack body">>,
     Trailer0 = bondy_mst_pack_codec:compute_trailer(Body),
     Bad = flip_bit(Trailer0, 0),
-    ?assertMatch({error, {trailer_mismatch, _, _}},
-                 bondy_mst_pack_codec:verify_trailer(Body, Bad)).
+    ?assertMatch(
+        {error, {trailer_mismatch, _, _}},
+        bondy_mst_pack_codec:verify_trailer(Body, Bad)
+    ).
 
 trailer_verify_rejects_body_corruption_test() ->
     Body = <<"pack body">>,
     Trailer = bondy_mst_pack_codec:compute_trailer(Body),
-    ?assertMatch({error, {trailer_mismatch, _, _}},
-                 bondy_mst_pack_codec:verify_trailer(<<"pack BODY">>, Trailer)).
+    ?assertMatch(
+        {error, {trailer_mismatch, _, _}},
+        bondy_mst_pack_codec:verify_trailer(<<"pack BODY">>, Trailer)
+    ).
 
 trailer_verify_rejects_wrong_size_test() ->
-    ?assertEqual({error, truncated_trailer},
-                 bondy_mst_pack_codec:verify_trailer(<<"body">>, <<"short">>)).
+    ?assertEqual(
+        {error, truncated_trailer},
+        bondy_mst_pack_codec:verify_trailer(<<"body">>, <<"short">>)
+    ).
 
 %% =============================================================================
 %% Helpers
@@ -204,13 +224,13 @@ trailer_verify_rejects_wrong_size_test() ->
 
 sample_header() ->
     #{
-        version       => 1,
-        flags         => 0,
-        pack_id       => 42,
+        version => 1,
+        flags => 0,
+        pack_id => 42,
         instance_hash => erlang:phash2(<<"test-instance">>),
-        hash_algo     => sha256,
-        created_at    => 1715520000000,
-        record_count  => 0
+        hash_algo => sha256,
+        created_at => 1715520000000,
+        record_count => 0
     }.
 
 flip_bit(Bin, BitIx) ->

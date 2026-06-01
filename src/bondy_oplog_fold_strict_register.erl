@@ -139,15 +139,15 @@ Events:
 -type conflict_entry() :: {register_value(), bondy_oplog_hlc:hlc()}.
 
 -type state() ::
-        undefined
-        | {set, register_value(), bondy_oplog_hlc:hlc()}
-        | {conflict, [conflict_entry()]}
-        | {revoked, bondy_oplog_hlc:hlc()}.
+    undefined
+    | {set, register_value(), bondy_oplog_hlc:hlc()}
+    | {conflict, [conflict_entry()]}
+    | {revoked, bondy_oplog_hlc:hlc()}.
 
 -type event() ::
-        {set, bondy_oplog_hlc:hlc(), register_value()}
-        | {revoke, bondy_oplog_hlc:hlc()}
-        | {resolve, bondy_oplog_hlc:hlc(), register_value()}.
+    {set, bondy_oplog_hlc:hlc(), register_value()}
+    | {revoke, bondy_oplog_hlc:hlc()}
+    | {resolve, bondy_oplog_hlc:hlc(), register_value()}.
 
 -export_type([state/0, event/0]).
 
@@ -160,7 +160,6 @@ Events:
 initial_value() ->
     undefined.
 
-
 -spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
     bondy_oplog_fold:apply_result().
 
@@ -168,14 +167,11 @@ initial_value() ->
 
 apply_event(undefined, {set, H, V}, _Meta) when is_binary(V) ->
     {{set, V, H}, V};
-
 apply_event(undefined, {revoke, H}, _Meta) ->
     {{revoked, H}, revoked};
-
 apply_event(undefined, {resolve, H, V}, _Meta) when is_binary(V) ->
     %% Admin-issued resolve on an empty cell degrades to a normal set.
     {{set, V, H}, V};
-
 %% --- from {set, _, _} -------------------------------------------------------
 
 apply_event({set, V, OldH} = S, {set, H, V2}, _Meta) when is_binary(V2) ->
@@ -193,22 +189,18 @@ apply_event({set, V, OldH} = S, {set, H, V2}, _Meta) when is_binary(V2) ->
             %% Strictly newer — causally ordered, LWW.
             {{set, V2, H}, V2}
     end;
-
 apply_event({set, _V, OldH}, {revoke, H}, _Meta) when H >= OldH ->
     %% Revoke at >= state HLC: terminal. Tie goes to revoke (security-
     %% critical operation wins ties, like cleared in lww_register).
     {{revoked, H}, revoked};
-
 apply_event({set, _, _} = S, {revoke, _}, _Meta) ->
     {S, none};
-
-apply_event({set, _V, OldH}, {resolve, H, V2}, _Meta)
-        when H >= OldH, is_binary(V2) ->
+apply_event({set, _V, OldH}, {resolve, H, V2}, _Meta) when
+    H >= OldH, is_binary(V2)
+->
     {{set, V2, H}, V2};
-
 apply_event({set, _, _} = S, {resolve, _, _}, _Meta) ->
     {S, none};
-
 %% --- from {conflict, States} ------------------------------------------------
 
 apply_event({conflict, States}, {set, H, V}, _Meta) when is_binary(V) ->
@@ -222,32 +214,26 @@ apply_event({conflict, States}, {set, H, V}, _Meta) when is_binary(V) ->
             NewState = {conflict, lists:usort([Entry | States])},
             {NewState, to_value(NewState)}
     end;
-
 apply_event({conflict, States}, {revoke, H}, _Meta) ->
     MaxH = max_conflict_hlc(States),
     case H >= MaxH of
-        true  -> {{revoked, H}, revoked};
+        true -> {{revoked, H}, revoked};
         false -> {{conflict, States}, none}
     end;
-
 apply_event({conflict, States}, {resolve, H, V}, _Meta) when is_binary(V) ->
     MaxH = max_conflict_hlc(States),
     case H >= MaxH of
-        true  -> {{set, V, H}, V};
+        true -> {{set, V, H}, V};
         false -> {{conflict, States}, none}
     end;
-
 %% --- from {revoked, _} (terminal) ------------------------------------------
 
 apply_event({revoked, OldH}, {set, H, V}, _Meta) when is_binary(V) ->
     {{revoked, erlang:max(OldH, H)}, none};
-
 apply_event({revoked, OldH}, {revoke, H}, _Meta) ->
     {{revoked, erlang:max(OldH, H)}, none};
-
 apply_event({revoked, OldH}, {resolve, H, V}, _Meta) when is_binary(V) ->
     {{revoked, erlang:max(OldH, H)}, none}.
-
 
 -spec to_value(state()) ->
     undefined
@@ -255,126 +241,105 @@ apply_event({revoked, OldH}, {resolve, H, V}, _Meta) when is_binary(V) ->
     | revoked
     | {conflict, [register_value()]}.
 
-to_value(undefined)         -> undefined;
-to_value({set, V, _})       -> V;
-to_value({revoked, _})      -> revoked;
-to_value({conflict, States}) ->
-    {conflict, [V || {V, _} <- States]}.
-
+to_value(undefined) -> undefined;
+to_value({set, V, _}) -> V;
+to_value({revoked, _}) -> revoked;
+to_value({conflict, States}) -> {conflict, [V || {V, _} <- States]}.
 
 -spec apply_value_delta(term(), term()) -> term().
 
 apply_value_delta(_OldValue, NewValue) ->
     NewValue.
 
-
 -spec merge_states(state(), state()) -> state().
 
-merge_states(undefined, B) -> B;
-merge_states(A, undefined) -> A;
-
+merge_states(undefined, B) ->
+    B;
+merge_states(A, undefined) ->
+    A;
 %% revoke dominates from either side
 merge_states({revoked, Hr}, B) ->
     {revoked, erlang:max(Hr, hlc(B))};
 merge_states(A, {revoked, Hr}) ->
     {revoked, erlang:max(Hr, hlc(A))};
-
 %% set vs set
 merge_states({set, _, Ha} = A, {set, _, Hb}) when Ha > Hb -> A;
 merge_states({set, _, Ha}, {set, _, Hb} = B) when Hb > Ha -> B;
-merge_states({set, V, H} = A, {set, V, H}) -> A;
+merge_states({set, V, H} = A, {set, V, H}) ->
+    A;
 merge_states({set, Va, H}, {set, Vb, H}) ->
     %% Same HLC, distinct values — surface a conflict (canonical form).
     {conflict, lists:usort([{Va, H}, {Vb, H}])};
-
 %% conflict vs conflict
 merge_states({conflict, A}, {conflict, B}) ->
     {conflict, lists:usort(A ++ B)};
-
 %% set vs conflict (and reverse)
 merge_states({set, V, H}, {conflict, States}) ->
     {conflict, lists:usort([{V, H} | States])};
 merge_states({conflict, States}, {set, V, H}) ->
     {conflict, lists:usort([{V, H} | States])}.
 
-
 -spec hlc(state()) -> bondy_oplog_hlc:hlc().
 
-hlc(undefined)         -> 0;
-hlc({set, _, H})       -> H;
+hlc(undefined) -> 0;
+hlc({set, _, H}) -> H;
 hlc({conflict, States}) -> max_conflict_hlc(States);
-hlc({revoked, H})      -> H.
-
+hlc({revoked, H}) -> H.
 
 -spec gc_threshold(state()) -> bondy_oplog_hlc:hlc() | undefined.
 
-gc_threshold(undefined)         -> undefined;
-gc_threshold({set, _, H})       -> H;
+gc_threshold(undefined) -> undefined;
+gc_threshold({set, _, H}) -> H;
 gc_threshold({conflict, States}) -> max_conflict_hlc(States);
-gc_threshold({revoked, H})      -> H.
-
+gc_threshold({revoked, H}) -> H.
 
 -spec encode_state(state()) -> binary().
 
 encode_state(undefined) ->
     <<0>>;
-
 encode_state({set, V, H}) when is_binary(V), is_integer(H) ->
     VSize = byte_size(V),
     <<1, H:64/big-unsigned, VSize:32/big-unsigned, V/binary>>;
-
 encode_state({conflict, States}) when is_list(States) ->
     N = length(States),
-    Body = << <<H:64/big-unsigned,
-                (byte_size(V)):32/big-unsigned,
-                V/binary>>
-              || {V, H} <- States >>,
+    Body = <<
+        <<H:64/big-unsigned, (byte_size(V)):32/big-unsigned, V/binary>>
+     || {V, H} <- States
+    >>,
     <<2, N:32/big-unsigned, Body/binary>>;
-
 encode_state({revoked, H}) when is_integer(H) ->
     <<3, H:64/big-unsigned>>.
-
 
 -spec decode_state(binary()) -> state().
 
 decode_state(<<0>>) ->
     undefined;
-
 decode_state(<<1, H:64/big-unsigned, VSize:32/big-unsigned, V:VSize/binary>>) ->
     {set, V, H};
-
 decode_state(<<2, N:32/big-unsigned, Rest/binary>>) ->
     {conflict, decode_conflict_entries(N, Rest)};
-
 decode_state(<<3, H:64/big-unsigned>>) ->
     {revoked, H}.
-
 
 -spec encode_event(event()) -> binary().
 
 encode_event({set, H, V}) when is_integer(H), is_binary(V) ->
     VSize = byte_size(V),
     <<1, H:64/big-unsigned, VSize:32/big-unsigned, V/binary>>;
-
 encode_event({revoke, H}) when is_integer(H) ->
     <<2, H:64/big-unsigned>>;
-
 encode_event({resolve, H, V}) when is_integer(H), is_binary(V) ->
     VSize = byte_size(V),
     <<3, H:64/big-unsigned, VSize:32/big-unsigned, V/binary>>.
-
 
 -spec decode_event(binary()) -> event().
 
 decode_event(<<1, H:64/big-unsigned, VSize:32/big-unsigned, V:VSize/binary>>) ->
     {set, H, V};
-
 decode_event(<<2, H:64/big-unsigned>>) ->
     {revoke, H};
-
 decode_event(<<3, H:64/big-unsigned, VSize:32/big-unsigned, V:VSize/binary>>) ->
     {resolve, H, V}.
-
 
 %% =============================================================================
 %% INTERNAL
@@ -385,8 +350,7 @@ max_conflict_hlc(States) ->
 
 decode_conflict_entries(0, <<>>) ->
     [];
-decode_conflict_entries(N, <<H:64/big-unsigned,
-                             VSize:32/big-unsigned,
-                             V:VSize/binary,
-                             Rest/binary>>) when N > 0 ->
+decode_conflict_entries(
+    N, <<H:64/big-unsigned, VSize:32/big-unsigned, V:VSize/binary, Rest/binary>>
+) when N > 0 ->
     [{V, H} | decode_conflict_entries(N - 1, Rest)].

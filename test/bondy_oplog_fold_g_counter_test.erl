@@ -170,12 +170,24 @@ merge_same_origin_max_per_field_test() ->
     %% (Count=10). Max-merge keeps the longer prefix.
     A = apply_inc(
         apply_inc(?MOD:initial_value(), 5, <<"a">>, 1, hlc(100, 0)),
-        3, <<"a">>, 2, hlc(101, 0)),
+        3,
+        <<"a">>,
+        2,
+        hlc(101, 0)
+    ),
     B = apply_inc(
         apply_inc(
             apply_inc(?MOD:initial_value(), 5, <<"a">>, 1, hlc(100, 0)),
-            3, <<"a">>, 2, hlc(101, 0)),
-        2, <<"a">>, 3, hlc(102, 0)),
+            3,
+            <<"a">>,
+            2,
+            hlc(101, 0)
+        ),
+        2,
+        <<"a">>,
+        3,
+        hlc(102, 0)
+    ),
     M = ?MOD:merge_states(A, B),
     ?assertEqual({10, 3}, maps:get(<<"a">>, maps:get(counters, M))).
 
@@ -223,10 +235,18 @@ encode_is_canonical_for_equal_states_test() ->
     S0 = ?MOD:initial_value(),
     Path1 = apply_inc(
         apply_inc(S0, 5, <<"a">>, 1, hlc(100, 0)),
-        7, <<"b">>, 1, hlc(101, 0)),
+        7,
+        <<"b">>,
+        1,
+        hlc(101, 0)
+    ),
     Path2 = apply_inc(
         apply_inc(S0, 7, <<"b">>, 1, hlc(101, 0)),
-        5, <<"a">>, 1, hlc(100, 0)),
+        5,
+        <<"a">>,
+        1,
+        hlc(100, 0)
+    ),
     ?assertEqual(?MOD:encode_state(Path1), ?MOD:encode_state(Path2)).
 
 encode_decode_event_test() ->

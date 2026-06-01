@@ -30,31 +30,37 @@
 per_entity_test_() ->
     topology_suite(bondy_db_topology_per_entity).
 
-
 single_bookie_test_() ->
     topology_suite(bondy_db_topology_single_bookie).
 
-
 topology_suite(Topology) ->
     Tag = atom_to_list(Topology),
-    {foreach,
-        fun() -> setup(Topology) end,
-        fun cleanup/1,
-        [
-            test("fan_out_routing_exercises_all_shards/" ++ Tag,
-                 fun fan_out_routing_exercises_all_shards/1),
-            test("multi_table_isolation_under_fanout/" ++ Tag,
-                 fun multi_table_isolation_under_fanout/1),
-            test("multi_realm_isolation_under_fanout/" ++ Tag,
-                 fun multi_realm_isolation_under_fanout/1),
-            test("per_shard_scan_recovers_all_keys/" ++ Tag,
-                 fun per_shard_scan_recovers_all_keys/1),
-            test("concurrent_apply_visible_after_completion/" ++ Tag,
-                 fun concurrent_apply_visible_after_completion/1),
-            test("later_hlc_wins_across_fanout/" ++ Tag,
-                 fun later_hlc_wins_across_fanout/1)
-        ]}.
-
+    {foreach, fun() -> setup(Topology) end, fun cleanup/1, [
+        test(
+            "fan_out_routing_exercises_all_shards/" ++ Tag,
+            fun fan_out_routing_exercises_all_shards/1
+        ),
+        test(
+            "multi_table_isolation_under_fanout/" ++ Tag,
+            fun multi_table_isolation_under_fanout/1
+        ),
+        test(
+            "multi_realm_isolation_under_fanout/" ++ Tag,
+            fun multi_realm_isolation_under_fanout/1
+        ),
+        test(
+            "per_shard_scan_recovers_all_keys/" ++ Tag,
+            fun per_shard_scan_recovers_all_keys/1
+        ),
+        test(
+            "concurrent_apply_visible_after_completion/" ++ Tag,
+            fun concurrent_apply_visible_after_completion/1
+        ),
+        test(
+            "later_hlc_wins_across_fanout/" ++ Tag,
+            fun later_hlc_wins_across_fanout/1
+        )
+    ]}.
 
 test(Title, Fn) ->
     fun(Ctx) -> {Title, {timeout, 60, fun() -> Fn(Ctx) end}} end.
@@ -69,13 +75,12 @@ setup(Topology) ->
     Dir = make_tempdir(),
     {ok, Sup} = bondy_db_leveled_sup:start_link(),
     {ok, Db} = bondy_db:open(?DB, #{
-        topology      => Topology,
+        topology => Topology,
         topology_opts => #{sup => Sup, dir => Dir},
-        shard_count   => ?SHARDS,
-        fold_module   => ?FOLD
+        shard_count => ?SHARDS,
+        fold_module => ?FOLD
     }),
     {Topology, Db, Sup, Dir}.
-
 
 cleanup({_T, Db, Sup, Dir}) ->
     %% A mid-test assertion failure bypasses `close_table/1`, leaving
@@ -83,10 +88,12 @@ cleanup({_T, Db, Sup, Dir}) ->
     %% point at the (about-to-die) bookie. Force-stop every running
     %% instance so the next test boots from a clean substrate.
     _ = catch bondy_db:close(Db),
-    _ = [catch bondy_oplog:stop_instance(I)
-         || I <- bondy_oplog:list_instances()],
+    _ = [
+        catch bondy_oplog:stop_instance(I)
+     || I <- bondy_oplog:list_instances()
+    ],
     case is_process_alive(Sup) of
-        true  -> bondy_db_leveled_sup:stop(Sup);
+        true -> bondy_db_leveled_sup:stop(Sup);
         false -> ok
     end,
     rmrf(Dir),
@@ -133,23 +140,30 @@ fan_out_routing_exercises_all_shards({Topology, Db, _Sup, _Dir}) ->
     ?assertEqual(?SHARDS, sets:size(Used)),
     ok = bondy_db:close_table(T).
 
-
 multi_table_isolation_under_fanout({_Topo, Db, _Sup, _Dir}) ->
     %% Two tables on the same DB resolve to distinct buckets — in T1
     %% via `bucket_for/3`, in T2 via separate Bookies. Same realm and
     %% key in each table must hold independent state across all shards.
-    {ok, Users}    = bondy_db:open_table(Db, users, #{}),
+    {ok, Users} = bondy_db:open_table(Db, users, #{}),
     {ok, Sessions} = bondy_db:open_table(Db, sessions, #{}),
     Realm = <<"r1">>,
-    Keys  = test_keys(?KEYS),
+    Keys = test_keys(?KEYS),
     lists:foreach(
         fun(K) ->
             Hu = bondy_db:tick(Users),
-            ok = bondy_db:apply(Users, Realm, K,
-                                {set, Hu, <<K/binary, "/u">>}),
+            ok = bondy_db:apply(
+                Users,
+                Realm,
+                K,
+                {set, Hu, <<K/binary, "/u">>}
+            ),
             Hs = bondy_db:tick(Sessions),
-            ok = bondy_db:apply(Sessions, Realm, K,
-                                {set, Hs, <<K/binary, "/s">>})
+            ok = bondy_db:apply(
+                Sessions,
+                Realm,
+                K,
+                {set, Hs, <<K/binary, "/s">>}
+            )
         end,
         Keys
     ),
@@ -165,13 +179,12 @@ multi_table_isolation_under_fanout({_Topo, Db, _Sup, _Dir}) ->
     ok = bondy_db:close_table(Users),
     ok = bondy_db:close_table(Sessions).
 
-
 multi_realm_isolation_under_fanout({_Topo, Db, _Sup, _Dir}) ->
     %% Same key in three realms — bucket disambiguation must hold
     %% across every shard the key set fans out to.
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     Realms = [<<"r1">>, <<"r2">>, <<"r3">>],
-    Keys   = test_keys(?KEYS),
+    Keys = test_keys(?KEYS),
     lists:foreach(
         fun(R) ->
             lists:foreach(
@@ -200,7 +213,6 @@ multi_realm_isolation_under_fanout({_Topo, Db, _Sup, _Dir}) ->
     ),
     ok = bondy_db:close_table(T).
 
-
 per_shard_scan_recovers_all_keys({_Topo, Db, _Sup, _Dir}) ->
     %% `bondy_db:range/5` is single-shard by contract; the caller
     %% scatters. Write a fanned-out key set, scatter-scan, then verify
@@ -214,7 +226,7 @@ per_shard_scan_recovers_all_keys({_Topo, Db, _Sup, _Dir}) ->
     %% cases to the union semantics that the test actually cares about.
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     Realm = <<"r1">>,
-    Keys  = test_keys(?KEYS),
+    Keys = test_keys(?KEYS),
     Writes = lists:foldl(
         fun(K, Acc) ->
             H = bondy_db:tick(T),
@@ -226,9 +238,14 @@ per_shard_scan_recovers_all_keys({_Topo, Db, _Sup, _Dir}) ->
         Keys
     ),
     PerShard = [
-        bondy_db:range(T, Realm, <<"a">>, <<"z">>,
-                       #{shard => S, limit => ?KEYS * 2})
-        || S <- lists:seq(0, ?SHARDS - 1)
+        bondy_db:range(
+            T,
+            Realm,
+            <<"a">>,
+            <<"z">>,
+            #{shard => S, limit => ?KEYS * 2}
+        )
+     || S <- lists:seq(0, ?SHARDS - 1)
     ],
     Rows = lists:flatmap(
         fun({ok, Xs}) -> [{K, V, H} || {K, V, H} <- Xs] end,
@@ -244,7 +261,6 @@ per_shard_scan_recovers_all_keys({_Topo, Db, _Sup, _Dir}) ->
     ),
     ok = bondy_db:close_table(T).
 
-
 concurrent_apply_visible_after_completion({_Topo, Db, _Sup, _Dir}) ->
     %% `apply/4` awaits the per-shard applier, so once every writer has
     %% returned, every write must be readable. Disjoint key prefixes
@@ -252,20 +268,27 @@ concurrent_apply_visible_after_completion({_Topo, Db, _Sup, _Dir}) ->
     %% then verifies WAL+applier serialisation under concurrent load.
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     Realm = <<"r1">>,
-    Writers   = 8,
+    Writers = 8,
     PerWriter = 20,
     Self = self(),
-    _ = [spawn_link(fun() ->
-            Writes = [begin
-                K = <<"w", (integer_to_binary(W))/binary,
-                      "-k", (integer_to_binary(I))/binary>>,
-                H = bondy_db:tick(T),
-                V = <<K/binary, "-v">>,
-                ok = bondy_db:apply(T, Realm, K, {set, H, V}),
-                {K, V, H}
-            end || I <- lists:seq(1, PerWriter)],
+    _ = [
+        spawn_link(fun() ->
+            Writes = [
+                begin
+                    K =
+                        <<"w", (integer_to_binary(W))/binary, "-k",
+                            (integer_to_binary(I))/binary>>,
+                    H = bondy_db:tick(T),
+                    V = <<K/binary, "-v">>,
+                    ok = bondy_db:apply(T, Realm, K, {set, H, V}),
+                    {K, V, H}
+                end
+             || I <- lists:seq(1, PerWriter)
+            ],
             Self ! {done, W, Writes}
-        end) || W <- lists:seq(1, Writers)],
+        end)
+     || W <- lists:seq(1, Writers)
+    ],
     All = collect_writers(Writers, []),
     ?assertEqual(Writers * PerWriter, length(All)),
     lists:foreach(
@@ -276,24 +299,29 @@ concurrent_apply_visible_after_completion({_Topo, Db, _Sup, _Dir}) ->
     ),
     ok = bondy_db:close_table(T).
 
-
 later_hlc_wins_across_fanout({_Topo, Db, _Sup, _Dir}) ->
     %% Two rounds against the same keys; round 2 carries strictly
     %% higher HLCs (HLC monotonic per shard). LWW must converge to the
     %% round-2 value for every key regardless of which shard holds it.
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     Realm = <<"r1">>,
-    Keys  = test_keys(?KEYS),
-    R1 = [begin
-              H = bondy_db:tick(T),
-              ok = bondy_db:apply(T, Realm, K, {set, H, <<K/binary, "-v1">>}),
-              {K, H}
-          end || K <- Keys],
-    R2 = [begin
-              H = bondy_db:tick(T),
-              ok = bondy_db:apply(T, Realm, K, {set, H, <<K/binary, "-v2">>}),
-              {K, H}
-          end || K <- Keys],
+    Keys = test_keys(?KEYS),
+    R1 = [
+        begin
+            H = bondy_db:tick(T),
+            ok = bondy_db:apply(T, Realm, K, {set, H, <<K/binary, "-v1">>}),
+            {K, H}
+        end
+     || K <- Keys
+    ],
+    R2 = [
+        begin
+            H = bondy_db:tick(T),
+            ok = bondy_db:apply(T, Realm, K, {set, H, <<K/binary, "-v2">>}),
+            {K, H}
+        end
+     || K <- Keys
+    ],
     R1Map = maps:from_list(R1),
     lists:foreach(
         fun({K, H2}) -> ?assert(H2 > maps:get(K, R1Map)) end,
@@ -324,16 +352,13 @@ collect_writers(N, Acc) ->
         error({timeout_waiting_for_writers, N})
     end.
 
-
 test_keys(N) ->
     [<<"key-", (integer_to_binary(I))/binary>> || I <- lists:seq(1, N)].
-
 
 bucket_for(bondy_db_topology_per_entity, _ET, Realm) ->
     Realm;
 bucket_for(bondy_db_topology_single_bookie, ET, Realm) ->
     <<Realm/binary, "/", (atom_to_binary(ET, utf8))/binary>>.
-
 
 make_tempdir() ->
     Base = filename:join([
@@ -344,16 +369,14 @@ make_tempdir() ->
     ok = filelib:ensure_dir(filename:join(Base, ".keep")),
     Base.
 
-
 wal_dir_for_this_db() ->
     filename:join([
         "/tmp", "bondy_oplog_wal", os:getpid(), atom_to_list(?DB)
     ]).
 
-
 rmrf(Dir) ->
     case file:del_dir_r(Dir) of
-        ok              -> ok;
+        ok -> ok;
         {error, enoent} -> ok;
-        {error, _}      -> ok
+        {error, _} -> ok
     end.

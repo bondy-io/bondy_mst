@@ -75,8 +75,7 @@ the `Opts` argument.
     | {ok, #{bondy_mst:hash() => bondy_mst_page:t()}}
     | {ok, no_snapshot}
     | {ok, bondy_oplog_event:event_key(), term()}
-    | {ok, {init, {non_neg_integer(),
-                   bondy_oplog_catalogue_cursor:cursor()}}}
+    | {ok, {init, {non_neg_integer(), bondy_oplog_catalogue_cursor:cursor()}}}
     | {ok, {batch, {bondy_oplog_catalogue_cursor:cursor(), [cell()]}}}
     | {ok, {done, []}}
     | {error, cursor_expired}.

@@ -19,12 +19,12 @@
 %% -----------------------------------------------------------------------------
 
 %% "BDPG" — Bondy paGe.
--define(BONDY_MST_PACK_MAGIC,           16#42445047).
--define(BONDY_MST_PACK_VERSION,         1).
--define(BONDY_MST_PACK_HEADER_BYTES,    48).
+-define(BONDY_MST_PACK_MAGIC, 16#42445047).
+-define(BONDY_MST_PACK_VERSION, 1).
+-define(BONDY_MST_PACK_HEADER_BYTES, 48).
 -define(BONDY_MST_PACK_RECORD_HEADER_BYTES, 40).
--define(BONDY_MST_PACK_HASH_BYTES,      32).
--define(BONDY_MST_PACK_TRAILER_BYTES,   32).
+-define(BONDY_MST_PACK_HASH_BYTES, 32).
+-define(BONDY_MST_PACK_TRAILER_BYTES, 32).
 
 %% Hash algorithm ids carried in the pack header (§3.1 byte 20).
 -define(BONDY_MST_PACK_HASH_ALGO_SHA256, 1).
@@ -38,12 +38,12 @@
 %% -----------------------------------------------------------------------------
 
 %% "BDIN" — bonDy INdex.
--define(BONDY_MST_PACK_IDX_MAGIC,         16#4244494E).
--define(BONDY_MST_PACK_IDX_VERSION,       1).
--define(BONDY_MST_PACK_IDX_HEADER_BYTES,  16).
--define(BONDY_MST_PACK_IDX_FANOUT_BYTES,  1024).
+-define(BONDY_MST_PACK_IDX_MAGIC, 16#4244494E).
+-define(BONDY_MST_PACK_IDX_VERSION, 1).
+-define(BONDY_MST_PACK_IDX_HEADER_BYTES, 16).
+-define(BONDY_MST_PACK_IDX_FANOUT_BYTES, 1024).
 -define(BONDY_MST_PACK_IDX_FANOUT_ENTRIES, 256).
--define(BONDY_MST_PACK_IDX_OFFSET_BYTES,  8).
+-define(BONDY_MST_PACK_IDX_OFFSET_BYTES, 8).
 
 %% Trailing sha256 over the rest of the file. Symmetric to
 %% `BONDY_MST_PACK_TRAILER_BYTES`; placed at the absolute end so
@@ -53,20 +53,20 @@
 
 %% Index header flag bits (byte 5, §4.1).
 %% Bit 0 — bloom section present after the header.
--define(BONDY_MST_PACK_IDX_FLAG_BLOOM,    1).
+-define(BONDY_MST_PACK_IDX_FLAG_BLOOM, 1).
 
 %% -----------------------------------------------------------------------------
 %% Bloom section (§4 extension; see `bondy_mst_pack_index` docstring)
 %% -----------------------------------------------------------------------------
 
 -define(BONDY_MST_PACK_BLOOM_HEADER_BYTES, 16).
--define(BONDY_MST_PACK_BLOOM_DEFAULT_P,    0.01).
+-define(BONDY_MST_PACK_BLOOM_DEFAULT_P, 0.01).
 
 %% -----------------------------------------------------------------------------
 %% Manifest (`manifest`)
 %% -----------------------------------------------------------------------------
 
--define(BONDY_MST_PACK_MANIFEST_VERSION,  1).
+-define(BONDY_MST_PACK_MANIFEST_VERSION, 1).
 -define(BONDY_MST_PACK_MANIFEST_FILENAME, "manifest").
 -define(BONDY_MST_PACK_MANIFEST_TMP_FILENAME, "manifest.tmp").
 
@@ -75,19 +75,19 @@
 %% -----------------------------------------------------------------------------
 
 -define(BONDY_MST_PACK_INCOMING_PACK_FILENAME, "incoming.pack").
--define(BONDY_MST_PACK_ROOT_FILENAME,          "root").
+-define(BONDY_MST_PACK_ROOT_FILENAME, "root").
 
 %% -----------------------------------------------------------------------------
 %% Tombstones file (`tombstones`)
 %% -----------------------------------------------------------------------------
 
 %% "BDTS" — bonDy TombStones.
--define(BONDY_MST_PACK_TOMBSTONES_MAGIC,         16#42445453).
--define(BONDY_MST_PACK_TOMBSTONES_VERSION,       1).
--define(BONDY_MST_PACK_TOMBSTONES_HEADER_BYTES,  16).
+-define(BONDY_MST_PACK_TOMBSTONES_MAGIC, 16#42445453).
+-define(BONDY_MST_PACK_TOMBSTONES_VERSION, 1).
+-define(BONDY_MST_PACK_TOMBSTONES_HEADER_BYTES, 16).
 -define(BONDY_MST_PACK_TOMBSTONES_TRAILER_BYTES, 32).
--define(BONDY_MST_PACK_TOMBSTONES_FILENAME,      "tombstones").
--define(BONDY_MST_PACK_TOMBSTONES_TMP_FILENAME,  "tombstones.tmp").
+-define(BONDY_MST_PACK_TOMBSTONES_FILENAME, "tombstones").
+-define(BONDY_MST_PACK_TOMBSTONES_TMP_FILENAME, "tombstones.tmp").
 
 %% -----------------------------------------------------------------------------
 %% Production defaults for open-time options
@@ -126,7 +126,7 @@
 %% Whichever fires first triggers the seal; either can be
 %% overridden (incl. to `infinity` for caller-driven seal only).
 -define(BONDY_MST_PACK_DEFAULT_AUTO_SEAL_RECORDS, 10_000).
--define(BONDY_MST_PACK_DEFAULT_AUTO_SEAL_BYTES,   16_000_000).
+-define(BONDY_MST_PACK_DEFAULT_AUTO_SEAL_BYTES, 16_000_000).
 %%
 %% `root_flush_every_records` / `root_flush_every_ms` — debounce the
 %% manifest rewrite triggered by `set_root/2`. Each manifest rewrite
@@ -140,7 +140,7 @@
 %% current_root catches up. Defaults match the incoming-pack
 %% sync defaults so durability lag is symmetric.
 -define(BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_RECORDS, 32).
--define(BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_MS,      200).
+-define(BONDY_MST_PACK_DEFAULT_ROOT_FLUSH_EVERY_MS, 200).
 %%
 %% `tombstones_flush_every_records` / `tombstones_flush_every_ms` —
 %% debounce the `tombstones` file rewrite triggered by `free/3` and
@@ -153,7 +153,7 @@
 %% is always authoritative; on crash the WAL applier re-derives
 %% missing tombstones by replaying puts forward from its watermark.
 -define(BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_RECORDS, 32).
--define(BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_MS,      200).
+-define(BONDY_MST_PACK_DEFAULT_TOMBSTONES_FLUSH_EVERY_MS, 200).
 %%
 %% `gc_threshold_dead_fraction` — minimum `dropped / (kept + dropped)`
 %% required for `gc/2` to actually rewrite a single sealed pack. A
@@ -176,6 +176,6 @@
 %% first for short-circuit reads; the store mirrors that).
 -record(sealed_view, {
     pack_id :: non_neg_integer(),
-    idx     :: bondy_mst_pack_index:t(),
+    idx :: bondy_mst_pack_index:t(),
     pack_fd :: file:fd()
 }).

@@ -337,8 +337,8 @@ origin_persist_path(InstanceId, Opts) ->
 %% on the node — fine for write-once-per-VM constants, the wrong
 %% substrate for per-instance lifecycle events.
 maybe_warn_default_wal_path(InstanceId, Opts) ->
-    HasWalDir       = maps:is_key(wal_dir, Opts),
-    HasStoragePath  = maps:is_key(storage_path, Opts),
+    HasWalDir = maps:is_key(wal_dir, Opts),
+    HasStoragePath = maps:is_key(storage_path, Opts),
     case HasWalDir orelse HasStoragePath of
         true ->
             ok;

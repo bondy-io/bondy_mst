@@ -50,7 +50,8 @@ with_telemetry(Fun) ->
         end,
         []
     ),
-    try Fun()
+    try
+        Fun()
     after
         ok = telemetry:detach(HandlerId),
         drain()
@@ -79,25 +80,37 @@ mailbox_dump() ->
 %% =============================================================================
 
 mk_tmp_dir() ->
-    Base = lists:flatten(io_lib:format(
-        "/tmp/bondy_mst_pack_store_telemetry_test_~p_~p",
-        [erlang:system_time(microsecond),
-         erlang:unique_integer([positive])])),
+    Base = lists:flatten(
+        io_lib:format(
+            "/tmp/bondy_mst_pack_store_telemetry_test_~p_~p",
+            [
+                erlang:system_time(microsecond),
+                erlang:unique_integer([positive])
+            ]
+        )
+    ),
     ok = filelib:ensure_path(Base),
     Base.
 
-rmrf(Dir) -> _ = file:del_dir_r(Dir), ok.
+rmrf(Dir) ->
+    _ = file:del_dir_r(Dir),
+    ok.
 
 open_store(Dir) ->
     InstanceId = list_to_binary(
         "telemetry_test_" ++
-        integer_to_list(erlang:unique_integer([positive]))),
+            integer_to_list(erlang:unique_integer([positive]))
+    ),
     Store = bondy_mst_store:open(
-        bondy_mst_pack_store, sha256,
-        #{dir => Dir, instance_id => InstanceId,
-          %% Disable auto-seal so each test controls when seal happens.
-          auto_seal_records => infinity,
-          auto_seal_bytes   => infinity}
+        bondy_mst_pack_store,
+        sha256,
+        #{
+            dir => Dir,
+            instance_id => InstanceId,
+            %% Disable auto-seal so each test controls when seal happens.
+            auto_seal_records => infinity,
+            auto_seal_bytes => infinity
+        }
     ),
     {Store, InstanceId}.
 
@@ -131,7 +144,8 @@ put_event_basic_test() ->
             ?assert(maps:get(page_bytes, M) > 0),
             ?assert(maps:get(duration_us, M) >= 0),
             ok = bondy_mst_store:close(S1)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -148,7 +162,8 @@ put_event_content_hit_test() ->
             {M2, _} = recv_event([bondy_mst, page_store, put]),
             ?assertEqual(true, maps:get(content_hit, M2)),
             ok = bondy_mst_store:close(S2)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -169,7 +184,8 @@ get_event_pending_source_test() ->
             ?assertEqual(pending, maps:get(source, M)),
             ?assert(maps:get(page_bytes, M) > 0),
             ok = bondy_mst_store:close(S1)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -189,7 +205,8 @@ get_event_sealed_source_test() ->
             ?assertMatch({sealed_pack, _}, maps:get(source, M)),
             ?assert(maps:get(page_bytes, M) > 0),
             ok = bondy_mst_store:close(S2W)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -204,7 +221,8 @@ get_event_cold_miss_test() ->
             ?assertEqual(cold_miss, maps:get(source, M)),
             ?assertEqual(0, maps:get(page_bytes, M)),
             ok = bondy_mst_store:close(S)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -222,7 +240,8 @@ get_event_tombstoned_is_cold_miss_test() ->
             ?assertEqual(cold_miss, maps:get(source, M)),
             ?assertEqual(0, maps:get(page_bytes, M)),
             ok = bondy_mst_store:close(S2)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -243,17 +262,24 @@ seal_event_carries_record_count_and_bytes_test() ->
                     _ = recv_event([bondy_mst, page_store, put]),
                     Acc1
                 end,
-                S, lists:seq(1, 3)
+                S,
+                lists:seq(1, 3)
             ),
             {ok, S2} = bondy_mst_pack_store:seal(extract(S1)),
             {M, D} = recv_event([bondy_mst, page_store, seal_incoming]),
             ?assertEqual(3, maps:get(record_count, M)),
             ?assert(maps:get(pack_bytes, M) > 0),
             ?assert(maps:get(duration_us, M) >= 0),
-            ?assertMatch(#{instance_id := InstanceId,
-                          new_pack_id := _}, D),
+            ?assertMatch(
+                #{
+                    instance_id := InstanceId,
+                    new_pack_id := _
+                },
+                D
+            ),
             ok = bondy_mst_store:close(wrap(S2))
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -269,7 +295,8 @@ seal_noop_emits_no_event_test() ->
             after 200 -> ok
             end,
             ok = bondy_mst_store:close(wrap(S1))
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -292,7 +319,8 @@ gc_event_noop_when_nothing_sealed_test() ->
             ?assertEqual(0, maps:get(bytes_freed, M)),
             ?assertEqual(noop, maps:get(reason, D)),
             ok = bondy_mst_store:close(S)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -321,7 +349,8 @@ gc_event_compacted_test() ->
             ?assert(maps:get(bytes_freed, M) > 0),
             ?assertEqual(compacted, maps:get(reason, D)),
             ok
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -342,7 +371,8 @@ info_gauges_consistent_with_state_test() ->
                     _ = recv_event([bondy_mst, page_store, put]),
                     Acc1
                 end,
-                S, lists:seq(1, 4)
+                S,
+                lists:seq(1, 4)
             ),
             Info0 = bondy_mst_pack_store:info(extract(S1)),
             ?assertEqual(InstanceId, maps:get(instance_id, Info0)),
@@ -363,6 +393,7 @@ info_gauges_consistent_with_state_test() ->
             ?assertEqual(0, maps:get(pending_bytes, Info1)),
             ?assert(maps:get(bytes_total, Info1) > 0),
             ok = bondy_mst_store:close(wrap(S2))
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).

@@ -34,31 +34,37 @@
 per_entity_test_() ->
     topology_suite(bondy_db_topology_per_entity).
 
-
 single_bookie_test_() ->
     topology_suite(bondy_db_topology_single_bookie).
 
-
 topology_suite(Topology) ->
     Tag = atom_to_list(Topology),
-    {foreach,
-        fun() -> setup(Topology) end,
-        fun cleanup/1,
-        [
-            test("put_read_round_trip/" ++ Tag,
-                 fun put_read_round_trip/1),
-            test("multi_shard_fanout/" ++ Tag,
-                 fun multi_shard_fanout/1),
-            test("concurrent_writers/" ++ Tag,
-                 fun concurrent_writers/1),
-            test("mst_state_persists_across_close_reopen/" ++ Tag,
-                 fun mst_state_persists_across_close_reopen/1),
-            test("head_path_telemetry_reports_native/" ++ Tag,
-                 fun head_path_telemetry_reports_native/1),
-            test("counter_inc_round_trip/" ++ Tag,
-                 fun counter_inc_round_trip/1)
-        ]}.
-
+    {foreach, fun() -> setup(Topology) end, fun cleanup/1, [
+        test(
+            "put_read_round_trip/" ++ Tag,
+            fun put_read_round_trip/1
+        ),
+        test(
+            "multi_shard_fanout/" ++ Tag,
+            fun multi_shard_fanout/1
+        ),
+        test(
+            "concurrent_writers/" ++ Tag,
+            fun concurrent_writers/1
+        ),
+        test(
+            "mst_state_persists_across_close_reopen/" ++ Tag,
+            fun mst_state_persists_across_close_reopen/1
+        ),
+        test(
+            "head_path_telemetry_reports_native/" ++ Tag,
+            fun head_path_telemetry_reports_native/1
+        ),
+        test(
+            "counter_inc_round_trip/" ++ Tag,
+            fun counter_inc_round_trip/1
+        )
+    ]}.
 
 test(Title, Fn) ->
     fun(Ctx) -> {Title, {timeout, 60, fun() -> Fn(Ctx) end}} end.
@@ -74,34 +80,35 @@ setup(Topology) ->
     PackDir = make_tempdir("pack"),
     {ok, Sup} = bondy_db_leveled_sup:start_link(),
     {ok, Db} = bondy_db:open(?DB, #{
-        topology      => Topology,
+        topology => Topology,
         topology_opts => #{sup => Sup, dir => LeveledDir},
-        shard_count   => ?SHARDS,
-        fold_module   => ?FOLD,
+        shard_count => ?SHARDS,
+        fold_module => ?FOLD,
         %% This is the production wiring under test: route every per-
         %% shard `bondy_oplog` instance to the MST pack-store backend,
         %% rooted under `PackDir`. The leveled projection store is
         %% provisioned via the topology above.
         oplog_instance_opts => #{
-            backend      => bondy_mst_pack_store,
+            backend => bondy_mst_pack_store,
             storage_path => unicode:characters_to_binary(PackDir),
             %% Single-process e2e test: each shard's instance is a
             %% genesis peer with no cluster to bootstrap from. Without
             %% `seed: true` the applier would refuse to drain the WAL
             %% per the bootstrap-lifecycle gate
             %% (`_design/catalogue_expansion_plan.md` §2).
-            seed         => true
+            seed => true
         }
     }),
     {Topology, Db, Sup, LeveledDir, PackDir}.
 
-
 cleanup({_T, Db, Sup, LeveledDir, PackDir}) ->
     _ = catch bondy_db:close(Db),
-    _ = [catch bondy_oplog:stop_instance(I)
-         || I <- bondy_oplog:list_instances()],
+    _ = [
+        catch bondy_oplog:stop_instance(I)
+     || I <- bondy_oplog:list_instances()
+    ],
     case is_process_alive(Sup) of
-        true  -> bondy_db_leveled_sup:stop(Sup);
+        true -> bondy_db_leveled_sup:stop(Sup);
         false -> ok
     end,
     rmrf(LeveledDir),
@@ -124,7 +131,6 @@ put_read_round_trip({_Topo, Db, _Sup, _LDir, _PDir}) ->
     ok = bondy_db:apply(T, Realm, Key, {set, H, V}),
     ?assertEqual({ok, V, H}, bondy_db:read(T, Realm, Key)),
     ok = bondy_db:close_table(T).
-
 
 multi_shard_fanout({Topology, Db, _Sup, _LDir, _PDir}) ->
     %% Apply ?KEYS keys and confirm they fan out across all shards and
@@ -159,7 +165,6 @@ multi_shard_fanout({Topology, Db, _Sup, _LDir, _PDir}) ->
     ?assertEqual(?SHARDS, sets:size(Used)),
     ok = bondy_db:close_table(T).
 
-
 concurrent_writers({_Topo, Db, _Sup, _LDir, _PDir}) ->
     %% 4 writers × 16 keys each, disjoint key prefixes (so no LWW
     %% interference). After every writer has returned, every key must
@@ -170,17 +175,24 @@ concurrent_writers({_Topo, Db, _Sup, _LDir, _PDir}) ->
     Writers = 4,
     PerWriter = 16,
     Self = self(),
-    _ = [spawn_link(fun() ->
-            Writes = [begin
-                K = <<"w", (integer_to_binary(W))/binary,
-                      "-k", (integer_to_binary(I))/binary>>,
-                H = bondy_db:tick(T),
-                V = <<K/binary, "-v">>,
-                ok = bondy_db:apply(T, Realm, K, {set, H, V}),
-                {K, V, H}
-            end || I <- lists:seq(1, PerWriter)],
+    _ = [
+        spawn_link(fun() ->
+            Writes = [
+                begin
+                    K =
+                        <<"w", (integer_to_binary(W))/binary, "-k",
+                            (integer_to_binary(I))/binary>>,
+                    H = bondy_db:tick(T),
+                    V = <<K/binary, "-v">>,
+                    ok = bondy_db:apply(T, Realm, K, {set, H, V}),
+                    {K, V, H}
+                end
+             || I <- lists:seq(1, PerWriter)
+            ],
             Self ! {done, W, Writes}
-        end) || W <- lists:seq(1, Writers)],
+        end)
+     || W <- lists:seq(1, Writers)
+    ],
     All = collect_writers(Writers, []),
     ?assertEqual(Writers * PerWriter, length(All)),
     lists:foreach(
@@ -190,7 +202,6 @@ concurrent_writers({_Topo, Db, _Sup, _LDir, _PDir}) ->
         All
     ),
     ok = bondy_db:close_table(T).
-
 
 mst_state_persists_across_close_reopen({Topology, Db, _Sup, LDir, PDir}) ->
     %% Pack-store-specific: the MST snapshot store is persistent, so
@@ -219,20 +230,22 @@ mst_state_persists_across_close_reopen({Topology, Db, _Sup, LDir, PDir}) ->
     %% packs) survives, which is what the reopen below depends on.
     ok = bondy_db:close_table(T0),
     ok = bondy_db:close(Db),
-    _ = [catch bondy_oplog:stop_instance(I)
-         || I <- bondy_oplog:list_instances()],
+    _ = [
+        catch bondy_oplog:stop_instance(I)
+     || I <- bondy_oplog:list_instances()
+    ],
 
     %% Reopen with a fresh leveled supervisor over the same on-disk
     %% dirs. Each Bookie is restarted against its prior journal +
     %% ledger; the pack store reopens its manifest + sealed packs.
     {ok, Sup1} = bondy_db_leveled_sup:start_link(),
     {ok, Db1} = bondy_db:open(?DB, #{
-        topology      => Topology,
+        topology => Topology,
         topology_opts => #{sup => Sup1, dir => LDir},
-        shard_count   => ?SHARDS,
-        fold_module   => ?FOLD,
+        shard_count => ?SHARDS,
+        fold_module => ?FOLD,
         oplog_instance_opts => #{
-            backend      => bondy_mst_pack_store,
+            backend => bondy_mst_pack_store,
             storage_path => unicode:characters_to_binary(PDir)
         }
     }),
@@ -241,18 +254,22 @@ mst_state_persists_across_close_reopen({Topology, Db, _Sup, LDir, PDir}) ->
     try
         lists:foreach(
             fun({K, V, H}) ->
-                ?assertEqual({ok, V, H},
-                             bondy_db:read(T1, Realm, K))
+                ?assertEqual(
+                    {ok, V, H},
+                    bondy_db:read(T1, Realm, K)
+                )
             end,
             Writes
         )
     after
         _ = catch bondy_db:close_table(T1),
         _ = catch bondy_db:close(Db1),
-        _ = [catch bondy_oplog:stop_instance(I)
-             || I <- bondy_oplog:list_instances()],
+        _ = [
+            catch bondy_oplog:stop_instance(I)
+         || I <- bondy_oplog:list_instances()
+        ],
         case is_process_alive(Sup1) of
-            true  -> bondy_db_leveled_sup:stop(Sup1);
+            true -> bondy_db_leveled_sup:stop(Sup1);
             false -> ok
         end
     end.
@@ -290,9 +307,12 @@ head_path_telemetry_reports_native({Topology, Db, _Sup, _LDir, _PDir}) ->
     ),
     try
         ?assertEqual({ok, V, H}, bondy_db:read(T, Realm, Key)),
-        Meta = receive {read_event, _, M} -> M after 1000 ->
-            error(no_read_event)
-        end,
+        Meta =
+            receive
+                {read_event, _, M} -> M
+            after 1000 ->
+                error(no_read_event)
+            end,
         ?assertEqual(projection, maps:get(source, Meta)),
         ?assertEqual(head, maps:get(path, Meta)),
         ?assertEqual(native, maps:get(head_path, Meta))
@@ -301,10 +321,8 @@ head_path_telemetry_reports_native({Topology, Db, _Sup, _LDir, _PDir}) ->
         bondy_db:close_table(T)
     end.
 
-
 wait_for_overlay_drain(T, Realm, Key) ->
     wait_for_overlay_drain(T, Realm, Key, 50).
-
 
 wait_for_overlay_drain(T, Realm, Key, 0) ->
     %% Last-ditch read — let the test fail downstream if the cache is
@@ -314,12 +332,12 @@ wait_for_overlay_drain(T, Realm, Key, 0) ->
     ok;
 wait_for_overlay_drain(T, Realm, Key, N) ->
     case bondy_db:read(T, Realm, Key) of
-        {ok, _, _} -> ok;
+        {ok, _, _} ->
+            ok;
         _ ->
             timer:sleep(100),
             wait_for_overlay_drain(T, Realm, Key, N - 1)
     end.
-
 
 counter_inc_round_trip({_Topo, Db, _Sup, _LDir, _PDir}) ->
     %% Exercise `bondy_db:counter_inc/4` end-to-end against a
@@ -342,7 +360,6 @@ counter_inc_round_trip({_Topo, Db, _Sup, _LDir, _PDir}) ->
     ?assertMatch({ok, Expected, _Hlc}, bondy_db:read(T, Realm, Key)),
     ok = bondy_db:close_table(T).
 
-
 %% Evict the (NS, Bucket, Key) entry from every shard's value cache.
 %% Iterating every shard is cheaper than computing phash2 ourselves
 %% and matches what `bondy_db_core_registry:lookup/3` exposes.
@@ -358,12 +375,12 @@ evict_value_cache(NS, Bucket, Key) ->
                         {ok, _} -> _ = CA:delete(CH, Bucket, Key);
                         not_found -> ok
                     end;
-                not_found -> ok
+                not_found ->
+                    ok
             end
         end,
         lists:seq(0, ShardCount - 1)
     ).
-
 
 %% =============================================================================
 %% Helpers
@@ -379,16 +396,13 @@ collect_writers(N, Acc) ->
         error({timeout_waiting_for_writers, N})
     end.
 
-
 test_keys(N) ->
     [<<"key-", (integer_to_binary(I))/binary>> || I <- lists:seq(1, N)].
-
 
 bucket_for(bondy_db_topology_per_entity, _ET, Realm) ->
     Realm;
 bucket_for(bondy_db_topology_single_bookie, ET, Realm) ->
     <<Realm/binary, "/", (atom_to_binary(ET, utf8))/binary>>.
-
 
 make_tempdir(Prefix) ->
     Base = filename:join([
@@ -400,16 +414,14 @@ make_tempdir(Prefix) ->
     ok = filelib:ensure_dir(filename:join(Base, ".keep")),
     Base.
 
-
 wal_dir_for_this_db() ->
     filename:join([
         "/tmp", "bondy_oplog_wal", os:getpid(), atom_to_list(?DB)
     ]).
 
-
 rmrf(Dir) ->
     case file:del_dir_r(Dir) of
-        ok              -> ok;
+        ok -> ok;
         {error, enoent} -> ok;
-        {error, _}      -> ok
+        {error, _} -> ok
     end.

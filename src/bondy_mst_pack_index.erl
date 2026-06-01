@@ -93,18 +93,18 @@ handle for the lifetime of the open pack.
 """).
 
 -record(?MODULE, {
-    version      :: pos_integer(),
-    flags        :: non_neg_integer(),
+    version :: pos_integer(),
+    flags :: non_neg_integer(),
     record_count :: non_neg_integer(),
-    hash_len     :: pos_integer(),
-    bloom        :: bondy_mst_pack_bloom:t() | undefined,
+    hash_len :: pos_integer(),
+    bloom :: bondy_mst_pack_bloom:t() | undefined,
     %% Fixed 1024-byte fanout table; kept as a binary for cheap
     %% `binary:at`/`binary:part` access in `lookup/2`.
-    fanout       :: binary(),
+    fanout :: binary(),
     %% Sorted hash array: RecordCount × HashLen contiguous bytes.
-    hashes       :: binary(),
+    hashes :: binary(),
     %% Offset array: RecordCount × 8 bytes (big-endian u64).
-    offsets      :: binary()
+    offsets :: binary()
 }).
 
 -type t() :: #?MODULE{}.
@@ -112,8 +112,8 @@ handle for the lifetime of the open pack.
 
 -type build_opts() :: #{
     hash_len => pos_integer(),
-    bloom    => boolean(),
-    bloom_p  => float()
+    bloom => boolean(),
+    bloom_p => float()
 }.
 
 -type open_error() ::
@@ -244,8 +244,8 @@ do_build(Entries, Opts) ->
     ok = ensure_hash_len(HashLen),
     Sorted = dedup_sorted(lists:keysort(1, Entries), HashLen),
     RecordCount = length(Sorted),
-    Hashes = << <<H/binary>> || {H, _} <- Sorted >>,
-    Offsets = << <<O:64/big-unsigned>> || {_, O} <- Sorted >>,
+    Hashes = <<<<H/binary>> || {H, _} <- Sorted>>,
+    Offsets = <<<<O:64/big-unsigned>> || {_, O} <- Sorted>>,
     Fanout = build_fanout(Sorted),
     {Flags, BloomBin} =
         case EmitBloom andalso RecordCount > 0 of
@@ -285,7 +285,7 @@ or offset array cannot route lookups to the wrong record.
 
 open(Bin) when byte_size(Bin) < ?HEADER_BYTES + ?TRAILER_BYTES ->
     case byte_size(Bin) < ?HEADER_BYTES of
-        true  -> {error, truncated_header};
+        true -> {error, truncated_header};
         false -> {error, truncated_trailer}
     end;
 open(Bin) ->
@@ -299,13 +299,10 @@ open(Bin) ->
     end.
 
 %% @private
-open_verified_body(<<?MAGIC:32/big-unsigned,
-                     Version:8,
-                     Flags:8,
-                     _Reserved:16,
-                     RecordCount:32/big-unsigned,
-                     HashLen:32/big-unsigned,
-                     Rest/binary>>) ->
+open_verified_body(
+    <<?MAGIC:32/big-unsigned, Version:8, Flags:8, _Reserved:16,
+        RecordCount:32/big-unsigned, HashLen:32/big-unsigned, Rest/binary>>
+) ->
     case Version =:= ?VERSION of
         false ->
             {error, {bad_version, Version}};
@@ -410,7 +407,9 @@ sort-index `I`.
 """).
 -spec offset_at(t(), non_neg_integer()) -> non_neg_integer().
 
-offset_at(#?MODULE{} = T, I) when is_integer(I), I >= 0, I < T#?MODULE.record_count ->
+offset_at(#?MODULE{} = T, I) when
+    is_integer(I), I >= 0, I < T#?MODULE.record_count
+->
     decode_offset_at(T, I).
 
 ?DOC("""
@@ -445,7 +444,8 @@ ensure_hash_len(L) -> throw({?MODULE, build_error, {bad_hash_len, L}}).
 %% order; we then collapse adjacent duplicates by hash, keeping
 %% the first (= earliest-inserted) offset. Pack-writer duplicates
 %% should not happen by construction, but the codec stays robust.
-dedup_sorted([], _) -> [];
+dedup_sorted([], _) ->
+    [];
 dedup_sorted([{H, _} = E | Rest], HashLen) ->
     ensure_hash_size(H, HashLen),
     dedup_sorted_loop(Rest, E, HashLen, []).
@@ -464,21 +464,23 @@ dedup_sorted_loop([{H, _} = E | Rest], Last, HashLen, Acc) ->
 ensure_hash_size(H, HashLen) when byte_size(H) =:= HashLen ->
     ok;
 ensure_hash_size(H, HashLen) ->
-    throw({?MODULE, build_error,
-           {bad_hash_size, HashLen, byte_size(H)}}).
+    throw({?MODULE, build_error, {bad_hash_size, HashLen, byte_size(H)}}).
 
 %% @private
 %% Cumulative count of records whose first hash byte is ≤ i, for
 %% i in 0..255. Entry 255 must equal `RecordCount`.
 build_fanout(Sorted) ->
-    Counts = count_first_bytes(Sorted, array:new(?FANOUT_ENTRIES, [{default, 0}, {fixed, true}])),
+    Counts = count_first_bytes(
+        Sorted, array:new(?FANOUT_ENTRIES, [{default, 0}, {fixed, true}])
+    ),
     Cumulative = cumulative_fold(Counts),
     iolist_to_binary(
         [<<C:32/big-unsigned>> || C <- Cumulative]
     ).
 
 %% @private
-count_first_bytes([], Counts) -> Counts;
+count_first_bytes([], Counts) ->
+    Counts;
 count_first_bytes([{<<B:8, _/binary>>, _} | Rest], Counts) ->
     Cur = array:get(B, Counts),
     count_first_bytes(Rest, array:set(B, Cur + 1, Counts)).
@@ -497,12 +499,8 @@ cumulative_fold(Counts) ->
 
 %% @private
 encode_header(Version, Flags, RecordCount, HashLen) ->
-    <<?MAGIC:32/big-unsigned,
-      Version:8,
-      Flags:8,
-      0:16,
-      RecordCount:32/big-unsigned,
-      HashLen:32/big-unsigned>>.
+    <<?MAGIC:32/big-unsigned, Version:8, Flags:8, 0:16,
+        RecordCount:32/big-unsigned, HashLen:32/big-unsigned>>.
 
 %% =============================================================================
 %% PRIVATE — open
@@ -516,27 +514,27 @@ open_body(Flags, RecordCount, HashLen, Bin0) ->
             HashesBytes = RecordCount * HashLen,
             OffsetsBytes = RecordCount * ?OFFSET_BYTES,
             case Bin1 of
-                <<Fanout:FanoutBytes/binary,
-                  Hashes:HashesBytes/binary,
-                  Offsets:OffsetsBytes/binary,
-                  _Tail/binary>> ->
+                <<Fanout:FanoutBytes/binary, Hashes:HashesBytes/binary,
+                    Offsets:OffsetsBytes/binary, _Tail/binary>> ->
                     case validate_fanout(Fanout, RecordCount) of
                         ok ->
                             {ok, #?MODULE{
-                                version      = ?VERSION,
-                                flags        = Flags,
+                                version = ?VERSION,
+                                flags = Flags,
                                 record_count = RecordCount,
-                                hash_len     = HashLen,
-                                bloom        = Bloom,
-                                fanout       = Fanout,
-                                hashes       = Hashes,
-                                offsets      = Offsets
+                                hash_len = HashLen,
+                                bloom = Bloom,
+                                fanout = Fanout,
+                                hashes = Hashes,
+                                offsets = Offsets
                             }};
                         {error, R} ->
                             {error, {fanout_inconsistent, R}}
                     end;
                 _ ->
-                    section_truncation_error(Bin1, FanoutBytes, HashesBytes, OffsetsBytes)
+                    section_truncation_error(
+                        Bin1, FanoutBytes, HashesBytes, OffsetsBytes
+                    )
             end;
         {error, _} = E ->
             E
@@ -548,7 +546,7 @@ maybe_parse_bloom(Flags, Bin) when Flags band ?FLAG_BLOOM =:= 0 ->
 maybe_parse_bloom(_Flags, Bin) ->
     case bondy_mst_pack_bloom:from_binary(Bin) of
         {ok, BF, Rest} -> {ok, BF, Rest};
-        {error, R}     -> {error, {bloom, R}}
+        {error, R} -> {error, {bloom, R}}
     end.
 
 %% @private
@@ -572,13 +570,13 @@ validate_fanout(Fanout, RecordCount) ->
 %% @private
 check_fanout_monotone(_Fanout, 256, Prev, Expected) ->
     case Prev =:= Expected of
-        true  -> ok;
+        true -> ok;
         false -> {error, {final_count_mismatch, Prev, Expected}}
     end;
 check_fanout_monotone(Fanout, I, Prev, Expected) ->
     <<_:I/binary-unit:32, V:32/big-unsigned, _/binary>> = Fanout,
     case V >= Prev of
-        true  -> check_fanout_monotone(Fanout, I + 1, V, Expected);
+        true -> check_fanout_monotone(Fanout, I + 1, V, Expected);
         false -> {error, {non_monotone_at, I, Prev, V}}
     end.
 
@@ -596,7 +594,8 @@ fanout_range(Fanout, 0) ->
     {0, Hi};
 fanout_range(Fanout, B) ->
     PrevOffset = (B - 1) * 4,
-    <<_:PrevOffset/binary, Lo:32/big-unsigned, Hi:32/big-unsigned, _/binary>> = Fanout,
+    <<_:PrevOffset/binary, Lo:32/big-unsigned, Hi:32/big-unsigned, _/binary>> =
+        Fanout,
     {Lo, Hi}.
 
 %% @private
@@ -604,7 +603,9 @@ binary_search(_T, _Hash, Lo, Hi) when Lo >= Hi ->
     not_found;
 binary_search(T, Hash, Lo, Hi) ->
     Mid = Lo + (Hi - Lo) div 2,
-    MidHash = binary:part(T#?MODULE.hashes, Mid * T#?MODULE.hash_len, T#?MODULE.hash_len),
+    MidHash = binary:part(
+        T#?MODULE.hashes, Mid * T#?MODULE.hash_len, T#?MODULE.hash_len
+    ),
     case MidHash of
         Hash ->
             {ok, Mid};

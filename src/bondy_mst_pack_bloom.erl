@@ -107,29 +107,31 @@ immutable records and safe to pass across processes.
 
 -record(builder, {
     slice_count :: pos_integer(),
-    slice_bits  :: pos_integer(),       %% log2(SliceBitLen)
-    slice_byte_len :: pos_integer(),    %% SliceBitLen div 8
-    mask        :: non_neg_integer(),
-    capacity    :: pos_integer(),
-    item_count  :: non_neg_integer(),
+    %% log2(SliceBitLen)
+    slice_bits :: pos_integer(),
+    %% SliceBitLen div 8
+    slice_byte_len :: pos_integer(),
+    mask :: non_neg_integer(),
+    capacity :: pos_integer(),
+    item_count :: non_neg_integer(),
     %% Per-slice mutable bit buffer represented as a list of
     %% byte-sized integers (length = slice_byte_len). Slices are
     %% stored in slice-0..slice-(k-1) order. Mutations go through
     %% `set_bit/3` which rewrites a single byte.
-    slices      :: [array:array(byte())]
+    slices :: [array:array(byte())]
 }).
 
 -record(?MODULE, {
     slice_count :: pos_integer(),
-    slice_bits  :: pos_integer(),
+    slice_bits :: pos_integer(),
     slice_byte_len :: pos_integer(),
-    mask        :: non_neg_integer(),
-    capacity    :: pos_integer(),
-    item_count  :: non_neg_integer(),
+    mask :: non_neg_integer(),
+    capacity :: pos_integer(),
+    item_count :: non_neg_integer(),
     %% On read, slices are kept as binaries for cheap pread-style
     %% lookups: bit `i` of slice `s` lives at `binary:at(slice_s,
     %% i bsr 3) band (1 bsl (i band 7))`.
-    slices      :: [binary()]
+    slices :: [binary()]
 }).
 
 -type t() :: #?MODULE{}.
@@ -137,7 +139,7 @@ immutable records and safe to pass across processes.
 
 -type build_opts() :: #{
     capacity := pos_integer(),
-    p        => float()
+    p => float()
 }.
 
 -export_type([t/0]).
@@ -167,8 +169,10 @@ immutable records and safe to pass across processes.
 
 -define(HEADER_BYTES, ?BONDY_MST_PACK_BLOOM_HEADER_BYTES).
 -define(DEFAULT_P, ?BONDY_MST_PACK_BLOOM_DEFAULT_P).
--define(MIN_SLICE_BITS, 6).      %% 64 bits / 8 bytes minimum per slice
--define(MAX_SLICE_BITS, 32).     %% guards against pathological sizing
+%% 64 bits / 8 bytes minimum per slice
+-define(MIN_SLICE_BITS, 6).
+%% guards against pathological sizing
+-define(MAX_SLICE_BITS, 32).
 
 %% =============================================================================
 %% API — sizing helpers
@@ -197,19 +201,19 @@ new(#{capacity := Capacity} = Opts) when
     P = maps:get(p, Opts, ?DEFAULT_P),
     valid_p_or_die(P),
     SliceCount = 1 + trunc(log2(1 / P)),
-    SliceBits  = compute_slice_bits(Capacity, P, SliceCount),
+    SliceBits = compute_slice_bits(Capacity, P, SliceCount),
     SliceBitLen = 1 bsl SliceBits,
     SliceByteLen = SliceBitLen bsr 3,
     Mask = SliceBitLen - 1,
     EmptySlice = array:new(SliceByteLen, [{default, 0}, {fixed, true}]),
     #builder{
-        slice_count    = SliceCount,
-        slice_bits     = SliceBits,
+        slice_count = SliceCount,
+        slice_bits = SliceBits,
         slice_byte_len = SliceByteLen,
-        mask           = Mask,
-        capacity       = Capacity,
-        item_count     = 0,
-        slices         = [EmptySlice || _ <- lists:seq(1, SliceCount)]
+        mask = Mask,
+        capacity = Capacity,
+        item_count = 0,
+        slices = [EmptySlice || _ <- lists:seq(1, SliceCount)]
     }.
 
 ?DOC("""
@@ -221,10 +225,14 @@ target bits are already set, `item_count` is unchanged.
 
 add(Element, #builder{} = B) when is_binary(Element) ->
     {I0, I1} = make_indexes(Element, B#builder.slice_bits, B#builder.mask),
-    {Slices, AnyNew} = set_slices(B#builder.slices, I0, I1, B#builder.mask, false),
+    {Slices, AnyNew} = set_slices(
+        B#builder.slices, I0, I1, B#builder.mask, false
+    ),
     case AnyNew of
-        true  -> B#builder{slices = Slices, item_count = B#builder.item_count + 1};
-        false -> B#builder{slices = Slices}
+        true ->
+            B#builder{slices = Slices, item_count = B#builder.item_count + 1};
+        false ->
+            B#builder{slices = Slices}
     end.
 
 ?DOC("""
@@ -236,15 +244,18 @@ the index codec serialises via `to_binary/1`.
 -spec finalise(builder()) -> t().
 
 finalise(#builder{} = B) ->
-    Slices = [slice_to_binary(S, B#builder.slice_byte_len) || S <- B#builder.slices],
+    Slices = [
+        slice_to_binary(S, B#builder.slice_byte_len)
+     || S <- B#builder.slices
+    ],
     #?MODULE{
-        slice_count    = B#builder.slice_count,
-        slice_bits     = B#builder.slice_bits,
+        slice_count = B#builder.slice_count,
+        slice_bits = B#builder.slice_bits,
         slice_byte_len = B#builder.slice_byte_len,
-        mask           = B#builder.mask,
-        capacity       = B#builder.capacity,
-        item_count     = B#builder.item_count,
-        slices         = Slices
+        mask = B#builder.mask,
+        capacity = B#builder.capacity,
+        item_count = B#builder.item_count,
+        slices = Slices
     }.
 
 ?DOC("""
@@ -286,13 +297,15 @@ The result is a single binary suitable for embedding in an
 to_binary(#?MODULE{} = T) ->
     Payload = iolist_to_binary(T#?MODULE.slices),
     PayloadBytes = byte_size(Payload),
-    <<(T#?MODULE.slice_count):16/big-unsigned,
-      (T#?MODULE.slice_bits):8,
-      0:8,
-      (T#?MODULE.capacity):32/big-unsigned,
-      (T#?MODULE.item_count):32/big-unsigned,
-      PayloadBytes:32/big-unsigned,
-      Payload/binary>>.
+    <<
+        (T#?MODULE.slice_count):16/big-unsigned,
+        (T#?MODULE.slice_bits):8,
+        0:8,
+        (T#?MODULE.capacity):32/big-unsigned,
+        (T#?MODULE.item_count):32/big-unsigned,
+        PayloadBytes:32/big-unsigned,
+        Payload/binary
+    >>.
 
 ?DOC("""
 Parses a previously-serialised filter. Returns
@@ -305,20 +318,26 @@ typed `{error, _}` for malformed input.
 
 from_binary(Bin) when byte_size(Bin) < ?HEADER_BYTES ->
     {error, truncated_bloom_header};
-from_binary(<<SliceCount:16/big-unsigned,
-              SliceBits:8,
-              _Reserved:8,
-              Capacity:32/big-unsigned,
-              ItemCount:32/big-unsigned,
-              PayloadBytes:32/big-unsigned,
-              Rest/binary>>) ->
+from_binary(
+    <<SliceCount:16/big-unsigned, SliceBits:8, _Reserved:8,
+        Capacity:32/big-unsigned, ItemCount:32/big-unsigned,
+        PayloadBytes:32/big-unsigned, Rest/binary>>
+) ->
     case validate_params(SliceCount, SliceBits, Capacity, PayloadBytes) of
         ok ->
             case Rest of
                 <<Payload:PayloadBytes/binary, Tail/binary>> ->
                     SliceByteLen = PayloadBytes div SliceCount,
-                    {ok, build_t(SliceCount, SliceBits, SliceByteLen, Capacity,
-                                 ItemCount, Payload), Tail};
+                    {ok,
+                        build_t(
+                            SliceCount,
+                            SliceBits,
+                            SliceByteLen,
+                            Capacity,
+                            ItemCount,
+                            Payload
+                        ),
+                        Tail};
                 _ ->
                     {error, truncated_bloom_payload}
             end;
@@ -406,7 +425,9 @@ set_slices([], _I, _I1, _Mask, AnyNew) ->
     {[], AnyNew};
 set_slices([Slice | Rest], I, I1, Mask, AnyNew) ->
     {Slice2, Changed} = array_set_bit(Slice, I),
-    {Rest2, AnyNew2} = set_slices(Rest, (I + I1) band Mask, I1, Mask, AnyNew orelse Changed),
+    {Rest2, AnyNew2} = set_slices(
+        Rest, (I + I1) band Mask, I1, Mask, AnyNew orelse Changed
+    ),
     {[Slice2 | Rest2], AnyNew2}.
 
 %% @private
@@ -416,7 +437,7 @@ array_set_bit(Slice, BitIx) ->
     Byte = array:get(ByteIx, Slice),
     case Byte band Mask of
         Mask -> {Slice, false};
-        0    -> {array:set(ByteIx, Byte bor Mask, Slice), true}
+        0 -> {array:set(ByteIx, Byte bor Mask, Slice), true}
     end.
 
 %% @private
@@ -424,7 +445,8 @@ slice_to_binary(Slice, ByteLen) ->
     list_to_binary([array:get(I, Slice) || I <- lists:seq(0, ByteLen - 1)]).
 
 %% @private
-all_set([], _I, _I1, _Mask) -> true;
+all_set([], _I, _I1, _Mask) ->
+    true;
 all_set([SliceBin | Rest], I, I1, Mask) ->
     ByteIx = I bsr 3,
     BitMask = 1 bsl (I band 7),
@@ -437,30 +459,34 @@ all_set([SliceBin | Rest], I, I1, Mask) ->
 %% @private
 validate_params(SliceCount, SliceBits, _Capacity, PayloadBytes) when
     SliceCount > 0,
-    SliceBits >= ?MIN_SLICE_BITS, SliceBits =< ?MAX_SLICE_BITS,
+    SliceBits >= ?MIN_SLICE_BITS,
+    SliceBits =< ?MAX_SLICE_BITS,
     PayloadBytes > 0
 ->
     ExpectedPayload = SliceCount * (1 bsl (SliceBits - 3)),
     case ExpectedPayload =:= PayloadBytes of
-        true  -> ok;
+        true -> ok;
         false -> {error, {bad_payload_size, PayloadBytes, ExpectedPayload}}
     end;
 validate_params(SliceCount, SliceBits, _Capacity, _PayloadBytes) ->
-    {error, {bad_bloom_params, #{slice_count => SliceCount,
-                                 slice_bits  => SliceBits}}}.
+    {error,
+        {bad_bloom_params, #{
+            slice_count => SliceCount,
+            slice_bits => SliceBits
+        }}}.
 
 %% @private
 build_t(SliceCount, SliceBits, SliceByteLen, Capacity, ItemCount, Payload) ->
     Slices = split_payload(Payload, SliceByteLen, SliceCount),
     Mask = (1 bsl SliceBits) - 1,
     #?MODULE{
-        slice_count    = SliceCount,
-        slice_bits     = SliceBits,
+        slice_count = SliceCount,
+        slice_bits = SliceBits,
         slice_byte_len = SliceByteLen,
-        mask           = Mask,
-        capacity       = Capacity,
-        item_count     = ItemCount,
-        slices         = Slices
+        mask = Mask,
+        capacity = Capacity,
+        item_count = ItemCount,
+        slices = Slices
     }.
 
 %% @private

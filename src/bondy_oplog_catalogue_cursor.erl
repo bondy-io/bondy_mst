@@ -168,11 +168,16 @@ requests.
     Watermark :: non_neg_integer()
 ) -> cursor().
 
-mint(InstanceId, NS, Index, Shard, Bucket, Watermark)
-        when is_binary(InstanceId), is_atom(NS), is_atom(Index),
-             is_integer(Shard), Shard >= 0,
-             is_binary(Bucket),
-             is_integer(Watermark), Watermark >= 0 ->
+mint(InstanceId, NS, Index, Shard, Bucket, Watermark) when
+    is_binary(InstanceId),
+    is_atom(NS),
+    is_atom(Index),
+    is_integer(Shard),
+    Shard >= 0,
+    is_binary(Bucket),
+    is_integer(Watermark),
+    Watermark >= 0
+->
     Cursor = crypto:strong_rand_bytes(16),
     Row = #cursor{
         cursor = Cursor,
@@ -216,8 +221,9 @@ Returns `not_found` if the cursor was reaped or never existed.
 """).
 -spec advance(cursor(), NewLastKey :: binary()) -> ok | not_found.
 
-advance(Cursor, NewLastKey)
-        when is_binary(Cursor), is_binary(NewLastKey) ->
+advance(Cursor, NewLastKey) when
+    is_binary(Cursor), is_binary(NewLastKey)
+->
     Now = erlang:monotonic_time(millisecond),
     NewExpiresAt = Now + ttl_ms(),
     Updates = [
@@ -225,7 +231,7 @@ advance(Cursor, NewLastKey)
         {#cursor.expires_at, NewExpiresAt}
     ],
     try ets:update_element(?TABLE, Cursor, Updates) of
-        true  -> ok;
+        true -> ok;
         false -> not_found
     catch
         error:badarg -> not_found

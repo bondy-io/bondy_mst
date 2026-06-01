@@ -184,7 +184,9 @@ committed_segment(#consumer_offset{committed_segment = S}) -> S.
 -spec committed_frame_offset(consumer_offset()) -> non_neg_integer().
 committed_frame_offset(#consumer_offset{committed_frame_offset = O}) -> O.
 
-?DOC("Returns the committed HLC, or `undefined` if nothing was ever committed.").
+?DOC(
+    "Returns the committed HLC, or `undefined` if nothing was ever committed."
+).
 -spec committed_hlc(consumer_offset()) -> bondy_oplog_hlc:hlc() | undefined.
 committed_hlc(#consumer_offset{committed_hlc = H}) -> H.
 
@@ -198,8 +200,10 @@ Replaces the `committed_segment` and `committed_frame_offset` fields.
 -spec with_position(consumer_offset(), non_neg_integer(), non_neg_integer()) ->
     consumer_offset().
 with_position(#consumer_offset{} = CO, Seg, Off) when
-    is_integer(Seg), Seg >= 0,
-    is_integer(Off), Off >= ?SEG_HEADER_BYTES
+    is_integer(Seg),
+    Seg >= 0,
+    is_integer(Off),
+    Off >= ?SEG_HEADER_BYTES
 ->
     CO#consumer_offset{
         committed_segment = Seg,
@@ -342,7 +346,9 @@ parse_snapshot_watermark_terms(Terms) ->
     end.
 
 %% @private
-validate_snapshot_watermark_version(?BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_VERSION) ->
+validate_snapshot_watermark_version(
+    ?BONDY_OPLOG_WAL_SNAPSHOT_WATERMARK_VERSION
+) ->
     ok;
 validate_snapshot_watermark_version(V) ->
     throw({invalid, {unsupported_snapshot_watermark_version, V}}).
@@ -384,15 +390,15 @@ validate_non_neg_integer(_K, V) when is_integer(V), V >= 0 -> ok;
 validate_non_neg_integer(K, V) -> throw({invalid, {invalid_field, K, V}}).
 
 %% @private
-validate_hlc_or_undefined(undefined) -> ok;
+validate_hlc_or_undefined(undefined) ->
+    ok;
 validate_hlc_or_undefined(V) when is_integer(V), V >= 0 -> ok;
 validate_hlc_or_undefined(V) ->
     throw({invalid, {invalid_field, committed_hlc, V}}).
 
 %% @private
 validate_hlc(H) when is_integer(H), H >= 0 -> ok;
-validate_hlc(V) ->
-    throw({invalid, {invalid_hlc, V}}).
+validate_hlc(V) -> throw({invalid, {invalid_hlc, V}}).
 
 %% @private
 format_term(T) ->

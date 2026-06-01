@@ -63,7 +63,6 @@ peer_strategy_test_() ->
         {timeout, 10, fun info_reports_strategy/0}
     ]}.
 
-
 first_strategy_picks_head() ->
     ok = bondy_oplog_sync_scheduler:set_bootstrap_peer_strategy(first),
     Inst = pre_bootstrap_instance(),
@@ -74,7 +73,6 @@ first_strategy_picks_head() ->
     Chosen = capture_chosen_peers(Inst, 5),
     ?assertEqual([p1, p1, p1, p1, p1], Chosen),
     bondy_oplog:stop_instance(Inst).
-
 
 random_strategy_distributes() ->
     ok = bondy_oplog_sync_scheduler:set_bootstrap_peer_strategy(random),
@@ -91,7 +89,6 @@ random_strategy_distributes() ->
     %% Every chosen peer was one of the offered.
     ?assertEqual([], Unique -- Peers),
     bondy_oplog:stop_instance(Inst).
-
 
 round_robin_strategy_advances() ->
     ok = bondy_oplog_sync_scheduler:set_bootstrap_peer_strategy(
@@ -110,7 +107,6 @@ round_robin_strategy_advances() ->
     ?assertEqual([p1, p2, p3, p1, p2, p3, p1], Chosen),
     bondy_oplog:stop_instance(Inst).
 
-
 unknown_strategy_falls_back_to_first() ->
     %% Write an unknown atom directly through app env (the setter
     %% guards against it).
@@ -124,7 +120,6 @@ unknown_strategy_falls_back_to_first() ->
     ?assertEqual([p1, p1, p1, p1], Chosen),
     ok = bondy_oplog_sync_scheduler:set_bootstrap_peer_strategy(first),
     bondy_oplog:stop_instance(Inst).
-
 
 set_strategy_takes_effect_next_tick() ->
     ok = bondy_oplog_sync_scheduler:set_bootstrap_peer_strategy(first),
@@ -142,7 +137,6 @@ set_strategy_takes_effect_next_tick() ->
     [p1, p2, p3] = capture_chosen_peers(Inst, 3),
     bondy_oplog:stop_instance(Inst).
 
-
 info_reports_strategy() ->
     ok = bondy_oplog_sync_scheduler:set_bootstrap_peer_strategy(random),
     Info = bondy_oplog_sync_scheduler:info(),
@@ -150,7 +144,6 @@ info_reports_strategy() ->
     ok = bondy_oplog_sync_scheduler:set_bootstrap_peer_strategy(first),
     Info2 = bondy_oplog_sync_scheduler:info(),
     ?assertEqual(first, maps:get(bootstrap_peer_strategy, Info2)).
-
 
 %% =============================================================================
 %% Helpers
@@ -169,7 +162,6 @@ pre_bootstrap_instance() ->
     }),
     ?assertEqual(pre_bootstrap, bondy_oplog_instance:lifecycle_state(Id)),
     Id.
-
 
 %% Triggers `N` ticks and returns the peers chosen for `InstanceId`,
 %% in dispatch order. We attach to the telemetry event the scheduler
@@ -197,15 +189,17 @@ capture_chosen_peers(InstanceId, N) ->
         Peers = [
             begin
                 bondy_oplog_sync_scheduler:trigger(),
-                receive {Ref, P} -> P after 2000 -> error(no_dispatch) end
+                receive
+                    {Ref, P} -> P
+                after 2000 -> error(no_dispatch)
+                end
             end
-            || _ <- lists:seq(1, N)
+         || _ <- lists:seq(1, N)
         ],
         Peers
     after
         telemetry:detach(HandlerId)
     end.
-
 
 mk_id() ->
     iolist_to_binary([

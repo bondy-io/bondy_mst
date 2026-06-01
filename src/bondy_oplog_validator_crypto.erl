@@ -247,7 +247,8 @@ refresh(#state{instance_id = InstanceId} = State) ->
                     peer_pubkeys, NewOpts, State#state.peer_pubkeys
                 ),
                 accept_unknown_origin = maps:get(
-                    accept_unknown_origin, NewOpts,
+                    accept_unknown_origin,
+                    NewOpts,
                     State#state.accept_unknown_origin
                 )
             }};

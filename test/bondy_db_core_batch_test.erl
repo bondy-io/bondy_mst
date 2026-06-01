@@ -70,20 +70,28 @@ multi_cell_batch_returns_all_values() ->
     ],
     {ok, Map, _} = bondy_db_core:read_batch(Reads, #{}),
     ?assertEqual(3, map_size(Map)),
-    ?assertEqual({<<"va">>, 10},
-                 maps:get({NS, primary, ?B, <<"a">>}, Map)),
-    ?assertEqual({<<"vb">>, 20},
-                 maps:get({NS, primary, ?B, <<"b">>}, Map)),
-    ?assertEqual({<<"vc">>, 30},
-                 maps:get({NS, primary, ?B, <<"c">>}, Map)),
+    ?assertEqual(
+        {<<"va">>, 10},
+        maps:get({NS, primary, ?B, <<"a">>}, Map)
+    ),
+    ?assertEqual(
+        {<<"vb">>, 20},
+        maps:get({NS, primary, ?B, <<"b">>}, Map)
+    ),
+    ?assertEqual(
+        {<<"vc">>, 30},
+        maps:get({NS, primary, ?B, <<"c">>}, Map)
+    ),
     teardown_shard(Setup).
 
 batch_with_missing_shard_returns_error_per_cell() ->
     NS = mk_ns(),
     {ok, Map, _} =
         bondy_db_core:read_batch([{NS, primary, ?B, <<"missing">>}], #{}),
-    ?assertEqual({error, no_shards},
-                 maps:get({NS, primary, ?B, <<"missing">>}, Map)).
+    ?assertEqual(
+        {error, no_shards},
+        maps:get({NS, primary, ?B, <<"missing">>}, Map)
+    ).
 
 fence_excludes_overlay_events_past_it() ->
     NS = mk_ns(),
@@ -94,8 +102,10 @@ fence_excludes_overlay_events_past_it() ->
     overlay_insert(OV, <<"k">>, 20, {set, 20, <<"new">>}),
     {ok, Map, _Fence} =
         bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{fence => 15}),
-    ?assertEqual({<<"mid">>, 10},
-                 maps:get({NS, primary, ?B, <<"k">>}, Map)),
+    ?assertEqual(
+        {<<"mid">>, 10},
+        maps:get({NS, primary, ?B, <<"k">>}, Map)
+    ),
     teardown_shard(Setup).
 
 fence_admits_overlay_events_at_or_below() ->
@@ -106,8 +116,10 @@ fence_admits_overlay_events_at_or_below() ->
     overlay_insert(OV, <<"k">>, 10, {set, 10, <<"mid">>}),
     {ok, Map, _} =
         bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{fence => 10}),
-    ?assertEqual({<<"mid">>, 10},
-                 maps:get({NS, primary, ?B, <<"k">>}, Map)),
+    ?assertEqual(
+        {<<"mid">>, 10},
+        maps:get({NS, primary, ?B, <<"k">>}, Map)
+    ),
     teardown_shard(Setup).
 
 fence_passes_through_projection_past_fence() ->
@@ -117,8 +129,10 @@ fence_passes_through_projection_past_fence() ->
     materialise(PH, <<"k">>, {set, <<"v">>, 100}, 100),
     {ok, Map, _} =
         bondy_db_core:read_batch([{NS, primary, ?B, <<"k">>}], #{fence => 50}),
-    ?assertEqual({<<"v">>, 100},
-                 maps:get({NS, primary, ?B, <<"k">>}, Map)),
+    ?assertEqual(
+        {<<"v">>, 100},
+        maps:get({NS, primary, ?B, <<"k">>}, Map)
+    ),
     teardown_shard(Setup).
 
 skew_within_bound_returns_ok() ->
@@ -142,8 +156,10 @@ skew_above_bound_returns_error() ->
     materialise(PH, <<"a">>, {set, <<"va">>, H1}, H1),
     materialise(PH, <<"b">>, {set, <<"vb">>, H2}, H2),
     Reads = [{NS, primary, ?B, <<"a">>}, {NS, primary, ?B, <<"b">>}],
-    ?assertMatch({error, {skew_too_large, 1_000, 500}},
-                 bondy_db_core:read_batch(Reads, #{require_skew_below => 500})),
+    ?assertMatch(
+        {error, {skew_too_large, 1_000, 500}},
+        bondy_db_core:read_batch(Reads, #{require_skew_below => 500})
+    ),
     teardown_shard(Setup).
 
 consistency_eventual_skips_freshness() ->
@@ -226,8 +242,10 @@ consistency_snapshot_applies_half_lag_skew() ->
 %% =============================================================================
 
 mk_ns() ->
-    list_to_atom("mst_db_batch_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
+    list_to_atom(
+        "mst_db_batch_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 find_key_for_shard(NS, Index, WantedShard) ->
     find_key_for_shard(NS, Index, WantedShard, 0).
@@ -266,12 +284,24 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
         overlay => OV,
         fold_module => Strategy
     }),
-    Setup = #{ns => NS, index => Index, shard => Shard,
-              cache_handle => CH, projection => PH, overlay => OV},
+    Setup = #{
+        ns => NS,
+        index => Index,
+        shard => Shard,
+        cache_handle => CH,
+        projection => PH,
+        overlay => OV
+    },
     {Setup, Setup}.
 
-teardown_shard(#{ns := NS, index := Index, shard := Shard,
-                 cache_handle := CH, projection := PH, overlay := OV}) ->
+teardown_shard(#{
+    ns := NS,
+    index := Index,
+    shard := Shard,
+    cache_handle := CH,
+    projection := PH,
+    overlay := OV
+}) ->
     ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),

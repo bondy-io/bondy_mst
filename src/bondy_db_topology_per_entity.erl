@@ -101,12 +101,15 @@ init(DbName, Opts) when is_atom(DbName), is_map(Opts) ->
         {ok, Sup} when is_pid(Sup) ->
             case maps:find(dir, Opts) of
                 {ok, Dir} ->
-                    BookOpts = maps:get(book_opts_fun, Opts,
-                                        fun default_book_opts/1),
+                    BookOpts = maps:get(
+                        book_opts_fun,
+                        Opts,
+                        fun default_book_opts/1
+                    ),
                     State = #{
-                        db_name       => DbName,
-                        sup           => Sup,
-                        dir           => normalise_dir(Dir),
+                        db_name => DbName,
+                        sup => Sup,
+                        dir => normalise_dir(Dir),
                         book_opts_fun => BookOpts
                     },
                     {ok, State};
@@ -117,21 +120,20 @@ init(DbName, Opts) when is_atom(DbName), is_map(Opts) ->
             {error, {missing_required_opt, sup}}
     end.
 
-
-open_table(EntityType, ShardCount, _TableOpts, State)
-        when is_atom(EntityType), is_integer(ShardCount), ShardCount > 0 ->
+open_table(EntityType, ShardCount, _TableOpts, State) when
+    is_atom(EntityType), is_integer(ShardCount), ShardCount > 0
+->
     case start_shards(EntityType, ShardCount, State) of
         {ok, Shards} ->
             TableState = #{
                 entity_type => EntityType,
                 shard_count => ShardCount,
-                shards      => Shards
+                shards => Shards
             },
             {ok, TableState, State};
         {error, _} = Err ->
             Err
     end.
-
 
 route(Shard, #{shards := Shards}) when is_integer(Shard) ->
     case maps:find(Shard, Shards) of
@@ -144,15 +146,13 @@ route(Shard, #{shards := Shards}) when is_integer(Shard) ->
             {error, {unknown_shard, Shard}}
     end.
 
-
--doc("""
+-doc """
 Per-entity topology disambiguates EntityType by the Bookie itself —
 each `(EntityType, Shard)` has its own Bookie. The Bucket only needs
 to isolate realms inside that Bookie, so it is just the Realm verbatim.
-""").
+""".
 bucket_for(_EntityType, Realm, _TableState) when is_binary(Realm) ->
     Realm.
-
 
 close_table(#{shards := Shards}, State) ->
     %% T2 owns one Bookie per (EntityType, Shard); close_table stops
@@ -164,10 +164,8 @@ close_table(#{shards := Shards}, State) ->
     ),
     {ok, State}.
 
-
 shutdown(#{sup := Sup}) ->
     bondy_db_leveled_sup:stop(Sup).
-
 
 %% =============================================================================
 %% PRIVATE
@@ -178,16 +176,30 @@ start_shards(EntityType, ShardCount, State) ->
 
 start_shards(_EntityType, N, N, _State, Acc) ->
     {ok, Acc};
-start_shards(EntityType, I, N, #{sup := Sup, dir := Dir,
-                                 book_opts_fun := BookOptsFun} = State, Acc) ->
+start_shards(
+    EntityType,
+    I,
+    N,
+    #{
+        sup := Sup,
+        dir := Dir,
+        book_opts_fun := BookOptsFun
+    } = State,
+    Acc
+) ->
     ShardDir = shard_dir(Dir, EntityType, I),
     case ensure_dir(ShardDir) of
         ok ->
             BookOpts = BookOptsFun(ShardDir),
             case bondy_db_leveled_sup:start_bookie(Sup, BookOpts) of
                 {ok, Bookie} ->
-                    start_shards(EntityType, I + 1, N, State,
-                                 Acc#{I => Bookie});
+                    start_shards(
+                        EntityType,
+                        I + 1,
+                        N,
+                        State,
+                        Acc#{I => Bookie}
+                    );
                 {error, _} = Err ->
                     %% Best-effort: stop already-started shards so the
                     %% caller is not left with a partial table.
@@ -199,7 +211,6 @@ start_shards(EntityType, I, N, #{sup := Sup, dir := Dir,
             Err
     end.
 
-
 shard_dir(Dir, EntityType, Shard) ->
     filename:join([
         Dir,
@@ -207,14 +218,11 @@ shard_dir(Dir, EntityType, Shard) ->
         integer_to_list(Shard)
     ]).
 
-
 ensure_dir(Dir) ->
     filelib:ensure_dir(filename:join(Dir, ".keep")).
 
-
 normalise_dir(Dir) when is_binary(Dir) -> binary_to_list(Dir);
-normalise_dir(Dir) when is_list(Dir)   -> Dir.
-
+normalise_dir(Dir) when is_list(Dir) -> Dir.
 
 default_book_opts(Dir) ->
     %% Mirrors the parameters the adapter eunit + PropEr suites use; the
@@ -224,12 +232,13 @@ default_book_opts(Dir) ->
     %% (PR-PS-15b) — enables `book_mput/2` + `book_headonly/4`. See
     %% `bondy_db_topology_single_bookie:default_book_opts/1` for the
     %% rationale.
-    [{root_path, Dir},
-     {cache_size, 2000},
-     {max_journalsize, 100_000_000},
-     {sync_strategy, none},
-     {head_only, with_lookup}].
-
+    [
+        {root_path, Dir},
+        {cache_size, 2000},
+        {max_journalsize, 100_000_000},
+        {sync_strategy, none},
+        {head_only, with_lookup}
+    ].
 
 stop_bookie_safe(Bookie) when is_pid(Bookie) ->
     case is_process_alive(Bookie) of

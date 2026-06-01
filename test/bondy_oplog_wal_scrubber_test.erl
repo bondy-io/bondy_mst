@@ -81,9 +81,16 @@ scrubber_test_() ->
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_scrubber_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_scrubber_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -98,8 +105,10 @@ instance_id() ->
     list_to_binary(
         io_lib:format(
             "scrubber-test-~p-~p",
-            [erlang:system_time(microsecond),
-             erlang:unique_integer([positive])]
+            [
+                erlang:system_time(microsecond),
+                erlang:unique_integer([positive])
+            ]
         )
     ).
 
@@ -107,11 +116,13 @@ origin() ->
     <<1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16>>.
 
 base_opts() ->
-    #{origin => origin(),
-      retention_sweep_interval => 24 * 60 * 60 * 1000,
-      %% Tight cap forces rotation after ~1 event per segment.
-      max_segment_bytes => 256,
-      max_batch_bytes => 200}.
+    #{
+        origin => origin(),
+        retention_sweep_interval => 24 * 60 * 60 * 1000,
+        %% Tight cap forces rotation after ~1 event per segment.
+        max_segment_bytes => 256,
+        max_batch_bytes => 200
+    }.
 
 mk_event(Hlc, Seq) ->
     Key = bondy_oplog_event:key(Hlc, origin(), Seq),
@@ -229,10 +240,14 @@ clean_walk_no_alert() ->
             ?assertEqual(0, maps:get(alerts_raised, Summary)),
             Events = collect_scrub_events(clean_walk_no_alert),
             %% Every emitted event must be `ok`.
-            [?assertEqual(ok, maps:get(outcome, Md))
-             || {_M, Md} <- Events],
+            [
+                ?assertEqual(ok, maps:get(outcome, Md))
+             || {_M, Md} <- Events
+            ],
             %% No alerts in info/1.
-            ?assertEqual([], maps:get(scrubber_alerts, bondy_oplog_wal:info(Pid)))
+            ?assertEqual(
+                [], maps:get(scrubber_alerts, bondy_oplog_wal:info(Pid))
+            )
         after
             detach_telemetry(H),
             bondy_oplog_wal_scrubber:stop(SPid)
@@ -263,8 +278,11 @@ bit_flip_raises_bad_crc() ->
             ?assert(maps:get(alerts_raised, Summary) >= 1),
             Events = collect_scrub_events(bit_flip_raises_bad_crc),
             %% Find the alert event for SegId0.
-            Alerts = [{M, Md} || {M, Md} <- Events,
-                                  maps:get(outcome, Md) =:= alert],
+            Alerts = [
+                {M, Md}
+             || {M, Md} <- Events,
+                maps:get(outcome, Md) =:= alert
+            ],
             ?assert(length(Alerts) >= 1),
             [{M, _Md} | _] = Alerts,
             ?assert(maps:get(bad_crc, M) >= 1),
@@ -295,8 +313,11 @@ magic_zero_raises_bad_magic() ->
         try
             {ok, _} = bondy_oplog_wal_scrubber:scrub_now(SPid),
             Events = collect_scrub_events(magic_zero_raises_bad_magic),
-            Alerts = [{M, Md} || {M, Md} <- Events,
-                                  maps:get(outcome, Md) =:= alert],
+            Alerts = [
+                {M, Md}
+             || {M, Md} <- Events,
+                maps:get(outcome, Md) =:= alert
+            ],
             ?assert(length(Alerts) >= 1),
             [{M, _} | _] = Alerts,
             ?assert(maps:get(bad_magic, M) >= 1),
@@ -358,9 +379,12 @@ already_alerted_segment_is_skipped() ->
             {ok, _} = bondy_oplog_wal_scrubber:scrub_now(SPid),
             Events = collect_scrub_events(already_alerted_segment_is_skipped),
             detach_telemetry(H),
-            Skipped = [Md || {_M, Md} <- Events,
-                              maps:get(segment_id, Md) =:= SegId0,
-                              maps:get(outcome, Md) =:= skipped],
+            Skipped = [
+                Md
+             || {_M, Md} <- Events,
+                maps:get(segment_id, Md) =:= SegId0,
+                maps:get(outcome, Md) =:= skipped
+            ],
             ?assertEqual(1, length(Skipped)),
             %% The skipped event must NOT carry alert counters > 0.
             [SkipMd] = Skipped,
@@ -386,16 +410,23 @@ clear_alert_then_rescrub() ->
         SPid = start_scrubber(Id),
         try
             {ok, _} = bondy_oplog_wal_scrubber:scrub_now(SPid),
-            ?assert(lists:keymember(
-                SegId0, 1,
-                maps:get(scrubber_alerts, bondy_oplog_wal:info(Pid1))
-            )),
+            ?assert(
+                lists:keymember(
+                    SegId0,
+                    1,
+                    maps:get(scrubber_alerts, bondy_oplog_wal:info(Pid1))
+                )
+            ),
             ok = bondy_oplog_wal:clear_segment_alert(Pid1, SegId0),
             ?assertEqual(
                 [],
-                [E || E <- maps:get(
-                    scrubber_alerts, bondy_oplog_wal:info(Pid1)
-                ), element(1, E) =:= SegId0]
+                [
+                    E
+                 || E <- maps:get(
+                        scrubber_alerts, bondy_oplog_wal:info(Pid1)
+                    ),
+                    element(1, E) =:= SegId0
+                ]
             )
         after
             bondy_oplog_wal_scrubber:stop(SPid)
@@ -418,8 +449,11 @@ head_segment_is_never_walked() ->
             ?assertEqual(0, maps:get(alerts_raised, Summary)),
             Events = collect_scrub_events(head_segment_is_never_walked),
             HeadSeg = maps:get(current_segment, bondy_oplog_wal:info(Pid)),
-            EventsForHead = [Md || {_M, Md} <- Events,
-                                    maps:get(segment_id, Md) =:= HeadSeg],
+            EventsForHead = [
+                Md
+             || {_M, Md} <- Events,
+                maps:get(segment_id, Md) =:= HeadSeg
+            ],
             ?assertEqual([], EventsForHead)
         after
             detach_telemetry(H),
@@ -570,15 +604,15 @@ wait_for_n_run_events(_Tag, _N, _Deadline, Acc) when length(Acc) >= 8 ->
 wait_for_n_run_events(Tag, N, Deadline, Acc) ->
     Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
     case Remaining of
-        0 -> lists:reverse(Acc);
+        0 ->
+            lists:reverse(Acc);
         _ ->
             receive
                 {run_event, Tag, M, Md} ->
                     Acc1 = [{M, Md} | Acc],
                     case length(Acc1) >= N of
                         true -> lists:reverse(Acc1);
-                        false ->
-                            wait_for_n_run_events(Tag, N, Deadline, Acc1)
+                        false -> wait_for_n_run_events(Tag, N, Deadline, Acc1)
                     end
             after Remaining ->
                 lists:reverse(Acc)

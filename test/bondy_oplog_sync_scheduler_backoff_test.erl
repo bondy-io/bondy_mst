@@ -64,7 +64,6 @@ backoff_test_() ->
         {timeout, 10, fun info_reports_backoff_knobs/0}
     ]}.
 
-
 first_failure_schedules_retry() ->
     Inst = mk_id(),
     ets:delete(?BACKOFF_TAB, Inst),
@@ -77,7 +76,6 @@ first_failure_schedules_retry() ->
     ?assert(NextMs >= Before + 100),
     ?assert(NextMs =< Before + 500),
     ets:delete(?BACKOFF_TAB, Inst).
-
 
 consecutive_failures_double_up_to_max() ->
     Inst = mk_id(),
@@ -99,7 +97,6 @@ consecutive_failures_double_up_to_max() ->
     ?assert(NextMs =< Before + 2000),
     ets:delete(?BACKOFF_TAB, Inst).
 
-
 normal_exit_clears_entry() ->
     Inst = mk_id(),
     ets:delete(?BACKOFF_TAB, Inst),
@@ -107,7 +104,6 @@ normal_exit_clears_entry() ->
     ?assertMatch([{Inst, _, _}], ets:lookup(?BACKOFF_TAB, Inst)),
     push_failure(Inst, normal),
     ?assertEqual([], ets:lookup(?BACKOFF_TAB, Inst)).
-
 
 backoff_deferred_telemetry_fires() ->
     %% Set a very long backoff so the entry doesn't expire during
@@ -131,8 +127,9 @@ backoff_deferred_telemetry_fires() ->
     try
         bondy_oplog_sync_scheduler:trigger(),
         receive
-            {Ref, #{wait_ms := Wait, fail_count := 1},
-                  #{instance_id := Inst}} when Wait > 0 ->
+            {Ref, #{wait_ms := Wait, fail_count := 1}, #{instance_id := Inst}} when
+                Wait > 0
+            ->
                 ok
         after 2000 ->
             error(no_backoff_deferred)
@@ -145,7 +142,6 @@ backoff_deferred_telemetry_fires() ->
     ok = bondy_oplog_sync_scheduler:set_bootstrap_retry_base_ms(100),
     ok = bondy_oplog_sync_scheduler:set_bootstrap_retry_max_ms(1000),
     ets:delete(?BACKOFF_TAB, Inst).
-
 
 setters_take_effect_on_next_failure() ->
     Inst = mk_id(),
@@ -166,7 +162,6 @@ setters_take_effect_on_next_failure() ->
     ets:delete(?BACKOFF_TAB, Inst),
     ok = bondy_oplog_sync_scheduler:set_bootstrap_retry_base_ms(100).
 
-
 info_reports_backoff_knobs() ->
     ok = bondy_oplog_sync_scheduler:set_bootstrap_retry_base_ms(123),
     ok = bondy_oplog_sync_scheduler:set_bootstrap_retry_max_ms(45678),
@@ -178,7 +173,6 @@ info_reports_backoff_knobs() ->
     ok = bondy_oplog_sync_scheduler:set_bootstrap_retry_base_ms(100),
     ok = bondy_oplog_sync_scheduler:set_bootstrap_retry_max_ms(1000),
     ok = bondy_oplog_sync_scheduler:set_bootstrap_retry_jitter(false).
-
 
 %% =============================================================================
 %% Helpers
@@ -196,14 +190,14 @@ push_failure(InstanceId, Reason) ->
     %% Wait for FakePid to die so the monitor would fire DOWN
     %% naturally — we still send our own DOWN to control timing.
     Ref = monitor(process, FakePid),
-    receive {'DOWN', Ref, process, FakePid, _} -> ok
+    receive
+        {'DOWN', Ref, process, FakePid, _} -> ok
     after 500 -> error(fake_pid_did_not_die)
     end,
     ets:insert(?INFLIGHT_TAB, {FakePid, InstanceId}),
     Sched ! {'DOWN', make_ref(), process, FakePid, Reason},
     _ = sys:get_state(Sched),
     ok.
-
 
 pre_bootstrap_instance() ->
     Id = mk_id(),
@@ -218,7 +212,6 @@ pre_bootstrap_instance() ->
     }),
     ?assertEqual(pre_bootstrap, bondy_oplog_instance:lifecycle_state(Id)),
     Id.
-
 
 mk_id() ->
     iolist_to_binary([

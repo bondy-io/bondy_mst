@@ -146,17 +146,17 @@ Events:
 %% Public helpers (not behaviour callbacks).
 -export([is_currently_valid/2]).
 
--type payload()    :: binary().
+-type payload() :: binary().
 -type expiry_hlc() :: bondy_oplog_hlc:hlc().
 
 -type state() ::
-        undefined
-        | {issued, bondy_oplog_hlc:hlc(), expiry_hlc(), payload()}
-        | {revoked, bondy_oplog_hlc:hlc()}.
+    undefined
+    | {issued, bondy_oplog_hlc:hlc(), expiry_hlc(), payload()}
+    | {revoked, bondy_oplog_hlc:hlc()}.
 
 -type event() ::
-        {issue, bondy_oplog_hlc:hlc(), expiry_hlc(), payload()}
-        | {revoke, bondy_oplog_hlc:hlc()}.
+    {issue, bondy_oplog_hlc:hlc(), expiry_hlc(), payload()}
+    | {revoke, bondy_oplog_hlc:hlc()}.
 
 -export_type([state/0, event/0]).
 
@@ -169,26 +169,25 @@ Events:
 initial_value() ->
     undefined.
 
-
 -spec apply_event(state(), event(), bondy_oplog_fold:meta()) ->
     bondy_oplog_fold:apply_result().
 
 %% --- from undefined ---------------------------------------------------------
 
-apply_event(undefined, {issue, H, E, P}, _Meta)
-        when is_integer(H), is_integer(E), is_binary(P) ->
+apply_event(undefined, {issue, H, E, P}, _Meta) when
+    is_integer(H), is_integer(E), is_binary(P)
+->
     {{issued, H, E, P}, P};
-
 apply_event(undefined, {revoke, H}, _Meta) when is_integer(H) ->
     %% Tombstone — preserves idempotency under out-of-order delivery (a
     %% later-arriving `issue` with H' < H would otherwise reanimate).
     %% Value stays undefined.
     {{revoked, H}, none};
-
 %% --- from {issued, _, _, _} -------------------------------------------------
 
-apply_event({issued, OldH, OldE, OldP} = S, {issue, H, E, P}, _Meta)
-        when is_binary(P) ->
+apply_event({issued, OldH, OldE, OldP} = S, {issue, H, E, P}, _Meta) when
+    is_binary(P)
+->
     if
         H > OldH ->
             {{issued, H, E, P}, P};
@@ -198,41 +197,36 @@ apply_event({issued, OldH, OldE, OldP} = S, {issue, H, E, P}, _Meta)
             %% Tie at HLC — deterministic resolution by `{payload,
             %% expiry}` (payload primary; required for merge associativity).
             case {P, E} > {OldP, OldE} of
-                true  -> {{issued, OldH, E, P}, P};
+                true -> {{issued, OldH, E, P}, P};
                 false -> {S, none}
             end;
         true ->
             {S, none}
     end;
-
-apply_event({issued, OldH, _OldE, _OldP}, {revoke, H}, _Meta)
-        when H >= OldH ->
+apply_event({issued, OldH, _OldE, _OldP}, {revoke, H}, _Meta) when
+    H >= OldH
+->
     %% Revoke wins ties (security-critical).
     {{revoked, H}, undefined};
-
 apply_event({issued, _, _, _} = S, {revoke, _}, _Meta) ->
     {S, none};
-
 %% --- from {revoked, _} ------------------------------------------------------
 
-apply_event({revoked, OldH}, {issue, H, E, P}, _Meta)
-        when H > OldH, is_binary(P) ->
+apply_event({revoked, OldH}, {issue, H, E, P}, _Meta) when
+    H > OldH, is_binary(P)
+->
     %% Re-issue after revoke (LWW); see deviation note in moduledoc.
     {{issued, H, E, P}, P};
-
 apply_event({revoked, _} = S, {issue, _, _, _}, _Meta) ->
     {S, none};
-
 apply_event({revoked, OldH}, {revoke, H}, _Meta) ->
     {{revoked, erlang:max(OldH, H)}, none}.
 
-
 -spec to_value(state()) -> undefined | payload().
 
-to_value(undefined)         -> undefined;
+to_value(undefined) -> undefined;
 to_value({issued, _H, _E, P}) -> P;
-to_value({revoked, _})      -> undefined.
-
+to_value({revoked, _}) -> undefined.
 
 -spec apply_value_delta(undefined | payload(), undefined | payload()) ->
     undefined | payload().
@@ -240,26 +234,24 @@ to_value({revoked, _})      -> undefined.
 apply_value_delta(_OldValue, NewValue) ->
     NewValue.
 
-
 -spec merge_states(state(), state()) -> state().
 
-merge_states(undefined, B) -> B;
-merge_states(A, undefined) -> A;
-
+merge_states(undefined, B) ->
+    B;
+merge_states(A, undefined) ->
+    A;
 %% issued vs issued
 merge_states({issued, Ha, _, _} = A, {issued, Hb, _, _}) when Ha > Hb -> A;
 merge_states({issued, Ha, _, _}, {issued, Hb, _, _} = B) when Hb > Ha -> B;
 merge_states({issued, H, Ea, Pa} = A, {issued, H, Eb, Pb}) ->
     %% Payload-first tie-break (associativity-preserving).
     case {Pb, Eb} > {Pa, Ea} of
-        true  -> {issued, H, Eb, Pb};
+        true -> {issued, H, Eb, Pb};
         false -> A
     end;
-
 %% revoked vs revoked
 merge_states({revoked, Ha}, {revoked, Hb}) ->
     {revoked, erlang:max(Ha, Hb)};
-
 %% issued vs revoked (and reverse)
 merge_states({issued, Hi, _, _}, {revoked, Hr}) when Hr > Hi ->
     {revoked, Hr};
@@ -273,68 +265,63 @@ merge_states({issued, H, _, _}, {revoked, H}) ->
 merge_states({revoked, H}, {issued, H, _, _}) ->
     {revoked, H}.
 
-
 -spec hlc(state()) -> bondy_oplog_hlc:hlc().
 
-hlc(undefined)         -> 0;
+hlc(undefined) -> 0;
 hlc({issued, H, _, _}) -> H;
-hlc({revoked, H})      -> H.
-
+hlc({revoked, H}) -> H.
 
 -spec gc_threshold(state()) -> bondy_oplog_hlc:hlc() | undefined.
 
-gc_threshold(undefined)         -> undefined;
+gc_threshold(undefined) -> undefined;
 gc_threshold({issued, _, E, _}) -> E;
-gc_threshold({revoked, H})      -> H.
-
+gc_threshold({revoked, H}) -> H.
 
 -spec encode_state(state()) -> binary().
 
 encode_state(undefined) ->
     <<0>>;
-
-encode_state({issued, H, E, P})
-        when is_integer(H), is_integer(E), is_binary(P) ->
+encode_state({issued, H, E, P}) when
+    is_integer(H), is_integer(E), is_binary(P)
+->
     PSize = byte_size(P),
-    <<1, H:64/big-unsigned, E:64/big-unsigned, PSize:32/big-unsigned, P/binary>>;
-
+    <<1, H:64/big-unsigned, E:64/big-unsigned, PSize:32/big-unsigned,
+        P/binary>>;
 encode_state({revoked, H}) when is_integer(H) ->
     <<2, H:64/big-unsigned>>.
-
 
 -spec decode_state(binary()) -> state().
 
 decode_state(<<0>>) ->
     undefined;
-
-decode_state(<<1, H:64/big-unsigned, E:64/big-unsigned,
-               PSize:32/big-unsigned, P:PSize/binary>>) ->
+decode_state(
+    <<1, H:64/big-unsigned, E:64/big-unsigned, PSize:32/big-unsigned,
+        P:PSize/binary>>
+) ->
     {issued, H, E, P};
-
 decode_state(<<2, H:64/big-unsigned>>) ->
     {revoked, H}.
 
-
 -spec encode_event(event()) -> binary().
 
-encode_event({issue, H, E, P})
-        when is_integer(H), is_integer(E), is_binary(P) ->
+encode_event({issue, H, E, P}) when
+    is_integer(H), is_integer(E), is_binary(P)
+->
     PSize = byte_size(P),
-    <<1, H:64/big-unsigned, E:64/big-unsigned, PSize:32/big-unsigned, P/binary>>;
-
+    <<1, H:64/big-unsigned, E:64/big-unsigned, PSize:32/big-unsigned,
+        P/binary>>;
 encode_event({revoke, H}) when is_integer(H) ->
     <<2, H:64/big-unsigned>>.
 
-
 -spec decode_event(binary()) -> event().
 
-decode_event(<<1, H:64/big-unsigned, E:64/big-unsigned,
-               PSize:32/big-unsigned, P:PSize/binary>>) ->
+decode_event(
+    <<1, H:64/big-unsigned, E:64/big-unsigned, PSize:32/big-unsigned,
+        P:PSize/binary>>
+) ->
     {issue, H, E, P};
-
 decode_event(<<2, H:64/big-unsigned>>) ->
     {revoke, H}.
-
 
 %% =============================================================================
 %% Public helpers

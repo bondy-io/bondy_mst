@@ -28,9 +28,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_oplog_wal_state_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_oplog_wal_state_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -42,8 +49,10 @@ rmrf(Dir) ->
 
 with_tmp_dir(Fun) ->
     Dir = mktemp_dir(),
-    try Fun(Dir)
-    after rmrf(Dir)
+    try
+        Fun(Dir)
+    after
+        rmrf(Dir)
     end.
 
 %% =============================================================================
@@ -130,7 +139,8 @@ read_missing_required_field_test() ->
             Dir, ?BONDY_OPLOG_WAL_CONSUMER_OFFSET_FILENAME
         ),
         %% Missing committed_frame_offset.
-        ok = file:write_file(Path,
+        ok = file:write_file(
+            Path,
             "{committed_segment, 0}.\n"
             "{commit_count, 0}.\n"
         ),
@@ -145,7 +155,8 @@ read_unsupported_schema_version_test() ->
         Path = filename:join(
             Dir, ?BONDY_OPLOG_WAL_CONSUMER_OFFSET_FILENAME
         ),
-        ok = file:write_file(Path,
+        ok = file:write_file(
+            Path,
             "{committed_segment, 0}.\n"
             "{committed_frame_offset, 48}.\n"
             "{schema_version, 99}.\n"
@@ -161,7 +172,8 @@ read_invalid_committed_segment_test() ->
         Path = filename:join(
             Dir, ?BONDY_OPLOG_WAL_CONSUMER_OFFSET_FILENAME
         ),
-        ok = file:write_file(Path,
+        ok = file:write_file(
+            Path,
             "{committed_segment, not_a_number}.\n"
             "{committed_frame_offset, 48}.\n"
         ),
@@ -176,7 +188,8 @@ read_negative_offset_rejected_test() ->
         Path = filename:join(
             Dir, ?BONDY_OPLOG_WAL_CONSUMER_OFFSET_FILENAME
         ),
-        ok = file:write_file(Path,
+        ok = file:write_file(
+            Path,
             "{committed_segment, 0}.\n"
             "{committed_frame_offset, -1}.\n"
         ),

@@ -496,9 +496,7 @@ child.
 
 instance_id_by_sup_pid(SupPid) when is_pid(SupPid) ->
     MatchSpec = [
-        {#entry{instance_id = '$1', sup_pid = SupPid, _ = '_'},
-         [],
-         ['$1']}
+        {#entry{instance_id = '$1', sup_pid = SupPid, _ = '_'}, [], ['$1']}
     ],
     case ets:select(?TABLE, MatchSpec, 1) of
         {[Id], _Cont} -> Id;
@@ -575,8 +573,10 @@ at instance init and never updated for the instance's lifetime.
     instance_id(), [{atom(), atom(), non_neg_integer()}]
 ) -> ok.
 
-set_ae_targets(InstanceId, Targets) when is_binary(InstanceId),
-                                          is_list(Targets) ->
+set_ae_targets(InstanceId, Targets) when
+    is_binary(InstanceId),
+    is_list(Targets)
+->
     _ = update_field(InstanceId, #entry.ae_targets, Targets),
     ok.
 
@@ -590,8 +590,9 @@ sides via the same atomic ref.
     instance_id(), atomics:atomics_ref(), pos_integer()
 ) -> ok.
 
-set_install_in_flight(InstanceId, Ref, Cap)
-        when is_binary(InstanceId), is_integer(Cap), Cap >= 1 ->
+set_install_in_flight(InstanceId, Ref, Cap) when
+    is_binary(InstanceId), is_integer(Cap), Cap >= 1
+->
     case ets:lookup(?TABLE, InstanceId) of
         [#entry{} = E] ->
             true = ets:insert(

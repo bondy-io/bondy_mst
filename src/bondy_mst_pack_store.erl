@@ -104,7 +104,7 @@ volume.
 """).
 
 -record(?MODULE, {
-    writer            :: bondy_mst_pack_writer:t(),
+    writer :: bondy_mst_pack_writer:t(),
     %% Invariant: stored in DESCENDING `pack_id` order (newest first).
     %% The read paths (`do_get/2`, `do_has/2`) iterate this list and
     %% short-circuit on the first hit, so newer pages — the most-
@@ -114,10 +114,10 @@ volume.
     %% preserve the invariant. Callers that need ascending order
     %% (`apply_compaction/3` reporting) sort at the use-site rather
     %% than reshuffling the canonical field.
-    sealed_views      :: [#sealed_view{}],
-    free_set          :: sets:set(binary()),
+    sealed_views :: [#sealed_view{}],
+    free_set :: sets:set(binary()),
     hashing_algorithm :: atom(),
-    opts              :: map(),
+    opts :: map(),
     %% Auto-seal thresholds. After every successful `put/2` the store
     %% checks pending record count and `incoming.pack` byte size; if
     %% either threshold is crossed it rolls over via `seal/1`. Defaults
@@ -127,7 +127,7 @@ volume.
     %% the put, since the page is already durable in incoming.pack
     %% and the next put will re-evaluate.
     auto_seal_records :: pos_integer() | infinity,
-    auto_seal_bytes   :: pos_integer() | infinity,
+    auto_seal_bytes :: pos_integer() | infinity,
     %% Tombstones-flush debounce. The `tombstones` file uses the same
     %% tmp+datasync+rename+fsync_dir pattern as the manifest (4 fsyncs
     %% per write). `bondy_mst:put/3` issues one `free/3` per spine
@@ -140,10 +140,10 @@ volume.
     %% `flush/1` force a flush so the on-disk tombstones never lag the
     %% in-memory set for long.
     tombstones_flush_every_records :: pos_integer() | infinity,
-    tombstones_flush_every_ms      :: pos_integer() | infinity,
-    tombstones_unsynced_count = 0  :: non_neg_integer(),
-    last_tombstones_flush_ms       :: integer(),
-    tombstones_dirty = false       :: boolean(),
+    tombstones_flush_every_ms :: pos_integer() | infinity,
+    tombstones_unsynced_count = 0 :: non_neg_integer(),
+    last_tombstones_flush_ms :: integer(),
+    tombstones_dirty = false :: boolean(),
     %% GC dead-fraction gate. The original policy was "rewrite on any
     %% drop", which is correct but not granular — for very large stores
     %% with sparse churn it rewrites the world on every GC. Setting
@@ -153,14 +153,14 @@ volume.
     %% 2+ sealed packs, GC always merges them into one (the threshold
     %% only gates the dead-fraction case). Default `0.0` preserves the
     %% pre-PR-PS-6 behaviour. See QA #9 / design §8.1.
-    gc_threshold_dead_fraction     :: float()
+    gc_threshold_dead_fraction :: float()
 }).
 
 -type t() :: #?MODULE{}.
 -type page() :: bondy_mst_page:t().
 -type opts() :: opts_map() | [{atom(), term()}].
 -type opts_map() :: #{
-    dir         := file:filename_all(),
+    dir := file:filename_all(),
     instance_id := binary(),
     atom() => term()
 }.
@@ -210,20 +210,20 @@ open(sha256, Opts) when is_map(Opts) ->
     WriterOpts1 = forward_opt(sync_every_records, Opts, WriterOpts0),
     WriterOpts2 = forward_opt(sync_every_ms, Opts, WriterOpts1),
     WriterOpts3 = forward_opt(root_flush_every_records, Opts, WriterOpts2),
-    WriterOpts  = forward_opt(root_flush_every_ms, Opts, WriterOpts3),
+    WriterOpts = forward_opt(root_flush_every_ms, Opts, WriterOpts3),
     Cfg = #{
-        opts                           => Opts,
-        auto_seal_records              =>
+        opts => Opts,
+        auto_seal_records =>
             validated_auto_seal(auto_seal_records, Opts),
-        auto_seal_bytes                =>
+        auto_seal_bytes =>
             validated_auto_seal(auto_seal_bytes, Opts),
         tombstones_flush_every_records =>
             validated_tombstones_flush(tombstones_flush_every_records, Opts),
-        tombstones_flush_every_ms      =>
+        tombstones_flush_every_ms =>
             validated_tombstones_flush(tombstones_flush_every_ms, Opts),
-        gc_threshold_dead_fraction     =>
+        gc_threshold_dead_fraction =>
             validated_gc_threshold(gc_threshold_dead_fraction, Opts),
-        now                            => erlang:monotonic_time(millisecond)
+        now => erlang:monotonic_time(millisecond)
     },
     open_writer(Dir, InstanceId, WriterOpts, Cfg);
 open(Algo, _Opts) ->
@@ -313,8 +313,8 @@ close(#?MODULE{} = T) ->
 
 capabilities(#?MODULE{}) ->
     #{
-        transactions      => false,
-        read_concurrency  => false,
+        transactions => false,
+        read_concurrency => false,
         concurrent_writes => false
     }.
 
@@ -339,12 +339,15 @@ get(#?MODULE{} = T, Hash) when is_binary(Hash) ->
     StartTs = erlang:monotonic_time(microsecond),
     {Page, Source, ByteSize} =
         case sets:is_element(Hash, T#?MODULE.free_set) of
-            true  -> {undefined, cold_miss, 0};
+            true -> {undefined, cold_miss, 0};
             false -> do_get(T, Hash)
         end,
-    emit_get(T, ByteSize,
-             erlang:monotonic_time(microsecond) - StartTs,
-             Source),
+    emit_get(
+        T,
+        ByteSize,
+        erlang:monotonic_time(microsecond) - StartTs,
+        Source
+    ),
     Page.
 
 -spec has(t(), binary()) -> boolean().
@@ -370,7 +373,9 @@ put(#?MODULE{writer = W, hashing_algorithm = Algo} = T, Page) ->
             Hash = bondy_mst_page:hash(Page, Algo),
             T1 = maybe_persist_free_set(
                 T#?MODULE{writer = W1},
-                sets:del_element(Hash, T#?MODULE.free_set), put),
+                sets:del_element(Hash, T#?MODULE.free_set),
+                put
+            ),
             T2 = maybe_auto_seal(T1),
             %% ContentHit: the writer dedups against its `pending` map.
             %% If pending_count didn't grow, the page was already in
@@ -379,9 +384,12 @@ put(#?MODULE{writer = W, hashing_algorithm = Algo} = T, Page) ->
             %% writer still appends them to incoming.pack.)
             ContentHit =
                 bondy_mst_pack_writer:pending_count(W1) =:= PendingBefore,
-            emit_put(T2, byte_size(Bytes),
-                     erlang:monotonic_time(microsecond) - StartTs,
-                     ContentHit),
+            emit_put(
+                T2,
+                byte_size(Bytes),
+                erlang:monotonic_time(microsecond) - StartTs,
+                ContentHit
+            ),
             {Hash, T2};
         {error, R} ->
             error({put, R})
@@ -390,8 +398,11 @@ put(#?MODULE{writer = W, hashing_algorithm = Algo} = T, Page) ->
 -spec delete(t(), binary()) -> t().
 
 delete(#?MODULE{} = T, Hash) when is_binary(Hash) ->
-    maybe_persist_free_set(T,
-        sets:add_element(Hash, T#?MODULE.free_set), delete).
+    maybe_persist_free_set(
+        T,
+        sets:add_element(Hash, T#?MODULE.free_set),
+        delete
+    ).
 
 -spec copy(t(), bondy_mst_store:t(), binary()) -> t().
 
@@ -418,7 +429,7 @@ list(#?MODULE{} = T) ->
         fun(H) ->
             case do_get(T, H) of
                 {undefined, _, _} -> false;
-                {Page, _, _}      -> {true, Page}
+                {Page, _, _} -> {true, Page}
             end
         end,
         Hashes
@@ -427,8 +438,11 @@ list(#?MODULE{} = T) ->
 -spec free(t(), binary(), page()) -> t().
 
 free(#?MODULE{} = T, Hash, _Page) when is_binary(Hash) ->
-    maybe_persist_free_set(T,
-        sets:add_element(Hash, T#?MODULE.free_set), free).
+    maybe_persist_free_set(
+        T,
+        sets:add_element(Hash, T#?MODULE.free_set),
+        free
+    ).
 
 ?DOC("""
 Pack-rewrite compaction. Given a list of `KeepRoots`, computes the
@@ -482,15 +496,19 @@ gc(#?MODULE{} = T, KeepRoots) when is_list(KeepRoots) ->
     %% post-call by stat'ing the new pack (if any) and subtracting
     %% from the pre-call sum. The new pack's bytes are still on disk
     %% at this point (finalise_compaction has fsync'd everything).
-    NewBytes = case maps:get(new_pack, Meta0, undefined) of
-        undefined -> 0;
-        PackId    ->
-            try filelib:file_size(
-                    bondy_mst_pack_paths:sealed_pack_path(Dir, PackId)
-                )
-            catch _:_ -> 0
-            end
-    end,
+    NewBytes =
+        case maps:get(new_pack, Meta0, undefined) of
+            undefined ->
+                0;
+            PackId ->
+                try
+                    filelib:file_size(
+                        bondy_mst_pack_paths:sealed_pack_path(Dir, PackId)
+                    )
+                catch
+                    _:_ -> 0
+                end
+        end,
     BytesFreed = max(OldBytes - NewBytes, 0),
     Meta = Meta0#{bytes_freed => BytesFreed},
     emit_gc(T1, Meta, DurationUs),
@@ -546,10 +564,17 @@ seal(#?MODULE{writer = W} = T) ->
                     Ctx = bondy_mst_pack_sealed_view:open_ctx_from_writer(W1),
                     case bondy_mst_pack_sealed_view:open(Dir, Ctx, PackId) of
                         {ok, View} ->
-                            Views = newest_first([View | T0#?MODULE.sealed_views]),
+                            Views = newest_first([
+                                View | T0#?MODULE.sealed_views
+                            ]),
                             T1 = T0#?MODULE{writer = W1, sealed_views = Views},
-                            emit_seal(T1, RecordCount, PackBytes,
-                                      DurationUs, PackId),
+                            emit_seal(
+                                T1,
+                                RecordCount,
+                                PackBytes,
+                                DurationUs,
+                                PackId
+                            ),
                             {ok, T1};
                         {error, _} = E ->
                             E
@@ -589,8 +614,8 @@ Fields:
 -spec info(t()) -> map().
 info(#?MODULE{} = T) ->
     #{
-        instance_id          => instance_id(T),
-        live_pack_count      => length(T#?MODULE.sealed_views),
+        instance_id => instance_id(T),
+        live_pack_count => length(T#?MODULE.sealed_views),
         pending_record_count =>
             bondy_mst_pack_writer:pending_count(T#?MODULE.writer),
         %% Total bytes resident in the writer's pending map (= the
@@ -599,10 +624,10 @@ info(#?MODULE{} = T) ->
         %% per-record headers, CRC, and body). Used by operators
         %% sizing per-instance memory budgets and by the QA #15
         %% memory-audit bench.
-        pending_bytes        =>
+        pending_bytes =>
             bondy_mst_pack_writer:incoming_offset(T#?MODULE.writer),
-        bytes_total          => sealed_views_bytes(T),
-        current_root_hash    => get_root(T)
+        bytes_total => sealed_views_bytes(T),
+        current_root_hash => get_root(T)
     }.
 
 %% =============================================================================
@@ -613,14 +638,14 @@ info(#?MODULE{} = T) ->
 required(K, M) ->
     case maps:find(K, M) of
         {ok, V} -> V;
-        error   -> error({missing_opt, K})
+        error -> error({missing_opt, K})
     end.
 
 %% @private
 forward_opt(K, Src, Dst) ->
     case maps:find(K, Src) of
         {ok, V} -> Dst#{K => V};
-        error   -> Dst
+        error -> Dst
     end.
 
 %% @private
@@ -713,16 +738,26 @@ load_tombstones(Dir) ->
 %%
 %% Both thresholds default to `infinity`; in that case the function
 %% short-circuits to avoid even the inspection calls.
-maybe_auto_seal(#?MODULE{auto_seal_records = infinity,
-                         auto_seal_bytes   = infinity} = T) ->
+maybe_auto_seal(
+    #?MODULE{
+        auto_seal_records = infinity,
+        auto_seal_bytes = infinity
+    } = T
+) ->
     T;
-maybe_auto_seal(#?MODULE{writer = W,
-                         auto_seal_records = RMax,
-                         auto_seal_bytes   = BMax} = T) ->
+maybe_auto_seal(
+    #?MODULE{
+        writer = W,
+        auto_seal_records = RMax,
+        auto_seal_bytes = BMax
+    } = T
+) ->
     Records = bondy_mst_pack_writer:pending_count(W),
     Bytes = bondy_mst_pack_writer:incoming_offset(W),
-    case threshold_crossed(Records, RMax)
-         orelse threshold_crossed(Bytes, BMax) of
+    case
+        threshold_crossed(Records, RMax) orelse
+            threshold_crossed(Bytes, BMax)
+    of
         false ->
             T;
         true ->
@@ -742,7 +777,7 @@ maybe_auto_seal(#?MODULE{writer = W,
 
 %% @private
 threshold_crossed(_, infinity) -> false;
-threshold_crossed(V, Max)      -> V >= Max.
+threshold_crossed(V, Max) -> V >= Max.
 
 %% @private
 %% Updates the in-memory `free_set` and decides whether to persist
@@ -771,7 +806,7 @@ maybe_persist_free_set(#?MODULE{free_set = Old} = T, New, Op) ->
             case tombstones_flush_due(T1) of
                 true ->
                     case do_flush_tombstones(T1) of
-                        {ok, T2}   -> T2;
+                        {ok, T2} -> T2;
                         {error, R} -> error({Op, {tombstones, R}})
                     end;
                 false ->
@@ -787,15 +822,18 @@ maybe_persist_free_set(#?MODULE{free_set = Old} = T, New, Op) ->
 tombstones_flush_due(#?MODULE{tombstones_dirty = false}) ->
     false;
 tombstones_flush_due(#?MODULE{
-        tombstones_unsynced_count = N,
-        tombstones_flush_every_records = K}) when
-        is_integer(K), N >= K ->
+    tombstones_unsynced_count = N,
+    tombstones_flush_every_records = K
+}) when
+    is_integer(K), N >= K
+->
     true;
 tombstones_flush_due(#?MODULE{tombstones_flush_every_ms = infinity}) ->
     false;
 tombstones_flush_due(#?MODULE{
-        last_tombstones_flush_ms = Last,
-        tombstones_flush_every_ms = TMs}) ->
+    last_tombstones_flush_ms = Last,
+    tombstones_flush_every_ms = TMs
+}) ->
     erlang:monotonic_time(millisecond) - Last >= TMs.
 
 %% @private
@@ -827,7 +865,8 @@ open_sealed_views(Dir, Ctx, [Id | Rest]) ->
     case bondy_mst_pack_sealed_view:open(Dir, Ctx, Id) of
         {ok, V} ->
             case open_sealed_views(Dir, Ctx, Rest) of
-                {ok, Vs} -> {ok, [V | Vs]};
+                {ok, Vs} ->
+                    {ok, [V | Vs]};
                 {error, _} = E ->
                     _ = prim_file:close(V#sealed_view.pack_fd),
                     E
@@ -865,8 +904,11 @@ get_from_sealed([V | Rest], Hash) ->
         {ok, Offset} ->
             case bondy_mst_pack_io:read_record(V, Hash, Offset) of
                 {ok, Bytes} ->
-                    {deserialise(Bytes), {sealed_pack, V#sealed_view.pack_id},
-                     byte_size(Bytes)};
+                    {
+                        deserialise(Bytes),
+                        {sealed_pack, V#sealed_view.pack_id},
+                        byte_size(Bytes)
+                    };
                 not_found ->
                     get_from_sealed(Rest, Hash);
                 {error, R} ->
@@ -892,13 +934,16 @@ do_has(#?MODULE{writer = W, sealed_views = Views}, Hash) ->
 %% Enumerate every hash known to the store: pending first, then
 %% every sealed view in newest-first order. Hashes are de-duplicated;
 %% `free_set` members are excluded.
-enumerate_hashes(#?MODULE{writer = W, sealed_views = Views,
-                         free_set = FreeSet}) ->
+enumerate_hashes(#?MODULE{
+    writer = W,
+    sealed_views = Views,
+    free_set = FreeSet
+}) ->
     Pending = bondy_mst_pack_writer:pending_hashes(W),
     Seen0 = lists:foldl(
         fun(H, M) ->
             case sets:is_element(H, FreeSet) of
-                true  -> M;
+                true -> M;
                 false -> M#{H => true}
             end
         end,
@@ -910,7 +955,7 @@ enumerate_hashes(#?MODULE{writer = W, sealed_views = Views,
             lists:foldl(
                 fun({H, _}, A) ->
                     case sets:is_element(H, FreeSet) of
-                        true  -> A;
+                        true -> A;
                         false -> A#{H => true}
                     end
                 end,
@@ -945,8 +990,10 @@ serialise(Page) ->
     Level = bondy_mst_page:level(Page),
     Low = bondy_mst_page:low(Page),
     List = bondy_mst_page:list(Page),
-    erlang:term_to_binary({Level, Low, List},
-                          [deterministic, {minor_version, 2}]).
+    erlang:term_to_binary(
+        {Level, Low, List},
+        [deterministic, {minor_version, 2}]
+    ).
 
 %% @private
 deserialise(Bytes) ->
@@ -959,8 +1006,13 @@ deserialise(Bytes) ->
 
 %% @private
 gc_noop_meta() ->
-    #{compacted => false, retired => [], new_pack => undefined,
-      kept => 0, dropped => 0}.
+    #{
+        compacted => false,
+        retired => [],
+        new_pack => undefined,
+        kept => 0,
+        dropped => 0
+    }.
 
 %% @private
 %% Meta for the threshold-skip path: GC found drops but decided not to
@@ -968,9 +1020,14 @@ gc_noop_meta() ->
 %% Reports the actual `Kept` / `Dropped` so operators can see the gap
 %% between the observed state and the configured threshold.
 gc_threshold_skip_meta(Kept, Dropped) ->
-    #{compacted => false, reason => below_threshold,
-      retired => [], new_pack => undefined,
-      kept => Kept, dropped => Dropped}.
+    #{
+        compacted => false,
+        reason => below_threshold,
+        retired => [],
+        new_pack => undefined,
+        kept => Kept,
+        dropped => Dropped
+    }.
 
 %% @private
 do_gc(#?MODULE{} = T, KeepRoots) ->
@@ -1026,8 +1083,10 @@ walk_reachable(T, Hash, Acc) when is_binary(Hash) ->
 %% Walk every sealed entry once. Newest-first dedup: if the same hash
 %% appears in multiple sealed packs (legal because content is
 %% identical), it's accounted for exactly once.
-partition_sealed(#?MODULE{sealed_views = Views, free_set = FreeSet},
-                Reachable) ->
+partition_sealed(
+    #?MODULE{sealed_views = Views, free_set = FreeSet},
+    Reachable
+) ->
     Init = {[], 0, sets:new([{version, 2}])},
     {Kept, Dropped, _Seen} = lists:foldl(
         fun(#sealed_view{idx = Idx}, Acc) ->
@@ -1038,10 +1097,11 @@ partition_sealed(#?MODULE{sealed_views = Views, free_set = FreeSet},
                             {K, D, S};
                         false ->
                             S1 = sets:add_element(H, S),
-                            Keep = sets:is_element(H, Reachable)
-                                andalso not sets:is_element(H, FreeSet),
+                            Keep =
+                                sets:is_element(H, Reachable) andalso
+                                    not sets:is_element(H, FreeSet),
                             case Keep of
-                                true  -> {[H | K], D, S1};
+                                true -> {[H | K], D, S1};
                                 false -> {K, D + 1, S1}
                             end
                     end
@@ -1065,9 +1125,14 @@ partition_sealed(#?MODULE{sealed_views = Views, free_set = FreeSet},
 %% (`Dropped / (Kept + Dropped)`) meets `gc_threshold_dead_fraction`.
 should_compact(#?MODULE{sealed_views = Views}, _Kept, 0) ->
     length(Views) > 1;
-should_compact(#?MODULE{sealed_views = Views,
-                        gc_threshold_dead_fraction = TR},
-               Kept, Dropped) ->
+should_compact(
+    #?MODULE{
+        sealed_views = Views,
+        gc_threshold_dead_fraction = TR
+    },
+    Kept,
+    Dropped
+) ->
     length(Views) > 1 orelse (Dropped / (Kept + Dropped)) >= TR.
 
 %% @private
@@ -1109,11 +1174,25 @@ apply_compaction(T, KeptHashes, Dropped) ->
     %% not require sorted input.
     OldIds = lists:sort([V#sealed_view.pack_id || V <- Views]),
     NewPackId = lists:max(OldIds) + 1,
-    case write_compacted_pack(Dir, IH, Algo, NewPackId, KeptHashes,
-                              sealed_reader(Views)) of
+    case
+        write_compacted_pack(
+            Dir,
+            IH,
+            Algo,
+            NewPackId,
+            KeptHashes,
+            sealed_reader(Views)
+        )
+    of
         ok ->
-            commit_compaction(T, Dir, OldIds, NewPackId, KeptHashes,
-                              Dropped);
+            commit_compaction(
+                T,
+                Dir,
+                OldIds,
+                NewPackId,
+                KeptHashes,
+                Dropped
+            );
         {error, R} ->
             ?LOG_ERROR(#{
                 event => mst_pack_store_gc_write_failed,
@@ -1137,10 +1216,11 @@ commit_compaction(T, Dir, OldIds, NewPackId, KeptHashes, Dropped) ->
     W0 = T#?MODULE.writer,
     M0 = bondy_mst_pack_writer:manifest(W0),
     M1 = bondy_mst_pack_manifest:remove_sealed_packs(M0, OldIds),
-    M2 = case KeptHashes of
-        [] -> M1;
-        _  -> bondy_mst_pack_manifest:add_sealed_pack(M1, NewPackId)
-    end,
+    M2 =
+        case KeptHashes of
+            [] -> M1;
+            _ -> bondy_mst_pack_manifest:add_sealed_pack(M1, NewPackId)
+        end,
     M3 = bondy_mst_pack_manifest:with_last_compacted_at(
         M2, erlang:system_time(millisecond)
     ),
@@ -1150,9 +1230,13 @@ commit_compaction(T, Dir, OldIds, NewPackId, KeptHashes, Dropped) ->
         {error, R} ->
             %% Roll back: delete the just-written sealed pack (if any).
             case KeptHashes of
-                [] -> ok;
-                _  -> bondy_mst_pack_seal:delete_sealed_pack_files(Dir,
-                                                                   NewPackId)
+                [] ->
+                    ok;
+                _ ->
+                    bondy_mst_pack_seal:delete_sealed_pack_files(
+                        Dir,
+                        NewPackId
+                    )
             end,
             ?LOG_ERROR(#{
                 event => mst_pack_store_gc_manifest_swap_failed,
@@ -1177,12 +1261,17 @@ finalise_compaction(T, M, OldIds, NewPackId, KeptHashes, Dropped) ->
         fun(#sealed_view{pack_fd = Fd}) -> _ = prim_file:close(Fd) end,
         OldViews
     ),
-    NewViews = case KeptHashes of
-        [] ->
-            [];
-        _ ->
-            open_new_view_or_raise(Dir, bondy_mst_pack_sealed_view:open_ctx_from_writer(W1), NewPackId)
-    end,
+    NewViews =
+        case KeptHashes of
+            [] ->
+                [];
+            _ ->
+                open_new_view_or_raise(
+                    Dir,
+                    bondy_mst_pack_sealed_view:open_ctx_from_writer(W1),
+                    NewPackId
+                )
+        end,
     lists:foreach(
         fun(Id) -> bondy_mst_pack_seal:delete_sealed_pack_files(Dir, Id) end,
         OldIds
@@ -1193,24 +1282,28 @@ finalise_compaction(T, M, OldIds, NewPackId, KeptHashes, Dropped) ->
     %% rule that GC commit yields fully durable state).
     Pruned = prune_applied_tombstones(W1, T#?MODULE.free_set),
     T0 = T#?MODULE{
-        writer       = W1,
+        writer = W1,
         sealed_views = NewViews,
-        free_set     = Pruned,
+        free_set = Pruned,
         tombstones_dirty = true
     },
-    T1 = case do_flush_tombstones(T0) of
-        {ok, FlushedT} ->
-            FlushedT;
-        {error, Reason} ->
-            error({gc, {tombstones, Reason}})
-    end,
+    T1 =
+        case do_flush_tombstones(T0) of
+            {ok, FlushedT} ->
+                FlushedT;
+            {error, Reason} ->
+                error({gc, {tombstones, Reason}})
+        end,
     Meta = #{
-        compacted         => true,
-        retired           => OldIds,
-        new_pack          =>
-            case KeptHashes of [] -> undefined; _ -> NewPackId end,
-        kept              => length(KeptHashes),
-        dropped           => Dropped,
+        compacted => true,
+        retired => OldIds,
+        new_pack =>
+            case KeptHashes of
+                [] -> undefined;
+                _ -> NewPackId
+            end,
+        kept => length(KeptHashes),
+        dropped => Dropped,
         last_compacted_at => bondy_mst_pack_manifest:last_compacted_at(M)
     },
     {T1, Meta}.
@@ -1294,7 +1387,7 @@ emit_put(T, PageBytes, DurationUs, ContentHit) ->
     telemetry:execute(
         [bondy_mst, page_store, put],
         #{
-            page_bytes  => PageBytes,
+            page_bytes => PageBytes,
             duration_us => DurationUs,
             content_hit => ContentHit
         },
@@ -1306,9 +1399,9 @@ emit_get(T, PageBytes, DurationUs, Source) ->
     telemetry:execute(
         [bondy_mst, page_store, get],
         #{
-            page_bytes  => PageBytes,
+            page_bytes => PageBytes,
             duration_us => DurationUs,
-            source      => Source
+            source => Source
         },
         #{instance_id => instance_id(T)}
     ).
@@ -1319,8 +1412,8 @@ emit_seal(T, RecordCount, PackBytes, DurationUs, NewPackId) ->
         [bondy_mst, page_store, seal_incoming],
         #{
             record_count => RecordCount,
-            pack_bytes   => PackBytes,
-            duration_us  => DurationUs
+            pack_bytes => PackBytes,
+            duration_us => DurationUs
         },
         #{instance_id => instance_id(T), new_pack_id => NewPackId}
     ).
@@ -1333,24 +1426,26 @@ emit_seal(T, RecordCount, PackBytes, DurationUs, NewPackId) ->
 %% to do), or `epoch_unsupported` (integer epoch passed).
 emit_gc(T, Meta, DurationUs) ->
     PacksRetired = length(maps:get(retired, Meta, [])),
-    PacksCreated = case maps:get(new_pack, Meta, undefined) of
-        undefined -> 0;
-        _         -> 1
-    end,
-    Reason = case Meta of
-        #{reason := R}                  -> R;
-        #{compacted := true}            -> compacted;
-        _                               -> noop
-    end,
+    PacksCreated =
+        case maps:get(new_pack, Meta, undefined) of
+            undefined -> 0;
+            _ -> 1
+        end,
+    Reason =
+        case Meta of
+            #{reason := R} -> R;
+            #{compacted := true} -> compacted;
+            _ -> noop
+        end,
     telemetry:execute(
         [bondy_mst, page_store, gc],
         #{
-            pages_kept    => maps:get(kept, Meta, 0),
+            pages_kept => maps:get(kept, Meta, 0),
             pages_dropped => maps:get(dropped, Meta, 0),
             packs_retired => PacksRetired,
             packs_created => PacksCreated,
-            bytes_freed   => maps:get(bytes_freed, Meta, 0),
-            duration_us   => DurationUs
+            bytes_freed => maps:get(bytes_freed, Meta, 0),
+            duration_us => DurationUs
         },
         #{instance_id => instance_id(T), reason => Reason}
     ).
@@ -1365,17 +1460,17 @@ emit_recovery_ok(InstanceId, Outcome, DurationUs) ->
     telemetry:execute(
         [bondy_mst, page_store, recovery],
         #{
-            duration_us       => DurationUs,
-            bytes_truncated   => maps:get(bytes_truncated, Outcome),
+            duration_us => DurationUs,
+            bytes_truncated => maps:get(bytes_truncated, Outcome),
             records_recovered => maps:get(records_recovered, Outcome)
         },
         #{
-            instance_id           => InstanceId,
-            result                => ok,
-            actions               => maps:get(actions, Outcome),
+            instance_id => InstanceId,
+            result => ok,
+            actions => maps:get(actions, Outcome),
             incoming_state_before =>
                 maps:get(incoming_state_before, Outcome),
-            incoming_state_after  =>
+            incoming_state_after =>
                 maps:get(incoming_state_after, Outcome)
         }
     ).
@@ -1388,16 +1483,15 @@ emit_recovery_failed(InstanceId, Reason, DurationUs) ->
     telemetry:execute(
         [bondy_mst, page_store, recovery],
         #{
-            duration_us       => DurationUs,
-            bytes_truncated   => 0,
+            duration_us => DurationUs,
+            bytes_truncated => 0,
             records_recovered => 0
         },
         #{
-            instance_id           => InstanceId,
-            result                => {error, Reason},
-            actions               => [],
+            instance_id => InstanceId,
+            result => {error, Reason},
+            actions => [],
             incoming_state_before => unknown,
-            incoming_state_after  => unknown
+            incoming_state_after => unknown
         }
     ).
-

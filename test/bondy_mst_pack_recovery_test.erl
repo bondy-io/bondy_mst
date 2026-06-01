@@ -46,7 +46,8 @@ with_telemetry(Fun) ->
         end,
         []
     ),
-    try Fun()
+    try
+        Fun()
     after
         ok = telemetry:detach(HandlerId),
         drain()
@@ -81,26 +82,38 @@ mailbox_dump() ->
 %% =============================================================================
 
 mk_tmp_dir() ->
-    Base = lists:flatten(io_lib:format(
-        "/tmp/bondy_mst_pack_recovery_test_~p_~p",
-        [erlang:system_time(microsecond),
-         erlang:unique_integer([positive])])),
+    Base = lists:flatten(
+        io_lib:format(
+            "/tmp/bondy_mst_pack_recovery_test_~p_~p",
+            [
+                erlang:system_time(microsecond),
+                erlang:unique_integer([positive])
+            ]
+        )
+    ),
     ok = filelib:ensure_path(Base),
     Base.
 
-rmrf(Dir) -> _ = file:del_dir_r(Dir), ok.
+rmrf(Dir) ->
+    _ = file:del_dir_r(Dir),
+    ok.
 
 mk_instance_id() ->
     list_to_binary(
         "recovery_test_" ++
-        integer_to_list(erlang:unique_integer([positive]))).
+            integer_to_list(erlang:unique_integer([positive]))
+    ).
 
 open_store(Dir, InstanceId) ->
     bondy_mst_store:open(
-        bondy_mst_pack_store, sha256,
-        #{dir => Dir, instance_id => InstanceId,
-          auto_seal_records => infinity,
-          auto_seal_bytes   => infinity}
+        bondy_mst_pack_store,
+        sha256,
+        #{
+            dir => Dir,
+            instance_id => InstanceId,
+            auto_seal_records => infinity,
+            auto_seal_bytes => infinity
+        }
     ).
 
 mk_page(K, V) ->
@@ -151,7 +164,8 @@ seed_n_pages(Dir, InstanceId, N) ->
             {_, S2} = bondy_mst_store:put(S, mk_page(K, V)),
             S2
         end,
-        S0, lists:seq(1, N)
+        S0,
+        lists:seq(1, N)
     ),
     ok = bondy_mst_store:close(S1),
     ok.
@@ -170,17 +184,22 @@ orphan_incoming_file_test() ->
             {M, D} = recv_event(),
             ?assertEqual(ok, maps:get(result, D)),
             ?assertEqual([orphan_incoming_deleted], maps:get(actions, D)),
-            ?assertEqual(absent,
-                maps:get(incoming_state_before, D)),
-            ?assertEqual(absent,
-                maps:get(incoming_state_after, D)),
+            ?assertEqual(
+                absent,
+                maps:get(incoming_state_before, D)
+            ),
+            ?assertEqual(
+                absent,
+                maps:get(incoming_state_after, D)
+            ),
             ?assertEqual(0, maps:get(bytes_truncated, M)),
             ?assertEqual(0, maps:get(records_recovered, M)),
             ?assertEqual(InstanceId, maps:get(instance_id, D)),
             %% Post-recovery: store is fresh and usable.
             {_, S1} = bondy_mst_store:put(S, mk_page(<<"a">>, <<"1">>)),
             ok = bondy_mst_store:close(S1)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -202,14 +221,17 @@ missing_incoming_file_test() ->
             S = open_store(Dir, InstanceId),
             {M, D} = recv_event(),
             ?assertEqual(ok, maps:get(result, D)),
-            ?assertEqual([manifest_flipped_to_absent],
-                maps:get(actions, D)),
+            ?assertEqual(
+                [manifest_flipped_to_absent],
+                maps:get(actions, D)
+            ),
             ?assertEqual(present, maps:get(incoming_state_before, D)),
-            ?assertEqual(absent,  maps:get(incoming_state_after, D)),
+            ?assertEqual(absent, maps:get(incoming_state_after, D)),
             ?assertEqual(0, maps:get(bytes_truncated, M)),
             ?assertEqual(0, maps:get(records_recovered, M)),
             ok = bondy_mst_store:close(S)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -230,17 +252,20 @@ header_corrupt_test() ->
             S = open_store(Dir, InstanceId),
             {M, D} = recv_event(),
             ?assertEqual(ok, maps:get(result, D)),
-            ?assertEqual([header_reset, manifest_flipped_to_absent],
-                maps:get(actions, D)),
+            ?assertEqual(
+                [header_reset, manifest_flipped_to_absent],
+                maps:get(actions, D)
+            ),
             ?assertEqual(present, maps:get(incoming_state_before, D)),
-            ?assertEqual(absent,  maps:get(incoming_state_after, D)),
+            ?assertEqual(absent, maps:get(incoming_state_after, D)),
             ?assertEqual(OrigSize, maps:get(bytes_truncated, M)),
-            ?assertEqual(0,        maps:get(records_recovered, M)),
+            ?assertEqual(0, maps:get(records_recovered, M)),
             %% After Case C the records are gone (WAL would replay them
             %% in production); the store is fresh and usable.
             ?assertEqual(false, filelib:is_regular(incoming_path(Dir))),
             ok = bondy_mst_store:close(S)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -264,13 +289,16 @@ header_short_test() ->
             S = open_store(Dir, InstanceId),
             {_M, D} = recv_event(),
             ?assertEqual(ok, maps:get(result, D)),
-            ?assertEqual([header_reset, manifest_flipped_to_absent],
-                maps:get(actions, D)),
+            ?assertEqual(
+                [header_reset, manifest_flipped_to_absent],
+                maps:get(actions, D)
+            ),
             ?assertEqual(present, maps:get(incoming_state_before, D)),
-            ?assertEqual(absent,  maps:get(incoming_state_after, D)),
+            ?assertEqual(absent, maps:get(incoming_state_after, D)),
             ?assertEqual(false, filelib:is_regular(incoming_path(Dir))),
             ok = bondy_mst_store:close(S)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -286,20 +314,24 @@ trailing_garbage_test() ->
             ok = seed_n_pages(Dir, InstanceId, 5),
             expect_no_event(),
             OrigSize = incoming_size(Dir),
-            append_raw(Dir, <<0:160>>),  %% 20 bytes < record header (40)
+            %% 20 bytes < record header (40)
+            append_raw(Dir, <<0:160>>),
             ?assertEqual(OrigSize + 20, incoming_size(Dir)),
             S = open_store(Dir, InstanceId),
             {M, D} = recv_event(),
             ?assertEqual(ok, maps:get(result, D)),
-            ?assertEqual([trailing_records_truncated],
-                maps:get(actions, D)),
+            ?assertEqual(
+                [trailing_records_truncated],
+                maps:get(actions, D)
+            ),
             ?assertEqual(present, maps:get(incoming_state_before, D)),
             ?assertEqual(present, maps:get(incoming_state_after, D)),
             ?assertEqual(20, maps:get(bytes_truncated, M)),
-            ?assertEqual(5,  maps:get(records_recovered, M)),
+            ?assertEqual(5, maps:get(records_recovered, M)),
             ?assertEqual(OrigSize, incoming_size(Dir)),
             ok = bondy_mst_store:close(S)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -321,22 +353,25 @@ torn_record_body_test() ->
             Hash = crypto:hash(sha256, <<"not-the-real-body">>),
             BodyLen = 16,
             Crc = erlang:crc32(<<0:128>>),
-            BadHeader = <<Hash/binary,
-                          BodyLen:32/big-unsigned,
-                          (Crc + 1):32/big-unsigned>>,
+            BadHeader =
+                <<Hash/binary, BodyLen:32/big-unsigned,
+                    (Crc + 1):32/big-unsigned>>,
             BadBody = <<0:128>>,
             append_raw(Dir, <<BadHeader/binary, BadBody/binary>>),
             ?assertEqual(OrigSize + 40 + 16, incoming_size(Dir)),
             S = open_store(Dir, InstanceId),
             {M, D} = recv_event(),
-            ?assertEqual([trailing_records_truncated],
-                maps:get(actions, D)),
+            ?assertEqual(
+                [trailing_records_truncated],
+                maps:get(actions, D)
+            ),
             ?assertEqual(present, maps:get(incoming_state_after, D)),
             ?assertEqual(40 + 16, maps:get(bytes_truncated, M)),
             ?assertEqual(3, maps:get(records_recovered, M)),
             ?assertEqual(OrigSize, incoming_size(Dir)),
             ok = bondy_mst_store:close(S)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -353,7 +388,8 @@ clean_reopen_no_event_test() ->
             S = open_store(Dir, InstanceId),
             expect_no_event(),
             ok = bondy_mst_store:close(S)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).
 
@@ -370,14 +406,17 @@ append_after_truncate_test() ->
             append_raw(Dir, <<0:160>>),
             S = open_store(Dir, InstanceId),
             {_M, D} = recv_event(),
-            ?assertEqual([trailing_records_truncated],
-                maps:get(actions, D)),
+            ?assertEqual(
+                [trailing_records_truncated],
+                maps:get(actions, D)
+            ),
             {_, S1} = bondy_mst_store:put(S, mk_page(<<"new">>, <<"v">>)),
             ok = bondy_mst_store:close(S1),
             %% Reopen again — should be clean now.
             S2 = open_store(Dir, InstanceId),
             expect_no_event(),
             ok = bondy_mst_store:close(S2)
-        after rmrf(Dir)
+        after
+            rmrf(Dir)
         end
     end).

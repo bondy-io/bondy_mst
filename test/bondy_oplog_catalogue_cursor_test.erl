@@ -43,11 +43,9 @@ mint_returns_opaque_binary() ->
     ?assertEqual(16, byte_size(Cursor)),
     ok = bondy_oplog_catalogue_cursor:discard(Cursor).
 
-
 lookup_unknown_returns_not_found() ->
     Bogus = crypto:strong_rand_bytes(16),
     ?assertEqual(not_found, bondy_oplog_catalogue_cursor:lookup(Bogus)).
-
 
 lookup_after_mint_returns_state() ->
     InstId = mk_id(),
@@ -56,17 +54,19 @@ lookup_after_mint_returns_state() ->
         InstId, NS, primary, 0, <<"bkt">>, 100
     ),
     {ok, State} = bondy_oplog_catalogue_cursor:lookup(Cursor),
-    ?assertMatch(#{
-        instance_id := InstId,
-        ns := NS,
-        index := primary,
-        shard := 0,
-        bucket := <<"bkt">>,
-        last_key := undefined,
-        watermark := 100
-    }, State),
+    ?assertMatch(
+        #{
+            instance_id := InstId,
+            ns := NS,
+            index := primary,
+            shard := 0,
+            bucket := <<"bkt">>,
+            last_key := undefined,
+            watermark := 100
+        },
+        State
+    ),
     ok = bondy_oplog_catalogue_cursor:discard(Cursor).
-
 
 advance_updates_last_key() ->
     InstId = mk_id(),
@@ -82,14 +82,12 @@ advance_updates_last_key() ->
     ?assertEqual(<<"k99">>, maps:get(last_key, S2)),
     ok = bondy_oplog_catalogue_cursor:discard(Cursor).
 
-
 advance_unknown_returns_not_found() ->
     Bogus = crypto:strong_rand_bytes(16),
     ?assertEqual(
         not_found,
         bondy_oplog_catalogue_cursor:advance(Bogus, <<"k">>)
     ).
-
 
 discard_removes_cursor() ->
     InstId = mk_id(),
@@ -103,7 +101,6 @@ discard_removes_cursor() ->
     %% Discard is idempotent.
     ok = bondy_oplog_catalogue_cursor:discard(Cursor).
 
-
 two_cursors_are_independent() ->
     Inst1 = mk_id(),
     Inst2 = mk_id(),
@@ -116,19 +113,19 @@ two_cursors_are_independent() ->
     {ok, S1} = bondy_oplog_catalogue_cursor:lookup(C1),
     {ok, S2} = bondy_oplog_catalogue_cursor:lookup(C2),
     ?assertEqual(<<"only_c1">>, maps:get(last_key, S1)),
-    ?assertEqual(undefined,     maps:get(last_key, S2)),
+    ?assertEqual(undefined, maps:get(last_key, S2)),
     ?assertEqual(Inst1, maps:get(instance_id, S1)),
     ?assertEqual(Inst2, maps:get(instance_id, S2)),
     ok = bondy_oplog_catalogue_cursor:discard(C1),
     ok = bondy_oplog_catalogue_cursor:discard(C2).
-
 
 cursor_distinct_per_mint() ->
     %% 50 mints should yield 50 distinct cursors.
     Cursors = [
         bondy_oplog_catalogue_cursor:mint(
             mk_id(), n, primary, 0, <<>>, 0
-        ) || _ <- lists:seq(1, 50)
+        )
+     || _ <- lists:seq(1, 50)
     ],
     ?assertEqual(50, length(lists:usort(Cursors))),
     [bondy_oplog_catalogue_cursor:discard(C) || C <- Cursors],
@@ -143,7 +140,6 @@ mk_id() ->
         "cur_",
         integer_to_binary(erlang:unique_integer([positive]))
     ]).
-
 
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).

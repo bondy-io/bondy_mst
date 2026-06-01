@@ -44,8 +44,10 @@ unknown_namespace_returns_no_shards() ->
 absent_cell_returns_initial_value_at_zero() ->
     NS = mk_ns(),
     {Setup, _} = setup_shard(NS, primary, 0, 1, lww_register),
-    ?assertEqual({ok, undefined, 0},
-                 bondy_db_core:read_at_hlc(NS, <<"absent">>, 100)),
+    ?assertEqual(
+        {ok, undefined, 0},
+        bondy_db_core:read_at_hlc(NS, <<"absent">>, 100)
+    ),
     teardown_shard(Setup).
 
 projection_at_or_before_t_returns_projection() ->
@@ -54,11 +56,15 @@ projection_at_or_before_t_returns_projection() ->
         setup_shard(NS, primary, 0, 1, lww_register),
     materialise(PH, <<"k">>, {set, <<"v">>, 5}, 5),
     %% T = 10; projection HLC 5 ≤ T → return.
-    ?assertEqual({ok, <<"v">>, 5},
-                 bondy_db_core:read_at_hlc(NS, <<"k">>, 10)),
+    ?assertEqual(
+        {ok, <<"v">>, 5},
+        bondy_db_core:read_at_hlc(NS, <<"k">>, 10)
+    ),
     %% T = 5; projection HLC 5 ≤ T → return (=< boundary).
-    ?assertEqual({ok, <<"v">>, 5},
-                 bondy_db_core:read_at_hlc(NS, <<"k">>, 5)),
+    ?assertEqual(
+        {ok, <<"v">>, 5},
+        bondy_db_core:read_at_hlc(NS, <<"k">>, 5)
+    ),
     teardown_shard(Setup).
 
 projection_past_t_refuses() ->
@@ -67,8 +73,10 @@ projection_past_t_refuses() ->
         setup_shard(NS, primary, 0, 1, lww_register),
     materialise(PH, <<"k">>, {set, <<"v">>, 50}, 50),
     %% T = 10; projection HLC 50 > T → refuse.
-    ?assertEqual({error, {historical_read_unavailable, 50, 10}},
-                 bondy_db_core:read_at_hlc(NS, <<"k">>, 10)),
+    ?assertEqual(
+        {error, {historical_read_unavailable, 50, 10}},
+        bondy_db_core:read_at_hlc(NS, <<"k">>, 10)
+    ),
     teardown_shard(Setup).
 
 overlay_events_through_t_are_folded() ->
@@ -79,8 +87,10 @@ overlay_events_through_t_are_folded() ->
     overlay_insert(OV, <<"k">>, 10, {set, 10, <<"mid">>}),
     overlay_insert(OV, <<"k">>, 20, {set, 20, <<"new">>}),
     %% T = 15; project=5, overlay events <= 15: only HLC=10.
-    ?assertEqual({ok, <<"mid">>, 10},
-                 bondy_db_core:read_at_hlc(NS, <<"k">>, 15)),
+    ?assertEqual(
+        {ok, <<"mid">>, 10},
+        bondy_db_core:read_at_hlc(NS, <<"k">>, 15)
+    ),
     teardown_shard(Setup).
 
 overlay_events_past_t_are_excluded() ->
@@ -92,8 +102,10 @@ overlay_events_past_t_are_excluded() ->
     overlay_insert(OV, <<"k">>, 100, {set, 100, <<"far">>}),
     overlay_insert(OV, <<"k">>, 200, {set, 200, <<"farther">>}),
     %% T = 10; projection at 5; no overlay applies.
-    ?assertEqual({ok, <<"old">>, 5},
-                 bondy_db_core:read_at_hlc(NS, <<"k">>, 10)),
+    ?assertEqual(
+        {ok, <<"old">>, 5},
+        bondy_db_core:read_at_hlc(NS, <<"k">>, 10)
+    ),
     teardown_shard(Setup).
 
 overlay_below_projection_hlc_is_ignored() ->
@@ -105,8 +117,10 @@ overlay_below_projection_hlc_is_ignored() ->
     materialise(PH, <<"k">>, {set, <<"absorbed">>, 50}, 50),
     overlay_insert(OV, <<"k">>, 20, {set, 20, <<"stale">>}),
     %% T = 100; projection at 50; overlay at 20 (=< proj) → ignored.
-    ?assertEqual({ok, <<"absorbed">>, 50},
-                 bondy_db_core:read_at_hlc(NS, <<"k">>, 100)),
+    ?assertEqual(
+        {ok, <<"absorbed">>, 50},
+        bondy_db_core:read_at_hlc(NS, <<"k">>, 100)
+    ),
     teardown_shard(Setup).
 
 mix_projection_and_overlay_with_partial_window() ->
@@ -118,11 +132,15 @@ mix_projection_and_overlay_with_partial_window() ->
     overlay_insert(OV, <<"k">>, 15, {set, 15, <<"v15">>}),
     overlay_insert(OV, <<"k">>, 25, {set, 25, <<"v25">>}),
     %% T = 15; window = (5, 15] → events 10 and 15 apply.
-    ?assertEqual({ok, <<"v15">>, 15},
-                 bondy_db_core:read_at_hlc(NS, <<"k">>, 15)),
+    ?assertEqual(
+        {ok, <<"v15">>, 15},
+        bondy_db_core:read_at_hlc(NS, <<"k">>, 15)
+    ),
     %% T = 12; window = (5, 12] → only event 10 applies.
-    ?assertEqual({ok, <<"v10">>, 10},
-                 bondy_db_core:read_at_hlc(NS, <<"k">>, 12)),
+    ?assertEqual(
+        {ok, <<"v10">>, 10},
+        bondy_db_core:read_at_hlc(NS, <<"k">>, 12)
+    ),
     teardown_shard(Setup).
 
 %% =============================================================================
@@ -130,8 +148,10 @@ mix_projection_and_overlay_with_partial_window() ->
 %% =============================================================================
 
 mk_ns() ->
-    list_to_atom("mst_db_rah_" ++
-                 integer_to_list(erlang:unique_integer([positive, monotonic]))).
+    list_to_atom(
+        "mst_db_rah_" ++
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
+    ).
 
 mk_event(Hlc, Origin, Seq, Op) ->
     K = bondy_oplog_event:key(Hlc, Origin, Seq),
@@ -158,12 +178,24 @@ setup_shard(NS, Index, Shard, ShardCount, Strategy) ->
         overlay => OV,
         fold_module => Strategy
     }),
-    Setup = #{ns => NS, index => Index, shard => Shard,
-              cache_handle => CH, projection => PH, overlay => OV},
+    Setup = #{
+        ns => NS,
+        index => Index,
+        shard => Shard,
+        cache_handle => CH,
+        projection => PH,
+        overlay => OV
+    },
     {Setup, Setup}.
 
-teardown_shard(#{ns := NS, index := Index, shard := Shard,
-                 cache_handle := CH, projection := PH, overlay := OV}) ->
+teardown_shard(#{
+    ns := NS,
+    index := Index,
+    shard := Shard,
+    cache_handle := CH,
+    projection := PH,
+    overlay := OV
+}) ->
     ok = bondy_db_core_registry:unregister(NS, Index, Shard),
     ok = bondy_oplog_cache_ets:close(CH),
     ok = bondy_oplog_projection_ets:close(PH),

@@ -49,9 +49,11 @@ Returns:
 - `{error, read_error()}` for any underlying I/O or decode failure,
   surfaced verbatim from the codec.
 """).
--spec read_record(SealedView :: #sealed_view{},
-                  Hash       :: binary(),
-                  Offset     :: non_neg_integer()) ->
+-spec read_record(
+    SealedView :: #sealed_view{},
+    Hash :: binary(),
+    Offset :: non_neg_integer()
+) ->
     {ok, binary()} | not_found | {error, read_error()}.
 
 read_record(#sealed_view{pack_id = PackId, pack_fd = Fd}, Hash, Offset) ->
@@ -61,8 +63,14 @@ read_record(#sealed_view{pack_id = PackId, pack_fd = Fd}, Hash, Offset) ->
             case bondy_mst_pack_codec:decode_record_header(HBin) of
                 {ok, #{hash := H} = Header} when H =:= Hash ->
                     PageLen = maps:get(page_len, Header),
-                    read_body(Fd, PackId, Offset + HdrBytes, PageLen,
-                              Header, Hash);
+                    read_body(
+                        Fd,
+                        PackId,
+                        Offset + HdrBytes,
+                        PageLen,
+                        Header,
+                        Hash
+                    );
                 {ok, _} ->
                     %% Header at this offset names a different hash —
                     %% bloom false positive that the binary-search also
@@ -84,15 +92,15 @@ read_record(#sealed_view{pack_id = PackId, pack_fd = Fd}, Hash, Offset) ->
 %% short-circuited rather than going through the read + size check.
 read_body(_Fd, PackId, _BodyOff, 0, Header, Hash) ->
     case bondy_mst_pack_codec:verify_record(Header, <<>>) of
-        ok          -> {ok, <<>>};
-        {error, _}  -> {error, {crc_mismatch, PackId, Hash}}
+        ok -> {ok, <<>>};
+        {error, _} -> {error, {crc_mismatch, PackId, Hash}}
     end;
 read_body(Fd, PackId, BodyOff, PageLen, Header, Hash) ->
     case prim_file:pread(Fd, BodyOff, PageLen) of
         {ok, Body} when byte_size(Body) =:= PageLen ->
             case bondy_mst_pack_codec:verify_record(Header, Body) of
-                ok          -> {ok, Body};
-                {error, _}  -> {error, {crc_mismatch, PackId, Hash}}
+                ok -> {ok, Body};
+                {error, _} -> {error, {crc_mismatch, PackId, Hash}}
             end;
         _ ->
             {error, {pack_io, PackId, short_body}}

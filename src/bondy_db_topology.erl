@@ -84,30 +84,29 @@ serves every realm.
     shard/0
 ]).
 
--type state()       :: term().
+-type state() :: term().
 -type table_state() :: term().
 -type entity_type() :: atom().
--type realm()       :: binary().
--type bucket()      :: term().
--type shard()       :: non_neg_integer().
+-type realm() :: binary().
+-type bucket() :: term().
+-type shard() :: non_neg_integer().
 
 %% =============================================================================
 %% CALLBACKS
 %% =============================================================================
 
--doc("""
+-doc """
 Initialise the topology for a DB named `DbName`. Returns the topology's
 process-wide state (often a supervisor pid plus bookkeeping). The
 returned `State` is opaque to `bondy_db`.
 
 `Opts` is the `topology_opts` map from the DB's `Opts`. Topology
 implementations document their own required keys.
-""").
+""".
 -callback init(DbName :: atom(), Opts :: map()) ->
     {ok, state()} | {error, term()}.
 
-
--doc("""
+-doc """
 Provision the physical resources for `EntityType` with `ShardCount`
 shards. Returns the per-table view `TableState` and the updated
 process-wide `State`. The facade stashes `TableState` in the `Table`
@@ -115,7 +114,7 @@ handle and threads `State` back through the DB handle.
 
 `Opts` is the table's effective opts (DB defaults cascaded with the
 caller's per-table opts).
-""").
+""".
 -callback open_table(
     EntityType :: entity_type(),
     ShardCount :: pos_integer(),
@@ -123,8 +122,7 @@ caller's per-table opts).
     State :: state()
 ) -> {ok, table_state(), state()} | {error, term()}.
 
-
--doc("""
+-doc """
 Resolve `Shard` inside the table represented by `TableState`.
 Returns the projection adapter module and the handle to call it with.
 
@@ -136,14 +134,13 @@ do not see realms at all; their job is purely shard placement.
 The handle is the same shape the adapter expects from its `open/4` —
 the topology has already opened it at `open_table/4` time and is
 handing back the ready handle.
-""").
+""".
 -callback route(
     Shard :: shard(),
     TableState :: table_state()
 ) -> {ok, Adapter :: module(), Handle :: term()} | {error, term()}.
 
-
--doc("""
+-doc """
 Compose the storage-layer **Bucket** for `(EntityType, Realm)` inside
 the table represented by `TableState`. Bucket is the leveled/Riak-style
 partition tag that travels with every projection-adapter call; the
@@ -158,30 +155,28 @@ Examples:
 - **single_bookie** topology (one Bookie for everything):
   `bucket_for(EntityType, Realm, _) -> <<Realm, "/", EntityType>>` —
   Bucket has to disambiguate both EntityType and Realm.
-""").
+""".
 -callback bucket_for(
     EntityType :: entity_type(),
     Realm :: realm(),
     TableState :: table_state()
 ) -> bucket().
 
-
--doc("""
+-doc """
 Release the resources owned by `TableState`. Returns the updated
 process-wide `State`.
 
 A topology MAY skip releasing resources that are shared with other
 tables (e.g., a single_bookie topology keeps its Bookie alive until
 `shutdown/1` even after every `close_table/2` is invoked).
-""").
+""".
 -callback close_table(
     TableState :: table_state(),
     State :: state()
 ) -> {ok, state()}.
 
-
--doc("""
+-doc """
 Tear down the topology: stop every Bookie, release every resource,
 unlink supervisors. Called from `bondy_db:close/1`.
-""").
+""".
 -callback shutdown(State :: state()) -> ok.

@@ -79,12 +79,10 @@ extract_metadata(?BONDY_FOLD_TAG, Size, Frame) when is_binary(Frame) ->
     HeadBin = bondy_oplog_cell_frame:extract_head(Frame),
     Hash = erlang:phash2(Frame),
     {{Hash, Size, HeadBin}, []};
-
 extract_metadata(_Tag, Size, Obj) ->
     %% Defensive fallback for any non-fold tag that somehow routes
     %% through our hook. Mirrors `leveled_head:default_extract_metadata/3`.
     {{standard_hash(Obj), Size, undefined}, []}.
-
 
 -doc """
 Reconstruct the HEAD wire format from the ledger-stored metadata.
@@ -100,12 +98,10 @@ substrate.
 
 build_head(?BONDY_FOLD_TAG, {_Hash, _Size, HeadBin}) when is_binary(HeadBin) ->
     HeadBin;
-
 build_head(_Tag, Metadata) ->
     %% Defensive fallback — return metadata unchanged. Mirrors
     %% `leveled_head:default_build_head/2`.
     Metadata.
-
 
 -doc """
 Register the `extract_metadata/3` and `build_head/2` hooks with leveled's
@@ -129,7 +125,6 @@ install() ->
         leveled, build_head, fun ?MODULE:build_head/2
     ),
     ok.
-
 
 %% =============================================================================
 %% INTERNAL

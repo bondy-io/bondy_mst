@@ -74,9 +74,11 @@ setup() ->
 
 cleanup(_) ->
     [bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
-    [bondy_db_core_registry:unregister(N, I, S)
+    [
+        bondy_db_core_registry:unregister(N, I, S)
      || E <- bondy_db_core_registry:list(),
-        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]],
+        {N, I, S} <- [bondy_db_core_registry:entry_key(E)]
+    ],
     ok.
 
 disterl_cell_apply_test_() ->
@@ -120,10 +122,14 @@ lww_converges_across_three_nodes() ->
             ok = peer_append_cell_at(NB, InstId, <<"b">>, 20, <<"v-b">>),
             ok = peer_append_cell_at(NC, InstId, <<"c">>, 30, <<"v-c">>),
             %% Pre-sync each node only sees its own write.
-            ?assertEqual({<<"v-a">>, 10},
-                         bondy_db_core:read(NS, primary, <<"a">>)),
-            ?assertEqual(undefined,
-                         bondy_db_core:read(NS, primary, <<"b">>)),
+            ?assertEqual(
+                {<<"v-a">>, 10},
+                bondy_db_core:read(NS, primary, <<"a">>)
+            ),
+            ?assertEqual(
+                undefined,
+                bondy_db_core:read(NS, primary, <<"b">>)
+            ),
             %% Full mesh sync.
             sync_full_mesh(InstId, [{NB, NB}, {NC, NC}]),
             ok = peer_sync_from(NB, InstId, [node(), NC]),
@@ -153,7 +159,6 @@ lww_converges_across_three_nodes() ->
         peer:stop(PB),
         peer:stop(PC)
     end.
-
 
 %% LWW semantics survive cross-node merges: an earlier-HLC write to
 %% the same key is absorbed and the later-HLC value wins on every
@@ -187,12 +192,18 @@ later_hlc_wins_after_sync() ->
             _ = bondy_oplog_instance:await_apply(InstId),
             ok = peer_await_apply(NB, InstId),
             ok = peer_await_apply(NC, InstId),
-            ?assertEqual({<<"latest">>, 5},
-                         bondy_db_core:read(NS, primary, <<"k">>)),
-            ?assertEqual({<<"latest">>, 5},
-                         remote_read(NB, NS, <<"k">>)),
-            ?assertEqual({<<"latest">>, 5},
-                         remote_read(NC, NS, <<"k">>))
+            ?assertEqual(
+                {<<"latest">>, 5},
+                bondy_db_core:read(NS, primary, <<"k">>)
+            ),
+            ?assertEqual(
+                {<<"latest">>, 5},
+                remote_read(NB, NS, <<"k">>)
+            ),
+            ?assertEqual(
+                {<<"latest">>, 5},
+                remote_read(NC, NS, <<"k">>)
+            )
         after
             ok = bondy_oplog:stop_instance(InstId),
             _ = erpc:call(NB, bondy_oplog, stop_instance, [InstId]),
@@ -206,7 +217,6 @@ later_hlc_wins_after_sync() ->
         peer:stop(PB),
         peer:stop(PC)
     end.
-
 
 %% Boot a third node *after* the first two have already exchanged
 %% events. The newcomer's projection must catch up via a single sync
@@ -232,10 +242,14 @@ new_node_catches_up_via_sync() ->
             ok = peer_sync_from(NB, InstId, [node()]),
             _ = bondy_oplog_instance:await_apply(InstId),
             ok = peer_await_apply(NB, InstId),
-            ?assertEqual({<<"vx">>, 1},
-                         bondy_db_core:read(NS, primary, <<"x">>)),
-            ?assertEqual({<<"vy">>, 2},
-                         remote_read(NB, NS, <<"y">>)),
+            ?assertEqual(
+                {<<"vx">>, 1},
+                bondy_db_core:read(NS, primary, <<"x">>)
+            ),
+            ?assertEqual(
+                {<<"vy">>, 2},
+                remote_read(NB, NS, <<"y">>)
+            ),
             %% Now C joins the cluster.
             {ok, PC, NC} = start_peer_node("nc3"),
             try
@@ -247,10 +261,14 @@ new_node_catches_up_via_sync() ->
                 %% projection with both x and y.
                 ok = peer_sync_from(NC, InstId, [node()]),
                 ok = peer_await_apply(NC, InstId),
-                ?assertEqual({<<"vx">>, 1},
-                             remote_read(NC, NS, <<"x">>)),
-                ?assertEqual({<<"vy">>, 2},
-                             remote_read(NC, NS, <<"y">>)),
+                ?assertEqual(
+                    {<<"vx">>, 1},
+                    remote_read(NC, NS, <<"x">>)
+                ),
+                ?assertEqual(
+                    {<<"vy">>, 2},
+                    remote_read(NC, NS, <<"y">>)
+                ),
                 _ = erpc:call(NC, bondy_oplog, stop_instance, [InstId]),
                 _ = peer_unregister_shard_at(NC, NS, primary, 0)
             after
@@ -266,7 +284,6 @@ new_node_catches_up_via_sync() ->
     after
         peer:stop(PB)
     end.
-
 
 %% Each node adds distinct elements to the same OR-set key. After
 %% pairwise sync, every node's projection holds the union of the
@@ -287,21 +304,46 @@ orset_union_converges_across_three_nodes() ->
         OriginB = bondy_oplog_origin:new(),
         OriginC = bondy_oplog_origin:new(),
         {ok, _} = open_instance(InstId, NS, OriginA, orset),
-        ok = erpc:call(NB, ?MODULE, peer_open_instance,
-                       [InstId, NS, OriginB, orset]),
-        ok = erpc:call(NC, ?MODULE, peer_open_instance,
-                       [InstId, NS, OriginC, orset]),
+        ok = erpc:call(
+            NB,
+            ?MODULE,
+            peer_open_instance,
+            [InstId, NS, OriginB, orset]
+        ),
+        ok = erpc:call(
+            NC,
+            ?MODULE,
+            peer_open_instance,
+            [InstId, NS, OriginC, orset]
+        ),
         try
             Key = <<"bag">>,
             %% Three distinct adds, each from a different origin —
             %% dots are unique by `(NodeId, Counter)` and by their
             %% containing origin's HLC.
-            ok = append_orset_add(InstId, Key, 1, <<"alpha">>,
-                                  {<<"a">>, 1}),
-            ok = peer_append_orset_add_at(NB, InstId, Key, 2, <<"beta">>,
-                                          {<<"b">>, 1}),
-            ok = peer_append_orset_add_at(NC, InstId, Key, 3, <<"gamma">>,
-                                          {<<"c">>, 1}),
+            ok = append_orset_add(
+                InstId,
+                Key,
+                1,
+                <<"alpha">>,
+                {<<"a">>, 1}
+            ),
+            ok = peer_append_orset_add_at(
+                NB,
+                InstId,
+                Key,
+                2,
+                <<"beta">>,
+                {<<"b">>, 1}
+            ),
+            ok = peer_append_orset_add_at(
+                NC,
+                InstId,
+                Key,
+                3,
+                <<"gamma">>,
+                {<<"c">>, 1}
+            ),
             sync_full_mesh(InstId, [{NB, NB}, {NC, NC}]),
             ok = peer_sync_from(NB, InstId, [node(), NC]),
             ok = peer_sync_from(NC, InstId, [node(), NB]),
@@ -325,7 +367,6 @@ orset_union_converges_across_three_nodes() ->
         peer:stop(PB),
         peer:stop(PC)
     end.
-
 
 %% OR-set remove semantics across nodes. Node A adds an element; after
 %% it propagates to B and C, node B issues a remove naming that
@@ -361,8 +402,14 @@ orset_remove_propagates_via_sync() ->
             %% Pre-remove: every node sees alpha.
             assert_orset_live_remote(NB, NS, Key, [<<"alpha">>]),
             %% B issues the remove (observed-dot semantics).
-            ok = peer_append_orset_remove_at(NB, InstId, Key, 5,
-                                              <<"alpha">>, [Dot]),
+            ok = peer_append_orset_remove_at(
+                NB,
+                InstId,
+                Key,
+                5,
+                <<"alpha">>,
+                [Dot]
+            ),
             ok = peer_await_apply(NB, InstId),
             %% Re-sync: B's tombstone reaches A and C.
             {ok, _} = bondy_oplog:sync(InstId, NB, sync_opts()),
@@ -387,7 +434,6 @@ orset_remove_propagates_via_sync() ->
         peer:stop(PC)
     end.
 
-
 %% =============================================================================
 %% Assertions
 %% =============================================================================
@@ -397,22 +443,18 @@ assert_all_three_cells(NS, ReadFun) ->
     ?assertEqual({<<"v-b">>, 20}, ReadFun(NS, primary, <<"b">>)),
     ?assertEqual({<<"v-c">>, 30}, ReadFun(NS, primary, <<"c">>)).
 
-
 assert_all_three_cells_remote(Node, NS) ->
     ?assertEqual({<<"v-a">>, 10}, remote_read(Node, NS, <<"a">>)),
     ?assertEqual({<<"v-b">>, 20}, remote_read(Node, NS, <<"b">>)),
     ?assertEqual({<<"v-c">>, 30}, remote_read(Node, NS, <<"c">>)).
 
-
 assert_orset_live(NS, Key, Expected) ->
     Got = orset_live_elements(bondy_db_core:read(NS, primary, Key)),
     ?assertEqual(lists:sort(Expected), lists:sort(Got)).
 
-
 assert_orset_live_remote(Node, NS, Key, Expected) ->
     Got = orset_live_elements(remote_read(Node, NS, Key)),
     ?assertEqual(lists:sort(Expected), lists:sort(Got)).
-
 
 orset_live_elements(undefined) ->
     [];
@@ -421,7 +463,6 @@ orset_live_elements({Value, _Hlc}) ->
     %% for orset is an ordset of the currently live elements.
     Value.
 
-
 %% =============================================================================
 %% Local helpers
 %% =============================================================================
@@ -429,59 +470,53 @@ orset_live_elements({Value, _Hlc}) ->
 mk_id() ->
     list_to_binary(
         "distca_" ++
-        integer_to_list(erlang:unique_integer([positive, monotonic]))
+            integer_to_list(erlang:unique_integer([positive, monotonic]))
     ).
-
 
 ns_of(Id) when is_binary(Id) ->
     binary_to_atom(<<"ns_", Id/binary>>, utf8).
 
-
 register_shard(NS, Index, Shard) ->
     register_shard(NS, Index, Shard, lww_register).
 
-
 register_shard(NS, Index, Shard, FoldModule) ->
     {ok, Cache} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
-    {ok, Proj}  = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
+    {ok, Proj} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
     ok = bondy_db_core_registry:register(NS, Index, Shard, #{
-        shard_count        => 1,
-        cache_adapter      => bondy_oplog_cache_ets,
-        cache_handle       => Cache,
+        shard_count => 1,
+        cache_adapter => bondy_oplog_cache_ets,
+        cache_handle => Cache,
         projection_adapter => bondy_oplog_projection_ets,
-        projection_handle  => Proj,
-        fold_module        => FoldModule,
-        overlay            => disabled
+        projection_handle => Proj,
+        fold_module => FoldModule,
+        overlay => disabled
     }),
     {Cache, Proj}.
-
 
 close_shard(Cache, Proj) ->
     ok = bondy_oplog_projection_ets:close(Proj),
     ok = bondy_oplog_cache_ets:close(Cache),
     ok.
 
-
 open_instance(InstanceId, NS, Origin) ->
     open_instance(InstanceId, NS, Origin, lww_register).
 
-
 open_instance(InstanceId, NS, Origin, FoldModule) ->
     bondy_oplog:start_instance(InstanceId, #{
-        origin       => Origin,
-        fold_module  => FoldModule,
-        applier      => #{
+        origin => Origin,
+        fold_module => FoldModule,
+        applier => #{
             cell_apply_target => {NS, primary, 0}
         }
     }).
 
-
 append_cell(InstanceId, Key, Hlc, Value) ->
-    _ = bondy_oplog:append(InstanceId,
-                            {cell_apply, ?B, Key, {set, Hlc, Value}}),
+    _ = bondy_oplog:append(
+        InstanceId,
+        {cell_apply, ?B, Key, {set, Hlc, Value}}
+    ),
     _ = bondy_oplog:projection(InstanceId),
     ok.
-
 
 append_orset_add(InstanceId, Key, Hlc, Elem, Dot) ->
     _ = bondy_oplog:append(
@@ -491,33 +526,43 @@ append_orset_add(InstanceId, Key, Hlc, Elem, Dot) ->
     _ = bondy_oplog:projection(InstanceId),
     ok.
 
-
 peer_register_shard_at(Node, NS, Index, Shard, FoldModule) ->
-    erpc:call(Node, ?MODULE, peer_register_shard,
-              [NS, Index, Shard, FoldModule]).
-
+    erpc:call(
+        Node,
+        ?MODULE,
+        peer_register_shard,
+        [NS, Index, Shard, FoldModule]
+    ).
 
 peer_open_instance_orset_at(Node, InstId, NS, Origin) ->
-    erpc:call(Node, ?MODULE, peer_open_instance,
-              [InstId, NS, Origin, orset]).
-
+    erpc:call(
+        Node,
+        ?MODULE,
+        peer_open_instance,
+        [InstId, NS, Origin, orset]
+    ).
 
 peer_append_orset_add_at(Node, InstId, Key, Hlc, Elem, Dot) ->
-    erpc:call(Node, ?MODULE, peer_append_orset_add,
-              [InstId, Key, Hlc, Elem, Dot]).
-
+    erpc:call(
+        Node,
+        ?MODULE,
+        peer_append_orset_add,
+        [InstId, Key, Hlc, Elem, Dot]
+    ).
 
 peer_append_orset_remove_at(Node, InstId, Key, Hlc, Elem, Dots) ->
-    erpc:call(Node, ?MODULE, peer_append_orset_remove,
-              [InstId, Key, Hlc, Elem, Dots]).
-
+    erpc:call(
+        Node,
+        ?MODULE,
+        peer_append_orset_remove,
+        [InstId, Key, Hlc, Elem, Dots]
+    ).
 
 sync_opts() ->
     #{
-        transport      => bondy_oplog_transport_disterl,
+        transport => bondy_oplog_transport_disterl,
         transport_opts => #{timeout => 10_000}
     }.
-
 
 %% Pull from each listed peer in sequence. Each pull merges the peer's
 %% events into the local MST and triggers a `replay_cell_events` cast.
@@ -529,7 +574,6 @@ sync_full_mesh(InstId, NodesPeers) ->
         NodesPeers
     ).
 
-
 %% =============================================================================
 %% Peer-node helpers
 %% =============================================================================
@@ -537,18 +581,17 @@ sync_full_mesh(InstId, NodesPeers) ->
 start_peer_node(NameSuffix) ->
     Name = list_to_atom(
         NameSuffix ++ "_" ++
-        integer_to_list(os:system_time(microsecond))
+            integer_to_list(os:system_time(microsecond))
     ),
     Cookie = atom_to_list(erlang:get_cookie()),
     PeerOpts = #{
-        name       => Name,
-        host       => "127.0.0.1",
+        name => Name,
+        host => "127.0.0.1",
         connection => standard_io,
-        args       => ["-setcookie", Cookie, "-pa" | code:get_path()]
+        args => ["-setcookie", Cookie, "-pa" | code:get_path()]
     },
     {ok, Peer, Node} = peer:start_link(PeerOpts),
     {ok, Peer, Node}.
-
 
 setup_peer(Node) ->
     {ok, _} = erpc:call(Node, application, ensure_all_started, [bondy_mst]),
@@ -556,50 +599,56 @@ setup_peer(Node) ->
     %% can run via apply.
     {Mod, Bin, File} = code:get_object_code(?MODULE),
     {module, Mod} = erpc:call(Node, code, load_binary, [Mod, File, Bin]),
-    ok = erpc:call(Node, bondy_oplog_sync_scheduler,
-                    set_dispatch, [undefined]),
-    ok = erpc:call(Node, bondy_oplog_gc_scheduler,
-                    set_trigger, [undefined]),
+    ok = erpc:call(
+        Node,
+        bondy_oplog_sync_scheduler,
+        set_dispatch,
+        [undefined]
+    ),
+    ok = erpc:call(
+        Node,
+        bondy_oplog_gc_scheduler,
+        set_trigger,
+        [undefined]
+    ),
     ok.
-
 
 peer_register_shard_at(Node, NS, Index, Shard) ->
     erpc:call(Node, ?MODULE, peer_register_shard, [NS, Index, Shard]).
 
-
 peer_unregister_shard_at(Node, NS, Index, Shard) ->
     erpc:call(Node, ?MODULE, peer_unregister_shard, [NS, Index, Shard]).
-
 
 peer_open_instance_at(Node, InstId, NS, Origin) ->
     erpc:call(Node, ?MODULE, peer_open_instance, [InstId, NS, Origin]).
 
-
 peer_append_cell_at(Node, InstId, Key, Hlc, Value) ->
-    erpc:call(Node, ?MODULE, peer_append_cell,
-              [InstId, Key, Hlc, Value]).
-
+    erpc:call(
+        Node,
+        ?MODULE,
+        peer_append_cell,
+        [InstId, Key, Hlc, Value]
+    ).
 
 peer_sync_from(Node, InstId, From) when is_list(From) ->
     lists:foreach(
         fun(Origin) ->
             {ok, _} = erpc:call(
-                Node, bondy_oplog, sync,
+                Node,
+                bondy_oplog,
+                sync,
                 [InstId, Origin, sync_opts()]
             )
         end,
         From
     ).
 
-
 peer_await_apply(Node, InstId) ->
     _ = erpc:call(Node, bondy_oplog_instance, await_apply, [InstId]),
     ok.
 
-
 remote_read(Node, NS, Key) ->
     erpc:call(Node, ?MODULE, peer_read, [NS, primary, Key]).
-
 
 %% =============================================================================
 %% Helpers invoked on the peer node
@@ -608,7 +657,6 @@ remote_read(Node, NS, Key) ->
 peer_register_shard(NS, Index, Shard) ->
     peer_register_shard(NS, Index, Shard, lww_register).
 
-
 peer_register_shard(NS, Index, Shard, FoldModule) ->
     %% ETS tables die with the calling process, and `erpc:call/4`
     %% workers exit as soon as the call returns. Spawn a long-lived
@@ -616,8 +664,11 @@ peer_register_shard(NS, Index, Shard, FoldModule) ->
     %% handles for the test's duration; the owner is registered under
     %% a deterministic name so `peer_unregister_shard/3` can find and
     %% stop it at teardown.
-    Owner = spawn(?MODULE, peer_shard_owner_loop,
-                  [NS, Index, Shard, FoldModule]),
+    Owner = spawn(
+        ?MODULE,
+        peer_shard_owner_loop,
+        [NS, Index, Shard, FoldModule]
+    ),
     Name = owner_name(NS, Index, Shard),
     %% Best-effort register; bail loudly on collision so two tests
     %% sharing a triple don't silently corrupt each other.
@@ -631,11 +682,11 @@ peer_register_shard(NS, Index, Shard, FoldModule) ->
         exit({peer_register_shard_timeout, NS, Index, Shard})
     end.
 
-
 peer_unregister_shard(NS, Index, Shard) ->
     Name = owner_name(NS, Index, Shard),
     case whereis(Name) of
-        undefined -> ok;
+        undefined ->
+            ok;
         Pid ->
             Pid ! {unregister, self()},
             receive
@@ -644,7 +695,6 @@ peer_unregister_shard(NS, Index, Shard) ->
                 exit({peer_unregister_shard_timeout, NS, Index, Shard})
             end
     end.
-
 
 %% @private
 %% Long-lived ETS owner on the peer node. Owns the cache + projection
@@ -656,15 +706,15 @@ peer_shard_owner_loop(NS, Index, Shard, FoldModule) ->
     receive
         {register, From} ->
             {ok, Cache} = bondy_oplog_cache_ets:init(NS, Index, Shard, #{}),
-            {ok, Proj}  = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
+            {ok, Proj} = bondy_oplog_projection_ets:open(NS, Index, Shard, #{}),
             ok = bondy_db_core_registry:register(NS, Index, Shard, #{
-                shard_count        => 1,
-                cache_adapter      => bondy_oplog_cache_ets,
-                cache_handle       => Cache,
+                shard_count => 1,
+                cache_adapter => bondy_oplog_cache_ets,
+                cache_handle => Cache,
                 projection_adapter => bondy_oplog_projection_ets,
-                projection_handle  => Proj,
-                fold_module        => FoldModule,
-                overlay            => disabled
+                projection_handle => Proj,
+                fold_module => FoldModule,
+                overlay => disabled
             }),
             From ! {self(), registered},
             peer_shard_owner_loop_serve(NS, Index, Shard, Cache, Proj)
@@ -683,31 +733,29 @@ peer_shard_owner_loop_serve(NS, Index, Shard, Cache, Proj) ->
 owner_name(NS, Index, Shard) ->
     list_to_atom(
         "owner_" ++ atom_to_list(NS) ++ "_" ++
-        atom_to_list(Index) ++ "_" ++ integer_to_list(Shard)
+            atom_to_list(Index) ++ "_" ++ integer_to_list(Shard)
     ).
-
 
 peer_open_instance(InstId, NS, Origin) ->
     peer_open_instance(InstId, NS, Origin, lww_register).
 
-
 peer_open_instance(InstId, NS, Origin, FoldModule) ->
     {ok, _} = bondy_oplog:start_instance(InstId, #{
-        origin       => Origin,
-        fold_module  => FoldModule,
-        applier      => #{
+        origin => Origin,
+        fold_module => FoldModule,
+        applier => #{
             cell_apply_target => {NS, primary, 0}
         }
     }),
     ok.
 
-
 peer_append_cell(InstId, Key, Hlc, Value) ->
-    _ = bondy_oplog:append(InstId,
-                            {cell_apply, <<>>, Key, {set, Hlc, Value}}),
+    _ = bondy_oplog:append(
+        InstId,
+        {cell_apply, <<>>, Key, {set, Hlc, Value}}
+    ),
     _ = bondy_oplog:projection(InstId),
     ok.
-
 
 peer_append_orset_add(InstId, Key, Hlc, Elem, Dot) ->
     _ = bondy_oplog:append(
@@ -716,7 +764,6 @@ peer_append_orset_add(InstId, Key, Hlc, Elem, Dot) ->
     ),
     _ = bondy_oplog:projection(InstId),
     ok.
-
 
 peer_append_orset_remove(InstId, Key, Hlc, _Elem, Dots) ->
     %% `remove` events tombstone the listed dots; the OR-set fold
@@ -730,10 +777,8 @@ peer_append_orset_remove(InstId, Key, Hlc, _Elem, Dots) ->
     _ = bondy_oplog:projection(InstId),
     ok.
 
-
 peer_read(NS, Index, Key) ->
     bondy_db_core:read(NS, Index, Key).
-
 
 peer_close_instance(InstId, NS) ->
     _ = bondy_oplog:stop_instance(InstId),

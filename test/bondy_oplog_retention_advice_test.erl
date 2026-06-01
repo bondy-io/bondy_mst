@@ -17,9 +17,15 @@
 %% =============================================================================
 
 mk_id() ->
-    iolist_to_binary(io_lib:format("ra-~p-~p",
-        [erlang:system_time(microsecond),
-         erlang:unique_integer([positive])])).
+    iolist_to_binary(
+        io_lib:format(
+            "ra-~p-~p",
+            [
+                erlang:system_time(microsecond),
+                erlang:unique_integer([positive])
+            ]
+        )
+    ).
 
 inputs(Overrides) ->
     Defaults = #{
@@ -52,61 +58,88 @@ low_pressure_recommends_none_test() ->
     In = with_pressure(0.1, 0.1, inputs(#{})),
     Advice = bondy_oplog:retention_decision(In),
     ?assertEqual(none, maps:get(recommended_action, Advice)),
-    ?assertMatch(<<"retention pressure is low", _/binary>>,
-                 maps:get(rationale, Advice)).
+    ?assertMatch(
+        <<"retention pressure is low", _/binary>>,
+        maps:get(rationale, Advice)
+    ).
 
 scrubber_alert_short_circuits_to_none_test() ->
     %% Even at maximum pressure, an outstanding scrubber alert wins.
-    In = with_pressure(0.95, 0.95,
-        inputs(#{scrubber_alerts => [{7, bad_crc}, {12, torn_write}],
-                 has_snapshot => true,
-                 bootstrap_consumers => 0})),
+    In = with_pressure(
+        0.95,
+        0.95,
+        inputs(#{
+            scrubber_alerts => [{7, bad_crc}, {12, torn_write}],
+            has_snapshot => true,
+            bootstrap_consumers => 0
+        })
+    ),
     Advice = bondy_oplog:retention_decision(In),
     ?assertEqual(none, maps:get(recommended_action, Advice)),
     Rationale = maps:get(rationale, Advice),
-    ?assertMatch(<<"scrubber alert outstanding on 2 segment(s)", _/binary>>,
-                 Rationale).
+    ?assertMatch(
+        <<"scrubber alert outstanding on 2 segment(s)", _/binary>>,
+        Rationale
+    ).
 
 high_pressure_with_snapshot_no_bootstrap_recommends_compact_test() ->
-    In = with_pressure(0.85, 0.3,
-        inputs(#{has_snapshot => true, bootstrap_consumers => 0})),
+    In = with_pressure(
+        0.85,
+        0.3,
+        inputs(#{has_snapshot => true, bootstrap_consumers => 0})
+    ),
     Advice = bondy_oplog:retention_decision(In),
     ?assertEqual(compact, maps:get(recommended_action, Advice)).
 
 high_pressure_no_snapshot_no_bootstrap_recommends_truncate_test() ->
-    In = with_pressure(0.85, 0.3,
-        inputs(#{has_snapshot => false, bootstrap_consumers => 0})),
+    In = with_pressure(
+        0.85,
+        0.3,
+        inputs(#{has_snapshot => false, bootstrap_consumers => 0})
+    ),
     Advice = bondy_oplog:retention_decision(In),
     ?assertEqual(truncate_prefix, maps:get(recommended_action, Advice)).
 
 high_pressure_with_snapshot_and_bootstrap_recommends_compact_test() ->
     %% bootstrap consumers are preserved by compact (snapshot watermark
     %% is the durability seam), so this is the safe pick.
-    In = with_pressure(0.7, 0.7,
-        inputs(#{has_snapshot => true, bootstrap_consumers => 2})),
+    In = with_pressure(
+        0.7,
+        0.7,
+        inputs(#{has_snapshot => true, bootstrap_consumers => 2})
+    ),
     Advice = bondy_oplog:retention_decision(In),
     ?assertEqual(compact, maps:get(recommended_action, Advice)),
     Rationale = maps:get(rationale, Advice),
-    ?assertMatch(<<"bootstrap consumers active; compact", _/binary>>,
-                 Rationale).
+    ?assertMatch(
+        <<"bootstrap consumers active; compact", _/binary>>,
+        Rationale
+    ).
 
 high_pressure_no_snapshot_with_bootstrap_recommends_none_test() ->
     %% truncate would orphan bootstrap; compact has nothing to fold.
     %% No safe automatic recommendation — wait or snapshot.
-    In = with_pressure(0.9, 0.4,
-        inputs(#{has_snapshot => false, bootstrap_consumers => 1})),
+    In = with_pressure(
+        0.9,
+        0.4,
+        inputs(#{has_snapshot => false, bootstrap_consumers => 1})
+    ),
     Advice = bondy_oplog:retention_decision(In),
     ?assertEqual(none, maps:get(recommended_action, Advice)),
     Rationale = maps:get(rationale, Advice),
     ?assertMatch(
         <<"bootstrap consumers active but no snapshot exists", _/binary>>,
-        Rationale).
+        Rationale
+    ).
 
 segment_pressure_alone_triggers_recommendation_test() ->
     %% bytes are fine, but live_segments is full — pick should still
     %% fire on the higher of the two ratios.
-    In = with_pressure(0.05, 0.95,
-        inputs(#{has_snapshot => false, bootstrap_consumers => 0})),
+    In = with_pressure(
+        0.05,
+        0.95,
+        inputs(#{has_snapshot => false, bootstrap_consumers => 0})
+    ),
     Advice = bondy_oplog:retention_decision(In),
     ?assertEqual(truncate_prefix, maps:get(recommended_action, Advice)).
 
@@ -114,14 +147,20 @@ boundary_at_threshold_recommends_action_test() ->
     %% At exactly the threshold (0.5), the predicate `max(B, S) <
     %% 0.5` is false → non-low branch fires. We want this so an
     %% operator at the boundary still gets a non-trivial answer.
-    In = with_pressure(0.5, 0.0,
-        inputs(#{has_snapshot => true, bootstrap_consumers => 0})),
+    In = with_pressure(
+        0.5,
+        0.0,
+        inputs(#{has_snapshot => true, bootstrap_consumers => 0})
+    ),
     Advice = bondy_oplog:retention_decision(In),
     ?assertEqual(compact, maps:get(recommended_action, Advice)).
 
 advice_carries_inputs_through_test() ->
-    In = with_pressure(0.85, 0.3,
-        inputs(#{has_snapshot => true, bootstrap_consumers => 4})),
+    In = with_pressure(
+        0.85,
+        0.3,
+        inputs(#{has_snapshot => true, bootstrap_consumers => 4})
+    ),
     Advice = bondy_oplog:retention_decision(In),
     ?assertEqual(In, maps:get(inputs, Advice)).
 
@@ -134,8 +173,10 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    [bondy_oplog:stop_instance(I)
-     || I <- bondy_oplog:list_instances()],
+    [
+        bondy_oplog:stop_instance(I)
+     || I <- bondy_oplog:list_instances()
+    ],
     ok.
 
 integration_test_() ->
@@ -147,8 +188,10 @@ integration_test_() ->
 
 advice_returns_error_when_instance_not_running() ->
     Id = mk_id(),
-    ?assertEqual({error, instance_not_running},
-                 bondy_oplog:retention_advice(Id)).
+    ?assertEqual(
+        {error, instance_not_running},
+        bondy_oplog:retention_advice(Id)
+    ).
 
 advice_against_idle_instance_returns_none() ->
     Id = mk_id(),

@@ -26,9 +26,16 @@
 
 mktemp_dir() ->
     Base = filename:join(
-        ["/tmp", io_lib:format("bondy_mst_pack_store_test_~p_~p",
-                              [erlang:system_time(microsecond),
-                               erlang:unique_integer([positive])])]
+        [
+            "/tmp",
+            io_lib:format(
+                "bondy_mst_pack_store_test_~p_~p",
+                [
+                    erlang:system_time(microsecond),
+                    erlang:unique_integer([positive])
+                ]
+            )
+        ]
     ),
     Dir = lists:flatten(Base),
     ok = filelib:ensure_path(Dir),
@@ -40,8 +47,10 @@ rmrf(Dir) ->
 
 with_tmp_dir(Fun) ->
     Dir = mktemp_dir(),
-    try Fun(Dir)
-    after rmrf(Dir)
+    try
+        Fun(Dir)
+    after
+        rmrf(Dir)
     end.
 
 opts(Dir) ->
@@ -51,8 +60,11 @@ open_store(Dir) ->
     bondy_mst_store:open(bondy_mst_pack_store, sha256, opts(Dir)).
 
 open_store_with(Dir, Extra) ->
-    bondy_mst_store:open(bondy_mst_pack_store, sha256,
-                         maps:merge(opts(Dir), Extra)).
+    bondy_mst_store:open(
+        bondy_mst_pack_store,
+        sha256,
+        maps:merge(opts(Dir), Extra)
+    ).
 
 mk_page(Level, Low, List) ->
     bondy_mst_page:new(Level, Low, List).
@@ -74,8 +86,11 @@ open_close_empty_dir_test() ->
 open_missing_dir_opt_test() ->
     ?assertError(
         {missing_opt, dir},
-        bondy_mst_store:open(bondy_mst_pack_store, sha256,
-                             #{instance_id => <<"x">>})
+        bondy_mst_store:open(
+            bondy_mst_pack_store,
+            sha256,
+            #{instance_id => <<"x">>}
+        )
     ).
 
 open_missing_instance_id_opt_test() ->
@@ -101,7 +116,8 @@ reopen_with_different_instance_id_test() ->
         ?assertError(
             {pack_store_open, {instance_id_mismatch, _, _}},
             bondy_mst_store:open(
-                bondy_mst_pack_store, sha256,
+                bondy_mst_pack_store,
+                sha256,
                 #{dir => Dir, instance_id => <<"other">>}
             )
         )
@@ -129,8 +145,10 @@ get_missing_hash_returns_undefined_test() ->
     with_tmp_dir(fun(Dir) ->
         S = open_store(Dir),
         try
-            ?assertEqual(undefined,
-                         bondy_mst_store:get(S, crypto:hash(sha256, <<"x">>))),
+            ?assertEqual(
+                undefined,
+                bondy_mst_store:get(S, crypto:hash(sha256, <<"x">>))
+            ),
             ?assertNot(bondy_mst_store:has(S, crypto:hash(sha256, <<"x">>)))
         after
             _ = bondy_mst_store:close(S)
@@ -338,10 +356,15 @@ auto_seal_records_resets_after_seal_test() ->
     %% batch fills incoming.pack again and triggers a second seal.
     with_tmp_dir(fun(Dir) ->
         S0 = open_store_with(Dir, #{auto_seal_records => 2}),
-        Pages = [mk_page(0, undefined, [{I, I, undefined}])
-                 || I <- lists:seq(1, 4)],
+        Pages = [
+            mk_page(0, undefined, [{I, I, undefined}])
+         || I <- lists:seq(1, 4)
+        ],
         S1 = lists:foldl(
-            fun(P, Acc) -> {_, A} = bondy_mst_store:put(Acc, P), A end,
+            fun(P, Acc) ->
+                {_, A} = bondy_mst_store:put(Acc, P),
+                A
+            end,
             S0,
             Pages
         ),
@@ -386,8 +409,10 @@ auto_seal_first_threshold_to_cross_wins_test() ->
     %% Records threshold trips first when both are configured but the
     %% byte threshold is far above one-put offsets.
     with_tmp_dir(fun(Dir) ->
-        S0 = open_store_with(Dir, #{auto_seal_records => 2,
-                                    auto_seal_bytes   => 10_000_000}),
+        S0 = open_store_with(Dir, #{
+            auto_seal_records => 2,
+            auto_seal_bytes => 10_000_000
+        }),
         P1 = mk_page(0, undefined, [{a, 1, undefined}]),
         P2 = mk_page(0, undefined, [{b, 2, undefined}]),
         {_, S1} = bondy_mst_store:put(S0, P1),
@@ -420,8 +445,10 @@ auto_seal_explicit_infinity_disables_test() ->
     %% Caller-supplied `infinity` must behave identically to the
     %% default.
     with_tmp_dir(fun(Dir) ->
-        S0 = open_store_with(Dir, #{auto_seal_records => infinity,
-                                    auto_seal_bytes   => infinity}),
+        S0 = open_store_with(Dir, #{
+            auto_seal_records => infinity,
+            auto_seal_bytes => infinity
+        }),
         S1 = lists:foldl(
             fun(I, Acc) ->
                 P = mk_page(0, undefined, [{I, I, undefined}]),
@@ -443,21 +470,24 @@ auto_seal_bad_records_opt_test() ->
         ?assertError(
             {invalid_opt, auto_seal_records, 0},
             bondy_mst_store:open(
-                bondy_mst_pack_store, sha256,
+                bondy_mst_pack_store,
+                sha256,
                 (opts(Dir))#{auto_seal_records => 0}
             )
         ),
         ?assertError(
             {invalid_opt, auto_seal_records, -1},
             bondy_mst_store:open(
-                bondy_mst_pack_store, sha256,
+                bondy_mst_pack_store,
+                sha256,
                 (opts(Dir))#{auto_seal_records => -1}
             )
         ),
         ?assertError(
             {invalid_opt, auto_seal_records, not_a_number},
             bondy_mst_store:open(
-                bondy_mst_pack_store, sha256,
+                bondy_mst_pack_store,
+                sha256,
                 (opts(Dir))#{auto_seal_records => not_a_number}
             )
         )
@@ -468,7 +498,8 @@ auto_seal_bad_bytes_opt_test() ->
         ?assertError(
             {invalid_opt, auto_seal_bytes, 0},
             bondy_mst_store:open(
-                bondy_mst_pack_store, sha256,
+                bondy_mst_pack_store,
+                sha256,
                 (opts(Dir))#{auto_seal_bytes => 0}
             )
         )
@@ -554,8 +585,11 @@ tombstone_persists_across_reopen_test() ->
         ?assertEqual(undefined, bondy_mst_store:get(S3, Hash)),
         ?assertEqual(ok, bondy_mst_store:close(S3)),
         %% The file is there.
-        ?assert(filelib:is_regular(
-            bondy_mst_pack_tombstones:path(Dir))),
+        ?assert(
+            filelib:is_regular(
+                bondy_mst_pack_tombstones:path(Dir)
+            )
+        ),
         S4 = open_store(Dir),
         try
             ?assertEqual(undefined, bondy_mst_store:get(S4, Hash)),
@@ -593,8 +627,11 @@ tombstone_file_absent_for_fresh_store_test() ->
     with_tmp_dir(fun(Dir) ->
         S0 = open_store(Dir),
         try
-            ?assertNot(filelib:is_regular(
-                bondy_mst_pack_tombstones:path(Dir)))
+            ?assertNot(
+                filelib:is_regular(
+                    bondy_mst_pack_tombstones:path(Dir)
+                )
+            )
         after
             _ = bondy_mst_store:close(S0)
         end
@@ -609,8 +646,11 @@ delete_of_unknown_hash_still_persists_test() ->
         S1 = bondy_mst_store:delete(S0, Ghost),
         ?assertEqual(undefined, bondy_mst_store:get(S1, Ghost)),
         bondy_mst_store:close(S1),
-        ?assert(filelib:is_regular(
-            bondy_mst_pack_tombstones:path(Dir))),
+        ?assert(
+            filelib:is_regular(
+                bondy_mst_pack_tombstones:path(Dir)
+            )
+        ),
         S2 = open_store(Dir),
         try
             ?assertEqual(undefined, bondy_mst_store:get(S2, Ghost)),
@@ -801,8 +841,13 @@ gc_epoch_rejected_with_typed_meta_test() ->
         S = open_store(Dir),
         try
             {S1, Meta} = bondy_mst_store:gc(S, 12345),
-            ?assertMatch(#{compacted := false,
-                           reason   := epoch_unsupported}, Meta),
+            ?assertMatch(
+                #{
+                    compacted := false,
+                    reason := epoch_unsupported
+                },
+                Meta
+            ),
             %% State must be unchanged.
             ?assertEqual([], pack_ids(S1))
         after
@@ -840,11 +885,16 @@ gc_drops_unreachable_pages_test() ->
         ?assertEqual([1], pack_ids(S4)),
         {S5, Meta} = bondy_mst_store:gc(S4, [H1]),
         try
-            ?assertMatch(#{compacted := true,
-                           retired   := [1],
-                           new_pack  := 2,
-                           kept      := 1,
-                           dropped   := 2}, Meta),
+            ?assertMatch(
+                #{
+                    compacted := true,
+                    retired := [1],
+                    new_pack := 2,
+                    kept := 1,
+                    dropped := 2
+                },
+                Meta
+            ),
             ?assertEqual([2], pack_ids(S5)),
             ?assertEqual(P1, bondy_mst_store:get(S5, H1)),
             %% Unreachable pages are gone from the store.
@@ -866,9 +916,14 @@ gc_drops_tombstoned_pages_test() ->
         S4 = bondy_mst_store:delete(S3, H2),
         {S5, Meta} = bondy_mst_store:gc(S4, [H1, H2]),
         try
-            ?assertMatch(#{compacted := true,
-                           dropped   := 1,
-                           kept      := 1}, Meta),
+            ?assertMatch(
+                #{
+                    compacted := true,
+                    dropped := 1,
+                    kept := 1
+                },
+                Meta
+            ),
             %% H1 retained, H2 dropped.
             ?assertEqual(P1, bondy_mst_store:get(S5, H1)),
             ?assertEqual(undefined, bondy_mst_store:get(S5, H2))
@@ -889,11 +944,16 @@ gc_coalesces_multiple_sealed_packs_test() ->
         ?assertEqual([2, 1], pack_ids(S4)),
         {S5, Meta} = bondy_mst_store:gc(S4, [H1, H2]),
         try
-            ?assertMatch(#{compacted := true,
-                           retired   := [1, 2],
-                           new_pack  := 3,
-                           kept      := 2,
-                           dropped   := 0}, Meta),
+            ?assertMatch(
+                #{
+                    compacted := true,
+                    retired := [1, 2],
+                    new_pack := 3,
+                    kept := 2,
+                    dropped := 0
+                },
+                Meta
+            ),
             ?assertEqual([3], pack_ids(S5)),
             ?assertEqual(P1, bondy_mst_store:get(S5, H1)),
             ?assertEqual(P2, bondy_mst_store:get(S5, H2))
@@ -911,11 +971,16 @@ gc_empty_keep_roots_retires_all_packs_test() ->
         ?assertEqual([1], pack_ids(S2)),
         {S3, Meta} = bondy_mst_store:gc(S2, []),
         try
-            ?assertMatch(#{compacted := true,
-                           retired   := [1],
-                           new_pack  := undefined,
-                           kept      := 0,
-                           dropped   := 1}, Meta),
+            ?assertMatch(
+                #{
+                    compacted := true,
+                    retired := [1],
+                    new_pack := undefined,
+                    kept := 0,
+                    dropped := 1
+                },
+                Meta
+            ),
             ?assertEqual([], pack_ids(S3)),
             ?assertEqual([], bondy_mst_store:list(S3))
         after
@@ -1071,11 +1136,16 @@ gc_open_view_succeeds_after_transient_failure_test() ->
         with_index_open_fault(1, eio, fun() ->
             {S4, Meta} = bondy_mst_store:gc(S3, [H1]),
             try
-                ?assertMatch(#{compacted := true,
-                               retired   := [1],
-                               new_pack  := 2,
-                               kept      := 1,
-                               dropped   := 1}, Meta),
+                ?assertMatch(
+                    #{
+                        compacted := true,
+                        retired := [1],
+                        new_pack := 2,
+                        kept := 1,
+                        dropped := 1
+                    },
+                    Meta
+                ),
                 ?assertEqual([2], pack_ids(S4)),
                 ?assertEqual(P1, bondy_mst_store:get(S4, H1))
             after
@@ -1163,12 +1233,17 @@ with_index_open_fault(FailN, Reason, Body) ->
 
 %% @private
 install_index_open_expectation(always, Reason) ->
-    meck:expect(bondy_mst_pack_index, open,
-                fun(_Bin) -> {error, Reason} end);
+    meck:expect(
+        bondy_mst_pack_index,
+        open,
+        fun(_Bin) -> {error, Reason} end
+    );
 install_index_open_expectation(N, Reason) when is_integer(N), N >= 1 ->
     Counter = atomics:new(1, []),
     ok = atomics:put(Counter, 1, N),
-    meck:expect(bondy_mst_pack_index, open,
+    meck:expect(
+        bondy_mst_pack_index,
+        open,
         fun(Bin) ->
             case atomics:sub_get(Counter, 1, 1) of
                 Remaining when Remaining >= 0 ->
@@ -1176,7 +1251,8 @@ install_index_open_expectation(N, Reason) when is_integer(N), N >= 1 ->
                 _ ->
                     meck:passthrough([Bin])
             end
-        end).
+        end
+    ).
 
 %% =============================================================================
 %% Tombstones-flush debounce
@@ -1205,8 +1281,10 @@ ts_disk_set(Dir) ->
 
 tombstones_below_threshold_skips_disk_write_test() ->
     with_tmp_dir(fun(Dir) ->
-        S0 = open_store_with(Dir, #{tombstones_flush_every_records => 4,
-                                     tombstones_flush_every_ms => infinity}),
+        S0 = open_store_with(Dir, #{
+            tombstones_flush_every_records => 4,
+            tombstones_flush_every_ms => infinity
+        }),
         H1 = crypto:hash(sha256, <<"h1">>),
         H2 = crypto:hash(sha256, <<"h2">>),
         H3 = crypto:hash(sha256, <<"h3">>),
@@ -1221,8 +1299,10 @@ tombstones_below_threshold_skips_disk_write_test() ->
 
 tombstones_threshold_flushes_to_disk_test() ->
     with_tmp_dir(fun(Dir) ->
-        S0 = open_store_with(Dir, #{tombstones_flush_every_records => 3,
-                                     tombstones_flush_every_ms => infinity}),
+        S0 = open_store_with(Dir, #{
+            tombstones_flush_every_records => 3,
+            tombstones_flush_every_ms => infinity
+        }),
         H1 = crypto:hash(sha256, <<"a">>),
         H2 = crypto:hash(sha256, <<"b">>),
         H3 = crypto:hash(sha256, <<"c">>),
@@ -1241,8 +1321,10 @@ tombstones_threshold_flushes_to_disk_test() ->
 
 tombstones_close_flushes_pending_test() ->
     with_tmp_dir(fun(Dir) ->
-        S0 = open_store_with(Dir, #{tombstones_flush_every_records => infinity,
-                                     tombstones_flush_every_ms => infinity}),
+        S0 = open_store_with(Dir, #{
+            tombstones_flush_every_records => infinity,
+            tombstones_flush_every_ms => infinity
+        }),
         H = crypto:hash(sha256, <<"close-flush">>),
         S1 = bondy_mst_store:delete(S0, H),
         %% Thresholds are infinity, so no in-flight flush yet.
@@ -1254,8 +1336,10 @@ tombstones_close_flushes_pending_test() ->
 
 tombstones_seal_flushes_pending_test() ->
     with_tmp_dir(fun(Dir) ->
-        S0 = open_store_with(Dir, #{tombstones_flush_every_records => infinity,
-                                     tombstones_flush_every_ms => infinity}),
+        S0 = open_store_with(Dir, #{
+            tombstones_flush_every_records => infinity,
+            tombstones_flush_every_ms => infinity
+        }),
         H = crypto:hash(sha256, <<"seal-flush">>),
         S1 = bondy_mst_store:delete(S0, H),
         ?assert(sets:is_empty(ts_disk_set(Dir))),
