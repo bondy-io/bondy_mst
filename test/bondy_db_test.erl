@@ -24,6 +24,31 @@ per_entity_test_() ->
 single_bookie_test_() ->
     topology_suite(bondy_db_topology_single_bookie).
 
+%% The same scenarios against the in-memory (ETS) topology — proves the
+%% facade is backend-agnostic and the ephemeral projection backing serves
+%% reads/writes/range identically. `sup`/`dir` in the shared setup are
+%% ignored by `bondy_db_topology_memory:init/2`.
+memory_test_() ->
+    topology_suite(bondy_db_topology_memory).
+
+%% The memory topology anchors every per-shard resource — the projection
+%% table, the read cache, and the `bondy_db_core_registry` row — in a
+%% dedicated DB-scoped process (`bondy_db_topology_memory_owner`),
+%% decoupled from the transient process that calls `open_table/3`. This
+%% proves full ephemeral survival end-to-end: kill the facade caller and
+%% a fresh process can still drive a write + read through the surviving
+%% substrate. Against the pre-fix code — caller-owned projection + cache,
+%% registry monitor on the caller — killing it wiped the tables (applier
+%% crashes on a dead tid) and dropped the registry row (reads fail).
+ets_owner_survives_caller_death_test_() ->
+    {setup,
+        fun() ->
+            {ok, _} = application:ensure_all_started(bondy_mst),
+            ok
+        end,
+        fun(_) -> ok end,
+        fun ets_owner_survives_caller_death/0}.
+
 topology_suite(Topology) ->
     Tag = atom_to_list(Topology),
     {foreach, fun() -> setup(Topology) end, fun cleanup/1, [
@@ -261,6 +286,234 @@ info_db_and_table({Db, _Sup, _Dir}) ->
         TInfo
     ),
     ok = bondy_db:close_table(T).
+
+ets_owner_survives_caller_death() ->
+    Parent = self(),
+    %% `open_table/3` from a transient process — the facade caller. Under
+    %% the pre-fix code it owned the projection table AND the cache, and
+    %% the registry monitor was on it, so its death wiped all three. With
+    %% the fix every per-shard resource is anchored in the DB-scoped
+    %% `bondy_db_topology_memory_owner`. Capture the full `Table` handle
+    %% so the parent can keep driving the facade after the caller dies.
+    {Caller, MRef} = spawn_monitor(fun() ->
+        {ok, Db} = bondy_db:open(ets_owner_db, #{
+            topology => bondy_db_topology_memory,
+            shard_count => 2,
+            fold_module => ?FOLD
+        }),
+        {ok, T} = bondy_db:open_table(Db, users, #{}),
+        H = bondy_db:tick(T),
+        ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H, <<"v1">>}),
+        Parent ! {captured, T},
+        receive stop -> ok end
+    end),
+    Table =
+        receive
+            {captured, T} -> T
+        after 5000 -> error(captured_timeout)
+        end,
+    TS = maps:get(table_state, Table),
+    Owner = maps:get(owner, TS),
+    Shards = maps:get(shards, TS),
+    NS = maps:get(namespace, Table),
+    Shard = erlang:phash2({<<"r1">>, <<"alice">>}, 2),
+    Tid = maps:get(Shard, Shards),
+    {ok, Entry} = bondy_db_core_registry:lookup(NS, primary, Shard),
+    CacheTid = bondy_db_core_registry:entry_cache_handle(Entry),
+    %% Pre-condition: projection table AND cache are owned by the
+    %% dedicated owner, NOT the transient caller — so by ETS semantics
+    %% the caller's death cannot delete either.
+    ?assert(is_pid(Owner)),
+    ?assertNotEqual(Caller, Owner),
+    ?assertEqual(Owner, ets:info(Tid, owner)),
+    ?assertEqual(Owner, ets:info(CacheTid, owner)),
+    %% Kill the caller.
+    exit(Caller, kill),
+    receive
+        {'DOWN', MRef, process, Caller, _} -> ok
+    after 5000 -> error(down_timeout)
+    end,
+    %% Every per-shard resource the appliers and reads depend on outlives
+    %% the caller: projection table, read cache, and the registry row
+    %% (its monitor now tracks the owner, not the caller).
+    ?assert(is_process_alive(Owner)),
+    ?assertEqual(Owner, ets:info(Tid, owner)),
+    ?assertEqual(Owner, ets:info(CacheTid, owner)),
+    ?assertMatch({ok, _}, bondy_db_core_registry:lookup(NS, primary, Shard)),
+    %% The decisive end-to-end check: a fresh process (the test process,
+    %% not the dead caller) drives a read of the pre-kill write, then a
+    %% NEW write + read, all through the surviving substrate. Pre-fix this
+    %% raised (dead projection/cache tid) or returned a read error (the
+    %% registry row was gone).
+    ?assertMatch({ok, <<"v1">>, _}, bondy_db:read(Table, <<"r1">>, <<"alice">>)),
+    H2 = bondy_db:tick(Table),
+    ok = bondy_db:apply(Table, <<"r1">>, <<"alice">>, {set, H2, <<"v2">>}),
+    ?assertEqual({ok, <<"v2">>, H2}, bondy_db:read(Table, <<"r1">>, <<"alice">>)),
+    %% Teardown through the normal facade path — every delete is routed
+    %% through the owner (cache + registry + projection). The owner is
+    %% orphaned (no surviving Db handle), so stop it explicitly.
+    ok = bondy_db:close_table(Table),
+    ?assertEqual(undefined, ets:info(Tid, owner)),
+    ?assertEqual(undefined, ets:info(CacheTid, owner)),
+    ok = bondy_db_topology_memory_owner:stop(Owner).
+
+%% =============================================================================
+%% PB-2 — per-table projection backend (durable leveled vs ephemeral ets)
+%% =============================================================================
+
+%% An `ets`-backed (ephemeral) table provisioned *inside a leveled DB*.
+%% The facade routes the table's projection through a DB-scoped
+%% `bondy_db_topology_memory` provider; the leveled topology is left
+%% untouched. The full read/write/range contract is identical to leveled.
+ets_backend_in_leveled_db_test_() ->
+    {setup,
+        fun() -> setup(bondy_db_topology_per_entity) end,
+        fun cleanup/1,
+        fun(Ctx) -> {"ets_backend_e2e", fun() -> ets_backend_e2e(Ctx) end} end}.
+
+ets_backend_e2e({Db, _Sup, _Dir}) ->
+    {ok, T} = bondy_db:open_table(Db, registrations, #{
+        projection_backend => ets,
+        oplog_instance_opts => #{backend => ets, durability => ephemeral}
+    }),
+    Info = bondy_db:info(T),
+    ?assertEqual(ets, maps:get(projection_backend, Info)),
+    %% Effective projection topology is the in-memory one even though the
+    %% DB's own topology is leveled.
+    ?assertEqual(bondy_db_topology_memory, maps:get(db_topology, T)),
+    H1 = bondy_db:tick(T),
+    ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H1, <<"v1">>}),
+    ?assertEqual({ok, <<"v1">>, H1}, bondy_db:read(T, <<"r1">>, <<"alice">>)),
+    H2 = bondy_db:tick(T),
+    ?assert(H2 > H1),
+    ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H2, <<"v2">>}),
+    ?assertEqual({ok, <<"v2">>, H2}, bondy_db:read(T, <<"r1">>, <<"alice">>)),
+    %% Single-shard range over the shard `alice` lives in (the facade
+    %% does not scatter-merge; mirror `range_returns_states`).
+    Shard = erlang:phash2({<<"r1">>, <<"alice">>}, 4),
+    {ok, Rows} = bondy_db:range(
+        T, <<"r1">>, <<"a">>, <<"z">>, #{shard => Shard, limit => 100}
+    ),
+    ?assert(lists:member({<<"alice">>, <<"v2">>, H2}, Rows)),
+    ok = bondy_db:close_table(T).
+
+%% One DB, two tables, two backends. A durable (leveled) table and an
+%% ephemeral (ets) table coexist and stay isolated — the headline
+%% intra-DB-mixing capability.
+intra_db_mixing_test_() ->
+    {setup,
+        fun() -> setup(bondy_db_topology_per_entity) end,
+        fun cleanup/1,
+        fun(Ctx) -> {"intra_db_mixing", fun() -> intra_db_mixing(Ctx) end} end}.
+
+intra_db_mixing({Db, _Sup, _Dir}) ->
+    {ok, Durable} = bondy_db:open_table(Db, accounts, #{}),
+    {ok, Ephemeral} = bondy_db:open_table(Db, registrations, #{
+        projection_backend => ets,
+        oplog_instance_opts => #{backend => ets, durability => ephemeral}
+    }),
+    ?assertEqual(leveled, maps:get(projection_backend, bondy_db:info(Durable))),
+    ?assertEqual(ets, maps:get(projection_backend, bondy_db:info(Ephemeral))),
+    Hd = bondy_db:tick(Durable),
+    ok = bondy_db:apply(Durable, <<"r1">>, <<"acct">>, {set, Hd, <<"balance">>}),
+    He = bondy_db:tick(Ephemeral),
+    ok = bondy_db:apply(Ephemeral, <<"r1">>, <<"sess">>, {set, He, <<"conn">>}),
+    ?assertEqual(
+        {ok, <<"balance">>, Hd}, bondy_db:read(Durable, <<"r1">>, <<"acct">>)
+    ),
+    ?assertEqual(
+        {ok, <<"conn">>, He}, bondy_db:read(Ephemeral, <<"r1">>, <<"sess">>)
+    ),
+    %% Distinct namespaces — neither table sees the other's cells.
+    ?assertEqual(not_found, bondy_db:read(Durable, <<"r1">>, <<"sess">>)),
+    ?assertEqual(not_found, bondy_db:read(Ephemeral, <<"r1">>, <<"acct">>)),
+    ok = bondy_db:close_table(Durable),
+    ok = bondy_db:close_table(Ephemeral).
+
+%% An ets-backed table writes nothing to the leveled topology's disk
+%% layout: it bypasses the leveled topology, so no `<Dir>/<entity>/...`
+%% subtree is ever laid out for it.
+ets_backend_no_disk_artifacts_test_() ->
+    {setup,
+        fun() -> setup(bondy_db_topology_per_entity) end,
+        fun cleanup/1,
+        fun(Ctx) ->
+            {"ets_backend_no_disk_artifacts", fun() ->
+                ets_backend_no_disk_artifacts(Ctx)
+            end}
+        end}.
+
+ets_backend_no_disk_artifacts({Db, _Sup, Dir}) ->
+    {ok, T} = bondy_db:open_table(Db, registrations, #{
+        projection_backend => ets,
+        oplog_instance_opts => #{backend => ets, durability => ephemeral}
+    }),
+    H = bondy_db:tick(T),
+    ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H, <<"v1">>}),
+    ?assertNot(filelib:is_dir(filename:join(Dir, "registrations"))),
+    %% A durable table in the same DB *does* lay out its subtree.
+    {ok, D} = bondy_db:open_table(Db, accounts, #{}),
+    Hd = bondy_db:tick(D),
+    ok = bondy_db:apply(D, <<"r1">>, <<"acct">>, {set, Hd, <<"v">>}),
+    ?assert(filelib:is_dir(filename:join(Dir, "accounts"))),
+    ok = bondy_db:close_table(T),
+    ok = bondy_db:close_table(D).
+
+%% A memory-topology DB has no leveled capability, so an explicit
+%% `projection_backend => leveled` is rejected rather than silently
+%% downgraded to ets.
+memory_db_rejects_leveled_backend_test_() ->
+    {setup,
+        fun() ->
+            {ok, _} = application:ensure_all_started(bondy_mst),
+            ok
+        end,
+        fun(_) -> ok end,
+        fun memory_db_rejects_leveled_backend/0}.
+
+memory_db_rejects_leveled_backend() ->
+    {ok, Db} = bondy_db:open(mem_reject_db, #{
+        topology => bondy_db_topology_memory,
+        shard_count => 2,
+        fold_module => ?FOLD
+    }),
+    ?assertMatch(
+        {error, {unsupported_projection_backend,
+            {leveled, bondy_db_topology_memory}}},
+        bondy_db:open_table(Db, t, #{projection_backend => leveled})
+    ),
+    ?assertMatch(
+        {error, {invalid_projection_backend, nonsense}},
+        bondy_db:open_table(Db, t, #{projection_backend => nonsense})
+    ),
+    ok = bondy_db:close(Db).
+
+%% The no-durable-storage WAL warning fires only when storage is absent
+%% AND the caller has not declared the instance ephemeral.
+warn_default_wal_path_test_() ->
+    [
+        ?_assert(bondy_oplog_instance_sup:warn_default_wal_path(#{})),
+        ?_assert(
+            bondy_oplog_instance_sup:warn_default_wal_path(
+                #{durability => durable}
+            )
+        ),
+        ?_assertNot(
+            bondy_oplog_instance_sup:warn_default_wal_path(
+                #{durability => ephemeral}
+            )
+        ),
+        ?_assertNot(
+            bondy_oplog_instance_sup:warn_default_wal_path(
+                #{storage_path => <<"/x">>}
+            )
+        ),
+        ?_assertNot(
+            bondy_oplog_instance_sup:warn_default_wal_path(
+                #{wal_dir => <<"/x">>}
+            )
+        )
+    ].
 
 %% =============================================================================
 %% Helpers

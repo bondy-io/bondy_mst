@@ -111,7 +111,11 @@ See `bondy_oplog_cache_adapter` for the orthogonal read-cache surface.
     handle(),
     bucket(),
     Low :: term(),
-    High :: term(),
+    %% `infinity` is the open-ended upper bound (every key `>= Low`); no
+    %% finite key exceeds it. Every adapter must handle it — it backs the
+    %% `index_get`/`index_range` primary-scan fallback. Mirrors
+    %% `bondy_db_core:range_spec()`.
+    High :: term() | infinity,
     Opts :: range_opts()
 ) ->
     {ok, [{Key :: term(), Frame :: binary()}]}
@@ -124,4 +128,10 @@ See `bondy_oplog_cache_adapter` for the orthogonal read-cache surface.
 -callback head(handle(), bucket(), Key :: term()) ->
     {ok, HeadBytes :: binary()} | not_found.
 
--optional_callbacks([head/3]).
+%% Wipe every object in the handle's keyspace (used by the secondary-index
+%% rebuild before a re-fold). Optional: only the ETS projection implements
+%% it; the rebuild guards the call with `function_exported/3` and degrades
+%% to live-term re-puts when absent.
+-callback clear(handle()) -> ok.
+
+-optional_callbacks([head/3, clear/1]).

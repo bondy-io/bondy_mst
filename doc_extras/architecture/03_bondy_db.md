@@ -260,20 +260,70 @@ flowchart LR
 - This is *consistent-as-of-now* with skew detection — not
   MVCC-as-of-historical-T.
 
-## Secondary indexes — not yet implemented
+## Secondary indexes
 
-The registry key carries an `Index` dimension
-(`bondy_db_core_registry.erl`), and the API signatures take an
-`Index` argument, but today **only `primary` is wired**:
+Secondary indexes are **wired**. A table opened with `indexes =>
+[Spec]` gets, per declared index, a term-sharded ETS keyspace that
+answers "which primary keys have term `T`?" without scanning and
+decoding every value.
 
-- `bondy_db.erl` hard-codes `?INDEX = primary` at every call site.
-- There is no secondary-writer process, no `{apply_secondary, ...}`
-  dispatch in the applier, no `lag_bound` config, no `by_session`
-  read path.
+```erlang
+{ok, Users} = bondy_db:open_table(Db, users, #{
+    fold_module => lww_register,
+    indexes => [#{
+        name      => by_status,
+        extract   => [status],      %% field path into the value
+        normalize => downcase,
+        projects  => [name, status] %% denormalised columns (optional)
+    }]
+}),
+%% ... apply some writes, then:
+{ok, Rows} = bondy_db:index_get(Users, <<"acme">>, by_status, <<"active">>, #{}),
+%% Rows :: [{PrimaryKey, ColumnsMap}]
+```
 
-The dimension exists so future secondaries can be added without an
-API break. Until they are, plan reads against the primary index
-only.
+**Always ETS, always rebuildable.** An index is *never* persisted —
+regardless of the namespace's projection backend it lives in RAM and
+is rebuilt from the primary on every cold start (a mandatory startup
+backfill). It is a deterministic function of the primary MST, so the
+authoritative copy is always the primary and the index is a disposable
+accelerator. This also sidesteps leveled's native 2i, which is
+incompatible with the `head_only` write mode the durable projection
+uses (see `MST_DB_DESIGN.md` §13).
+
+**Term-sharded.** Each index is its own shard-set under
+`(NS, IndexName, SecShard)`, sharded by `phash2({SecBucket, Term},
+SecShardCount)`. An equality read (`index_get/5`) hits exactly one
+shard; a range read (`index_range/6`) scatters across all of them and
+merges into one globally `(term, primary-key)`-ordered list (terms span
+every shard).
+
+**Asynchronous writer + lag fence.** The primary applier computes the
+old→new term diff for free — it already decoded both values — and after
+the primary write commits it casts the index ops to a per-shard
+`bondy_oplog_secondary_writer`. The writer batches, coalesces, and
+read-modify-writes each touched index cell through the `index_entry`
+fold (LWW-over-presence keyed by the primary's HLC, so an out-of-order
+local-drain-vs-peer-replay delivery still converges). Because the write
+is asynchronous, an index can lag the primary; reads can fence on it:
+
+- `index_get(.., #{max_lag => Ms})` refuses with
+  `{error, {stale_secondary, IndexName, Lag}}` if the touched shard
+  was not freshened within `Ms` (`Lag` is the ms lag, or `infinity`
+  when never freshened or flagged for rebuild).
+- `#{fallback => primary}` instead scans the primary directly and
+  recomputes the matching keys (slow but always correct).
+
+**Back-pressure + self-healing.** Each shard carries an in-flight
+atomic; if a hot shard's backlog would exceed its `max_inflight` cap
+the applier *drops* the batch, marks the shard `needs_rebuild`, and
+asks `bondy_oplog_index_rebuild` to re-materialise it from the primary
+MST. The same rebuild path runs on a writer crash and at startup
+(backfill). Memory stays bounded and correctness is preserved: the
+index is rebuildable, and stale reads refuse until it catches up.
+`bondy_db:rebuild_index/2` exposes the rebuild for operators;
+`bondy_db:index_lag/2` reports per-shard `{lag, inflight,
+needs_rebuild}`.
 
 ## Range scans
 
@@ -326,10 +376,51 @@ The registry entry per `(NS, Index, Shard)` carries:
 - `fold_module` — the per-namespace fold ([chapter 05](05_fold_strategies.md)).
 - `ae_atomics` — the wait-free freshness ref read by
   `ensure_fresh/2` and bumped by `bump_ae/3` after each AE round.
+- For secondary-index shards, additionally a `writer_pid` and an
+  `inflight_ref` (the in-flight counter + `needs_rebuild` flag);
+  primary shards carry an `instance_id` so a rebuild can find the
+  applier to re-fold.
 
 The applier reads the registry at init to resolve its
 `cell_apply_target` — the (projection, cache, fold, overlay) tuple
 it writes through on every event.
+
+## Projection backend: durable vs ephemeral
+
+The registry entry's `projection_adapter` is chosen **per table** from
+`open_table`'s `projection_backend` option:
+
+- `leveled` (default) — the durable path. The topology's `route/2`
+  hands back a Bookie handle; state survives restart and is the source
+  of truth on a cold start.
+- `ets` — an in-RAM projection (`bondy_oplog_projection_ets`). Nothing
+  is persisted; the table starts empty and reconverges from peer
+  anti-entropy.
+
+`ets` alone only makes a table **ephemeral** if the *whole* stack is
+in-memory — the MST store and the WAL too. Otherwise WAL replay would
+resurrect dead entries on restart. The **caller assembles** that stack
+from three independent keys: `projection_backend => ets` +
+`oplog_instance_opts => #{backend => ets}` (in-memory MST) + no
+`storage_path` anywhere in the cascade. `durability => ephemeral` is the
+explicit acknowledgement of that intent — it does not enforce the bundle;
+it only silences the "no durable storage" warning the missing
+`storage_path` would otherwise log. The WAL still writes to a per-PID
+tmp path (`/tmp/bondy_oplog_wal/<os_pid>/…`); what makes it
+restart-safe is that the path is `os:getpid()`-namespaced, so a fresh
+BEAM never replays the prior run's segments — not that the WAL is
+non-durable within a run.
+
+This is what ephemeral namespaces need: WAMP registrations and
+subscriptions die with the node's transport connections, so persisting
+them would only resurrect dead, unroutable entries on restart. An
+ephemeral table starts empty after a restart and rebuilds its live
+state from peers — never from disk.
+
+Backends can be mixed within one DB — a durable `leveled` table and an
+ephemeral `ets` table coexist under the same topology
+(`bondy_db_topology_memory` is itself a DB-scoped ETS provider for the
+ephemeral case).
 
 ## Things to keep in mind
 
@@ -344,8 +435,11 @@ it writes through on every event.
 - **Cache coherence is by invalidation.** The applier deletes the
   cache entry after each projection write; the next read
   repopulates.
-- **Secondary indexes are a registry-key dimension only.** No
-  secondary-writer code path exists yet; only `primary` is wired.
+- **Secondary indexes are wired.** A table's `indexes => [Spec]`
+  provisions term-sharded ETS index shard-sets fed by an async
+  `bondy_oplog_secondary_writer`; reads go through `index_get/5` /
+  `index_range/6` with a `max_lag` fence. They are never persisted —
+  always rebuilt from the primary.
 
 ## Pointers
 
@@ -365,6 +459,23 @@ Implementation:
 - `bondy_oplog_cache_adapter.erl` + `bondy_oplog_cache_ets.erl`
   — cache behaviour and the single ETS implementation.
 - `bondy_oplog_projection_adapter.erl` +
-  `bondy_oplog_projection_leveled.erl` — Leveled-backed projection.
+  `bondy_oplog_projection_leveled.erl` /
+  `bondy_oplog_projection_ets.erl` — durable (Leveled) and ephemeral
+  (in-RAM) projections.
+- `bondy_db_topology_memory.erl` — DB-scoped ETS projection provider
+  for ephemeral tables.
 - `bondy_oplog_cell_frame.erl` — `<<HlcLen:16, Hlc:64, Body>>`
   cell encoding.
+
+Secondary indexes:
+
+- `bondy_oplog_index_spec.erl` — declarative index spec (extract,
+  normalize, projects, `max_lag`, `max_inflight`).
+- `bondy_oplog_index_key.erl` — order-preserving `(Term, PrimaryKey)`
+  composite-key codec.
+- `bondy_oplog_fold_index_entry.erl` — the `index_entry` fold
+  (LWW-over-presence keyed by the primary HLC).
+- `bondy_oplog_secondary_writer.erl` + `bondy_oplog_secondary_sup.erl`
+  — per-(NS, Index, Shard) async writer and its supervisor.
+- `bondy_oplog_index_rebuild.erl` — serialised MST-replay rebuild /
+  backfill orchestrator.

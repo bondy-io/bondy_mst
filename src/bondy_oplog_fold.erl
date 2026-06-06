@@ -341,6 +341,7 @@ mod_of(g_counter) -> bondy_oplog_fold_g_counter;
 mod_of(max_register) -> bondy_oplog_fold_max_register;
 mod_of(min_register) -> bondy_oplog_fold_min_register;
 mod_of(g_set) -> bondy_oplog_fold_g_set;
+mod_of(index_entry) -> bondy_oplog_fold_index_entry;
 mod_of(Mod) when is_atom(Mod) -> Mod.
 
 -doc """
@@ -364,6 +365,7 @@ is_known(g_counter) -> true;
 is_known(max_register) -> true;
 is_known(min_register) -> true;
 is_known(g_set) -> true;
+is_known(index_entry) -> true;
 is_known(Atom) when is_atom(Atom) -> false;
 is_known(_) -> false.
 

@@ -80,6 +80,22 @@ keeps reads parallel.
 
 -define(TABLE, bondy_db_core_registry_tab).
 
+%% "Infinitely stale" freshness sentinel (`MST_DB_DESIGN.md` §11). Chosen
+%% so that on a node whose `monotonic_time(millisecond)` offset is large
+%% and negative, `Now - sentinel` is always a huge positive number — an
+%% un-bumped (or deliberately invalidated) shard fails any finite
+%% `max_lag` check. `-(1 bsl 62)` leaves headroom above the signed-int64
+%% floor so the subtraction never wraps.
+-define(STALE_SENTINEL, -(1 bsl 62)).
+
+%% Atomics slot layout for an index shard's `inflight_ref` (IDX-4
+%% back-pressure). Slot 1 counts ops dispatched to the secondary writer
+%% but not yet flushed (the unbounded-mailbox bound); slot 2 is a
+%% `needs_rebuild` flag (0 | 1) raised on a saturation drop or a writer
+%% crash and cleared only by a completed rebuild.
+-define(INFLIGHT_SLOT, 1).
+-define(NEEDS_REBUILD_SLOT, 2).
+
 -record(entry, {
     key :: shard_key(),
     shard_count :: pos_integer(),
@@ -107,7 +123,32 @@ keeps reads parallel.
     %% prevent unfenced staleness. Owners pass this on `register/4`;
     %% the substrate trusts the value to be consistent across shards
     %% of the same namespace (consumer responsibility).
-    consistency_class :: ap | cp
+    consistency_class :: ap | cp,
+    %% Secondary-index writer pid for this `(NS, IndexName, SecShard)`
+    %% triple (`MST_DB_DESIGN.md` §13). `undefined` for primary shards
+    %% and for index shards whose `bondy_oplog_secondary_writer` has not
+    %% yet stamped itself (a brief startup window). The primary applier
+    %% reads it via `entry_writer_pid/1` to dispatch index updates after
+    %% a successful projection write. Set out-of-band via
+    %% `set_writer_pid/4` (a single-field `ets:update_element`, no
+    %% monitor change) — the projection-handle owner, not the writer,
+    %% owns the registry monitor.
+    writer_pid = undefined :: pid() | undefined,
+    %% Per-index-shard back-pressure atomics (`MST_DB_DESIGN.md` §13,
+    %% IDX-4). `undefined` for primary shards. Two slots: in-flight op
+    %% count (slot `?INFLIGHT_SLOT`) and a `needs_rebuild` flag (slot
+    %% `?NEEDS_REBUILD_SLOT`). The primary applier reads slot 1 at dispatch
+    %% to decide whether to drop a saturating batch; the secondary writer
+    %% decrements it on flush. Slot 2 gates `index_get`/`index_range`
+    %% freshness so reads refuse from a saturation drop until a rebuild
+    %% clears it. Allocated by the facade on index-shard registration.
+    inflight_ref = undefined :: atomics:atomics_ref() | undefined,
+    %% Primary shard's oplog `instance_id` (`bondy_oplog`), recorded so a
+    %% secondary-index rebuild can discover the primary appliers for a
+    %% namespace from the registry alone (no table handle), re-fold each
+    %% one's MST, and re-dispatch the index ops. `undefined` for secondary
+    %% (index) shards, which have no oplog instance.
+    instance_id = undefined :: binary() | undefined
 }).
 
 -record(state, {
@@ -147,7 +188,14 @@ keeps reads parallel.
     %% Optional. Per-namespace consistency policy (`MST_DB_DESIGN.md`
     %% §15). Defaults to `ap`. See `read_batch/2` for the enforcement
     %% rule.
-    consistency_class => ap | cp
+    consistency_class => ap | cp,
+    %% Optional. Per-index-shard back-pressure atomics (IDX-4). Allocated
+    %% by the facade for index shards (`atomics:new(2, [{signed, true}])`);
+    %% absent for primary shards.
+    inflight_atomics => atomics:atomics_ref(),
+    %% Optional. The owning oplog `instance_id` for a primary shard, so a
+    %% rebuild can find the primary applier. Absent for index shards.
+    instance_id => binary()
 }.
 
 -export_type([shard_entry/0, config/0]).
@@ -157,6 +205,7 @@ keeps reads parallel.
 
 -export([register/4]).
 -export([unregister/3]).
+-export([set_writer_pid/4]).
 -export([lookup/3]).
 -export([shard_count/2]).
 -export([list/0]).
@@ -174,6 +223,7 @@ keeps reads parallel.
 -export([bump_ae_targets/1]).
 -export([bump_ae_targets/2]).
 -export([last_ae_at/3]).
+-export([ever_freshened/3]).
 -export([shards_for/1]).
 -export([namespaces/0]).
 
@@ -189,6 +239,23 @@ keeps reads parallel.
 -export([entry_ae_atomics/1]).
 -export([entry_high_water_ref/1]).
 -export([entry_consistency_class/1]).
+-export([entry_writer_pid/1]).
+-export([entry_inflight_ref/1]).
+-export([entry_instance_id/1]).
+-export([entry_last_ae/1]).
+-export([entry_ever_freshened/1]).
+
+%% Index-shard back-pressure helpers (IDX-4). Operate on the entry's
+%% `inflight_ref`; all are wait-free and a strict no-op (or `false`) when
+%% the ref is `undefined` (a primary shard).
+-export([index_inflight_add/2]).
+-export([index_inflight_sub/2]).
+-export([index_inflight/1]).
+-export([index_inflight_reset/1]).
+-export([index_mark_rebuild/1]).
+-export([index_clear_rebuild/1]).
+-export([index_needs_rebuild/1]).
+-export([reset_stale_ae/1]).
 
 %% Namespace-level consistency_class lookup (`MST_DB_DESIGN.md` §15).
 -export([consistency_class/1]).
@@ -252,6 +319,31 @@ register(NS, Index, Shard, Config) when
 
 unregister(NS, Index, Shard) ->
     gen_server:call(?MODULE, {unregister, {NS, Index, Shard}}).
+
+-doc """
+Stamp the secondary-index writer pid onto an already-registered
+`(NS, IndexName, SecShard)` row. A single-field `ets:update_element/3`:
+lock-free, no monitor change (the registry monitor stays bound to the
+projection-handle owner from `register/4` — the writer is a client, not
+the owner, of that row). Returns `not_found` when no row exists for the
+triple (e.g. the index shard was torn down, or the registry restarted
+and the owner has not re-registered yet). Called by
+`bondy_oplog_secondary_writer` at init and on the registry-restart epoch.
+""".
+-spec set_writer_pid(atom(), atom(), non_neg_integer(), pid()) ->
+    ok | not_found.
+
+set_writer_pid(NS, Index, Shard, Pid) when
+    is_atom(NS), is_atom(Index), is_integer(Shard), Shard >= 0, is_pid(Pid)
+->
+    case
+        ets:update_element(
+            ?TABLE, {NS, Index, Shard}, {#entry.writer_pid, Pid}
+        )
+    of
+        true -> ok;
+        false -> not_found
+    end.
 
 -doc """
 Return the current epoch reference. A new epoch is allocated on each
@@ -429,6 +521,22 @@ last_ae_at(NS, Index, Shard) ->
     end.
 
 -doc """
+Whether the shard has ever been freshened (AE bumped past the
+"infinitely stale" sentinel). Used by a restarting secondary writer to
+tell a crash-restart of a previously-populated shard (rebuild to recover
+the lost buffer) from a first-ever start (the startup backfill handles
+it). `false` for an unknown or never-bumped shard.
+""".
+-spec ever_freshened(atom(), atom(), non_neg_integer()) -> boolean().
+
+ever_freshened(NS, Index, Shard) ->
+    case last_ae_at(NS, Index, Shard) of
+        not_found -> false;
+        ?STALE_SENTINEL -> false;
+        _ -> true
+    end.
+
+-doc """
 Return all entries registered for the namespace. Used by callers that
 need the atomics ref directly to avoid the second `lookup/3`.
 """.
@@ -482,6 +590,115 @@ entry_shard_count(#entry{shard_count = V}) -> V.
 entry_ae_atomics(#entry{ae_atomics = V}) -> V.
 entry_high_water_ref(#entry{high_water_ref = V}) -> V.
 entry_consistency_class(#entry{consistency_class = V}) -> V.
+entry_writer_pid(#entry{writer_pid = V}) -> V.
+entry_inflight_ref(#entry{inflight_ref = V}) -> V.
+entry_instance_id(#entry{instance_id = V}) -> V.
+
+%% Last AE-freshness timestamp (monotonic ms), read straight off the
+%% entry's atomics — the sentinel `?STALE_SENTINEL` for a never-freshened
+%% shard. Lets a caller that already holds the entry compute the lag
+%% without a second `lookup/3`.
+entry_last_ae(#entry{ae_atomics = Ref}) -> atomics:get(Ref, 1).
+
+%% Whether this shard has ever been freshened (AE bumped past the stale
+%% sentinel).
+entry_ever_freshened(#entry{ae_atomics = Ref}) ->
+    atomics:get(Ref, 1) =/= ?STALE_SENTINEL.
+
+%% =============================================================================
+%% Index-shard back-pressure (IDX-4)
+%% =============================================================================
+
+-doc """
+Add `N` to the index shard's in-flight op counter and return the new
+value. Called by the primary applier when it accepts a batch for the
+secondary writer. A no-op returning `0` for a primary shard (no
+`inflight_ref`).
+""".
+-spec index_inflight_add(shard_entry(), non_neg_integer()) ->
+    non_neg_integer().
+
+index_inflight_add(#entry{inflight_ref = undefined}, _N) ->
+    0;
+index_inflight_add(#entry{inflight_ref = Ref}, N) when is_integer(N), N >= 0 ->
+    atomics:add_get(Ref, ?INFLIGHT_SLOT, N).
+
+-doc """
+Subtract `N` from the index shard's in-flight op counter, flooring at
+`0` (a flush can never legitimately drive it negative, but a concurrent
+reset must not leave it below zero). No-op for a primary shard.
+""".
+-spec index_inflight_sub(shard_entry(), non_neg_integer()) -> ok.
+
+index_inflight_sub(#entry{inflight_ref = undefined}, _N) ->
+    ok;
+index_inflight_sub(#entry{inflight_ref = Ref}, N) when is_integer(N), N >= 0 ->
+    case atomics:sub_get(Ref, ?INFLIGHT_SLOT, N) of
+        V when V < 0 -> atomics:put(Ref, ?INFLIGHT_SLOT, 0);
+        _ -> ok
+    end.
+
+-doc "Current in-flight op count for the index shard (`0` for a primary).".
+-spec index_inflight(shard_entry()) -> non_neg_integer().
+
+index_inflight(#entry{inflight_ref = undefined}) ->
+    0;
+index_inflight(#entry{inflight_ref = Ref}) ->
+    erlang:max(0, atomics:get(Ref, ?INFLIGHT_SLOT)).
+
+-doc """
+Reset the in-flight counter to `0`. Used by a rebuild before it re-folds
+the primary, since the rebuild also discards the writer's buffer — the
+counter and the buffer are reset together so they stay consistent.
+""".
+-spec index_inflight_reset(shard_entry()) -> ok.
+
+index_inflight_reset(#entry{inflight_ref = undefined}) ->
+    ok;
+index_inflight_reset(#entry{inflight_ref = Ref}) ->
+    atomics:put(Ref, ?INFLIGHT_SLOT, 0).
+
+-doc """
+Raise the index shard's `needs_rebuild` flag (a saturation drop or a
+writer crash lost ops). While set, `index_get`/`index_range` treat the
+shard as stale regardless of its AE timestamp, so reads refuse (or fall
+back to the primary) until a rebuild clears the flag. No-op for a primary.
+""".
+-spec index_mark_rebuild(shard_entry()) -> ok.
+
+index_mark_rebuild(#entry{inflight_ref = undefined}) ->
+    ok;
+index_mark_rebuild(#entry{inflight_ref = Ref}) ->
+    atomics:put(Ref, ?NEEDS_REBUILD_SLOT, 1).
+
+-doc "Clear the `needs_rebuild` flag. Called by a completed rebuild.".
+-spec index_clear_rebuild(shard_entry()) -> ok.
+
+index_clear_rebuild(#entry{inflight_ref = undefined}) ->
+    ok;
+index_clear_rebuild(#entry{inflight_ref = Ref}) ->
+    atomics:put(Ref, ?NEEDS_REBUILD_SLOT, 0).
+
+-doc "Whether the index shard's `needs_rebuild` flag is set (`false` for a primary).".
+-spec index_needs_rebuild(shard_entry()) -> boolean().
+
+index_needs_rebuild(#entry{inflight_ref = undefined}) ->
+    false;
+index_needs_rebuild(#entry{inflight_ref = Ref}) ->
+    atomics:get(Ref, ?NEEDS_REBUILD_SLOT) =/= 0.
+
+-doc """
+Reset the shard's AE freshness counter to the "infinitely stale"
+sentinel, so any finite `max_lag` read refuses until the shard is
+freshened again. Used by a saturation drop (`MST_DB_DESIGN.md` §13). No-op
+when the entry has no AE atomics.
+""".
+-spec reset_stale_ae(shard_entry()) -> ok.
+
+reset_stale_ae(#entry{ae_atomics = undefined}) ->
+    ok;
+reset_stale_ae(#entry{ae_atomics = Ref}) ->
+    atomics:put(Ref, 1, ?STALE_SENTINEL).
 
 -doc """
 Return the consistency class declared for the namespace. Reads it from
@@ -540,13 +757,9 @@ handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
                 ExistingRef;
             error ->
                 NewRef = atomics:new(1, [{signed, true}]),
-                %% Initialise to a "very stale" sentinel so that on a node
-                %% where `monotonic_time(millisecond)` is large-negative
-                %% (the default offset), `Now - sentinel` is always huge,
-                %% i.e. an un-bumped shard fails any finite freshness
-                %% check. -(1 bsl 62) leaves plenty of headroom above the
-                %% signed-int64 floor for subtraction not to wrap.
-                ok = atomics:put(NewRef, 1, -(1 bsl 62)),
+                %% Initialise to the "infinitely stale" sentinel so an
+                %% un-bumped shard fails any finite freshness check.
+                ok = atomics:put(NewRef, 1, ?STALE_SENTINEL),
                 NewRef
         end,
     HighWater = bondy_oplog_high_water:new(),
@@ -561,7 +774,9 @@ handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
         fold_module = maps:get(fold_module, Config),
         ae_atomics = Ae,
         high_water_ref = HighWater,
-        consistency_class = maps:get(consistency_class, Config, ap)
+        consistency_class = maps:get(consistency_class, Config, ap),
+        inflight_ref = maps:get(inflight_atomics, Config, undefined),
+        instance_id = maps:get(instance_id, Config, undefined)
     },
     true = ets:insert(?TABLE, Entry),
     State2 = State1#state{

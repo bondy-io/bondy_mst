@@ -268,7 +268,25 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% shard's registry entry has no ref (legacy entries created
     %% before PR-D1 §3 — defensive only; new registrations always
     %% allocate).
-    high_water_ref => bondy_oplog_high_water:ref() | undefined
+    high_water_ref => bondy_oplog_high_water:ref() | undefined,
+    %% Secondary indexes declared on this primary table
+    %% (`MST_DB_DESIGN.md` §13). Static descriptors resolved once at
+    %% init from the applier opts; `[]` (the default) makes the index
+    %% dispatch a strict no-op for non-indexed tables. For each cell the
+    %% applier materialises, it term-diffs the cell's old vs new value
+    %% per descriptor and dispatches `index_entry` ops to the
+    %% `bondy_oplog_secondary_writer` owning each touched secondary
+    %% shard (resolved live via `bondy_db_core_registry`), so the writer
+    %% need not exist when the applier starts.
+    secondary_indexes => [index_descriptor()]
+}.
+-type index_descriptor() :: #{
+    index_name := atom(),
+    spec := bondy_oplog_index_spec:spec(),
+    sec_shard_count := pos_integer(),
+    %% Per-shard in-flight back-pressure cap; read by `dispatch_index_ops/4`.
+    %% Defaults to `?DEFAULT_MAX_INFLIGHT` when absent.
+    max_inflight => non_neg_integer()
 }.
 
 -type opts() :: #{
@@ -284,7 +302,11 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% Per-cell projection write wiring (MST_DB_DESIGN §6.3).
     %% Setting this requires the shard to be already registered in
     %% `bondy_db_core_registry`. Resolved eagerly at init/1.
-    cell_apply_target => shard_key()
+    cell_apply_target => shard_key(),
+    %% Secondary-index descriptors for this primary table
+    %% (MST_DB_DESIGN §13). Passed through into the `cell_apply_ctx`;
+    %% only meaningful alongside `cell_apply_target`.
+    secondary_indexes => [index_descriptor()]
 }.
 
 -export_type([opts/0]).
@@ -298,6 +320,8 @@ configured; defaults are no-ops so existing instances are unaffected.
 -export([notify_drain_resume/1]).
 -export([replay_cell_events/1]).
 -export([replay_cell_events_sync/1]).
+-export([rebuild_indexes/1]).
+-export([rebuild_indexes_sync/1]).
 -export([cell_apply_target/1]).
 -export([install_catalogue_batch/2]).
 -export([resolve_logical_event/4]).
@@ -319,6 +343,13 @@ configured; defaults are no-ops so existing instances are unaffected.
 %% supervisor shutdown messages and any future control-plane signals
 %% are processed in a timely fashion.
 -define(AWAIT_DURABLE_TIMEOUT_MS, 200).
+%% Default per-secondary-shard in-flight cap (IDX-4 back-pressure). A
+%% batch that would push the writer's unflushed-op backlog past this is
+%% dropped and the shard scheduled for rebuild. Must exceed a shard's
+%% live-entry working set; overridable per index via the spec's
+%% `max_inflight`. Large by design — back-pressure is a safety valve for
+%% a pathologically hot shard, not a steady-state throttle.
+-define(DEFAULT_MAX_INFLIGHT, 100000).
 
 %% =============================================================================
 %% API
@@ -423,6 +454,29 @@ cast (idempotent, no-op when `cell_apply_target` is not configured).
 """.
 replay_cell_events_sync(ApplierPid) when is_pid(ApplierPid) ->
     gen_server:call(ApplierPid, replay_cell_events, infinity).
+
+-spec rebuild_indexes(pid()) -> ok.
+
+-doc """
+Force a full secondary-index rebuild from this primary shard
+(`MST_DB_DESIGN.md` §13, IDX-4): resets the replay watermark to
+`undefined` and re-folds the whole MST, re-dispatching a `put` for every
+live term of every cell to the secondary writers. Unlike
+`replay_cell_events/1` (incremental, diff-since-last-sync), this always
+walks the full MST, and its dispatch **bypasses the writer back-pressure
+cap** so the rebuild can load the full working set in one pass even when
+the cap was exceeded. Combined with the rebuild orchestrator first
+clearing the stale index shard, this restores the index exactly. A no-op
+when the instance has no `cell_apply_target`.
+""".
+rebuild_indexes(ApplierPid) when is_pid(ApplierPid) ->
+    gen_server:cast(ApplierPid, rebuild_indexes).
+
+-spec rebuild_indexes_sync(pid()) -> ok.
+
+-doc "Synchronous variant of `rebuild_indexes/1` (the rebuild barrier).".
+rebuild_indexes_sync(ApplierPid) when is_pid(ApplierPid) ->
+    gen_server:call(ApplierPid, rebuild_indexes, infinity).
 
 -spec projection(pid()) ->
     {ok, term()} | {error, no_fold_configured}.
@@ -692,7 +746,9 @@ resolve_cell_apply_ctx(Opts) ->
                         cache_handle =>
                             bondy_db_core_registry:entry_cache_handle(Entry),
                         high_water_ref =>
-                            bondy_db_core_registry:entry_high_water_ref(Entry)
+                            bondy_db_core_registry:entry_high_water_ref(Entry),
+                        secondary_indexes =>
+                            maps:get(secondary_indexes, Opts, [])
                     }};
                 not_found ->
                     {error, {cell_apply_target_not_registered, Key}}
@@ -797,6 +853,11 @@ handle_call(replay_cell_events, _From, State) ->
     %% up. Callers that need read-your-peers-write semantics use this
     %% instead of the cast.
     {reply, ok, do_replay_cell_events(State)};
+handle_call(rebuild_indexes, _From, State) ->
+    %% Full secondary-index rebuild (IDX-4): reset the replay watermark
+    %% and re-fold the whole MST with the back-pressure cap bypassed, so
+    %% every live term is re-dispatched to the secondary writers.
+    {reply, ok, do_rebuild_indexes(State)};
 handle_call(
     {resolve_logical_event, _Bucket, _Key, _Event},
     _From,
@@ -841,6 +902,8 @@ handle_cast({refresh_validator, Reason}, State) ->
     {noreply, do_refresh_validator(Reason, State)};
 handle_cast(replay_cell_events, State) ->
     {noreply, do_replay_cell_events(State)};
+handle_cast(rebuild_indexes, State) ->
+    {noreply, do_rebuild_indexes(State)};
 handle_cast(drain_resume, #state{drain_deferred = false} = State) ->
     %% Already draining (or about to); the next `self() ! drain` will
     %% pick up the freed slot anyway. Drop the redundant signal.
@@ -1353,6 +1416,7 @@ apply_cell_batch(
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
     CacheHandle = maps:get(cache_handle, Ctx, undefined),
     HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
+    SecIdx = sec_idx(Ctx),
 
     %% PR-PS-15b: collect all per-event writes into a single
     %% `Adapter:put_batch/2` call.
@@ -1365,8 +1429,13 @@ apply_cell_batch(
     %% we issue ONE `put_batch` with the deduped {Bucket, Key, Frame}
     %% list (last write wins per key — consistent with the previous
     %% sequential-per-key semantics).
-    {LocalWrites, MaxHlc} = lists:foldl(
-        fun(Event, {WAcc, HlcAcc}) ->
+    %%
+    %% IDX-3: a third accumulator `IdxAcc :: #{{IndexName, SecShard} =>
+    %% [IndexOp]}` collects the secondary-index ops every cell yields
+    %% (empty for non-indexed tables); they are dispatched to the
+    %% secondary writers *after* the primary `put_batch` returns ok.
+    {LocalWrites, MaxHlc, IdxAcc} = lists:foldl(
+        fun(Event, {WAcc, HlcAcc, IAcc}) ->
             case bondy_oplog_event:op(Event) of
                 {cell_apply, Bucket, Key, FoldEvent} ->
                     Meta = bondy_oplog_event:key(Event),
@@ -1380,20 +1449,25 @@ apply_cell_batch(
                             Bucket,
                             Key,
                             FoldEvent,
-                            Meta
+                            Meta,
+                            SecIdx
                         )
                     of
-                        {ok, NewFrame, NewHlc} ->
+                        {ok, NewFrame, NewHlc, IdxOps} ->
                             WAcc1 = WAcc#{{Bucket, Key} => NewFrame},
-                            {WAcc1, max_hlc(HlcAcc, NewHlc)};
+                            {
+                                WAcc1,
+                                max_hlc(HlcAcc, NewHlc),
+                                merge_idx_ops(IAcc, IdxOps)
+                            };
                         skip ->
-                            {WAcc, HlcAcc}
+                            {WAcc, HlcAcc, IAcc}
                     end;
                 _ ->
-                    {WAcc, HlcAcc}
+                    {WAcc, HlcAcc, IAcc}
             end
         end,
-        {#{}, undefined},
+        {#{}, undefined, #{}},
         Events
     ),
 
@@ -1426,8 +1500,15 @@ apply_cell_batch(
                     case MaxHlc of
                         undefined -> ok;
                         _ -> advance_high_water(HighWaterRef, MaxHlc)
-                    end;
+                    end,
+                    %% Only after the primary write is durable do we let
+                    %% the index see these terms. The live drain path
+                    %% enforces the back-pressure cap (Bypass = false).
+                    dispatch_index_ops(SecIdx, IdxAcc, MaxHlc, false);
                 {error, Reason} ->
+                    %% Primary write failed: do NOT dispatch index ops —
+                    %% the cells (and their index entries) are re-applied
+                    %% on the next replay of these events.
                     ?LOG_WARNING(#{
                         description =>
                             "bondy_oplog_applier projection batch write "
@@ -1464,7 +1545,8 @@ compute_one_cell(
     Bucket,
     Key,
     FoldEvent,
-    Meta
+    Meta,
+    SecIdx
 ) ->
     try
         ReadT0 = erlang:monotonic_time(microsecond),
@@ -1515,7 +1597,14 @@ compute_one_cell(
             #{duration_us => erlang:monotonic_time(microsecond) - ApplyT0},
             #{instance_id => Id}
         ),
-        {ok, NewFrame, Hlc}
+        %% IDX-3: term-diff the cell's old vs new value into secondary
+        %% index ops. Wrapped in its own try (`index_ops_for_cell/8`) so a
+        %% malformed spec degrades only the index (rebuildable) and never
+        %% drops the primary write.
+        IdxOps = index_ops_for_cell(
+            SecIdx, Id, Fold, Bucket, Key, OldState, NewState, Hlc
+        ),
+        {ok, NewFrame, Hlc, IdxOps}
     catch
         C:R:S ->
             ?LOG_ERROR(#{
@@ -1542,6 +1631,186 @@ max_hlc(A, B) when A >= B -> A;
 max_hlc(_, B) -> B.
 
 %% @private
+%% Bundle the namespace + resolved secondary-index descriptors out of the
+%% cell-apply ctx into the compact `{NS, [Descriptor]}` pair threaded
+%% through the cell compute/dispatch path. `[]` (no indexes) makes every
+%% downstream step a strict no-op.
+sec_idx(Ctx) ->
+    {NS, _Index, _Shard} = maps:get(shard_key, Ctx),
+    {NS, maps:get(secondary_indexes, Ctx, [])}.
+
+%% @private
+%% Term-diff one cell's old vs new value into a flat list of
+%% `{IndexName, SecShard, IndexOp}` across every declared secondary index.
+%% Own try/catch: a malformed spec (e.g. a term type the codec rejects)
+%% degrades only the index — the caller's primary write proceeds.
+index_ops_for_cell(
+    {_NS, []}, _Id, _Fold, _Bucket, _Key, _OldState, _NewState, _Hlc
+) ->
+    [];
+index_ops_for_cell(
+    {_NS, SecIndexes}, Id, Fold, Bucket, Key, OldState, NewState, Hlc
+) ->
+    try
+        OldValue = bondy_oplog_fold:to_value(Fold, OldState),
+        NewValue = bondy_oplog_fold:to_value(Fold, NewState),
+        lists:flatmap(
+            fun(Desc) ->
+                index_ops_for_one(Desc, Bucket, Key, OldValue, NewValue, Hlc)
+            end,
+            SecIndexes
+        )
+    catch
+        C:R:S ->
+            ?LOG_ERROR(#{
+                description =>
+                    "bondy_oplog_applier secondary-index op computation "
+                    "raised; the index is degraded for this cell "
+                    "(rebuildable from the primary). The primary write "
+                    "is unaffected.",
+                instance_id => Id,
+                bucket => Bucket,
+                cell_key => Key,
+                class => C,
+                reason => R,
+                stacktrace => S
+            }),
+            []
+    end.
+
+%% @private
+%% A `put` for every current term (an idempotent re-put also refreshes the
+%% denormalised columns when sibling fields changed) and a `remove` for
+%% every term the value no longer yields. The op HLC is the *primary*
+%% cell's new HLC, so the index cell's LWW-over-presence fold converges
+%% regardless of arrival order.
+index_ops_for_one(
+    #{index_name := IName, spec := Spec, sec_shard_count := SCount},
+    Bucket,
+    Key,
+    OldValue,
+    NewValue,
+    Hlc
+) ->
+    OldTerms = lists:usort(bondy_oplog_index_spec:terms(Spec, OldValue)),
+    NewTerms = lists:usort(bondy_oplog_index_spec:terms(Spec, NewValue)),
+    SecBucket = bondy_oplog_index_key:bucket(Bucket, IName),
+    Cols = bondy_oplog_index_spec:project(Spec, NewValue),
+    Removed = OldTerms -- NewTerms,
+    [
+        index_op(IName, SecBucket, SCount, T, Key, {put, Cols, Hlc})
+     || T <- NewTerms
+    ] ++
+        [
+            index_op(IName, SecBucket, SCount, T, Key, {remove, Hlc})
+         || T <- Removed
+        ].
+
+%% @private
+index_op(IName, SecBucket, SCount, Term, PrimaryKey, EventDelta) ->
+    SecShard = bondy_oplog_index_key:shard(SecBucket, Term, SCount),
+    SecKey = bondy_oplog_index_key:encode(Term, PrimaryKey),
+    Op =
+        case EventDelta of
+            {put, Cols, Hlc} -> {put, SecBucket, SecKey, Cols, Hlc};
+            {remove, Hlc} -> {remove, SecBucket, SecKey, Hlc}
+        end,
+    {IName, SecShard, Op}.
+
+%% @private
+%% Group the cell's `{IndexName, SecShard, Op}` triples into
+%% `#{{IndexName, SecShard} => [Op]}` (ops accumulate in reverse; the
+%% dispatcher restores arrival order). A no-op for an empty op list, so
+%% non-indexed tables pay nothing.
+merge_idx_ops(Acc, []) ->
+    Acc;
+merge_idx_ops(Acc, [{IName, SecShard, Op} | Rest]) ->
+    K = {IName, SecShard},
+    merge_idx_ops(Acc#{K => [Op | maps:get(K, Acc, [])]}, Rest).
+
+%% @private
+%% Dispatch the grouped index ops to the secondary writer owning each
+%% touched shard, resolved live from the registry (so the writer need not
+%% have existed when the applier started). A missing writer pid or row is
+%% dropped silently — the index is rebuildable from the primary.
+%%
+%% IDX-4 back-pressure: each `(IName, SecShard)` carries an in-flight op
+%% counter. On the live drain path (`Bypass = false`) a batch that would
+%% push the counter past the index's `max_inflight` cap is dropped, the
+%% shard is marked `needs_rebuild`, its freshness reset to stale (so reads
+%% refuse), and a rebuild requested. A rebuild's own re-fold dispatches
+%% with `Bypass = true` so it can reload the full working set in one pass.
+dispatch_index_ops({_NS, []}, _IdxAcc, _MaxHlc, _Bypass) ->
+    ok;
+dispatch_index_ops({NS, SecIndexes}, IdxAcc, MaxHlc, Bypass) ->
+    Hlc =
+        case MaxHlc of
+            undefined -> 0;
+            _ -> MaxHlc
+        end,
+    Caps = maps:from_list([
+        {maps:get(index_name, D), maps:get(max_inflight, D, ?DEFAULT_MAX_INFLIGHT)}
+     || D <- SecIndexes
+    ]),
+    maps:foreach(
+        fun({IName, SecShard}, RevOps) ->
+            Cap = maps:get(IName, Caps, ?DEFAULT_MAX_INFLIGHT),
+            dispatch_one_index(
+                NS, IName, SecShard, lists:reverse(RevOps), Hlc, Cap, Bypass
+            )
+        end,
+        IdxAcc
+    ).
+
+%% @private
+dispatch_one_index(NS, IName, SecShard, Ops, MaxHlc, Cap, Bypass) ->
+    case bondy_db_core_registry:lookup(NS, IName, SecShard) of
+        {ok, Entry} ->
+            case bondy_db_core_registry:entry_writer_pid(Entry) of
+                Pid when is_pid(Pid) ->
+                    NumOps = length(Ops),
+                    Accept =
+                        Bypass orelse
+                            bondy_db_core_registry:index_inflight(Entry) +
+                                NumOps =< Cap,
+                    case Accept of
+                        true ->
+                            _ = bondy_db_core_registry:index_inflight_add(
+                                Entry, NumOps
+                            ),
+                            bondy_oplog_secondary_writer:enqueue(
+                                Pid, Ops, MaxHlc
+                            );
+                        false ->
+                            secondary_saturation_drop(
+                                NS, IName, SecShard, Entry, NumOps
+                            )
+                    end;
+                undefined ->
+                    ok
+            end;
+        not_found ->
+            ok
+    end.
+
+%% @private
+%% Saturation: the secondary writer's in-flight backlog would exceed the
+%% cap. Drop the batch (the index is a deterministic function of the
+%% primary, so it is rebuildable), mark the shard for rebuild, reset its
+%% freshness so `index_get`/`index_range` refuse until the rebuild
+%% completes, and request the rebuild.
+secondary_saturation_drop(NS, IName, SecShard, Entry, NumOps) ->
+    bondy_db_core_registry:index_mark_rebuild(Entry),
+    bondy_db_core_registry:reset_stale_ae(Entry),
+    telemetry:execute(
+        [bondy_oplog, secondary_writer, saturated],
+        #{dropped_ops => NumOps},
+        #{namespace => NS, index_name => IName, shard => SecShard}
+    ),
+    catch bondy_oplog_index_rebuild:request(NS, IName),
+    ok.
+
+%% @private
 %% Re-fold the `cell_apply` events that landed in the MST since the
 %% last replay through `apply_one_cell/11`. Called from the instance
 %% after a sync session merges peer events. Without this, remote events
@@ -1554,14 +1823,28 @@ max_hlc(_, B) -> B.
 %% than O(events in MST). A cold start (`last_replayed_root = undefined`)
 %% does one full fold so any peer-authored events present in the MST at
 %% boot time are observed; subsequent replays use the diff.
-do_replay_cell_events(#state{cell_apply_ctx = undefined} = State) ->
+%% @private
+%% Full secondary-index rebuild (IDX-4). Resets the replay watermark so
+%% the entire MST is re-folded (not just the diff-since-last-sync) and
+%% dispatches with the back-pressure cap bypassed, so the writers accept
+%% the whole working set even if a prior saturation left the cap tripped.
+do_rebuild_indexes(#state{cell_apply_ctx = undefined} = State) ->
+    State;
+do_rebuild_indexes(State) ->
+    do_replay_cell_events(State#state{last_replayed_root = undefined}, true).
+
+do_replay_cell_events(State) ->
+    do_replay_cell_events(State, false).
+
+do_replay_cell_events(#state{cell_apply_ctx = undefined} = State, _Bypass) ->
     State;
 do_replay_cell_events(
     #state{
         cell_apply_ctx = Ctx,
         instance_id = Id,
         last_replayed_root = LastRoot
-    } = State
+    } = State,
+    Bypass
 ) ->
     case bondy_oplog_registry:mst(Id) of
         undefined ->
@@ -1582,7 +1865,7 @@ do_replay_cell_events(
                     State;
                 _ ->
                     Pairs = diff_pairs(MST, LastRoot, Id),
-                    Count = apply_cell_pairs(Ctx, Id, Pairs),
+                    Count = apply_cell_pairs(Ctx, Id, Pairs, Bypass),
                     ?LOG_DEBUG(#{
                         description => "replay_cell_events done",
                         instance_id => Id,
@@ -1636,13 +1919,14 @@ diff_pairs(MST, LastRoot, Id) ->
 %% PR-PS-15b: same collect-then-batch shape as `apply_cell_batch/2`.
 %% Per-key shadow map preserves in-batch read-your-own-writes when
 %% two pairs target the same `{Bucket, Key}`.
-apply_cell_pairs(Ctx, Id, Pairs) ->
+apply_cell_pairs(Ctx, Id, Pairs, Bypass) ->
     #{adapter := Adapter, handle := Handle, fold_module := Fold} = Ctx,
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
     CacheHandle = maps:get(cache_handle, Ctx, undefined),
     HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
+    SecIdx = sec_idx(Ctx),
     try
-        {LocalWrites, MaxHlc, N} = lists:foldl(
+        {LocalWrites, MaxHlc, N, IdxAcc} = lists:foldl(
             fun
                 (
                     {MstKey, {
@@ -1651,7 +1935,7 @@ apply_cell_pairs(Ctx, Id, Pairs) ->
                         _Prev,
                         _Sig
                     }},
-                    {WAcc, HlcAcc, NAcc}
+                    {WAcc, HlcAcc, NAcc, IAcc}
                 ) ->
                     case
                         compute_one_cell(
@@ -1663,19 +1947,25 @@ apply_cell_pairs(Ctx, Id, Pairs) ->
                             Bucket,
                             CellKey,
                             FoldEvent,
-                            MstKey
+                            MstKey,
+                            SecIdx
                         )
                     of
-                        {ok, NewFrame, NewHlc} ->
+                        {ok, NewFrame, NewHlc, IdxOps} ->
                             WAcc1 = WAcc#{{Bucket, CellKey} => NewFrame},
-                            {WAcc1, max_hlc(HlcAcc, NewHlc), NAcc + 1};
+                            {
+                                WAcc1,
+                                max_hlc(HlcAcc, NewHlc),
+                                NAcc + 1,
+                                merge_idx_ops(IAcc, IdxOps)
+                            };
                         skip ->
-                            {WAcc, HlcAcc, NAcc}
+                            {WAcc, HlcAcc, NAcc, IAcc}
                     end;
                 (_, Acc) ->
                     Acc
             end,
-            {#{}, undefined, 0},
+            {#{}, undefined, 0, #{}},
             Pairs
         ),
         case map_size(LocalWrites) of
@@ -1699,7 +1989,8 @@ apply_cell_pairs(Ctx, Id, Pairs) ->
                         case MaxHlc of
                             undefined -> ok;
                             _ -> advance_high_water(HighWaterRef, MaxHlc)
-                        end;
+                        end,
+                        dispatch_index_ops(SecIdx, IdxAcc, MaxHlc, Bypass);
                     {error, Reason} ->
                         ?LOG_WARNING(#{
                             description =>

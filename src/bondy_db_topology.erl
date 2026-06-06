@@ -65,10 +65,14 @@ serves every realm.
 
 ## What the behaviour does NOT cover
 
-- WAL, replication, applier, overlay, or cache wiring — those are
-  substrate concerns (`bondy_db_core`, `bondy_oplog_*`). PR9's facade
-  uses the projection adapter directly; substrate integration lands
-  in a later PR.
+- WAL, replication, applier, or overlay wiring — those are substrate
+  concerns (`bondy_db_core`, `bondy_oplog_*`). The facade wires them
+  directly. The one exception is the optional cache-hosting hook
+  (`provision_cache/5` + `release_cache/2`): a topology whose per-shard
+  resources must outlive the transient `open_table/3` caller (an
+  ephemeral in-memory topology) implements it to host the read cache in
+  a long-lived owner; topologies that omit it get the default
+  caller-owned cache.
 - Realm lifecycle (creation, retirement, migration). Topology routes
   realms it is asked about; coordinating which realms exist is the
   caller's concern.
@@ -180,3 +184,51 @@ Tear down the topology: stop every Bookie, release every resource,
 unlink supervisors. Called from `bondy_db:close/1`.
 """.
 -callback shutdown(State :: state()) -> ok.
+
+-doc """
+**Optional.** Provision the per-shard read cache for `(NS, Index, Shard)`
+and name the long-lived process that owns it.
+
+A topology implements this when its per-shard substrate resources must
+outlive the transient process that calls `bondy_db:open_table/3` — the
+motivating case is an ephemeral in-memory topology whose ETS tables
+must survive the caller so the node-global appliers keep writing them.
+The returned `owner` is the process the facade attributes BOTH the
+cache table AND the `bondy_db_core_registry` monitor to: when it dies,
+the registration is torn down and (for an ETS cache) the table is
+reclaimed by the VM.
+
+Topologies that omit this callback get the default **long-lived caller**
+contract — the facade creates a `bondy_oplog_cache_ets` table owned by,
+and registers a registry monitor on, the calling process. A topology
+that exports `provision_cache/5` MUST also export `release_cache/2`.
+
+`Opts` mirrors the 4th argument of `bondy_oplog_cache_adapter:init/4`.
+Returns `#{owner := pid(), adapter := module(), handle := term()}` —
+the adapter/handle pair is registered verbatim and used on the read
+path exactly as a caller-owned cache would be.
+""".
+-callback provision_cache(
+    NS :: atom(),
+    Index :: atom(),
+    Shard :: shard(),
+    Opts :: map(),
+    TableState :: table_state()
+) ->
+    {ok, #{owner := pid(), adapter := module(), handle := term()}}
+    | {error, term()}.
+
+-doc """
+**Optional.** Release a cache provisioned by `provision_cache/5`.
+
+Runs the whole-table delete inside the owning process — for an ETS
+cache the facade cannot do it itself (`ets:delete/1` is owner-only).
+Paired with `provision_cache/5`; a topology that exports one MUST
+export the other.
+""".
+-callback release_cache(
+    Handle :: term(),
+    TableState :: table_state()
+) -> ok.
+
+-optional_callbacks([provision_cache/5, release_cache/2]).

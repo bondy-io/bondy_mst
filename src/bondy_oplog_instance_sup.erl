@@ -48,6 +48,7 @@ peers.
 -export([instance_pid/1]).
 -export([applier_pid/1]).
 -export([scrubber_pid/1]).
+-export([warn_default_wal_path/1]).
 
 %% =============================================================================
 %% API
@@ -337,20 +338,40 @@ origin_persist_path(InstanceId, Opts) ->
 %% on the node — fine for write-once-per-VM constants, the wrong
 %% substrate for per-instance lifecycle events.
 maybe_warn_default_wal_path(InstanceId, Opts) ->
-    HasWalDir = maps:is_key(wal_dir, Opts),
-    HasStoragePath = maps:is_key(storage_path, Opts),
-    case HasWalDir orelse HasStoragePath of
-        true ->
-            ok;
+    case warn_default_wal_path(Opts) of
         false ->
+            ok;
+        true ->
             ?LOG_WARNING(#{
                 description =>
                     "WAL falling back to ephemeral tmp path; fsynced "
                     "frames will be abandoned on BEAM restart (the "
                     "path includes os:getpid() for test isolation). "
                     "Configure `storage_path` or `wal_dir` for "
-                    "durable instances.",
+                    "durable instances, or set `durability => ephemeral` "
+                    "to acknowledge an intentionally non-durable instance.",
                 instance_id => InstanceId
             }),
             ok
     end.
+
+-doc """
+Pure predicate: should the no-durable-storage WAL warning fire for these
+instance opts?
+
+`false` when a durable WAL location is configured (`wal_dir` or
+`storage_path`) **or** when the caller has explicitly declared the
+instance ephemeral (`durability => ephemeral`). The latter is the
+operator's acknowledgement that the missing `storage_path` is intended —
+an ephemeral namespace's full in-memory stack reconverges from peers, so
+the kill-restart footgun the warning guards against does not apply and
+the message would be pure noise. Exported for unit testing.
+""".
+-spec warn_default_wal_path(Opts :: map()) -> boolean().
+
+warn_default_wal_path(Opts) ->
+    not (
+        maps:is_key(wal_dir, Opts) orelse
+        maps:is_key(storage_path, Opts) orelse
+        maps:get(durability, Opts, durable) =:= ephemeral
+    ).

@@ -244,30 +244,45 @@ the matching state subkey).
 
 The high bound is **exclusive** (substrate contract); the
 keylist fold below filters out the matching key.
+
+`High` may be the atom `infinity` for an open-ended scan (every value
+subkey `>= Low` in the bucket) — the form the secondary-index
+primary-scan fallback (IDX-4) uses. It folds the whole bucket
+(`book_keylist/4`) rather than a bounded `KeyRange`.
 """.
 -spec range(
     handle(),
     Bucket :: binary(),
     Low :: binary(),
-    High :: binary(),
+    High :: binary() | infinity,
     Opts :: bondy_oplog_projection_adapter:range_opts()
 ) -> {ok, [{Key :: binary(), Frame :: binary()}]} | {error, term()}.
 
 range(#{bookie := Pid}, Bucket, Low, High, Opts) when
     is_binary(Bucket),
     is_binary(Low),
-    is_binary(High),
+    (is_binary(High) orelse High =:= infinity),
     is_map(Opts)
 ->
     Limit = maps:get(limit, Opts, 1000),
     Direction = maps:get(direction, Opts, asc),
-    %% Range over the {Key, SubKey} composite that brackets every
-    %% value subkey between Low and High.
-    KeyRange = {{Low, ?SK_VALUE}, {High, ?SK_VALUE}},
-    FoldFun = make_value_keylist_fold(Limit, High),
-    {async, Folder} = leveled_bookie:book_keylist(
-        Pid, ?HEAD_TAG, Bucket, KeyRange, {FoldFun, {0, []}}
-    ),
+    {async, Folder} =
+        case High of
+            infinity ->
+                %% Whole-bucket fold from Low with no upper bound.
+                FoldFun0 = make_value_keylist_fold_open(Limit, Low),
+                leveled_bookie:book_keylist(
+                    Pid, ?HEAD_TAG, Bucket, {FoldFun0, {0, []}}
+                );
+            _ ->
+                %% Range over the {Key, SubKey} composite that brackets
+                %% every value subkey between Low and High.
+                KeyRange = {{Low, ?SK_VALUE}, {High, ?SK_VALUE}},
+                FoldFun1 = make_value_keylist_fold(Limit, High),
+                leveled_bookie:book_keylist(
+                    Pid, ?HEAD_TAG, Bucket, KeyRange, {FoldFun1, {0, []}}
+                )
+        end,
     {_N, KeysRev} =
         try
             Folder()
@@ -377,6 +392,23 @@ make_value_keylist_fold(Limit, High) ->
     fun(_B, {K, SubKey}, {N, Items}) ->
         case SubKey of
             ?SK_VALUE when K =/= High ->
+                N1 = N + 1,
+                State = {N1, [K | Items]},
+                case N1 >= Limit of
+                    true -> throw({limit_reached, State});
+                    false -> State
+                end;
+            _ ->
+                {N, Items}
+        end
+    end.
+
+%% Open-ended (`High =:= infinity`) variant: a whole-bucket fold keeps
+%% only value subkeys whose key is `>= Low`, capped at `Limit`.
+make_value_keylist_fold_open(Limit, Low) ->
+    fun(_B, {K, SubKey}, {N, Items}) ->
+        case SubKey of
+            ?SK_VALUE when K >= Low ->
                 N1 = N + 1,
                 State = {N1, [K | Items]},
                 case N1 >= Limit of

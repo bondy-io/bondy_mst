@@ -30,6 +30,8 @@ Children, in start order:
 | `bondy_oplog_catalogue_cursor`   | `gen_server`; node-shared catalogue-bootstrap cursor ETS |
 | `bondy_oplog_sync_scheduler`     | `gen_server`; optional default scheduler |
 | `bondy_oplog_gc_scheduler`       | `gen_server`; optional default scheduler |
+| `bondy_oplog_index_rebuild`      | `gen_server`; serialised secondary-index rebuild orchestrator |
+| `bondy_oplog_secondary_sup`      | `simple_one_for_one`; spawns per-(NS,Index,Shard) index writers |
 | `bondy_oplog_instance_dyn_sup`   | `simple_one_for_one`; spawns per-instance workers |
 
 Strategy is `one_for_one`: a singleton crash does not cascade across
@@ -71,6 +73,15 @@ init([]) ->
         bondy_oplog_catalogue_cursor:child_spec(),
         bondy_oplog_sync_scheduler:child_spec(#{}),
         bondy_oplog_gc_scheduler:child_spec(#{}),
+        bondy_oplog_index_rebuild:child_spec(),
+        #{
+            id => bondy_oplog_secondary_sup,
+            start => {bondy_oplog_secondary_sup, start_link, []},
+            restart => permanent,
+            shutdown => infinity,
+            type => supervisor,
+            modules => [bondy_oplog_secondary_sup]
+        },
         #{
             id => bondy_oplog_instance_dyn_sup,
             start => {bondy_oplog_instance_dyn_sup, start_link, []},
