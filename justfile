@@ -148,6 +148,30 @@ bench-e2e duration="10" shards="4" fsync="per_write" batch="1" cache="false" bac
       BACKENDS={{backends}} \
       mix run benchmarks/e2e_pipeline.exs
 
+# Ephemeral (ets-backed, fully in-memory) vs durable (leveled-backed)
+# tables, head-to-head across the e2e scenarios. Each value of BACKENDS
+# here is a whole-stack *profile*, not just a projection swap:
+#   ephemeral = ets projection + in-memory MST + batched fsync
+#               (the `durability => ephemeral` table — nothing durable)
+#   durable   = leveled projection + pack-store MST + per_write fsync
+#               (the fully-durable, leveled-backed production stack;
+#                each shard runs as a genesis peer via seed: true)
+# Reports land as `<scenario>_ephemeral` vs `<scenario>_durable` so the
+# index page lists them side-by-side. Needs the leveled adapter, so this
+# compiles the bench profile (`rebar3 as bench compile`) — which leaves
+# eunit unable to find utils.app; run `rebar3 as test compile` before
+# `just test` afterwards.
+bench-ephemeral-vs-leveled duration="15" shards="4" cache="false":
+    rebar3 as bench compile
+    cd {{bench_dir}} && mix deps.get
+    cd {{bench_dir}} && \
+      ELIXIR_ERL_OPTIONS="+SDio {{shards}}" \
+      DURATION_S={{duration}} \
+      SHARDS={{shards}} \
+      BYPASS_CACHE={{cache}} \
+      BACKENDS=ephemeral,durable \
+      mix run benchmarks/e2e_pipeline.exs
+
 # Open the most recently generated HTML report (macOS / Linux).
 bench-open:
     @latest=$(ls -1t {{output_dir}}/*/index.html 2>/dev/null | head -1); \
@@ -476,6 +500,36 @@ bench-fly-8x-applier-profile-long scenario="write_only" duration="120" reps="3" 
         done; \
         echo \"Done. Results in /data/results/applier_long_8x_{{scenario}}_{{fsync}}_rep*_\$ts.txt\" \
           | tee -a /data/results/applier_long_8x_{{scenario}}_{{fsync}}_\$ts.log'"
+
+# Ephemeral (ets-backed, in-memory) vs durable (leveled-backed) tables on
+# perf-8x — the head-to-head the rollout's `durability => ephemeral` was
+# built for. Runs both whole-stack profiles across every e2e scenario and
+# tees the result tables + HTML reports under /data/results. Pull with
+# `just bench-fly-8x-results`.
+#
+#   ephemeral = ets projection + in-memory MST + batched fsync
+#   durable   = leveled projection + pack-store MST + per_write fsync
+#
+# The write scenarios are the headline: ephemeral touches no disk and pays
+# almost no fsync (batched), while the durable stack pays per_write fsync
+# on every event + writes through the leveled journal/ledger + the durable
+# pack-store MST. The image already has the leveled adapter compiled
+# (`rebar3 as bench compile` at Docker build), so `durable` is not skipped.
+#
+# Defaults: 60s per scenario, 4 shards, cache on (realistic read-your-writes).
+# `cache=true` bypasses the read cache to expose the projection read delta.
+#   just bench-fly-8x-ephemeral-vs-leveled 120 8
+bench-fly-8x-ephemeral-vs-leveled duration="60" shards="4" cache="false":
+    fly ssh console --config fly-8x.toml -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        out=/data/results/ephemeral_vs_leveled_8x_\$ts.txt; \
+        echo \"=== perf-8x ephemeral vs leveled — {{duration}}s x {{shards}} shards (cache_bypass={{cache}}) ===\" \
+          | tee \$out; \
+        just bench-e2e {{duration}} {{shards}} per_write 1 {{cache}} ephemeral,durable \
+          2>&1 | tee -a \$out; \
+        echo \"Done. Result table in \$out; HTML under bench/_output/e2e_pipeline/\" \
+          | tee -a \$out'"
 
 # Pull /data/results from the perf-8x VM into a fresh local dir.
 # Same pattern as bench-fly-results — tarball-then-sftp to dodge

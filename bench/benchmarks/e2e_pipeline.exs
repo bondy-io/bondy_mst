@@ -73,16 +73,59 @@ IO.puts(
 # twice; `BACKENDS=ets` runs only the in-memory path. `leveled` is
 # skipped automatically when the bench profile hasn't been compiled
 # yet (so a plain `mix run` on a fresh checkout still works).
-backends =
+# A value in BACKENDS is either a legacy projection-only swap (`ets`,
+# `leveled` — honour the global MST_BACKEND / WAL_FSYNC envs, unchanged)
+# or a full durability *stack profile* that bundles projection + MST
+# snapshot store + WAL fsync mode, so `ephemeral` vs `durable` measures
+# the whole stack rather than only the projection adapter:
+#
+#   ephemeral → ets projection + in-memory (ets) MST + batched fsync.
+#               The `durability => ephemeral` table: nothing durable,
+#               reconverges from peers, so it carries no per-write fsync
+#               cost. This is the "ets-backed ephemeral table".
+#   durable   → leveled projection + pack-store MST + per_write fsync.
+#               The fully-durable, leveled-backed production stack: the
+#               queryable store is leveled, the MST snapshot is the
+#               durable pack-store, and every event is fsynced. A durable
+#               backend gates the applier on the bootstrap lifecycle, so
+#               the per-instance config sets `seed: true` (genesis peer,
+#               no cluster to bootstrap from) — see `make_ctx`.
+#
+# `BACKENDS=ephemeral,durable` runs the head-to-head ephemeral-vs-leveled
+# comparison. Legacy `ets` / `leveled` keep projection-only semantics.
+profile_for = fn
+  :ephemeral ->
+    %{label: "ephemeral", projection: :ets, mst: :ets, fsync: :batched}
+
+  :durable ->
+    %{label: "durable", projection: :leveled, mst: :pack, fsync: :per_write}
+
+  :ets ->
+    %{label: "ets", projection: :ets, mst: mst_backend, fsync: wal_fsync_mode}
+
+  :leveled ->
+    %{label: "leveled", projection: :leveled, mst: mst_backend, fsync: wal_fsync_mode}
+end
+
+profiles =
   System.get_env("BACKENDS", "ets,leveled")
   |> String.split(",", trim: true)
   |> Enum.map(&String.to_atom/1)
-  |> Enum.filter(fn
-    :leveled -> Bench.leveled_available?() or (IO.puts(
-                  "[e2e] skipping leveled backend (run `rebar3 as bench compile`)"
-                ) && false)
-    _ -> true
+  |> Enum.map(profile_for)
+  |> Enum.filter(fn p ->
+    p.projection != :leveled or Bench.leveled_available?() or
+      (IO.puts(
+         "[e2e] skipping #{p.label} profile (needs the leveled adapter; " <>
+           "run `rebar3 as bench compile`)"
+       ) && false)
   end)
+
+IO.puts(
+  "[e2e] profiles: " <>
+    Enum.map_join(profiles, ", ", fn p ->
+      "#{p.label}(proj=#{p.projection},mst=#{p.mst},fsync=#{p.fsync})"
+    end)
+)
 
 bucket = ""
 fold = :bondy_oplog_fold_lww_register
@@ -169,13 +212,13 @@ end
 
 # Provision N shards: projection + cache + overlay + registry +
 # oplog instance, each instance's applier targets its shard.
-make_ctx = fn prefix, backend ->
+make_ctx = fn prefix, profile ->
   ns = unique_ns.(prefix)
   inst_prefix = unique_prefix.(prefix)
 
   shards =
     for shard <- 0..(shard_count - 1), into: %{} do
-      {adapter, ph, bookie} = open_projection.(backend, ns, shard)
+      {adapter, ph, bookie} = open_projection.(profile.projection, ns, shard)
       {:ok, ch} = cache_adapter.init(ns, :primary, shard, %{})
       ov = :bondy_oplog_db_overlay.new()
 
@@ -200,10 +243,21 @@ make_ctx = fn prefix, backend ->
       # `storage_path` via the same path strategy other persistent
       # backends use; `dir` is derived per-instance internally.
       mst_opts =
-        case mst_backend do
+        case profile.mst do
           :pack ->
             File.mkdir_p!(pack_root)
-            %{backend: :bondy_mst_pack_store, storage_path: pack_root}
+            # A durable backend (storage_path set) puts the instance in
+            # the `pre_bootstrap` lifecycle — the applier refuses to drain
+            # the WAL until it bootstraps from a peer. This bench has no
+            # cluster, so each shard is a genesis peer: `seed: true` skips
+            # the bootstrap gate (matches
+            # test/bondy_db_pack_leveled_e2e_test.erl). The in-memory ets
+            # path has no storage_path and so no gate.
+            %{
+              backend: :bondy_mst_pack_store,
+              storage_path: pack_root,
+              seed: true
+            }
 
           :ets ->
             %{}
@@ -214,7 +268,7 @@ make_ctx = fn prefix, backend ->
           instance_id,
           Map.merge(mst_opts, %{
             fold_module: fold,
-            fsync_mode: wal_fsync_mode,
+            fsync_mode: profile.fsync,
             max_install_in_flight: max_in_flight,
             applier: %{
               cell_apply_target: {ns, :primary, shard}
@@ -236,7 +290,7 @@ make_ctx = fn prefix, backend ->
   %{
     ns: ns,
     bucket: bucket,
-    backend: backend,
+    profile: profile,
     shards: shards,
     instance_prefix: inst_prefix,
     n_keys: prepopulate,
@@ -322,7 +376,7 @@ cleanup = fn ctx ->
   # Drop leveled per-NS dirs. The bookie has closed by now; remove the
   # files so the 5 GB cap in feedback_cleanup_tmp_after_tests is not
   # tripped across repeated bench runs.
-  if ctx.backend == :leveled do
+  if ctx.profile.projection == :leveled do
     _ =
       File.rm_rf(
         Path.join(leveled_root, Atom.to_string(ctx.ns))
@@ -333,7 +387,7 @@ cleanup = fn ctx ->
   # still running, but every oplog instance using this NS has been
   # stopped above; the on-disk manifests + sealed packs are safe to
   # rm. Same /tmp budget concern as the leveled cleanup above.
-  if mst_backend == :pack do
+  if ctx.profile.mst == :pack do
     _ = File.rm_rf(pack_root)
   end
 end
@@ -412,9 +466,9 @@ end
 # it through to the harness's `setup`, and bind workload ops to a
 # captured `ctx` so workers don't have to re-resolve it.
 
-run_scenario = fn base_name, backend, workload_specs ->
-  name = "#{base_name}_#{backend}#{cache_label}"
-  ctx = make_ctx.(name, backend)
+run_scenario = fn base_name, profile, workload_specs ->
+  name = "#{base_name}_#{profile.label}#{cache_label}"
+  ctx = make_ctx.(name, profile)
   populate.(ctx, prepopulate)
 
   workloads =
@@ -497,9 +551,9 @@ scenarios =
   end
 
 runs =
-  for backend <- backends,
+  for profile <- profiles,
       {base_name, specs} <- scenarios,
-      do: run_scenario.(base_name, backend, specs)
+      do: run_scenario.(base_name, profile, specs)
 
 Bench.E2E.write_index(runs)
 

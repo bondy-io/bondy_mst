@@ -97,6 +97,37 @@ with a top-level `index.html` linking every scenario.
 Set `DURATION_S`, `WARMUP_MS`, `SHARDS`, `PREPOPULATE`, `WRITERS`,
 `READERS` to tune the run.
 
+#### Ephemeral vs durable (leveled) tables
+
+`BACKENDS` accepts whole-stack **profiles**, not just a projection
+swap, so you can measure an ephemeral (ets-backed, in-memory) table
+against the fully-durable leveled-backed stack:
+
+| Profile     | Projection | MST snapshot | WAL fsync   |
+|-------------|------------|--------------|-------------|
+| `ephemeral` | ets (RAM)  | ets (RAM)    | `batched`   |
+| `durable`   | leveled    | pack-store   | `per_write` |
+
+```bash
+just bench-ephemeral-vs-leveled            # local, all scenarios
+just bench-fly-8x-ephemeral-vs-leveled 120 8   # perf-8x, 120s × 8 shards
+```
+
+Reports list `<scenario>_ephemeral` vs `<scenario>_durable` side by
+side. The write scenarios are the headline: ephemeral touches no disk
+and fsyncs rarely (batched), while durable pays a `per_write` fsync per
+event plus the leveled journal and pack-store MST. (Legacy `ets` /
+`leveled` values stay projection-only and honour `MST_BACKEND` /
+`WAL_FSYNC`, so existing recipes are unchanged.)
+
+> **Durable instances need `seed: true`.** A durable MST backend
+> (`storage_path` set) gates the applier on the bootstrap lifecycle —
+> it won't drain the WAL until it bootstraps from a peer. A
+> single-process bench has no cluster, so without `seed: true` each
+> shard hangs in `pre_bootstrap` and `await_apply` times out (this is
+> *not* a pack-store defect). The `durable` profile sets it; any new
+> manual-substrate bench using a durable backend must too.
+
 ### Concurrency (sustained-load harness, not Benchee)
 
 The `Bench.Concurrency` harness drives N worker processes through a
