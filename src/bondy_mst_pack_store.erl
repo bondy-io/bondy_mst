@@ -366,11 +366,15 @@ put(#?MODULE{writer = W, hashing_algorithm = Algo} = T, Page) ->
     StartTs = erlang:monotonic_time(microsecond),
     case bondy_mst_pack_writer:append(W, Bytes) of
         {ok, Hash, W1} ->
-            %% The canonical page hash must equal sha256 of the
-            %% serialised body for the on-disk store to be content-
-            %% addressed — verify in debug builds; in release builds
-            %% the equivalence is by construction.
-            Hash = bondy_mst_page:hash(Page, Algo),
+            %% The writer's content hash IS sha256(serialise(Page)), which
+            %% equals bondy_mst_page:hash(Page, Algo) by construction (both
+            %% term_to_binary the same `{Level, Low, List}` with identical
+            %% opts, then sha256 it), so the on-disk store is content-
+            %% addressed for free. Re-deriving it here would repeat one
+            %% term_to_binary + one sha256 per page — the dominant CPU of the
+            %% MST spine rebuild (mst_install). We assert the equivalence
+            %% under TEST and skip the redundant work in release/bench.
+            ok = assert_content_hash(Hash, Page, Algo),
             T1 = maybe_persist_free_set(
                 T#?MODULE{writer = W1},
                 sets:del_element(Hash, T#?MODULE.free_set),
@@ -999,6 +1003,22 @@ serialise(Page) ->
 deserialise(Bytes) ->
     {Level, Low, List} = erlang:binary_to_term(Bytes, [safe]),
     bondy_mst_page:new(Level, Low, List).
+
+%% @private
+%% Content-addressing invariant: the writer's content hash (sha256 of the
+%% serialised page body) must equal the canonical `bondy_mst_page:hash/2`.
+%% This holds by construction — both serialise `{Level, Low, List}` with the
+%% same `term_to_binary` opts and sha256 the result — so release/bench builds
+%% trust the writer's hash and skip the recompute. Under TEST we re-derive and
+%% assert it, exercising the invariant across the full pack-store test suite.
+-ifdef(TEST).
+assert_content_hash(Hash, Page, Algo) ->
+    Hash = bondy_mst_page:hash(Page, Algo),
+    ok.
+-else.
+assert_content_hash(_Hash, _Page, _Algo) ->
+    ok.
+-endif.
 
 %% =============================================================================
 %% PRIVATE — gc
