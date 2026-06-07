@@ -1278,11 +1278,15 @@ release_cache(Topology, TableState, CacheHandle) ->
     end.
 
 %% @private
-%% `OplogOpts` is merged into the per-shard instance opts. The pinned
-%% keys (`fold_module`, `applier`) override any caller-provided values
-%% — those carry per-shard routing the caller cannot meaningfully
-%% provide. Everything else (`backend`, `storage_path`, `fsync_mode`,
-%% `max_install_in_flight`, etc.) is forwarded verbatim.
+%% `OplogOpts` is merged into the per-shard instance opts. `fold_module`
+%% and the applier's *routing* keys (`cell_apply_target`,
+%% `secondary_indexes`) are pinned — they carry per-shard routing the
+%% caller cannot meaningfully provide — and override any caller value.
+%% Caller-provided applier *tuning* (e.g. `apply_batch_max_events`,
+%% `oldstate_cache`) is merged in *under* the pinned routing keys, so it
+%% reaches the applier instead of being dropped. Everything else
+%% (`backend`, `storage_path`, `fsync_mode`, `max_install_in_flight`,
+%% etc.) is forwarded verbatim.
 start_shard_instance(
     NS,
     InstanceId,
@@ -1294,9 +1298,10 @@ start_shard_instance(
     Topology,
     TableState
 ) ->
+    CallerApplier = maps:get(applier, OplogOpts, #{}),
     Pinned = #{
         fold_module => FoldModule,
-        applier => #{
+        applier => CallerApplier#{
             cell_apply_target => {NS, ?INDEX, Shard},
             secondary_indexes => SecIndexes
         }

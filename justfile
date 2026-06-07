@@ -531,6 +531,53 @@ bench-fly-8x-ephemeral-vs-leveled duration="60" shards="4" cache="false":
         echo \"Done. Result table in \$out; HTML under bench/_output/e2e_pipeline/\" \
           | tee -a \$out'"
 
+# Durable per-shard ceiling + linear shard-scaling on perf-8x (Linux,
+# fast NVMe). The validation WRITE_STACK_THROUGHPUT_PLAN §10 calls for:
+# measure the TRUE per-shard durable ceiling (Linux fsync ~20-50µs vs
+# macOS's ~8x distortion) and confirm shards scale linearly.
+#
+# Full durable stack: leveled projection + pack-store MST
+# (MST_BACKEND=pack — the macOS A2/A4 numbers used pack, so this is
+# apples-to-apples) + per_write WAL + A2/A4 defaults (256/16).
+# write_only scenario, one writer per shard (WRITERS=shards), so each
+# run isolates per-shard throughput and aggregate/shards = per-shard.
+#
+# Sweeps SHARDS over `shard_list`; linear scaling => aggregate applier
+# ops/s doubles as shards double, until the 8 vCPU saturate.
+#
+# `writers_per_shard` (default 2, matching the macOS A2 baseline's 4w/2s)
+# sets WRITERS = writers_per_shard × shards, so each shard's applier is
+# fed by >1 writer — otherwise a single writer's per_write fsync floor
+# (~266µs on the Fly volume) under-feeds the applier and you measure the
+# WAL fsync ceiling instead of the applier ceiling.
+#
+# `oldstate_cache` (default false) toggles the A3 applier OldValue
+# frame-cache, so the same sweep doubles as the A3 A/B:
+#   just bench-fly-8x-shard-scaling 90 "1 4" 2 false   # A3 off (baseline)
+#   just bench-fly-8x-shard-scaling 90 "1 4" 2 true    # A3 on
+#
+#   just bench-fly-8x-shard-scaling                  # 90s × {1,2,4,8}, 2 w/shard
+#   just bench-fly-8x-shard-scaling 120 "1 2 4" 4    # 4 writers/shard
+bench-fly-8x-shard-scaling duration="90" shard_list="1 2 4 8" writers_per_shard="2" oldstate_cache="false":
+    fly ssh console --config fly-8x.toml -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        out=/data/results/shard_scaling_8x_oc{{oldstate_cache}}_\$ts.log; \
+        echo \"=== perf-8x durable shard-scaling — write_only, pack MST, per_write, {{duration}}s/point, shards={{shard_list}}, {{writers_per_shard}} writers/shard, oldstate_cache={{oldstate_cache}} ===\" \
+          | tee \$out; \
+        for s in {{shard_list}}; do \
+          w=\$((s * {{writers_per_shard}})); \
+          echo \"--- shards=\$s writers=\$w oldstate_cache={{oldstate_cache}} ---\" | tee -a \$out; \
+          MST_BACKEND=pack WRITERS=\$w SCENARIOS=write_only \
+          APPLY_BATCH_MAX_EVENTS=256 INSTALL_COALESCE_MAX=16 \
+          OLDSTATE_CACHE={{oldstate_cache}} \
+            just bench-e2e {{duration}} \$s per_write 1 false leveled \
+              2>&1 | tee /data/results/shard_scaling_8x_oc{{oldstate_cache}}_s\${s}_\$ts.txt \
+              | tee -a \$out; \
+        done; \
+        echo \"Done. Per-point tables: /data/results/shard_scaling_8x_oc{{oldstate_cache}}_s*_\$ts.txt\" \
+          | tee -a \$out'"
+
 # Pull /data/results from the perf-8x VM into a fresh local dir.
 # Same pattern as bench-fly-results — tarball-then-sftp to dodge
 # `sftp get -r`'s won't-overwrite + won't-auto-start behaviour.

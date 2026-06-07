@@ -311,6 +311,16 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% batch). Default `?DEFAULT_APPLY_BATCH_MAX_EVENTS`. `1` disables the
     %% coalescing (pre-A2 behaviour).
     apply_batch_max_events => pos_integer(),
+    %% A3 — OldValue frame-cache. When `true`, the applier keeps a
+    %% private, write-through cache of the last durable cell frame per
+    %% `{Bucket, Key}`, so `compute_one_cell/11`'s OldValue read can
+    %% skip the projection `get/3` (the dominant per-event cost on the
+    %% durable stack) on a hit. Default `false` (behaviour byte-identical
+    %% to pre-A3). `oldstate_cache_max` bounds the entry count; when
+    %% exceeded the cache is cleared (coarse evict — it is rebuildable
+    %% from the projection, so a clear only costs re-warm misses).
+    oldstate_cache => boolean(),
+    oldstate_cache_max => pos_integer(),
     poll_interval_ms => pos_integer(),
     %% Substrate read-side wiring (MST_DB_DESIGN §18 item 6).
     ae_targets => [shard_key()],
@@ -350,6 +360,13 @@ configured; defaults are no-ops so existing instances are unaffected.
 -export([handle_info/2]).
 -export([terminate/2]).
 
+-ifdef(TEST).
+%% A3 — exported for the bounded-eviction / hit-miss unit test.
+-export([oldstate_cache_new/2]).
+-export([oldstate_cache_get/3]).
+-export([oldstate_cache_put_entries/2]).
+-endif.
+
 -define(DEFAULT_COMMIT_EVERY, 64).
 %% A2 — coarser applier batching. The drain loop coalesces consecutive
 %% WAL frames into a single applier batch until the accumulated event
@@ -363,6 +380,9 @@ configured; defaults are no-ops so existing instances are unaffected.
 %% already exists — when caught up only one frame is available before
 %% `end_of_log`, so steady-state apply latency is unchanged.
 -define(DEFAULT_APPLY_BATCH_MAX_EVENTS, 256).
+%% A3 — default OldValue frame-cache entry cap. Bounds memory; when
+%% exceeded the cache is cleared (it is rebuildable from the projection).
+-define(DEFAULT_OLDSTATE_CACHE_MAX, 100_000).
 %% The applier long-polls the WAL via `await_durable/3` on
 %% `end_of_log` rather than sleeping between ticks, so this only
 %% bounds the wake-up cadence when the WAL is idle. A small interval
@@ -782,7 +802,21 @@ resolve_cell_apply_ctx(Opts) ->
                         high_water_ref =>
                             bondy_db_core_registry:entry_high_water_ref(Entry),
                         secondary_indexes =>
-                            maps:get(secondary_indexes, Opts, [])
+                            maps:get(secondary_indexes, Opts, []),
+                        %% A3 — applier-private OldValue frame-cache (or
+                        %% `undefined` when disabled). Created here in the
+                        %% applier's init/1, so the ETS table is owned by
+                        %% the applier process and dies with it (the cache
+                        %% is rebuildable from the projection).
+                        oldstate_cache =>
+                            oldstate_cache_new(
+                                maps:get(oldstate_cache, Opts, false),
+                                maps:get(
+                                    oldstate_cache_max,
+                                    Opts,
+                                    ?DEFAULT_OLDSTATE_CACHE_MAX
+                                )
+                            )
                     }};
                 not_found ->
                     {error, {cell_apply_target_not_registered, Key}}
@@ -1515,6 +1549,7 @@ apply_cell_batch(
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
     CacheHandle = maps:get(cache_handle, Ctx, undefined),
     HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
+    OldStateCache = maps:get(oldstate_cache, Ctx, undefined),
     SecIdx = sec_idx(Ctx),
 
     %% PR-PS-15b: collect all per-event writes into a single
@@ -1549,7 +1584,8 @@ apply_cell_batch(
                             Key,
                             FoldEvent,
                             Meta,
-                            SecIdx
+                            SecIdx,
+                            OldStateCache
                         )
                     of
                         {ok, NewFrame, NewHlc, IdxOps} ->
@@ -1596,6 +1632,9 @@ apply_cell_batch(
                         end,
                         LocalWrites
                     ),
+                    %% A3 — write-through the now-durable frames into the
+                    %% applier's OldValue cache (no-op when disabled).
+                    oldstate_cache_put_entries(OldStateCache, Entries),
                     case MaxHlc of
                         undefined -> ok;
                         _ -> advance_high_water(HighWaterRef, MaxHlc)
@@ -1645,33 +1684,24 @@ compute_one_cell(
     Key,
     FoldEvent,
     Meta,
-    SecIdx
+    SecIdx,
+    OldStateCache
 ) ->
     try
         ReadT0 = erlang:monotonic_time(microsecond),
+        %% OldValue read precedence: in-batch shadow (`LocalWrites`) →
+        %% A3 frame-cache → projection `get/3`. A cache hit returns
+        %% byte-identical `{OldState, OldValueOpt}` to a projection read
+        %% (the cache is a write-through mirror of the durable frame), so
+        %% the fold result is unchanged — A3 only removes the read I/O.
         {OldState, OldValueOpt} =
             case maps:get({Bucket, Key}, LocalWrites, undefined) of
                 undefined ->
-                    case Adapter:get(Handle, Bucket, Key) of
-                        not_found ->
-                            {bondy_oplog_fold:initial_value(Fold), undefined};
-                        {ok, OldFrame} ->
-                            {_PrevHlc, OldStateBytes, OldValueBytes} =
-                                bondy_oplog_cell_frame:decode_full(OldFrame),
-                            {
-                                bondy_oplog_fold:decode_state(
-                                    Fold, OldStateBytes
-                                ),
-                                OldValueBytes
-                            }
-                    end;
+                    read_old_value(
+                        OldStateCache, Adapter, Handle, Fold, Id, Bucket, Key
+                    );
                 LocalFrame ->
-                    {_PrevHlc, LStateBytes, LValueBytes} =
-                        bondy_oplog_cell_frame:decode_full(LocalFrame),
-                    {
-                        bondy_oplog_fold:decode_state(Fold, LStateBytes),
-                        LValueBytes
-                    }
+                    decode_old_frame(Fold, LocalFrame)
             end,
         telemetry:execute(
             [bondy_oplog, applier, cell_read],
@@ -1720,6 +1750,96 @@ compute_one_cell(
             }),
             skip
     end.
+
+%% @private
+%% A3 — resolve OldValue from the frame-cache (hit) or the projection
+%% (miss). Emits a `[bondy_oplog, applier, oldstate_cache]` hit/miss
+%% event only when the cache is enabled (zero overhead when off).
+read_old_value(OldStateCache, Adapter, Handle, Fold, Id, Bucket, Key) ->
+    case oldstate_cache_get(OldStateCache, Bucket, Key) of
+        {hit, Frame} ->
+            emit_cache_result(OldStateCache, Id, hit),
+            decode_old_frame(Fold, Frame);
+        miss ->
+            emit_cache_result(OldStateCache, Id, miss),
+            case Adapter:get(Handle, Bucket, Key) of
+                not_found ->
+                    {bondy_oplog_fold:initial_value(Fold), undefined};
+                {ok, OldFrame} ->
+                    decode_old_frame(Fold, OldFrame)
+            end
+    end.
+
+%% @private
+%% Decode a stored cell frame into `{OldState, OldValueOpt}` — the exact
+%% shape `compute_one_cell/11` consumes. Shared by the in-batch shadow,
+%% the A3 cache-hit, and the projection-read paths so all three are
+%% byte-for-byte equivalent.
+decode_old_frame(Fold, Frame) ->
+    {_PrevHlc, StateBytes, ValueBytes} =
+        bondy_oplog_cell_frame:decode_full(Frame),
+    {bondy_oplog_fold:decode_state(Fold, StateBytes), ValueBytes}.
+
+%% @private
+%% A3 OldValue frame-cache constructor. `{Tab, Max}` when enabled,
+%% `undefined` when disabled (every cache op below is then a no-op and
+%% behaviour is byte-identical to pre-A3). The table is `private` — only
+%% the owning applier process reads or writes it.
+oldstate_cache_new(false, _Max) ->
+    undefined;
+oldstate_cache_new(true, Max) ->
+    {ets:new(applier_oldstate_cache, [set, private]), Max}.
+
+%% @private
+%% Look up the cached frame for `{Bucket, Key}`.
+oldstate_cache_get(undefined, _Bucket, _Key) ->
+    miss;
+oldstate_cache_get({Tab, _Max}, Bucket, Key) ->
+    case ets:lookup(Tab, {Bucket, Key}) of
+        [{_, Frame}] -> {hit, Frame};
+        [] -> miss
+    end.
+
+%% @private
+%% Write-through the just-written `{Bucket, Key, Frame}` entries. Called
+%% only after the projection `put_batch` returns ok, so the cache mirrors
+%% exactly what is durable. Bounded: if the table is at the cap, it is
+%% cleared before inserting (coarse evict — the cache is rebuildable, so a
+%% clear only costs re-warm misses on the next cycle).
+oldstate_cache_put_entries(undefined, _Entries) ->
+    ok;
+oldstate_cache_put_entries({Tab, Max}, Entries) ->
+    case ets:info(Tab, size) >= Max of
+        true -> ets:delete_all_objects(Tab);
+        false -> ok
+    end,
+    lists:foreach(
+        fun({Bucket, Key, Frame}) ->
+            ets:insert(Tab, {{Bucket, Key}, Frame})
+        end,
+        Entries
+    ),
+    ok.
+
+%% @private
+%% Drop every cached frame. Used when the projection is written outside
+%% the write-through paths (catalogue install) so the cache cannot serve
+%% a pre-install frame on the next read. No-op when disabled.
+oldstate_cache_clear(undefined) ->
+    ok;
+oldstate_cache_clear({Tab, _Max}) ->
+    true = ets:delete_all_objects(Tab),
+    ok.
+
+%% @private
+emit_cache_result(undefined, _Id, _Result) ->
+    ok;
+emit_cache_result(_Cache, Id, Result) ->
+    telemetry:execute(
+        [bondy_oplog, applier, oldstate_cache],
+        #{count => 1},
+        #{instance_id => Id, result => Result}
+    ).
 
 %% @private
 %% Tracks the maximum HLC seen across a batch so the per-shard
@@ -2023,6 +2143,7 @@ apply_cell_pairs(Ctx, Id, Pairs, Bypass) ->
     CacheAdapter = maps:get(cache_adapter, Ctx, undefined),
     CacheHandle = maps:get(cache_handle, Ctx, undefined),
     HighWaterRef = maps:get(high_water_ref, Ctx, undefined),
+    OldStateCache = maps:get(oldstate_cache, Ctx, undefined),
     SecIdx = sec_idx(Ctx),
     try
         {LocalWrites, MaxHlc, N, IdxAcc} = lists:foldl(
@@ -2047,7 +2168,8 @@ apply_cell_pairs(Ctx, Id, Pairs, Bypass) ->
                             CellKey,
                             FoldEvent,
                             MstKey,
-                            SecIdx
+                            SecIdx,
+                            OldStateCache
                         )
                     of
                         {ok, NewFrame, NewHlc, IdxOps} ->
@@ -2085,6 +2207,10 @@ apply_cell_pairs(Ctx, Id, Pairs, Bypass) ->
                             end,
                             LocalWrites
                         ),
+                        %% A3 — write-through the peer/replay frames too,
+                        %% so a subsequent local read sees the durable
+                        %% value (no-op when disabled).
+                        oldstate_cache_put_entries(OldStateCache, Entries),
                         case MaxHlc of
                             undefined -> ok;
                             _ -> advance_high_water(HighWaterRef, MaxHlc)
@@ -2242,6 +2368,20 @@ do_install_catalogue_batch(Id, Ctx, Mode, Cells) ->
         },
         Cells
     ),
+    %% A3 — the install path (`install_cell_unchecked/9`) writes the
+    %% projection WITHOUT write-through (it installs a frame directly,
+    %% with no fold result to cache). A `merge`-mode catalogue bootstrap
+    %% runs on a LIVE instance (operator re-bootstrap to repair drift),
+    %% so any installed key may already be warm in the OldValue cache
+    %% with its pre-install frame — a stale hit would then fold the next
+    %% live event against the wrong OldState (a convergence break). The
+    %% merge itself reads the existing value straight from the projection
+    %% (`read_existing_for_install/5`), not the cache, so the only
+    %% exposure is subsequent live reads; clearing the whole cache here
+    %% closes it. The single-threaded applier guarantees this clear
+    %% completes before any later drain reads. Cheap: a rare bulk
+    %% recovery op, and the cache is rebuildable from the projection.
+    oldstate_cache_clear(maps:get(oldstate_cache, Ctx, undefined)),
     {ok, Counts}.
 
 %% @private
@@ -2961,7 +3101,11 @@ validate_substrate_opts(Opts) ->
             case validate_publish_opts(Opts) of
                 ok ->
                     case validate_cell_apply_target(Opts) of
-                        ok -> validate_apply_batch_max_events(Opts);
+                        ok ->
+                            case validate_apply_batch_max_events(Opts) of
+                                ok -> validate_oldstate_cache_opts(Opts);
+                                {error, _} = Err -> Err
+                            end;
                         {error, _} = Err -> Err
                     end;
                 {error, _} = Err -> Err
@@ -2978,6 +3122,22 @@ validate_apply_batch_max_events(Opts) ->
             ok;
         Bad ->
             {error, {invalid_opt, apply_batch_max_events, Bad}}
+    end.
+
+%% @private
+%% A3 — `oldstate_cache` is a boolean flag (default false);
+%% `oldstate_cache_max` is a positive integer entry cap.
+validate_oldstate_cache_opts(Opts) ->
+    case maps:get(oldstate_cache, Opts, false) of
+        B when is_boolean(B) ->
+            case maps:get(oldstate_cache_max, Opts, ?DEFAULT_OLDSTATE_CACHE_MAX) of
+                M when is_integer(M), M >= 1 ->
+                    ok;
+                BadM ->
+                    {error, {invalid_opt, oldstate_cache_max, BadM}}
+            end;
+        BadB ->
+            {error, {invalid_opt, oldstate_cache, BadB}}
     end.
 
 validate_cell_apply_target(Opts) ->

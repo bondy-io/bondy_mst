@@ -77,11 +77,19 @@ apply_batch_max_events =
 install_coalesce_max =
   String.to_integer(System.get_env("INSTALL_COALESCE_MAX", "16"))
 
+# A3 — applier OldValue frame-cache. When `true`, the applier serves the
+# per-event OldValue read from a private write-through cache (a hit skips
+# the projection `get/3`, the dominant per-event cost on the durable
+# stack). `false` (the A/B baseline arm) reproduces the pre-A3 read path.
+# Lib default is false.
+oldstate_cache = System.get_env("OLDSTATE_CACHE", "false") in ["1", "true"]
+
 IO.puts(
   "[e2e] config: shards=#{shard_count} writers=#{writers} readers=#{readers} " <>
     "fsync=#{wal_fsync_mode} batch_size=#{batch_size} mst=#{mst_backend} " <>
     "apply_batch_max_events=#{apply_batch_max_events} " <>
     "install_coalesce_max=#{install_coalesce_max} " <>
+    "oldstate_cache=#{oldstate_cache} " <>
     "dirty_io_schedulers=#{:erlang.system_info(:dirty_io_schedulers)}"
 )
 
@@ -289,7 +297,8 @@ make_ctx = fn prefix, profile ->
             install_coalesce_max: install_coalesce_max,
             applier: %{
               cell_apply_target: {ns, :primary, shard},
-              apply_batch_max_events: apply_batch_max_events
+              apply_batch_max_events: apply_batch_max_events,
+              oldstate_cache: oldstate_cache
             }
           })
         )
