@@ -142,6 +142,22 @@ stateful-PropEr fault-injection harness are still to land.
     %% Active `send_after/3` timer that will fire `flush_tick`. Set when
     %% pending bytes accrue in batched mode; cancelled on fsync.
     flush_timer :: reference() | undefined,
+    %% --- Group commit ---------------------------------------------------------
+    %% When `true` (and `fsync_mode = per_write`), concurrently-queued
+    %% appends are coalesced into one `datasync` per group; each caller is
+    %% replied only after the shared fsync covers its frame, preserving the
+    %% per_write durable-on-return contract while removing the
+    %% one-fsync-per-appender wall. No effect in batched mode.
+    group_commit :: boolean(),
+    %% Max appends folded into a single group (one datasync); bounds the
+    %% first caller's fsync latency and the per-`handle_call` work.
+    group_commit_max :: pos_integer(),
+    %% Count of head fsyncs issued via `do_fsync_head/1`. Does NOT count
+    %% rotation seals, new-segment header syncs, or the terminate sync
+    %% (those datasync independently). Surfaced in `info/1` as the
+    %% coalescing observable: under load `append_count / fsync_count` is
+    %% the average group size.
+    fsync_count :: non_neg_integer(),
     %% Two-slot atomics ref mirroring `head_pos_ref`'s shape but carrying
     %% the durable position (slot 1: durable segment id, slot 2:
     %% durable byte offset). Tail readers / appliers may poll this
@@ -240,6 +256,8 @@ stateful-PropEr fault-injection harness are still to land.
     fsync_mode => per_write | batched,
     batched_fsync_interval => pos_integer(),
     batched_fsync_bytes => pos_integer(),
+    group_commit => boolean(),
+    group_commit_max => pos_integer(),
     min_live_segments => pos_integer(),
     retention_sweep_interval => pos_integer(),
     max_total_wal_size => pos_integer(),
@@ -599,6 +617,9 @@ Current shape:
     fsync_mode             => per_write | batched,
     batched_fsync_interval => pos_integer(),
     batched_fsync_bytes    => pos_integer(),
+    group_commit           => boolean(),
+    group_commit_max       => pos_integer(),
+    fsync_count            => non_neg_integer(),
     pending_fsync_bytes    => non_neg_integer(),
     last_fsync_at          => integer() | undefined,
     waiter_count           => non_neg_integer(),
@@ -807,31 +828,12 @@ init({InstanceId, Opts}) ->
             {stop, Reason}
     end.
 
-handle_call({append_batch, Events}, _From, State0) ->
-    case do_append_batch(State0, Events) of
-        {ok, Entries, State1} ->
-            State2 = emit_append_telemetry(State1, Entries),
-            {reply, {ok, Entries}, State2};
-        {wal_full, Reason} ->
-            State1 = emit_wal_full_telemetry(State0, Reason),
-            {reply, {error, wal_full}, State1};
-        {fatal, Reason, State1} ->
-            %% Rotation failed *after* the old segment fd was closed.
-            %% The writer cannot serve further requests safely; stop so
-            %% the supervisor can restart and recovery (run from `init/1`)
-            %% reconciles the on-disk state. We reply to this caller with
-            %% the underlying reason so the integration layer can surface
-            %% a meaningful error before the gen_server exits.
-            ?LOG_ERROR(#{
-                description =>
-                    "bondy_oplog_wal stopping after a non-recoverable "
-                    "rotation failure; supervisor restart will run "
-                    "recovery to reconcile the on-disk state",
-                reason => Reason
-            }),
-            {stop, Reason, {error, Reason}, State1};
-        {error, _} = E ->
-            {reply, E, State0}
+handle_call({append_batch, Events}, From, State0) ->
+    case use_group_commit(State0) of
+        true ->
+            group_commit_append(State0, From, Events);
+        false ->
+            handle_inline_append(State0, Events)
     end;
 handle_call(sync, _From, #state{head_fd = Fd} = State) when Fd =/= undefined ->
     case do_fsync_head(State) of
@@ -1122,16 +1124,47 @@ validate_body_encryption(Opts) ->
 %% time so the gen_server doesn't start with a state that would explode
 %% on first batched-mode timer arming or oversize-batch comparison.
 validate_durability_opts(Opts) ->
-    case maps:get(fsync_mode, Opts, ?BONDY_OPLOG_WAL_FSYNC_MODE_DEFAULT) of
-        per_write ->
-            validate_batch_opts(Opts);
-        batched ->
-            case validate_batched_opts(Opts) of
-                ok -> validate_batch_opts(Opts);
-                {error, _} = E -> E
+    case validate_group_commit_opts(Opts) of
+        ok ->
+            case
+                maps:get(fsync_mode, Opts, ?BONDY_OPLOG_WAL_FSYNC_MODE_DEFAULT)
+            of
+                per_write ->
+                    validate_batch_opts(Opts);
+                batched ->
+                    case validate_batched_opts(Opts) of
+                        ok -> validate_batch_opts(Opts);
+                        {error, _} = E -> E
+                    end;
+                Other ->
+                    {error, {invalid_opt, fsync_mode, Other}}
+            end;
+        {error, _} = E ->
+            E
+    end.
+
+%% @private
+%% Validate the group-commit opts. `group_commit` (bool) applies to both
+%% fsync modes — though it only changes behaviour in `per_write` — so it
+%% is validated ahead of the mode dispatch. `group_commit_max` must be a
+%% positive integer.
+validate_group_commit_opts(Opts) ->
+    case maps:get(group_commit, Opts, ?BONDY_OPLOG_WAL_GROUP_COMMIT_DEFAULT) of
+        Bool when is_boolean(Bool) ->
+            case
+                maps:get(
+                    group_commit_max,
+                    Opts,
+                    ?BONDY_OPLOG_WAL_GROUP_COMMIT_MAX_DEFAULT
+                )
+            of
+                Max when is_integer(Max), Max >= 1 ->
+                    ok;
+                Max ->
+                    {error, {invalid_opt, group_commit_max, Max}}
             end;
         Other ->
-            {error, {invalid_opt, fsync_mode, Other}}
+            {error, {invalid_opt, group_commit, Other}}
     end.
 
 %% @private
@@ -1204,6 +1237,14 @@ open_after_opts_validated(InstanceId, Origin, Opts) ->
                 Opts,
                 ?BONDY_OPLOG_WAL_BATCHED_FSYNC_BYTES_DEFAULT
             ),
+            GroupCommit = maps:get(
+                group_commit, Opts, ?BONDY_OPLOG_WAL_GROUP_COMMIT_DEFAULT
+            ),
+            GroupCommitMax = maps:get(
+                group_commit_max,
+                Opts,
+                ?BONDY_OPLOG_WAL_GROUP_COMMIT_MAX_DEFAULT
+            ),
             MinLive = maps:get(
                 min_live_segments,
                 Opts,
@@ -1247,6 +1288,9 @@ open_after_opts_validated(InstanceId, Origin, Opts) ->
                 fsync_mode = FsyncMode,
                 batched_fsync_interval = Interval,
                 batched_fsync_bytes = Bytes,
+                group_commit = GroupCommit,
+                group_commit_max = GroupCommitMax,
+                fsync_count = 0,
                 pending_fsync_bytes = 0,
                 last_fsync_at = undefined,
                 flush_timer = undefined,
@@ -1496,7 +1540,192 @@ segment_path(Dir, SegId) ->
 %% to hold their last frame, then the next append rotates). Callers
 %% that want strict segment sizing should set `max_batch_bytes =<
 %% max_segment_bytes - SEG_HEADER_BYTES - FRAME_HEADER_BYTES`.
-do_append_batch(#state{max_batch_bytes = MaxBatch} = State0, Events) ->
+%% @private
+%% Group commit applies only to `per_write` mode (the durable-on-return
+%% mode). `batched` already coalesces by size/time and replies before the
+%% fsync, so it needs no boxcar.
+use_group_commit(#state{group_commit = true, fsync_mode = per_write}) ->
+    true;
+use_group_commit(#state{}) ->
+    false.
+
+%% @private
+%% The non-group-commit append path (batched mode, or group commit
+%% disabled). Write + per-call durability + reply. Behaviour identical to
+%% the historical `handle_call({append_batch, …})`.
+handle_inline_append(State0, Events) ->
+    case do_append_batch(State0, Events) of
+        {ok, Entries, State1} ->
+            State2 = emit_append_telemetry(State1, Entries),
+            {reply, {ok, Entries}, State2};
+        {wal_full, Reason} ->
+            State1 = emit_wal_full_telemetry(State0, Reason),
+            {reply, {error, wal_full}, State1};
+        {fatal, Reason, State1} ->
+            %% Rotation failed *after* the old segment fd was closed.
+            %% The writer cannot serve further requests safely; stop so
+            %% the supervisor can restart and recovery (run from `init/1`)
+            %% reconciles the on-disk state. We reply to this caller with
+            %% the underlying reason so the integration layer can surface
+            %% a meaningful error before the gen_server exits.
+            ?LOG_ERROR(#{
+                description =>
+                    "bondy_oplog_wal stopping after a non-recoverable "
+                    "rotation failure; supervisor restart will run "
+                    "recovery to reconcile the on-disk state",
+                reason => Reason
+            }),
+            {stop, Reason, {error, Reason}, State1};
+        {error, _} = E ->
+            {reply, E, State0}
+    end.
+
+%% @private
+%% Group-commit (boxcar) path for per_write mode. Write the first batch's
+%% frame WITHOUT fsyncing, then drain any concurrently-queued
+%% `append_batch` calls from the mailbox and write each (no fsync). One
+%% `datasync` then makes the whole group durable before any caller is
+%% replied — so every reply still observes the per_write durable-on-return
+%% contract, but a single fsync amortises across the group.
+group_commit_append(State0, From, Events) ->
+    case do_write_batch(State0, Events) of
+        {ok, Entries, State1, _FrameLen} ->
+            State2 = emit_append_telemetry(State1, Entries),
+            %% Acc = {OkReplies, ErrReplies}. Ok callers ride the shared
+            %% group fsync; err/wal_full callers wrote nothing and carry
+            %% their own error, but are replied together for simplicity.
+            Acc0 = {[{From, {ok, Entries}}], []},
+            Remaining = State2#state.group_commit_max - 1,
+            case drain_queued_appends(State2, Acc0, Remaining) of
+                {ok, {Oks, Errs}, StateN} ->
+                    flush_group(StateN, Oks, Errs);
+                {fatal, Reason, FatalFrom, {Oks, Errs}, StateF} ->
+                    %% A drained batch hit a fatal rotation failure (fd
+                    %% gone). Be conservative: reply an error to every
+                    %% caller in the group — the good frames may or may
+                    %% not have reached disk; recovery's break-and-
+                    %% truncate reconciles the tail on restart and a
+                    %% client retry is idempotent (content-addressed).
+                    %% Then stop for a supervisor restart + recovery.
+                    reply_all([{F, {error, Reason}} || {F, _} <- Oks]),
+                    reply_all(Errs),
+                    gen_server:reply(FatalFrom, {error, Reason}),
+                    ?LOG_ERROR(#{
+                        description =>
+                            "bondy_oplog_wal stopping after a "
+                            "non-recoverable rotation failure during a "
+                            "group commit; supervisor restart will run "
+                            "recovery to reconcile the on-disk state",
+                        reason => Reason
+                    }),
+                    {stop, Reason, StateF}
+            end;
+        {wal_full, Reason} ->
+            State1 = emit_wal_full_telemetry(State0, Reason),
+            {reply, {error, wal_full}, State1};
+        {fatal, Reason, State1} ->
+            ?LOG_ERROR(#{
+                description =>
+                    "bondy_oplog_wal stopping after a non-recoverable "
+                    "rotation failure; supervisor restart will run "
+                    "recovery to reconcile the on-disk state",
+                reason => Reason
+            }),
+            {stop, Reason, {error, Reason}, State1};
+        {error, _} = E ->
+            {reply, E, State0}
+    end.
+
+%% @private
+%% Pull further queued `{append_batch, _}` gen_server calls out of the
+%% mailbox (in arrival order — selective receive preserves order among
+%% matching messages) and write each frame WITHOUT fsyncing, until the
+%% mailbox has no more (`after 0`) or the per-group cap is reached. Other
+%% message types are left untouched in the mailbox for normal dispatch
+%% after this `handle_call` returns. Accumulates `{From, Reply}` pairs.
+%% The selective `receive` scans the mailbox per iteration, so total work
+%% is bounded by `group_commit_max` (the recursion cap), not the mailbox
+%% depth unboundedly.
+drain_queued_appends(State, Acc, 0) ->
+    {ok, Acc, State};
+drain_queued_appends(State, {Oks, Errs} = Acc, N) ->
+    receive
+        {'$gen_call', From, {append_batch, Events}} ->
+            case do_write_batch(State, Events) of
+                {ok, Entries, State1, _FrameLen} ->
+                    State2 = emit_append_telemetry(State1, Entries),
+                    drain_queued_appends(
+                        State2,
+                        {[{From, {ok, Entries}} | Oks], Errs},
+                        N - 1
+                    );
+                {wal_full, Reason} ->
+                    State1 = emit_wal_full_telemetry(State, Reason),
+                    drain_queued_appends(
+                        State1,
+                        {Oks, [{From, {error, wal_full}} | Errs]},
+                        N - 1
+                    );
+                {error, _} = E ->
+                    drain_queued_appends(
+                        State, {Oks, [{From, E} | Errs]}, N - 1
+                    );
+                {fatal, Reason, State1} ->
+                    {fatal, Reason, From, Acc, State1}
+            end
+    after 0 ->
+        {ok, Acc, State}
+    end.
+
+%% @private
+%% One datasync makes every frame written in this group durable, then all
+%% callers are replied. On a datasync failure the ok-write callers get the
+%% error (per_write promised durability); err/wal_full callers keep their
+%% own replies. Offsets stay advanced; recovery truncates any non-durable
+%% tail on next open.
+flush_group(StateN, Oks, Errs) ->
+    case do_fsync_head(StateN) of
+        {ok, StateD} ->
+            reply_all(Oks),
+            reply_all(Errs),
+            {noreply, StateD};
+        {error, Reason} ->
+            reply_all([{F, {error, Reason}} || {F, _} <- Oks]),
+            reply_all(Errs),
+            {noreply, StateN}
+    end.
+
+%% @private
+reply_all(Replies) ->
+    lists:foreach(
+        fun({From, Reply}) -> gen_server:reply(From, Reply) end, Replies
+    ).
+
+%% @private
+%% Single-call append: write the frame, then apply per-call durability —
+%% a `per_write` fsync now (returning durable), or a `batched`-mode
+%% accumulate + maybe-trigger. Contract unchanged: `{ok, Entries, State}`
+%% on success; a per_write datasync failure surfaces as `{error, Reason}`
+%% (the caller keeps `State0` — recovery's break-and-truncate reconciles
+%% the non-durable tail on next open).
+do_append_batch(State0, Events) ->
+    case do_write_batch(State0, Events) of
+        {ok, Entries, State1, FrameLen} ->
+            case post_write_durability(State1, FrameLen) of
+                {ok, State2} -> {ok, Entries, State2};
+                {error, _} = E -> E
+            end;
+        Other ->
+            Other
+    end.
+
+%% @private
+%% Write a batch frame to the head segment WITHOUT fsyncing. Validates
+%% HLC monotonicity and the batch-size cap, applies backpressure and
+%% pre-rotation, then appends the frame. Returns
+%% `{ok, Entries, State, FrameLen}` (durability deferred to the caller),
+%% or `{wal_full, _}` / `{fatal, _, _}` / `{error, _}`.
+do_write_batch(#state{max_batch_bytes = MaxBatch} = State0, Events) ->
     Hlcs = [bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)) || E <- Events],
     case is_strictly_increasing(Hlcs) of
         false ->
@@ -1832,20 +2061,17 @@ write_batch_frame(
                 last_append_at_ms = erlang:monotonic_time(millisecond)
             },
             Entries = [{H, {Seg, Off}} || H <- Hlcs],
-            case post_write_durability(State1, FrameLen) of
-                {ok, State2} ->
-                    publish_head_offset(HeadRef, NewOff),
-                    {ok, Entries, State2};
-                {error, _} = E ->
-                    %% Datasync failed in per_write mode. The frame's
-                    %% byte range is on disk but not durable — surface
-                    %% the error and leave `state.current_offset`
-                    %% advanced so a retry doesn't double-write the
-                    %% same frame. Recovery's break-and-truncate
-                    %% removes any non-durable tail on next open.
-                    publish_head_offset(HeadRef, NewOff),
-                    E
-            end;
+            %% The frame's bytes are in the OS page cache and the head
+            %% offset is published; the durability step (the fsync) is
+            %% applied by the caller — per call in `do_append_batch/2`,
+            %% or once per group in `flush_group/3` (driven by
+            %% `group_commit_append/3`). Publishing
+            %% the head offset here (before the fsync) is safe: the bytes
+            %% are written, and head has always been allowed to run ahead
+            %% of durable (readers reading head read non-durable data by
+            %% design).
+            publish_head_offset(HeadRef, NewOff),
+            {ok, Entries, State1, FrameLen};
         {error, _} = E ->
             E
     end.
@@ -2199,7 +2425,8 @@ do_fsync_head(
         head_fd = Fd,
         segment_id = Seg,
         current_offset = Off,
-        pending_fsync_bytes = Pending
+        pending_fsync_bytes = Pending,
+        fsync_count = FsyncCount
     } = State
 ) when Fd =/= undefined ->
     T0 = erlang:monotonic_time(microsecond),
@@ -2207,7 +2434,8 @@ do_fsync_head(
         ok ->
             Duration = erlang:monotonic_time(microsecond) - T0,
             emit_fsync_telemetry(State, Pending, Duration),
-            {ok, advance_durable(State, Seg, Off)};
+            State1 = advance_durable(State, Seg, Off),
+            {ok, State1#state{fsync_count = FsyncCount + 1}};
         {error, _} = E ->
             E
     end.
@@ -2395,6 +2623,9 @@ build_info(#state{} = State) ->
         fsync_mode => State#state.fsync_mode,
         batched_fsync_interval => State#state.batched_fsync_interval,
         batched_fsync_bytes => State#state.batched_fsync_bytes,
+        group_commit => State#state.group_commit,
+        group_commit_max => State#state.group_commit_max,
+        fsync_count => State#state.fsync_count,
         pending_fsync_bytes => State#state.pending_fsync_bytes,
         last_fsync_at => State#state.last_fsync_at,
         waiter_count => length(State#state.waiters),

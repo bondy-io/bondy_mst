@@ -164,6 +164,17 @@ without protocol changes.
     %% instance's mailbox at `cap × batch_size` events.
     install_in_flight :: atomics:atomics_ref() | undefined,
     max_install_in_flight :: pos_integer(),
+    %% A4 — instance-side install coalescing. The
+    %% `install_local_batch` cast handler drains up to this many *queued*
+    %% install casts (including the one being handled) and merges their
+    %% events into a single `bondy_mst:put_batch/2` + one publish + one
+    %% overlay-evict. When the applier outruns the instance the mailbox
+    %% accumulates casts, so this amortises the O(log n) spine rebuild
+    %% over many casts' worth of events — the dominant per-event durable
+    %% cost (A0b). `1` reproduces the pre-A4 one-put_batch-per-cast
+    %% behaviour. Bounded by `max_install_in_flight` in practice (the
+    %% applier cannot have more than that many casts in flight).
+    install_coalesce_max :: pos_integer(),
     %% Bootstrap lifecycle (`bondy_oplog_bootstrap_lifecycle`). Opened
     %% at `init/1` and published via the registry so the applier can
     %% gate its WAL drain on the durable two-state machine
@@ -214,6 +225,10 @@ without protocol changes.
     %% `{error, backpressure}` immediately; `block` is reserved for a
     %% follow-on PR and currently behaves like `drop`.
     overlay_throttle => drop,
+    %% A4 — max number of queued `install_local_batch` casts the
+    %% instance coalesces into one MST `put_batch` (default 16; `1`
+    %% disables coalescing). See the `install_coalesce_max` state field.
+    install_coalesce_max => pos_integer(),
     %% Per-instance applier tuning. See `bondy_oplog_applier:opts/0`.
     %% Recognised keys:
     %%   commit_every     :: pos_integer()   (default 64)
@@ -1576,6 +1591,9 @@ init({InstanceId, Opts}) ->
         max_local_installed_seq = MaxLocalInstalledSeq,
         install_in_flight = atomics:new(1, [{signed, false}]),
         max_install_in_flight = maps:get(max_install_in_flight, Opts, 16),
+        install_coalesce_max = validate_coalesce_max(
+            maps:get(install_coalesce_max, Opts, 16)
+        ),
         lifecycle = bondy_oplog_bootstrap_lifecycle:open(InstanceId, Opts)
     },
     ok = publish(State),
@@ -2046,11 +2064,34 @@ handle_cast({install_local_batch, Events}, State0) ->
     %% HLC-conditionally evict the matching overlay rows. MST publish
     %% strictly precedes overlay evict so a reader missing the
     %% overlay row finds the entry in the MST instead.
-    State1 = install_local_batch(State0, Events),
+    %%
+    %% A4 — instance-side install coalescing. When the applier outruns
+    %% the instance, several `install_local_batch` casts queue in the
+    %% mailbox while we are mid-`put_batch`. We drain the queued ones
+    %% (up to `install_coalesce_max`) and merge every cast's events into
+    %% a SINGLE `put_batch` + publish + overlay-evict, amortising the
+    %% O(log n) spine rebuild — the dominant per-event durable cost
+    %% (A0b) — over many casts' worth of events.
+    %%
+    %% The drain matches only `install_local_batch` casts and preserves
+    %% their FIFO (= WAL = HLC) order. It may skip past queued peer
+    %% `install_remote` / `drain_install_queue` / `await_overlay_drained`
+    %% *calls*; this is convergence-safe: local and peer events have
+    %% disjoint MST keys (different origin) and disjoint per-origin
+    %% watermarks, so a reordered local-ahead-of-peer install yields the
+    %% same final MST (merge is commutative/idempotent); overlay evict is
+    %% per-event HLC-conditional (order-independent); and the local
+    %% applier blocks on `drain_install_queue`, so no install cast is
+    %% ever queued behind that barrier (the barrier cannot be skipped).
+    {EventsRev, NCasts} = drain_install_casts(
+        [Events], 1, State0#state.install_coalesce_max
+    ),
+    AllEvents = lists:append(lists:reverse(EventsRev)),
+    State1 = install_local_batch(State0, AllEvents),
     ok = publish(State1),
-    State2 = evict_overlay_batch(State1, Events),
+    State2 = evict_overlay_batch(State1, AllEvents),
     State3 = maybe_signal_drain_waiters(State2),
-    ok = release_install_slot(State3),
+    ok = release_install_slots(State3, NCasts),
     {noreply, State3};
 handle_cast(check_drain_waiters, State) ->
     %% Sent by the applier after `evict_rejected_overlay/2` evicts
@@ -2336,7 +2377,9 @@ install_fast_events(State, []) ->
     State;
 install_fast_events(#state{} = State0, Events) ->
     {Pairs, MaxSeq, MaxKey, MaxHlc, Count} = scan_fast_events(Events, State0),
+    InstallT0 = erlang:monotonic_time(microsecond),
     MST1 = bondy_mst:put_batch(State0#state.mst, Pairs),
+    InstallUs = erlang:monotonic_time(microsecond) - InstallT0,
     _ = bondy_oplog_hlc:update(State0#state.hlc, MaxHlc),
     %% Mirror the HLC update for the local-Seq atomic. Rebuilding the
     %% MST from the WAL on restart (init seeds SeqRef from
@@ -2351,6 +2394,19 @@ install_fast_events(#state{} = State0, Events) ->
         [bondy_oplog, instance, apply_event, ok],
         #{count => Count},
         #{instance_id => State0#state.instance_id, new => true}
+    ),
+    %% Per-batch wall-time of the MST install — the single
+    %% `bondy_mst:put_batch/2` spine rebuild that writes into the
+    %% pluggable store. For the pack-store backend this is the durable
+    %% MST page churn, and it runs in THIS (instance) process, off the
+    %% applier's critical path: the applier's `batch_install_cast` only
+    %% times the async cast, so without this event the pack-store cost is
+    %% invisible. `count` lets handlers derive per-event install cost and
+    %% the mean batch size (`count / calls`).
+    telemetry:execute(
+        [bondy_oplog, instance, mst_install],
+        #{duration_us => InstallUs, count => Count},
+        #{instance_id => State0#state.instance_id}
     ),
     State0#state{
         mst = MST1,
@@ -3395,6 +3451,44 @@ release_install_slot(#state{
             ok
     end,
     ok.
+
+%% @private
+%% A4 — release N install slots after a coalesced batch (one per
+%% coalesced cast). Calling `release_install_slot/1` N times decrements
+%% the atomic N times; because the value descends monotonically through
+%% the calls, exactly one of them observes the `Cap - 1` crossing and
+%% wakes the applier — so coalescing N casts still resumes a gated
+%% applier exactly once, without bespoke threshold arithmetic.
+release_install_slots(_State, 0) ->
+    ok;
+release_install_slots(State, N) when N > 0 ->
+    ok = release_install_slot(State),
+    release_install_slots(State, N - 1).
+
+%% @private
+%% A4 — drain queued `install_local_batch` casts into `Acc` (a list of
+%% per-cast event lists, most-recent first) without blocking. Stops at
+%% `Max` casts (counting the one already being handled) or when the
+%% mailbox holds no more install casts. Selective receive returns
+%% mailbox-FIFO order, so prepending preserves WAL order once reversed.
+drain_install_casts(Acc, N, Max) when N >= Max ->
+    {Acc, N};
+drain_install_casts(Acc, N, Max) ->
+    receive
+        {'$gen_cast', {install_local_batch, Events}} ->
+            drain_install_casts([Events | Acc], N + 1, Max)
+    after 0 ->
+        {Acc, N}
+    end.
+
+%% @private
+%% A4 — validate the coalescing cap. A malformed value crashes `init/1`
+%% loudly (same convention as the other startup-validated opts) rather
+%% than silently degrading to a default.
+validate_coalesce_max(N) when is_integer(N), N >= 1 ->
+    N;
+validate_coalesce_max(Bad) ->
+    error({invalid_opt, install_coalesce_max, Bad}).
 
 %% @private
 %% Replies `ok` to every caller queued in `drain_waiters` once the

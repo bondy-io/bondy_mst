@@ -71,6 +71,7 @@ defmodule Bench.E2E.Report do
 
       base =
         "      #{pad(key, 24)} count=#{fmt_int(s.count)} " <>
+          "batches=#{fmt_int(s.batches)} " <>
           "p50=#{fmt_us(p[50])} p99=#{fmt_us(p[99])}"
 
       extra =

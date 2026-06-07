@@ -150,6 +150,11 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% when the reader returns `end_of_log`.
     uncommitted :: non_neg_integer(),
     commit_every :: pos_integer(),
+    %% A2 — coalesce consecutive WAL frames into one applier batch until
+    %% at least this many events have accumulated (soft cap; a frame is
+    %% never split). `1` = the pre-A2 one-frame-per-apply behaviour. See
+    %% `?DEFAULT_APPLY_BATCH_MAX_EVENTS`.
+    apply_batch_max_events :: pos_integer(),
     %% Milliseconds between polling ticks when the reader returns
     %% `end_of_log`. Constant for now; the writer publishes an atomics
     %% durable position so a future revision could long-poll instead.
@@ -207,6 +212,15 @@ configured; defaults are no-ops so existing instances are unaffected.
     %% builds an unbounded backlog (observable as an 8 GB+ RES set
     %% under stress, and ultimately a `gen_server:call` timeout on
     %% `drain_install_queue` during commit).
+    %%
+    %% NOTE (A2): the cap bounds the *number* of in-flight casts, not
+    %% their size. Each `install_local_batch` cast now carries up to
+    %% `apply_batch_max_events` events (the coalescing soft cap), so the
+    %% worst-case instance-side backlog is
+    %% `max_install_in_flight * apply_batch_max_events` events
+    %% (default 16 * 256 = 4096). Raising BOTH knobs together multiplies
+    %% the backlog — keep their product in mind to avoid reintroducing
+    %% the OOM above.
     install_in_flight :: atomics:atomics_ref() | undefined,
     max_install_in_flight :: pos_integer() | undefined,
     %% Set when the applier deferred a drain because the cap was
@@ -293,6 +307,10 @@ configured; defaults are no-ops so existing instances are unaffected.
     instance_id := instance_id(),
     wal_dir := file:filename_all(),
     commit_every => pos_integer(),
+    %% A2 — coarser applier batching (soft event-count cap per applier
+    %% batch). Default `?DEFAULT_APPLY_BATCH_MAX_EVENTS`. `1` disables the
+    %% coalescing (pre-A2 behaviour).
+    apply_batch_max_events => pos_integer(),
     poll_interval_ms => pos_integer(),
     %% Substrate read-side wiring (MST_DB_DESIGN §18 item 6).
     ae_targets => [shard_key()],
@@ -333,6 +351,18 @@ configured; defaults are no-ops so existing instances are unaffected.
 -export([terminate/2]).
 
 -define(DEFAULT_COMMIT_EVERY, 64).
+%% A2 — coarser applier batching. The drain loop coalesces consecutive
+%% WAL frames into a single applier batch until the accumulated event
+%% count reaches this threshold (or the reader hits `end_of_log`), so the
+%% two co-dominant per-batch storage costs — the pack-store spine rebuild
+%% (`install_local_batch` → `bondy_mst:put_batch/2`) and the leveled
+%% projection `put_batch` — amortise over many more events. It is a soft
+%% cap: a frame is never split, so a batch may exceed it by at most the
+%% last frame's size. Set to `1` to reproduce the pre-A2
+%% one-frame-per-apply behaviour exactly. Engages only when a WAL backlog
+%% already exists — when caught up only one frame is available before
+%% `end_of_log`, so steady-state apply latency is unchanged.
+-define(DEFAULT_APPLY_BATCH_MAX_EVENTS, 256).
 %% The applier long-polls the WAL via `await_durable/3` on
 %% `end_of_log` rather than sleeping between ticks, so this only
 %% bounds the wake-up cadence when the WAL is idle. A small interval
@@ -641,12 +671,15 @@ do_init_2(
     WalDir,
     CommitEvery,
     PollMs,
-    _Opts,
+    Opts,
     AeTargets,
     PublishNs,
     PublishFun,
     CellCtx
 ) ->
+    ApplyBatchMax = maps:get(
+        apply_batch_max_events, Opts, ?DEFAULT_APPLY_BATCH_MAX_EVENTS
+    ),
     case resolve_siblings(InstanceId) of
         {ok, InstP, WalP, MST, Watermark} ->
             CO = read_consumer_offset(WalDir),
@@ -681,6 +714,7 @@ do_init_2(
                         consumer_offset = CO,
                         uncommitted = 0,
                         commit_every = CommitEvery,
+                        apply_batch_max_events = ApplyBatchMax,
                         poll_interval_ms = PollMs,
                         validator_module = ValidatorMod,
                         validator_state = ValidatorState,
@@ -1152,9 +1186,17 @@ lifecycle_live(#state{lifecycle = undefined}) ->
 lifecycle_live(#state{lifecycle = H}) ->
     bondy_oplog_bootstrap_lifecycle:is_live(H).
 
-drain_loop_step(#state{iter = Iter} = State0) ->
-    case bondy_oplog_wal_reader:next(Iter) of
-        {ok, Batch, _Hlcs, {NextSeg, NextOff}, NewIter} ->
+drain_loop_step(
+    #state{iter = Iter, apply_batch_max_events = Max} = State0
+) ->
+    %% A2 — coalesce several WAL frames into one applier batch so the
+    %% pack-store spine rebuild and the leveled `put_batch` amortise over
+    %% many events. `collect_frames/2` reads frames until the event count
+    %% reaches `Max` (`more`) or the reader drains (`eol`); when caught up
+    %% it returns a single frame and is behaviourally identical to the
+    %% pre-A2 path.
+    case collect_frames(Iter, Max) of
+        {frames, Batch, {NextSeg, NextOff}, NewIter, More} ->
             StateA = apply_batch(State0, Batch),
             {LastHlc, Count} = batch_summary(Batch),
             State1 = bump_offset(
@@ -1164,9 +1206,14 @@ drain_loop_step(#state{iter = Iter} = State0) ->
                 LastHlc,
                 Count
             ),
-            State2 = maybe_commit(State1),
-            drain_loop(State2);
-        end_of_log ->
+            case More of
+                more ->
+                    State2 = maybe_commit(State1),
+                    drain_loop(State2);
+                eol ->
+                    {ok, commit_now(State1)}
+            end;
+        {empty, _Iter} ->
             {ok, commit_now(State0)};
         {error, Reason} ->
             ?LOG_ERROR(#{
@@ -1178,6 +1225,58 @@ drain_loop_step(#state{iter = Iter} = State0) ->
                 reason => Reason
             }),
             {stop, {reader_error, Reason}, State0}
+    end.
+
+%% @private
+%% A2 — coalesce consecutive WAL frames into a single applier batch.
+%% Reads frames via the reader's `next/1` until the accumulated event
+%% count reaches `Max` (a soft cap — a frame is never split, so the batch
+%% may exceed `Max` by at most the last frame's size) or the reader
+%% signals `end_of_log`. Applying many frames as one batch amortises the
+%% two co-dominant per-batch storage costs (the pack-store spine rebuild
+%% and the leveled projection `put_batch`) over many more events.
+%%
+%% When the WAL is caught up — the steady state — only one frame is
+%% available before `end_of_log`, so this collapses to exactly the old
+%% one-frame-per-apply behaviour: coalescing engages only when a backlog
+%% already exists, which is precisely when throughput matters and when a
+%% little extra per-event apply latency is irrelevant. `Max = 1`
+%% reproduces the pre-A2 behaviour verbatim (the first frame already
+%% satisfies `N >= 1`).
+%%
+%% A reader error mid-collect discards the (not-yet-applied) accumulated
+%% frames and surfaces the error: their offset was never bumped, so they
+%% are re-read from the last committed position after the supervisor
+%% restart — at-least-once, identical to the pre-A2 stop-and-reconcile
+%% behaviour.
+%%
+%% Returns:
+%%   `{frames, Batch, {Seg, Off}, NewIter, more | eol}` — ≥1 frame read;
+%%       `more` = `Max` reached and the reader has more; `eol` = drained.
+%%   `{empty, Iter}` — `end_of_log` with nothing read.
+%%   `{error, Reason}` — reader error.
+collect_frames(Iter, Max) ->
+    collect_frames(Iter, Max, [], 0, undefined).
+
+collect_frames(Iter0, Max, AccRev, N, LastPos) ->
+    case bondy_oplog_wal_reader:next(Iter0) of
+        {ok, Batch, _Hlcs, NextPos, NewIter} ->
+            N1 = N + length(Batch),
+            AccRev1 = [Batch | AccRev],
+            case N1 >= Max of
+                true ->
+                    {frames, lists:append(lists:reverse(AccRev1)),
+                        NextPos, NewIter, more};
+                false ->
+                    collect_frames(NewIter, Max, AccRev1, N1, NextPos)
+            end;
+        end_of_log when AccRev == [] ->
+            {empty, Iter0};
+        end_of_log ->
+            {frames, lists:append(lists:reverse(AccRev)),
+                LastPos, Iter0, eol};
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 %% @private
@@ -2860,11 +2959,25 @@ validate_substrate_opts(Opts) ->
     case validate_ae_targets(maps:get(ae_targets, Opts, [])) of
         ok ->
             case validate_publish_opts(Opts) of
-                ok -> validate_cell_apply_target(Opts);
+                ok ->
+                    case validate_cell_apply_target(Opts) of
+                        ok -> validate_apply_batch_max_events(Opts);
+                        {error, _} = Err -> Err
+                    end;
                 {error, _} = Err -> Err
             end;
         {error, _} = Err ->
             Err
+    end.
+
+%% @private
+%% A2 coalescing threshold must be a positive integer (`1` = disabled).
+validate_apply_batch_max_events(Opts) ->
+    case maps:get(apply_batch_max_events, Opts, ?DEFAULT_APPLY_BATCH_MAX_EVENTS) of
+        N when is_integer(N), N >= 1 ->
+            ok;
+        Bad ->
+            {error, {invalid_opt, apply_batch_max_events, Bad}}
     end.
 
 validate_cell_apply_target(Opts) ->

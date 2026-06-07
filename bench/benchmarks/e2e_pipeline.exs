@@ -63,9 +63,25 @@ batch_size = String.to_integer(System.get_env("BATCH_SIZE", "1"))
 # pre-flow-control behaviour.
 max_in_flight = String.to_integer(System.get_env("MAX_IN_FLIGHT", "16"))
 
+# A2 — coarser applier batching. The applier coalesces consecutive WAL
+# frames into one batch until this many events accumulate, amortising the
+# pack-store spine rebuild + leveled put_batch. `1` reproduces the pre-A2
+# one-frame-per-apply behaviour (the A/B baseline arm); the lib default is
+# 256.
+apply_batch_max_events =
+  String.to_integer(System.get_env("APPLY_BATCH_MAX_EVENTS", "256"))
+
+# A4 — instance-side install coalescing. The instance merges up to this
+# many queued `install_local_batch` casts into one MST put_batch,
+# amortising the spine rebuild. `1` disables it; lib default is 16.
+install_coalesce_max =
+  String.to_integer(System.get_env("INSTALL_COALESCE_MAX", "16"))
+
 IO.puts(
   "[e2e] config: shards=#{shard_count} writers=#{writers} readers=#{readers} " <>
     "fsync=#{wal_fsync_mode} batch_size=#{batch_size} mst=#{mst_backend} " <>
+    "apply_batch_max_events=#{apply_batch_max_events} " <>
+    "install_coalesce_max=#{install_coalesce_max} " <>
     "dirty_io_schedulers=#{:erlang.system_info(:dirty_io_schedulers)}"
 )
 
@@ -270,8 +286,10 @@ make_ctx = fn prefix, profile ->
             fold_module: fold,
             fsync_mode: profile.fsync,
             max_install_in_flight: max_in_flight,
+            install_coalesce_max: install_coalesce_max,
             applier: %{
-              cell_apply_target: {ns, :primary, shard}
+              cell_apply_target: {ns, :primary, shard},
+              apply_batch_max_events: apply_batch_max_events
             }
           })
         )

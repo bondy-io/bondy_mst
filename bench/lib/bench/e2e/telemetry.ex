@@ -68,7 +68,36 @@ defmodule Bench.E2E.Telemetry do
     # in the batch (post-dedup). Measures the cost of the single
     # `Adapter:put_batch/2` call that replaces the previous per-event
     # `book_put` storm.
-    {[:bondy_oplog, :applier, :batch_cell_put], :batch_cell_put, :duration_us, :count}
+    {[:bondy_oplog, :applier, :batch_cell_put], :batch_cell_put, :duration_us, :count},
+    # Instance-side MST install (the `bondy_mst:put_batch/2` spine
+    # rebuild — for the pack-store backend, the durable MST page churn).
+    # Runs in the instance process, OFF the applier's critical path, so
+    # the applier's `batch_install_cast` (just the async cast) does not
+    # see it. Fires once per installed fast batch; `count` is the events
+    # installed. This is the stage that exposes the pack-store cost the
+    # applier breakdown otherwise hides (W2/A0).
+    {[:bondy_oplog, :instance, :mst_install], :mst_install, :duration_us, :count},
+    # A0b — pack-store per-page CPU-vs-disk decomposition. These three
+    # events (PR-PS-2) let us split the ~490µs the pack-store adds to each
+    # `mst_install` (vs the 42µs ets-store baseline) into CPU vs disk:
+    #   - `page_store_put`  — one per page written. p50 ≈ CPU
+    #     (term_to_binary + sha256 + buffered prim_file:write to page
+    #     cache); the top ~1/32 tail ≈ CPU + the deferred `datasync` fsync
+    #     (sync_every_records=32). put-count / applied-event = the
+    #     page-write amplification (substrate-independent).
+    #   - `page_store_get`  — one per page read during the merge. A µs-scale
+    #     p50 means the read hit the in-RAM pending map; a hundreds-of-µs
+    #     p50 means sealed-pack `pread` (disk). get-count / applied-event =
+    #     the read amplification.
+    #   - `page_store_seal` — one per sealed pack; `count` = records sealed,
+    #     so events/batches = records-per-seal and seal-count /
+    #     applied-event = the seal amplification (the 6-syscall flush).
+    # Together with `wal_fsync`'s count these give ops-per-applied-event
+    # amplification independent of the substrate's per-op latency.
+    {[:bondy_mst, :page_store, :put], :page_store_put, :duration_us, nil},
+    {[:bondy_mst, :page_store, :get], :page_store_get, :duration_us, nil},
+    {[:bondy_mst, :page_store, :seal_incoming], :page_store_seal, :duration_us,
+     :record_count}
   ]
 
   # Subset gated by APPLIER_PROFILE=control. The Erlang-side

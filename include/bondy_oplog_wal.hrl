@@ -176,6 +176,21 @@
 %% writer.
 -define(BONDY_OPLOG_WAL_BATCHED_FSYNC_BYTES_DEFAULT, (1 * 1024 * 1024)).
 
+%% Group commit (boxcar) for `per_write` mode. When enabled, the writer
+%% writes each concurrently-queued append's frame, then issues a single
+%% `datasync` covering the whole group and replies to every caller only
+%% after that shared fsync. Durability is identical to plain per_write
+%% (durable-on-return), but one fsync amortises across many appends —
+%% removing the "one fsync per concurrent appender" wall. No effect in
+%% `batched` mode, which already coalesces by size/time.
+-define(BONDY_OPLOG_WAL_GROUP_COMMIT_DEFAULT, true).
+
+%% Upper bound on the number of queued appends folded into one group (one
+%% datasync). Bounds the first caller's fsync latency and the work done
+%% in a single `handle_call`. 1024 is far above realistic per-writer
+%% concurrency, so in practice a whole burst coalesces into one fsync.
+-define(BONDY_OPLOG_WAL_GROUP_COMMIT_MAX_DEFAULT, 1024).
+
 %% -----------------------------------------------------------------------------
 %% Atomic batches (§3, §8.3 — Q9)
 %% -----------------------------------------------------------------------------
