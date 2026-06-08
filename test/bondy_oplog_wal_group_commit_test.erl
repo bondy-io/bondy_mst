@@ -284,3 +284,174 @@ invalid_group_commit_max_rejected_test() ->
     after
         rmrf(Dir)
     end.
+
+%% =============================================================================
+%% Group-commit failure injection (the two W1-QA carry-over branches)
+%% =============================================================================
+%%
+%% These cover the two error branches of the boxcar path that the W1
+%% Architecture QA flagged as deferred because they need fault injection:
+%%
+%%   1. `flush_group/3` datasync failure — the group's single shared
+%%      `do_fsync_head` fails. per_write promised durability-on-return, so
+%%      EVERY ok-write caller in the group must receive the error (not the
+%%      `{ok, _}` its own write would otherwise have produced), and the
+%%      writer must STAY ALIVE (the failure is recoverable — the non-durable
+%%      tail is truncated on the next open).
+%%
+%%   2. fatal-during-drain reply fan-out — a drained batch trips a rotation
+%%      that fails *after* the old segment fd was sealed+closed (a
+%%      non-recoverable in-memory/on-disk divergence). Every caller already
+%%      accumulated in the group (including the ones whose own frame was
+%%      written ok) plus the fatal caller must receive the error, and the
+%%      writer must STOP so the supervisor restart runs recovery.
+
+%% (1) A failed group datasync fans the error out to every grouped caller
+%% and leaves the writer alive. Distinct from the proper-test per-append
+%% fault: this exercises the *group* path (`flush_group/3`), where one
+%% datasync covers many callers.
+group_commit_flush_group_datasync_failure_errors_whole_group_test() ->
+    Dir = mktemp_dir(),
+    try
+        {ok, Pid} = bondy_oplog_wal:start_link(
+            instance_id(), (base_opts())#{dir => Dir, group_commit => true}
+        ),
+        try
+            N = 5,
+            Events = mk_monotonic_events(N),
+            {Replies, Alive, FsyncCount} = with_meck(
+                bondy_mst_io,
+                fun() ->
+                    ok = meck:expect(
+                        bondy_mst_io, datasync, fun(_Fd) -> {error, eio} end
+                    ),
+                    Rs = suspend_enqueue_resume(Pid, Events),
+                    {
+                        Rs,
+                        is_process_alive(Pid),
+                        maps:get(fsync_count, bondy_oplog_wal:info(Pid))
+                    }
+                end
+            ),
+            %% Every grouped caller observes the datasync failure.
+            ?assertEqual(N, length(Replies)),
+            [?assertEqual({error, eio}, R) || R <- Replies],
+            %% The writer survives — `flush_group/3` returns `{noreply, _}`.
+            ?assert(Alive),
+            %% A failed `do_fsync_head` is not counted (bumps only on ok).
+            ?assertEqual(0, FsyncCount)
+        after
+            ok = bondy_oplog_wal:close(Pid)
+        end
+    after
+        rmrf(Dir)
+    end.
+
+%% (2) A fatal rotation hit by a *drained* batch errors every caller in the
+%% group (incl. the already-ok ones) and the fatal caller, then stops the
+%% writer for a supervisor restart + recovery.
+group_commit_fatal_during_drain_errors_group_and_stops_test() ->
+    %% At max_segment_bytes=200 the K-th single-event append is the first to
+    %% rotate into segment 1. The group leader (event 1) can never rotate
+    %% (the `maybe_rotate/2` `Cur > SEG_HEADER` guard), so K >= 2: events
+    %% 1..K-1 ride the group as oks, event K trips the (injected) fatal.
+    K = probe_rotation_event(200),
+    ?assert(K >= 2),
+    Dir = mktemp_dir(),
+    OldTrap = process_flag(trap_exit, true),
+    try
+        {ok, Pid} = bondy_oplog_wal:start_link(
+            instance_id(),
+            (base_opts())#{
+                dir => Dir, group_commit => true, max_segment_bytes => 200
+            }
+        ),
+        Events = mk_monotonic_events(K),
+        Reason = {rotation_failed_after_seal, injected},
+        Replies = with_meck(
+            bondy_oplog_wal_segment,
+            fun() ->
+                %% New-segment creation fails => `open_next_segment/1` fails
+                %% *after* the old fd is sealed+closed => `rotate/1` returns
+                %% `{fatal, {rotation_failed_after_seal, injected}, _}`.
+                ok = meck:expect(
+                    bondy_oplog_wal_segment,
+                    create,
+                    fun(_Path, _SegId, _Iid, _Origin) -> {error, injected} end
+                ),
+                suspend_enqueue_resume(Pid, Events)
+            end
+        ),
+        %% Every caller in the coalesced group — including the K-1 whose own
+        %% frame was written ok — plus the fatal caller gets the error.
+        ?assertEqual(K, length(Replies)),
+        [?assertEqual({error, Reason}, R) || R <- Replies],
+        %% The writer stopped (supervisor restart will run recovery).
+        receive
+            {'EXIT', Pid, Reason} -> ok
+        after 5000 ->
+            error(writer_did_not_stop)
+        end,
+        ?assertNot(is_process_alive(Pid))
+    after
+        _ = process_flag(trap_exit, OldTrap),
+        rmrf(Dir)
+    end.
+
+%% =============================================================================
+%% Failure-injection helpers
+%% =============================================================================
+
+%% Serialises any test that mecks a VM-wide module (meck:new/2 swaps it in
+%% the code server) and guarantees unload even on assertion failure. Mirrors
+%% `bondy_oplog_wal_proper_test:with_io_fault_lock/1`.
+with_meck(Mod, Body) ->
+    Lock = {bondy_mst_meck_fault, ?MODULE},
+    global:trans(
+        {Lock, self()},
+        fun() ->
+            ok = meck:new(Mod, [passthrough]),
+            try
+                Body()
+            after
+                _ = meck:unload(Mod)
+            end
+        end,
+        [node()],
+        infinity
+    ).
+
+%% Open a throwaway WAL at `MaxSegBytes` and append single events (one HLC
+%% clock, strictly increasing) until one lands in segment > 0; return its
+%% 1-based index. This is the deterministic rotation point reused by the
+%% fatal-during-drain test so the injected failure lands on the last enqueued
+%% event (no orphaned requests after the writer stops).
+probe_rotation_event(MaxSegBytes) ->
+    Dir = mktemp_dir(),
+    try
+        {ok, Pid} = bondy_oplog_wal:start_link(
+            instance_id(),
+            (base_opts())#{
+                dir => Dir,
+                group_commit => true,
+                max_segment_bytes => MaxSegBytes
+            }
+        ),
+        try
+            find_rotation_index(Pid, bondy_oplog_hlc:new(), 1, 50)
+        after
+            ok = bondy_oplog_wal:close(Pid)
+        end
+    after
+        rmrf(Dir)
+    end.
+
+find_rotation_index(_Pid, _Clock, I, Max) when I > Max ->
+    error({probe_no_rotation_within, Max});
+find_rotation_index(Pid, Clock, I, Max) ->
+    E = mk_event(bondy_oplog_hlc:now(Clock), I),
+    {ok, _Hlc, {Seg, _Off}} = bondy_oplog_wal:append(Pid, E),
+    case Seg > 0 of
+        true -> I;
+        false -> find_rotation_index(Pid, Clock, I + 1, Max)
+    end.
