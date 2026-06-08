@@ -12,7 +12,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(FOLD, bondy_oplog_fold_lww_register).
+-define(FOLD, bondy_oplog_crdt_lww_register).
 
 %% =============================================================================
 %% Test generators

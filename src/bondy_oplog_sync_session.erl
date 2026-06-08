@@ -263,48 +263,9 @@ do_bootstrap_catalogue(Instance, Peer, Opts) ->
     TransportOpts = maps:get(transport_opts, Opts, #{}),
     WasLive = is_live(Instance),
     Start = erlang:monotonic_time(),
-    Result =
-        case
-            Transport:request(
-                Peer, Instance, get_catalogue_snapshot_init, TransportOpts
-            )
-        of
-            {ok, no_snapshot} ->
-                %% Peer has nothing to ship. Run the regular pull and let
-                %% the lifecycle stay where it was — the caller seeded the
-                %% replica as `live` (genesis) or expects a future
-                %% bootstrap against a non-empty peer.
-                run(Instance, Peer, Opts);
-            {ok, {init, {Watermark, Cursor}}} ->
-                case
-                    pull_install_loop(
-                        Instance, Peer, Transport, TransportOpts, Cursor, 0, 0
-                    )
-                of
-                    {ok, Installed, Skipped} ->
-                        ok = bondy_oplog_instance:finalize_catalogue_bootstrap(
-                            Instance, Watermark, WasLive
-                        ),
-                        telemetry:execute(
-                            [bondy_oplog, sync, catalogue_bootstrap, complete],
-                            #{
-                                installed => Installed,
-                                skipped => Skipped,
-                                watermark => Watermark
-                            },
-                            #{
-                                instance_id => Instance,
-                                peer => Peer,
-                                was_live => WasLive
-                            }
-                        ),
-                        run(Instance, Peer, Opts);
-                    {error, _} = E ->
-                        E
-                end;
-            {error, _} = E ->
-                E
-        end,
+    Result = do_bootstrap_snapshot(
+        Instance, Peer, Opts, Transport, TransportOpts, WasLive
+    ),
     Duration = erlang:monotonic_time() - Start,
     Outcome =
         case Result of
@@ -319,10 +280,96 @@ do_bootstrap_catalogue(Instance, Peer, Opts) ->
     Result.
 
 %% @private
+%% Catalogue-snapshot bootstrap: bulk-seed the local projection from the
+%% peer snapshot in `replace` mode (skip-if-older by HLC), mark live (a
+%% `pre_bootstrap` caller), then anti-entropy + op-replay — the plan's
+%% "checkpoint-replace + op-replay" (PR-G removed the CvRDT `merge_states`
+%% merge-mode).
+do_bootstrap_snapshot(Instance, Peer, Opts, Transport, TransportOpts, WasLive) ->
+    case
+        Transport:request(
+            Peer, Instance, get_catalogue_snapshot_init, TransportOpts
+        )
+    of
+        {ok, no_snapshot} ->
+            %% Peer has nothing to ship. Run the regular pull and let the
+            %% lifecycle stay where it was — the caller seeded the replica
+            %% as `live` (genesis) or expects a future bootstrap against a
+            %% non-empty peer.
+            run(Instance, Peer, Opts);
+        {ok, {init, {Watermark, Cursor}}} ->
+            case
+                pull_install_loop(
+                    Instance, Peer, Transport, TransportOpts, Cursor, 0, 0
+                )
+            of
+                {ok, Installed, Skipped} ->
+                    ok = bondy_oplog_instance:finalize_catalogue_bootstrap(
+                        Instance, Watermark, WasLive
+                    ),
+                    telemetry:execute(
+                        [bondy_oplog, sync, catalogue_bootstrap, complete],
+                        #{
+                            installed => Installed,
+                            skipped => Skipped,
+                            watermark => Watermark
+                        },
+                        #{
+                            instance_id => Instance,
+                            peer => Peer,
+                            was_live => WasLive
+                        }
+                    ),
+                    finish_bootstrap(Instance, Peer, Opts, WasLive);
+                {error, _} = E ->
+                    E
+            end;
+        {error, _} = E ->
+            E
+    end.
+
+%% @private
+%% Run anti-entropy (MST page union + diff-replay), then, for a LIVE
+%% re-bootstrap, op-replay: re-derive the projection from the now-merged
+%% local+peer event set. The snapshot install is `replace` (skip-if-older
+%% by HLC), which is correct for a register but can CLOBBER a CRDT that
+%% accumulates per-Origin (a counter, a grow-set) when the peer's
+%% higher-HLC cell omits a local Origin's contribution. A full re-fold
+%% (`interpret_cog` over the complete event set) restores it — the op-based
+%% replacement for the removed CvRDT `merge_states`. On a fresh
+%% (`pre_bootstrap`) replica it is unnecessary (the local projection was
+%% empty, so `replace` could not clobber, and the cold-start replay already
+%% re-folds), so it is skipped to avoid a redundant full fold.
+finish_bootstrap(Instance, Peer, Opts, WasLive) ->
+    case run(Instance, Peer, Opts) of
+        {ok, _} = Ok ->
+            case WasLive of
+                true -> ok = rederive_projection(Instance);
+                false -> ok
+            end,
+            Ok;
+        {error, _} = E ->
+            E
+    end.
+
+%% @private
+rederive_projection(Instance) ->
+    case bondy_oplog_registry:applier_pid(Instance) of
+        undefined ->
+            ok;
+        Pid when is_pid(Pid) ->
+            bondy_oplog_applier:rederive_projection_sync(Pid)
+    end.
+
+%% @private
 pull_install_loop(
     Instance, Peer, Transport, TransportOpts, Cursor, Installed, Skipped
 ) ->
-    Mode = install_mode(Instance),
+    %% The install is always `replace` (skip-if-older by HLC) — PR-G
+    %% removed merge-mode (the CvRDT `merge_states` join). On a fresh
+    %% replica the local projection is empty so every cell installs; on a
+    %% live re-bootstrap a higher-HLC peer cell can clobber a per-Origin-
+    %% accumulating CRDT, which the post-bootstrap op-replay then restores.
     Req = {get_catalogue_snapshot_next, Cursor},
     case Transport:request(Peer, Instance, Req, TransportOpts) of
         {ok, {done, []}} ->
@@ -330,7 +377,7 @@ pull_install_loop(
         {ok, {batch, {NextCursor, Cells}}} ->
             case
                 bondy_oplog_instance:install_catalogue_batch(
-                    Instance, {Mode, Cells}
+                    Instance, {replace, Cells}
                 )
             of
                 {ok, #{installed := I, skipped := S} = _Counts} ->
@@ -350,17 +397,6 @@ pull_install_loop(
             E
     end.
 
-%% @private
-%% Pick the install mode based on the local lifecycle: `replace` for
-%% fresh (pre_bootstrap) callers — local projection is empty so per-
-%% cell replacement is identity. `merge` for live callers — the local
-%% projection already has state and the install must use
-%% `merge_states/2` (or fall back to skip-if-older for folds without).
-install_mode(Instance) ->
-    case is_live(Instance) of
-        true -> merge;
-        false -> replace
-    end.
 
 ?DOC("""
 Spawns a `bootstrap/3` (single-CRDT) session in a separate process and

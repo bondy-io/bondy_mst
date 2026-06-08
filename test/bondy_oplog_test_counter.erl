@@ -11,6 +11,11 @@
 -export([init/0]).
 -export([interpret_cog/2]).
 -export([query/2]).
+-export([to_value/1]).
+-export([hlc/1]).
+-export([encode_state/1]).
+-export([decode_state/1]).
+-export([order_independent/0]).
 
 causal_tier() ->
     tier_0.
@@ -32,3 +37,20 @@ interpret_cog(Events, State) ->
 
 query(value, State) ->
     State.
+
+to_value(State) ->
+    State.
+
+%% A summing counter carries no logical timestamp of its own.
+hlc(_State) ->
+    0.
+
+encode_state(State) when is_integer(State) ->
+    <<State:64/big-signed>>.
+
+decode_state(<<State:64/big-signed>>) ->
+    State.
+
+%% Integer addition commutes — order-independent by construction.
+order_independent() ->
+    true.

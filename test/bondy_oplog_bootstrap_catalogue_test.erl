@@ -41,7 +41,7 @@ bootstrap_catalogue_test_() ->
         fun bootstrap_marks_local_live/0,
         fun no_snapshot_falls_through_to_sync/0,
         fun single_crdt_local_refuses_bootstrap_catalogue/0,
-        fun merge_mode_picks_higher_hlc_for_lww/0
+        fun live_replica_recovers_lossless_via_anti_entropy/0
     ]}.
 
 fresh_replica_bootstraps_from_peer() ->
@@ -140,15 +140,19 @@ no_snapshot_falls_through_to_sync() ->
     bondy_oplog:stop_instance(Peer),
     teardown(Local).
 
-merge_mode_picks_higher_hlc_for_lww() ->
-    %% Both replicas have applied cells. Local is `live` (ephemeral),
-    %% so `bootstrap_catalogue` runs in merge mode. For LWW register,
-    %% merge_states picks the cell with the higher HLC.
+live_replica_recovers_lossless_via_anti_entropy() ->
+    %% A LIVE replica calling `bootstrap_catalogue` no longer pulls and
+    %% REPLACES from the peer snapshot — PR-G removed the CvRDT merge-mode.
+    %% It converges via op-based anti-entropy (`run/3`: MST page union +
+    %% per-cell replay), which is LOSSLESS: a local-only write the peer
+    %% never observed survives, and a cell both hold resolves by the op's
+    %% HLC (LWW). The replace-mode wipe a naive cutover would use could drop
+    %% the local-only cell, so this is the recovering-bootstrap convergence
+    %% gate for the cutover.
     {Peer, _, _, _} = setup_instance(),
     {Local, _, _, _} = setup_instance(),
 
-    %% Local has K1@5=local, K2@30=local-wins.
-    %% Peer  has K1@20=peer-wins,  K2@10=peer.
+    %% Local (live): a shared K1@5 and a LOCAL-ONLY K2@30 the peer never sees.
     _ = bondy_oplog:append(
         Local, {cell_apply, ?B, <<"k1">>, {set, 5, <<"local-k1">>}}
     ),
@@ -156,22 +160,21 @@ merge_mode_picks_higher_hlc_for_lww() ->
         Local, {cell_apply, ?B, <<"k2">>, {set, 30, <<"local-k2">>}}
     ),
     _ = barrier(Local),
+    %% Peer: a higher-HLC K1@20 and nothing else.
     _ = bondy_oplog:append(
         Peer, {cell_apply, ?B, <<"k1">>, {set, 20, <<"peer-k1">>}}
     ),
-    _ = bondy_oplog:append(
-        Peer, {cell_apply, ?B, <<"k2">>, {set, 10, <<"peer-k2">>}}
-    ),
     _ = barrier(Peer),
 
-    %% Sanity — local is live (so install_mode is merge).
     ?assertEqual(live, bondy_oplog_instance:lifecycle_state(Local)),
 
     {ok, _} = bondy_oplog_sync_session:bootstrap_catalogue(
         Local, Peer, #{}
     ),
+    %% Anti-entropy lands the peer events in the MST; force the per-cell
+    %% projection replay so the read observes them (production casts async).
+    ok = replay(Local),
 
-    %% After merge, K1 has the peer's HLC=20 winning, K2 keeps local's HLC=30.
     LocalEntry = peer_entry(Local),
     Adapter = bondy_db_core_registry:entry_projection_adapter(LocalEntry),
     Handle = bondy_db_core_registry:entry_projection_handle(LocalEntry),
@@ -179,7 +182,9 @@ merge_mode_picks_higher_hlc_for_lww() ->
     {ok, K2Frame} = Adapter:get(Handle, ?B, <<"k2">>),
     {K1Hlc, _, _} = bondy_oplog_cell_frame:decode_full(K1Frame),
     {K2Hlc, _, _} = bondy_oplog_cell_frame:decode_full(K2Frame),
+    %% Shared cell converges to the higher-HLC value (peer@20).
     ?assertEqual(20, K1Hlc),
+    %% Local-only cell is PRESERVED — the lossless property (no replace-wipe).
     ?assertEqual(30, K2Hlc),
 
     teardown(Peer),
@@ -281,6 +286,12 @@ ns_of(Id) when is_binary(Id) ->
 
 barrier(Id) ->
     bondy_oplog:projection(Id).
+
+%% Force the synchronous per-cell projection replay: project the events a
+%% sync session integrated into the MST onto the per-cell projection.
+replay(Id) ->
+    Pid = bondy_oplog_registry:applier_pid(Id),
+    bondy_oplog_applier:replay_cell_events_sync(Pid).
 
 high_water(Id) ->
     NS = ns_of(Id),

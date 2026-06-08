@@ -48,11 +48,23 @@ The single most important rule of this tutorial is one sentence:
 
 Everything else in this chapter is a consequence of that rule.
 
-## 2. Picking a fold
+## 2. Picking a CRDT
 
-`bondy_db` ships ten folds (see [chapter 05](05_fold_strategies.md)) —
-six general-purpose / record-shaped and four Tier 1 textbook CRDTs.
-Reframed by "what does the data look like":
+> **As-built note (PR-Z).** The decision tree and notes in this section
+> are the original conceptual guide. Several of the types shown
+> (`presence_basic`, `ttl_presence`, `orset`, `strict_register`,
+> `map_of_fields`) were **retired** with no twin (see
+> [chapter 05](05_fold_strategies.md)); the surviving CRDTs are
+> `lww_register`, `g_counter`/`pn_counter`, `g_set`, `max_register`/
+> `min_register`, `mv_register`, and the add-wins map
+> `bondy_oplog_crdt_aw_map`. Map a retired type onto a survivor as the
+> §4 examples below do (e.g. `orset` → add-wins map, `strict_register`
+> → `lww_register` + the strict-uniqueness `merge_strategy`,
+> presence/TTL → `lww_register` with app-level expiry).
+
+`bondy_db` ships a small catalogue of native CRDTs (see
+[chapter 05](05_fold_strategies.md)). Reframed by "what does the data
+look like":
 
 ```mermaid
 flowchart TB
@@ -172,18 +184,31 @@ contention.
 
 The current Bondy state lives in twelve plum_db prefixes. Mapped
 onto `bondy_db`, each becomes a table. Below, every row gives a
-sample `open_table/3` call, the fold choice, the topology choice,
+sample `open_table/3` call, the CRDT choice, the topology choice,
 and the one-line "why".
+
+> **As-built note (PR-Z).** The substrate is now native
+> operation-based CRDTs; the state-based **fold** modules were retired
+> (see [chapter 05](05_fold_strategies.md)). The mappings below are
+> illustrative. A `fold_module => lww_register` / `pn_counter` /
+> `g_set` label still works (it resolves to the byte-identical CRDT
+> twin), but the folds with **no twin** were deleted —
+> `orset`/`strict_register`/`ttl_presence`/`presence_basic`/`map_of_fields`
+> no longer exist. Use the surviving CRDTs: `lww_register` for
+> register/presence-style cells, `g_set` for grow-only sets, the native
+> add-wins map (`bondy_oplog_crdt_aw_map`) for observed-remove
+> set/map semantics, `pn_counter`/`g_counter` for counters, and
+> `mv_register` where concurrent siblings must survive.
 
 ### 4.1 Registrations and subscriptions
 
 ```erlang
 {ok, Regs} = bondy_db:open_table(Db, bondy_registration, #{
-    fold_module => bondy_oplog_fold_presence_basic,
+    fold_module => lww_register,
     shard_count => 8
 }).
 {ok, Subs} = bondy_db:open_table(Db, bondy_subscription, #{
-    fold_module => bondy_oplog_fold_presence_basic,
+    fold_module => lww_register,
     shard_count => 8
 }).
 ```
@@ -191,15 +216,18 @@ and the one-line "why".
 WAMP registrations and subscriptions are keyed by
 `{Realm, Uri, SessionId, RegistrationId}`. No two writers ever
 target the same cell — uniqueness is structural. The cell is
-either `live` or `dead`; `dead` is terminal. That's exactly
-`presence_basic`. RAM-only is fine because session-bound state
-disappears when the session closes; no recovery from disk needed.
+present (a `set` value) or withdrawn (a `clear`); the highest-HLC
+write wins. `lww_register` matches that. (The dedicated `presence`
+CRDT was retired in PR-Z — it had no production consumer; a
+set/clear register covers the same need.) RAM-only is fine because
+session-bound state disappears when the session closes; no recovery
+from disk needed.
 
 ### 4.2 Realm
 
 ```erlang
 {ok, Realms} = bondy_db:open_table(Db, bondy_realm, #{
-    fold_module => bondy_oplog_fold_lww_register,
+    fold_module => lww_register,
     shard_count => 4
 }).
 ```
@@ -218,7 +246,7 @@ splitting into `map_of_fields` is a one-table refactor.
 
 ```erlang
 {ok, Users} = bondy_db:open_table(Db, security_users, #{
-    fold_module => bondy_oplog_fold_lww_register,
+    fold_module => lww_register,
     shard_count => 8
 }).
 ```
@@ -232,11 +260,11 @@ membership is **not** stored in this record (see 4.4).
 
 ```erlang
 {ok, Groups} = bondy_db:open_table(Db, security_groups, #{
-    fold_module => bondy_oplog_fold_lww_register,
+    fold_module => lww_register,
     shard_count => 4
 }).
 {ok, Members} = bondy_db:open_table(Db, security_group_members, #{
-    fold_module => bondy_oplog_fold_orset,
+    crdt_module => bondy_oplog_crdt_aw_map,
     shard_count => 8
 }).
 ```
@@ -251,7 +279,7 @@ under contention.
 flowchart LR
     OLD["plum_db today<br/>security_groups<br/>(record + members list, lww)"]
     NEW1["bondy_db<br/>security_groups<br/>(record minus members, lww_register)"]
-    NEW2["bondy_db<br/>security_group_members<br/>(membership relation, orset)"]
+    NEW2["bondy_db<br/>security_group_members<br/>(membership relation, aw_map)"]
 
     OLD -->|"split"| NEW1
     OLD -->|"+"| NEW2
@@ -259,34 +287,39 @@ flowchart LR
 
 The migration: keep the group record in `security_groups` with
 `lww_register` (name, meta, default policies); move membership to
-a new `security_group_members` table with `orset`. The cell key is
-`{Realm, GroupId, UserId}`; concurrent adds and removes converge
-via the OR-Set's dot/tombstone protocol
-([chapter 05](05_fold_strategies.md)).
+a new `security_group_members` table with the native add-wins map
+(`bondy_oplog_crdt_aw_map`). Concurrent adds and removes converge via
+its observed-remove (add-wins) semantics — a concurrent add survives a
+remove that did not observe it ([chapter 05](05_fold_strategies.md)).
 
-This is the recommendation for Bondy: **memberships scale better
-as a dedicated OR-Set table** than as a list inside an LWW record.
+This is the recommendation for Bondy: **memberships scale better as a
+dedicated add-wins table** than as a list inside an LWW record.
 
 ### 4.5 Grants (user and group)
 
 ```erlang
 {ok, UserGrants} = bondy_db:open_table(Db, security_user_grants, #{
-    fold_module => bondy_oplog_fold_strict_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
+    merge_strategy => bondy_oplog_merge_strict_uniqueness,
     shard_count => 8,
     topology_hint => isolated
 }).
 {ok, GroupGrants} = bondy_db:open_table(Db, security_group_grants, #{
-    fold_module => bondy_oplog_fold_strict_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
+    merge_strategy => bondy_oplog_merge_strict_uniqueness,
     shard_count => 4,
     topology_hint => isolated
 }).
 ```
 
-Authorisation grants are the canonical `strict_register` case. Two
+Authorisation grants are the canonical strict-uniqueness case. Two
 concurrent grants to the same `(Realm, Principal, Resource)` mean
-someone violated single-writer discipline at the management plane.
-The substrate surfaces the conflict; the management API treats it
-as an admin alert, not a silent LWW.
+someone violated single-writer discipline at the management plane. The
+`bondy_oplog_merge_strict_uniqueness` merge strategy surfaces that
+collision loudly instead of silently picking an LWW winner. (The
+retired `strict_register` fold folded this into a single module; the
+strict-uniqueness behaviour now lives in the separate, surviving
+`merge_strategy`.)
 
 These are the tables where `per_entity` topology pays off: ops can
 quiesce or migrate the grants Bookie for one realm without
@@ -296,7 +329,8 @@ touching anything else.
 
 ```erlang
 {ok, Sources} = bondy_db:open_table(Db, security_sources, #{
-    fold_module => bondy_oplog_fold_strict_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
+    merge_strategy => bondy_oplog_merge_strict_uniqueness,
     shard_count => 4,
     topology_hint => isolated
 }).
@@ -310,7 +344,7 @@ surface as a conflict.
 
 ```erlang
 {ok, Gateway} = bondy_db:open_table(Db, api_gateway, #{
-    fold_module => bondy_oplog_fold_lww_register,
+    fold_module => lww_register,
     shard_count => 4
 }).
 ```
@@ -322,7 +356,7 @@ one operator at a time. `lww_register` is plenty.
 
 ```erlang
 {ok, Tickets} = bondy_db:open_table(Db, bondy_ticket, #{
-    fold_module => bondy_oplog_fold_ttl_presence,
+    crdt_module => bondy_oplog_crdt_lww_register,
     shard_count => 32
 }).
 ```
@@ -330,9 +364,12 @@ one operator at a time. `lww_register` is plenty.
 Tickets are short-lived auth artefacts with a hard expiry. Two
 properties matter:
 
-1. **TTL must auto-evict.** `ttl_presence` carries an `expiry_hlc`
-   on every cell. Cells past their HLC are skipped on read; the GC
-   threshold drops them from the snapshot.
+1. **TTL eviction is app-level.** The dedicated `ttl_presence` CRDT
+   (which carried an `expiry_hlc` and auto-skipped expired cells) was
+   retired in PR-Z with no twin. A `lww_register` cell holds the
+   ticket; the auth handler enforces expiry on read and clears
+   expired cells (or a periodic sweep does). The expiry HLC can live
+   in the value.
 2. **High cardinality, key-independent.** Sharding by key
    (hash) spreads load evenly. 32 shards is a fine starting point;
    tune up if write rates climb.
@@ -341,7 +378,7 @@ properties matter:
 
 ```erlang
 {ok, Tokens} = bondy_db:open_table(Db, bondy_oauth_token, #{
-    fold_module => bondy_oplog_fold_ttl_presence,
+    crdt_module => bondy_oplog_crdt_lww_register,
     shard_count => 32
 }).
 ```
@@ -349,10 +386,11 @@ properties matter:
 Same shape as tickets. Two things worth calling out:
 
 - **Refresh-token rotation needs `revoked → issued` reanimation.**
-  `ttl_presence` supports this (see
-  [chapter 05](05_fold_strategies.md)); a later-HLC `ISSUE`
-  reanimates a revoked cell, which is what you want when re-issuing
-  a rotated refresh token to the same `{user, realm, device}`.
+  `lww_register` gives this for free: a `clear` (revoke) is not
+  terminal, so a later-HLC `set` (re-issue) reanimates the cell —
+  exactly what you want when re-issuing a rotated refresh token to the
+  same `{user, realm, device}`. (Expiry handling is app-level, as for
+  tickets above.)
 - **The "bounded N tokens per `{user, realm, device}`" rule is
   app-level.** No CRDT can express "keep the N latest" without
   coordination. Your auth handler reads the current token set,
@@ -364,7 +402,7 @@ Same shape as tickets. Two things worth calling out:
 
 ```erlang
 {ok, Bridges} = bondy_db:open_table(Db, bondy_bridge_relay, #{
-    fold_module => bondy_oplog_fold_lww_register,
+    fold_module => lww_register,
     shard_count => 4
 }).
 ```
@@ -382,7 +420,7 @@ The shape:
 
 ```erlang
 {ok, Counters} = bondy_db:open_table(Db, app_counters, #{
-    fold_module => bondy_oplog_fold_pn_counter,
+    fold_module => pn_counter,
     shard_count => 8
 }).
 

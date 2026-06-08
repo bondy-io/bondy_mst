@@ -104,12 +104,14 @@ provision_reports_indexes({_Db, Table, _Sup, _Dir}) ->
 secondary_shards_registered({_Db, Table, _Sup, _Dir}) ->
     NS = maps:get(namespace, bondy_db:info(Table)),
     %% by_status has 4 shards (inherits primary shard_count); each is an
-    %% ets projection with the index_entry fold.
+    %% ets projection backed by the native index-entry CRDT (PR-Z; the
+    %% retired `index_entry` fold's op-based twin).
     lists:foreach(
         fun(Shard) ->
             {ok, Entry} = bondy_db_core_registry:lookup(NS, by_status, Shard),
             ?assertEqual(
-                index_entry, bondy_db_core_registry:entry_fold_module(Entry)
+                bondy_oplog_crdt_index_entry,
+                bondy_db_core_registry:entry_crdt_module(Entry)
             ),
             ?assertEqual(
                 bondy_oplog_projection_ets,
@@ -323,7 +325,7 @@ put_index_entry(Table, Realm, IndexName, Term, PrimaryKey, Cols, Hlc) ->
     SecBucket = bondy_oplog_index_key:bucket(Realm, IndexName),
     SecShard = bondy_oplog_index_key:shard(SecBucket, Term, SecCount),
     SecKey = bondy_oplog_index_key:encode(Term, PrimaryKey),
-    StateBytes = bondy_oplog_fold:encode_state(index_entry, {live, Cols, Hlc}),
+    StateBytes = bondy_oplog_crdt_index_entry:encode_state({live, Cols, Hlc}),
     Frame = bondy_oplog_cell_frame:encode(Hlc, StateBytes, undefined, true),
     {ok, Entry} = bondy_db_core_registry:lookup(NS, IndexName, SecShard),
     PA = bondy_db_core_registry:entry_projection_adapter(Entry),

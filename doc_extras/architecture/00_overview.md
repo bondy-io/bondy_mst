@@ -218,9 +218,11 @@ the chapters that follow make sense:
 2. **Per-cell HLC.** Each projection cell carries its own
    `last_modified_hlc`. Reads return `{Value, Hlc}`; causality is
    *exposed*, not hidden.
-3. **Per-namespace fold strategy.** The substrate is CRDT-agnostic.
-   What "merge" means for `users` is different from what it means
-   for `registry`, and both live as plain Erlang modules.
+3. **Per-table CRDT.** The substrate is CRDT-agnostic. What "merge"
+   means for `users` is different from what it means for `registry`,
+   and both live as plain Erlang modules implementing the
+   `bondy_oplog_crdt` behaviour. (The earlier state-based *fold*
+   modules were retired in PR-Z; see [chapter 05](05_fold_strategies.md).)
 4. **Two-sided API.** `bondy_oplog` for writes, `bondy_db` for reads.
    Applications never read from the oplog.
 5. **No consensus.** Convergence is by anti-entropy over the MST,

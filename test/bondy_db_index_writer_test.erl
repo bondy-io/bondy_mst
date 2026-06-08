@@ -197,16 +197,13 @@ aw_map_field_extract_index({Db, _Sup, _Dir}) ->
     K = <<"u1">>,
     %% Set a projected (non-indexed) field first, then the indexed one, so
     %% the single `put` of term "active" already carries the columns.
-    ok = bondy_db:aw_put(
-        T, R, K, <<"name">>, {lww_register, {set, <<"alice">>, bondy_db:tick(T)}}
-    ),
-    ok = bondy_db:aw_put(
-        T, R, K, <<"status">>,
-        {lww_register, {set, <<"active">>, bondy_db:tick(T)}}
-    ),
+    ok = bondy_db:apply(T, R, K, {put, <<"name">>, <<"alice">>}),
+    ok = bondy_db:apply(T, R, K, {put, <<"status">>, <<"active">>}),
     ok = flush_index(T, by_status),
+    %% Projected column is the MV-leaf sibling list (`[<<"alice">>]`), not
+    %% the bare value — the native map's projection shape.
     ?assertEqual(
-        {ok, [{<<"u1">>, #{[<<"name">>] => <<"alice">>}}]},
+        {ok, [{<<"u1">>, #{[<<"name">>] => [<<"alice">>]}}]},
         bondy_db:index_get(T, R, by_status, <<"active">>, #{})
     ),
     ok = bondy_db:close_table(T).
@@ -215,29 +212,23 @@ aw_map_status_change_retracts({Db, _Sup, _Dir}) ->
     {ok, T} = open_aw_map(Db),
     R = <<"r1">>,
     K = <<"u1">>,
-    ok = bondy_db:aw_put(
-        T, R, K, <<"name">>, {lww_register, {set, <<"alice">>, bondy_db:tick(T)}}
-    ),
-    ok = bondy_db:aw_put(
-        T, R, K, <<"status">>,
-        {lww_register, {set, <<"active">>, bondy_db:tick(T)}}
-    ),
+    ok = bondy_db:apply(T, R, K, {put, <<"name">>, <<"alice">>}),
+    ok = bondy_db:apply(T, R, K, {put, <<"status">>, <<"active">>}),
     ok = flush_index(T, by_status),
     ?assertMatch(
         {ok, [{<<"u1">>, _}]},
         bondy_db:index_get(T, R, by_status, <<"active">>, #{})
     ),
-    %% Evolve the status sub-register to a new value at a higher HLC.
-    ok = bondy_db:aw_apply(
-        T, R, K, <<"status">>,
-        {lww_register, {set, bondy_db:tick(T), <<"inactive">>}}
-    ),
+    %% Re-put the status field. The new put observes the prior one
+    %% (read-your-writes) and dominates, so the old "active" dot is
+    %% dropped — the indexed term changes to "inactive".
+    ok = bondy_db:apply(T, R, K, {put, <<"status">>, <<"inactive">>}),
     ok = flush_index(T, by_status),
     ?assertEqual(
         {ok, []}, bondy_db:index_get(T, R, by_status, <<"active">>, #{})
     ),
     ?assertEqual(
-        {ok, [{<<"u1">>, #{[<<"name">>] => <<"alice">>}}]},
+        {ok, [{<<"u1">>, #{[<<"name">>] => [<<"alice">>]}}]},
         bondy_db:index_get(T, R, by_status, <<"inactive">>, #{})
     ),
     ok = bondy_db:close_table(T).
@@ -282,9 +273,15 @@ open_lww(Db) ->
         indexes => [#{name => by_value, extract => []}]
     }).
 
+%% Native tier_2 add-wins map. `fold_module` is mandatory at open but
+%% vestigial when a `crdt_module` is set (the kernel selects the CRDT).
+%% Its projection is `#{MapKey => [SiblingValue, ...]}`, so an extracted
+%% field is a (usually singleton) list — the index spec turns a list leaf
+%% into one term per element, and a projected column is the list itself.
 open_aw_map(Db) ->
     bondy_db:open_table(Db, profiles, #{
-        fold_module => aw_map,
+        fold_module => lww_register,
+        crdt_module => bondy_oplog_crdt_aw_map,
         indexes => [
             #{
                 name => by_status,

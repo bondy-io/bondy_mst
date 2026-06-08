@@ -296,14 +296,12 @@ mk_event(Hlc, Op) ->
     bondy_oplog_event:new(Key, Op, undefined).
 
 initial() ->
-    bondy_oplog_fold:initial_value(?STRATEGY).
+    bondy_oplog_crdt_lww_register:init().
 
 fold_events(State, Events) ->
     lists:foldl(
         fun(E, Acc) ->
-            {NewState, _Delta} =
-                bondy_oplog_fold:apply_event(?STRATEGY, Acc, E, undefined),
-            NewState
+            bondy_oplog_crdt_lww_register:apply_op(Acc, E, undefined)
         end,
         State,
         Events
@@ -322,7 +320,7 @@ expected_read(Events) ->
         Events
     ),
     State = fold_events(initial(), Sorted),
-    case bondy_oplog_fold:to_value(?STRATEGY, State) of
+    case bondy_oplog_crdt_lww_register:to_value(State) of
         undefined -> undefined;
         Value -> {Value, hlc_of(State)}
     end.

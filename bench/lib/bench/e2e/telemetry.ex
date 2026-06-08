@@ -97,7 +97,13 @@ defmodule Bench.E2E.Telemetry do
     {[:bondy_mst, :page_store, :put], :page_store_put, :duration_us, nil},
     {[:bondy_mst, :page_store, :get], :page_store_get, :duration_us, nil},
     {[:bondy_mst, :page_store, :seal_incoming], :page_store_seal, :duration_us,
-     :record_count}
+     :record_count},
+    # Compaction cycle: `duration_us` p50/p99 = per-cycle wall time (does it
+    # stay bounded under sustained writes, or grow as the MST grows?);
+    # `event_count` total = events truncated. Total events_removed vs total
+    # written tells us whether compaction is keeping up (removed ≈ written →
+    # bounded MST) or falling behind (removed ≪ written → runaway).
+    {[:bondy_oplog, :compaction, :ok], :compaction, :duration_us, :event_count}
   ]
 
   # Subset gated by APPLIER_PROFILE=control. The Erlang-side

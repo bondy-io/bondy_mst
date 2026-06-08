@@ -42,6 +42,32 @@ defmodule Bench.E2E.Report do
         "#{fmt_int(round(applier_ops_per_sec))}"
     )
 
+    # Per-instance (per-shard) write throughput vs the targets: 4,000/s on
+    # the durable (leveled) stack, 20,000/s on the ephemeral (ets) stack.
+    # The applier counter is the end-to-end applied-event rate; dividing by
+    # the shard count gives per-instance throughput. Only meaningful for
+    # write-bearing scenarios, so the target check is gated on the name.
+    shard_count = max(Map.get(run, :shard_count, 1), 1)
+    per_instance = applier_ops_per_sec / shard_count
+
+    IO.puts(
+      "    applier ops/s per instance: " <>
+        "#{fmt_int(round(per_instance))} (#{shard_count} instance(s))"
+    )
+
+    case write_target(run.name) do
+      nil ->
+        :ok
+
+      {target, profile} ->
+        verdict = if per_instance >= target, do: "PASS ✓", else: "BELOW ✗"
+
+        IO.puts(
+          "    target (#{profile}): #{fmt_int(target)} writes/s/instance — " <>
+            "#{verdict} (#{fmt_int(round(per_instance))})"
+        )
+    end
+
     case Map.get(run, :memory) do
       nil ->
         :ok
@@ -87,6 +113,21 @@ defmodule Bench.E2E.Report do
     end
 
     :ok
+  end
+
+  # Per-instance write-throughput target for a scenario, by profile label
+  # in the run name. Only `write_only` scenarios (the canonical pure-write
+  # measurement the targets refer to) get a verdict. Durable/leveled stack
+  # targets 4,000 writes/s/instance; ephemeral/ets stack targets 20,000.
+  defp write_target(name) do
+    cond do
+      not String.starts_with?(name, "write_only") -> nil
+      String.contains?(name, "durable") -> {4_000, "durable / leveled"}
+      String.contains?(name, "leveled") -> {4_000, "durable / leveled"}
+      String.contains?(name, "ephemeral") -> {20_000, "ephemeral / ets"}
+      String.contains?(name, "ets") -> {20_000, "ephemeral / ets"}
+      true -> nil
+    end
   end
 
   defp pad(x, n), do: String.pad_trailing(to_string(x), n)

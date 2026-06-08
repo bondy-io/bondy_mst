@@ -14,7 +14,7 @@ end
 # Encode a fold state into a projection frame for direct seeding.
 encode_lww_frame = fn hlc, value ->
   body =
-    :bondy_oplog_fold_lww_register.encode_state({:set, value, hlc})
+    :bondy_oplog_crdt_lww_register.encode_state({:set, value, hlc})
 
   :bondy_oplog_cell_frame.encode(hlc, body)
 end

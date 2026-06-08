@@ -17,7 +17,7 @@ unique_ns = fn prefix ->
 end
 
 encode_lww_frame = fn hlc, value ->
-  body = :bondy_oplog_fold_lww_register.encode_state({:set, value, hlc})
+  body = :bondy_oplog_crdt_lww_register.encode_state({:set, value, hlc})
   :bondy_oplog_cell_frame.encode(hlc, body)
 end
 
@@ -37,7 +37,8 @@ make_ctx = fn prefix, n, cache_warmup_fraction ->
     projection_adapter: Bench.ProjectionEts.__info__(:module),
     projection_handle: proj_handle,
     overlay: overlay,
-    fold_module: :bondy_oplog_fold_lww_register,
+    fold_module: :undefined,
+    crdt_module: :bondy_oplog_crdt_lww_register,
     owner: self()
   }
 

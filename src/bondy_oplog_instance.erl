@@ -97,15 +97,6 @@ without protocol changes.
     %% on every state-mutating handle_call.
     live_size :: non_neg_integer(),
     last_event_key :: undefined | bondy_oplog_event:event_key(),
-    %% Compaction-in-flight tracking. While set, refuse new compact /
-    %% load_snapshot requests (idempotent re-arm on next tick).
-    compaction ::
-        undefined
-        | #{
-            pid := pid(),
-            from := gen_server:from(),
-            started_at := integer()
-        },
     %% Cached per-instance WAL writer pid. Refreshed lazily from the
     %% registry on the first append after a `'DOWN'` from the previous
     %% writer (one_for_all restarts swap in a new pid).
@@ -203,15 +194,18 @@ without protocol changes.
     %% divergent values for the same event key. Configuring this
     %% emits a one-shot deprecation warning at instance start.
     merge_strategy => module(),
-    %% Per-namespace fold strategy. Either a shorthand atom
-    %% (`presence_basic`, `lww_register`, `strict_register`, `orset`,
-    %% `ttl_presence`, `map_of_fields`) or an application-defined
-    %% module that implements the `bondy_oplog_fold` behaviour. The
-    %% module must export every mandatory callback (validated at
-    %% instance start; a misconfigured value crashes init).
-    fold_module => bondy_oplog_fold:strategy(),
-    %% Opaque options passed through to the fold consumer. Shape is
-    %% fold-module-specific; defaults to `#{}`.
+    %% Per-table CRDT, named by a `fold_module` label for backward
+    %% compatibility. Resolves to its native `bondy_oplog_crdt` twin via
+    %% `bondy_oplog_cell_kernel:default_crdt_for_fold/1` (PR-Z): a
+    %% shorthand atom (`lww_register`, `g_counter`, `pn_counter`, `g_set`,
+    %% `max_register`, `min_register`, `index_entry`), the fully-qualified
+    %% `bondy_oplog_fold_*` form, or a native `bondy_oplog_crdt_*` module
+    %% directly. A label with no twin is rejected (validated at instance
+    %% start; a misconfigured value crashes init). Prefer `crdt_module`
+    %% for new tables.
+    fold_module => atom(),
+    %% Opaque options passed through; shape is consumer-specific,
+    %% defaults to `#{}`.
     fold_opts => map(),
     crdt_module => module(),
     compaction_checkpoint => module(),
@@ -288,6 +282,7 @@ without protocol changes.
 %% validator snapshot by calling the optional
 %% `bondy_oplog_validator:refresh/1` callback.
 -export([refresh_validator/1, refresh_validator/2]).
+-export([reap_origins/2]).
 
 %% Page-level API (sync protocol)
 -export([get_pages/2]).
@@ -318,6 +313,11 @@ without protocol changes.
 -export([handle_cast/2]).
 -export([handle_info/2]).
 -export([terminate/2]).
+
+-ifdef(TEST).
+%% Exposed for the stability-frontier equivalence test.
+-export([compute_frontier_for/2]).
+-endif.
 
 %% =============================================================================
 %% LIFECYCLE
@@ -995,6 +995,44 @@ refresh_validator(Target, Reason) ->
             Err
     end.
 
+?DOC("""
+Reap the per-cell causal-context entries of permanently-retired origins
+from this shard's projection (the dead-origin GC; PR-H, #24). A tier_2
+CRDT carries one version-vector entry per origin that ever wrote a cell;
+a decommissioned node leaves those entries behind forever — the one cost
+that grows with cluster *churn*. This drops only the value-preserving
+(causal-history-only) entries of the supplied `RetiredOrigins`, so the
+projection's value is unchanged.
+
+The library cannot know which origins are retired (membership is delegated
+to the consumer, as with `bondy_oplog_peer_source` and
+`bondy_oplog_origin_bans`); the operator supplies `RetiredOrigins` and
+owns the obligation that they are permanently gone and causally stable
+cluster-wide. The local value-preserving gate means even a premature call
+cannot lose live data — it just reaps fewer entries and reports them. The
+pass is idempotent. A no-op (`supported => false`) for a legacy fold /
+tier_0 shard.
+
+A reap rewrites the projection checkpoint, not the MST, so it is undone by
+a subsequent **live re-bootstrap** (which re-folds the full MST) and skips
+**fully-compacted** cells — re-run it after a re-bootstrap. Both are
+bounded-by-churn, not convergence bugs; see
+`bondy_oplog_applier:reap_origins_sync/2` for the full durability note.
+
+Returns `{ok, Report}` (see `bondy_oplog_applier:reap_report/0`) or
+`{error, applier_unavailable}` during a subtree restart.
+""").
+-spec reap_origins(instance_id() | pid(), [term()]) ->
+    {ok, bondy_oplog_applier:reap_report()} | {error, term()}.
+
+reap_origins(Target, RetiredOrigins) when is_list(RetiredOrigins) ->
+    case applier_pid_for(Target) of
+        {ok, ApplierPid} ->
+            bondy_oplog_applier:reap_origins_sync(ApplierPid, RetiredOrigins);
+        {error, _} = Err ->
+            Err
+    end.
+
 %% =============================================================================
 %% PAGE-LEVEL API (sync protocol)
 %% =============================================================================
@@ -1301,16 +1339,18 @@ install_catalogue_batch(InstanceId, Cells) when
     is_binary(InstanceId), is_list(Cells)
 ->
     install_catalogue_batch(InstanceId, {replace, Cells});
-install_catalogue_batch(InstanceId, {Mode, Cells}) when
-    is_binary(InstanceId),
-    (Mode =:= replace orelse Mode =:= merge)
+install_catalogue_batch(InstanceId, {replace, Cells}) when
+    is_binary(InstanceId)
 ->
+    %% `replace` is the only mode — PR-G removed the CvRDT `merge` mode.
+    %% Guard fails fast on a stray `{merge, _}` here rather than letting it
+    %% reach the applier (which would function_clause).
     case bondy_oplog_registry:applier_pid(InstanceId) of
         undefined ->
             {error, instance_not_running};
         ApplierPid ->
             bondy_oplog_applier:install_catalogue_batch(
-                ApplierPid, {Mode, Cells}
+                ApplierPid, {replace, Cells}
             )
     end;
 install_catalogue_batch(Pid, ModeAndCells) when is_pid(Pid) ->
@@ -1580,7 +1620,6 @@ init({InstanceId, Opts}) ->
         max_working_set = maps:get(max_working_set, Opts, infinity),
         live_size = LiveSize,
         last_event_key = LastMSTKey,
-        compaction = undefined,
         wal_pid = undefined,
         wal_pid_monitor = undefined,
         overlay = Overlay,
@@ -1860,11 +1899,10 @@ do_handle_call(
     Result = fold_range_merged(MST, From, To, OverlayQueue, Fun, Acc0),
     {reply, Result, State};
 do_handle_call({truncate_prefix, Watermark}, _From, #state{mst = MST0} = State) ->
-    %% Operator-driven prefix removal: collect keys ≤ Watermark and
-    %% delete one by one (descending order — see the comment on
-    %% truncate_below_or_equal/2 for the underlying `bondy_mst:delete/2`
-    %% bug). Structural prefix-truncate touching only the leftmost path
-    %% is a future optimisation in `bondy_mst` itself.
+    %% Operator-driven prefix removal: structurally drop every key
+    %% `=< Watermark` via `bondy_mst:truncate/2` (an O(log N) left-spine
+    %% rewrite), counting the removed events first for `live_size`
+    %% bookkeeping.
     %%
     %% Also advances `state.watermark` so the receive-side filter in
     %% `do_append_remote/2` rejects peer events with HLC ≤ Watermark.
@@ -1876,20 +1914,8 @@ do_handle_call({truncate_prefix, Watermark}, _From, #state{mst = MST0} = State) 
     %% watermark advance is monotone: a Watermark lower than the
     %% current `state.watermark` is ignored so compaction-set values
     %% are never regressed.
-    Keys = bondy_mst:fold(
-        MST0,
-        fun
-            ({K, _V}, Acc) when K =< Watermark -> [K | Acc];
-            (_, Acc) -> Acc
-        end,
-        []
-    ),
-    MST1 = lists:foldl(
-        fun(K, M) -> bondy_mst:delete(M, K) end,
-        MST0,
-        Keys
-    ),
-    Removed = length(Keys),
+    Removed = count_in_open_range(MST0, undefined, Watermark),
+    MST1 = bondy_mst:truncate(MST0, Watermark),
     NewWatermark = advance_watermark(State#state.watermark, Watermark),
     _ = bondy_oplog_hlc:update(
         State#state.hlc, bondy_oplog_event:key_hlc(Watermark)
@@ -2039,8 +2065,8 @@ do_handle_call(get_compaction_checkpoint, _From, State) ->
         State#state.compaction_checkpoint_state
     ),
     {reply, Reply, State};
-do_handle_call({compact, PeerRoots}, From, State) ->
-    do_compact_async(State, PeerRoots, From);
+do_handle_call({compact, PeerRoots}, _From, State) ->
+    do_compact_sync(State, PeerRoots);
 do_handle_call({load_snapshot, NewWatermark, Snapshot}, _From, State) ->
     do_load_snapshot(State, NewWatermark, Snapshot);
 do_handle_call(
@@ -2101,38 +2127,9 @@ handle_cast(check_drain_waiters, State) ->
     %% next install batch shrank the overlay, even though the overlay
     %% is already empty.
     {noreply, maybe_signal_drain_waiters(State)};
-handle_cast(
-    {compaction_done, Pid, Result},
-    #state{compaction = #{pid := Pid}} = State0
-) ->
-    State = commit_compaction(State0, Result),
-    ok = publish(State),
-    {noreply, State};
-handle_cast({compaction_done, _StalePid, _Result}, State) ->
-    %% Worker pid doesn't match — must be a stale message from a
-    %% previously-aborted run. Ignore.
-    {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info(
-    {'DOWN', _Ref, process, Pid, Reason},
-    #state{compaction = #{pid := Pid, from := From}} = State
-) ->
-    %% Compaction worker exited. If exit was normal, the cast already
-    %% drove commit; otherwise we need to surface the failure.
-    case Reason of
-        normal ->
-            {noreply, State};
-        _ ->
-            ?LOG_WARNING(#{
-                description => "compaction worker died abnormally",
-                instance_id => State#state.instance_id,
-                reason => Reason
-            }),
-            gen_server:reply(From, {error, {compaction_worker_died, Reason}}),
-            {noreply, State#state{compaction = undefined}}
-    end;
 handle_info(
     {'DOWN', Ref, process, _Pid, _Reason},
     #state{wal_pid_monitor = Ref} = State
@@ -2866,7 +2863,7 @@ backpressure_admit(
 %% @private
 %% Monotone watermark advance: returns whichever of the two values is
 %% higher, treating `undefined` as the bottom. Used by both compaction
-%% (via direct assignment, which is safe by construction — the worker
+%% (via direct assignment, which is safe by construction — compaction
 %% rejects frontiers ≤ current watermark) and operator-driven
 %% `truncate_prefix`, where the caller's value could in principle be
 %% lower than a previously installed compaction watermark.
@@ -2875,80 +2872,66 @@ advance_watermark(Cur, New) when New > Cur -> New;
 advance_watermark(Cur, _New) -> Cur.
 
 %% @private
-%% Drops every key in MST that is `=< Watermark`. Used both by explicit
-%% truncation and post-merge re-truncation. Linear in the prefix size;
-%% a structural prefix-truncate that touches only the leftmost path
-%% would be the long-term optimisation.
+%% Drops every key in MST that is `=< Watermark`, keeping the suffix of
+%% keys `> Watermark`. Used both by explicit truncation and post-merge
+%% re-truncation.
 %%
-%% Deletes are issued in **descending** order (highest first within the
-%% to-remove prefix). The underlying `bondy_mst:delete/2` has been
-%% observed to leave a page in an invalid state when keys are deleted
-%% in ascending order — manifesting as a `case_clause` in
-%% `bondy_mst:first/2`. Descending order avoids the pathological path.
+%% Delegates to `bondy_mst:truncate/2` — a structural prefix-truncate
+%% that walks only the tree's left spine, rewriting `O(log N)` pages
+%% instead of issuing one `O(log N)` `delete/2` per stale key. This is
+%% what lets compaction keep the live MST bounded under sustained write
+%% saturation: the truncation cost is decoupled from the prefix size, so
+%% a single cycle removes the whole stable prefix in time independent of
+%% how many events accumulated. (The old per-key delete loop was
+%% `O(P·log N)` and ran inside the gen_server, so at saturation the
+%% truncation could not keep pace with the write rate and the MST grew
+%% without bound — `mst_install` degraded and throughput collapsed.)
+%%
+%% The result is byte-identical to the equivalent delete sequence (the
+%% MST is history-independent), so the root hash that peers sync against
+%% is unchanged.
 truncate_below_or_equal(MST, Watermark) ->
-    %% Collect keys ≤ Watermark *in descending order* (the fold cons-es
-    %% in ascending order; we keep them ascending and reverse only when
-    %% we want descending — here we want descending, so we don't reverse).
-    Keys = bondy_mst:fold(
-        MST,
-        fun
-            ({K, _V}, Acc) when K =< Watermark -> [K | Acc];
-            (_, Acc) -> Acc
-        end,
-        []
-    ),
-    lists:foldl(fun(K, M) -> bondy_mst:delete(M, K) end, MST, Keys).
+    bondy_mst:truncate(MST, Watermark).
 
 %% @private
-%% Spawns a worker that does the heavy compaction work (frontier
-%% computation, event fold, `interpret_cog`, snapshot persist) off the
-%% gen_server. The gen_server only runs the final atomic commit
-%% (truncate + watermark advance + HLC bump) when the worker reports
-%% back via {compaction_done, ...} cast. Local appends and reads
-%% proceed concurrently throughout.
+%% Runs a full compaction cycle synchronously, in the instance
+%% gen_server. The frontier is now O(diff) (read-only `diff_to_list` + an
+%% O(log N) `get/3` false-positive filter — see `compute_frontier_for/2`),
+%% so the cycle is cheap enough to run inline rather than off-process.
+%% Running in the gen_server is what makes the durable (pack-store)
+%% backend work: the MST is read by the process that OWNS its sealed-pack
+%% fds, so `prim_file:pread` no longer raises `not_on_controlling_process`.
+%% The truncate + projection flush + checkpoint always ran here; only the
+%% frontier moved in.
 %%
-%% Concurrency guard: only one compaction in flight per instance.
-%% Repeated `compact` requests while one is running reply
-%% `{ok, no_change}` immediately — compaction is idempotent and
-%% scheduled-driven, so the next tick will retry.
-do_compact_async(#state{compaction = InFlight} = State, _PeerRoots, _From) when
-    InFlight =/= undefined
-->
-    {reply, {ok, no_change}, State};
-do_compact_async(#state{crdt_module = undefined} = State, _PeerRoots, _From) ->
+%% A compaction is fully serial with every other gen_server message
+%% (appends, reads, `load_snapshot`), so there is no in-flight bookkeeping
+%% and no concurrency window. (This replaces the earlier async worker,
+%% whose sole justification — keeping an O(N) frontier off the gen_server —
+%% is gone now that the frontier is O(diff).)
+do_compact_sync(
+    #state{crdt_module = undefined, fold_module = undefined} = State,
+    _PeerRoots
+) ->
     {reply, {error, no_crdt_module}, State};
-do_compact_async(#state{} = State, PeerRoots, From) ->
-    Self = self(),
-    %% Capture exactly the data the worker needs. The State at
-    %% commit time may differ (new appends), but truncation only
-    %% removes events ≤ Frontier, which by construction were already
-    %% present when the worker ran.
-    MST = State#state.mst,
-    Watermark0 = State#state.watermark,
-    CkptMod = State#state.compaction_checkpoint,
-    CkptState = State#state.compaction_checkpoint_state,
-    CachedCheckpoint = State#state.cached_checkpoint,
-    CrdtMod = State#state.crdt_module,
-    InstanceId = State#state.instance_id,
-    {Pid, _Ref} = spawn_monitor(fun() ->
-        Result = run_compaction_worker(
-            InstanceId,
-            MST,
-            Watermark0,
-            PeerRoots,
-            CkptMod,
-            CkptState,
-            CachedCheckpoint,
-            CrdtMod
-        ),
-        gen_server:cast(Self, {compaction_done, self(), Result})
-    end),
+do_compact_sync(#state{} = State, PeerRoots) ->
     Started = erlang:monotonic_time(),
-    Compaction = #{pid => Pid, from => From, started_at => Started},
-    {noreply, State#state{compaction = Compaction}}.
+    Result = run_compaction(
+        State#state.instance_id,
+        State#state.mst,
+        State#state.watermark,
+        PeerRoots,
+        State#state.compaction_checkpoint,
+        State#state.compaction_checkpoint_state,
+        State#state.cached_checkpoint,
+        State#state.crdt_module
+    ),
+    {Reply, State1} = commit_compaction(State, Started, Result),
+    ok = publish(State1),
+    {reply, Reply, State1}.
 
 %% @private
-run_compaction_worker(
+run_compaction(
     InstanceId,
     MST,
     Watermark0,
@@ -2968,27 +2951,63 @@ run_compaction_worker(
             ->
                 {ok, no_change};
             Frontier ->
-                Events = events_in_open_range(MST, Watermark0, Frontier),
-                BaseCheckpoint =
-                    case CachedCheckpoint of
-                        undefined ->
-                            case CkptMod:get_checkpoint(CkptState) of
-                                {ok, _W, S} -> S;
-                                not_found -> CrdtMod:init()
-                            end;
-                        {_, S0} ->
-                            S0
-                    end,
-                NewCheckpoint = CrdtMod:interpret_cog(Events, BaseCheckpoint),
-                ok = CkptMod:put_checkpoint(
-                    CkptState, Frontier, NewCheckpoint
-                ),
-                {ok, {compacted, Frontier, NewCheckpoint, length(Events)}}
+                %% Path is chosen by whether a PROJECTION materialises the
+                %% state — NOT by whether `crdt_module` is set. A
+                %% projection-backed instance (every `bondy_db` table:
+                %% the applier's cell kernel maintains each cell via
+                %% `interpret_cog` on write) takes the catalogue path even
+                %% though it also has a `crdt_module`. See
+                %% `architecture_regrounding_plan.md` §7 step 4.
+                case has_projection(InstanceId) of
+                    true ->
+                        %% Catalogue (projection-backed): the projection IS
+                        %% the durable checkpoint, so compaction only bounds
+                        %% the MST — NO per-cycle `interpret_cog` re-fold of
+                        %% the stable range (that O(range) per-event CRDT
+                        %% work is what made sustained-write compaction fall
+                        %% behind → unbounded MST → throughput collapse).
+                        %% The truncate (and a synchronous flush of any
+                        %% not-yet-replayed remote events first) runs in
+                        %% `commit_compaction`. `EventCount` is derived there
+                        %% from the live-size delta (O(remaining)), so this
+                        %% does not fold the whole tree to count.
+                        {ok, {catalogue_compacted, Frontier}};
+                    false when CrdtMod =/= undefined ->
+                        %% Bare CRDT instance with no projection: it owns its
+                        %% own single-CRDT checkpoint, so fold the newly
+                        %% stable range into it via `interpret_cog`.
+                        Events = events_in_open_range(
+                            MST, Watermark0, Frontier
+                        ),
+                        BaseCheckpoint =
+                            case CachedCheckpoint of
+                                undefined ->
+                                    case CkptMod:get_checkpoint(CkptState) of
+                                        {ok, _W, S} -> S;
+                                        not_found -> CrdtMod:init()
+                                    end;
+                                {_, S0} ->
+                                    S0
+                            end,
+                        NewCheckpoint = CrdtMod:interpret_cog(
+                            Events, BaseCheckpoint
+                        ),
+                        ok = CkptMod:put_checkpoint(
+                            CkptState, Frontier, NewCheckpoint
+                        ),
+                        {ok,
+                            {compacted, Frontier, NewCheckpoint,
+                                length(Events)}};
+                    false ->
+                        %% No projection and no CRDT module — nothing holds
+                        %% the state, so truncating would lose it. Defer.
+                        {ok, no_change}
+                end
         end
     catch
         Class:Reason:Stack ->
             ?LOG_ERROR(#{
-                description => "compaction worker raised",
+                description => "compaction raised",
                 instance_id => InstanceId,
                 class => Class,
                 reason => Reason,
@@ -2998,44 +3017,263 @@ run_compaction_worker(
     end.
 
 %% @private
-%% Same algorithm as compute_frontier/2 but takes the captured MST
-%% directly so it can run in the worker process.
+%% The stability frontier: the largest local key K such that every local
+%% key `=< K` is present (with the same value) in EVERY peer's confirmed
+%% root.
+%%
+%% O(diff) and read-only. For each peer root it takes the read-only
+%% structural diff of the live MST against that root (`diff_to_list/2` no
+%% longer mutates the store — see `bondy_mst`), then walks the diff in key
+%% order to the FIRST genuinely-divergent key. The structural diff is a
+%% superset (a key that rides along in a changed leaf but is in fact
+%% present-and-equal in the peer is a false-positive), so each candidate
+%% is confirmed with an O(log N) `bondy_mst:get/3` against the peer root.
+%% The global first hole is the smallest such key across peers; the
+%% frontier is its predecessor in the local tree (`last_n/3`). With no
+%% holes the whole local tree is confirmed and the frontier is the local
+%% max key.
+%%
+%% This early-stops at the first divergence instead of folding every peer
+%% into a full key set. It is equivalent to the previous O(N) set
+%% longest-common-prefix: the instance MST uses the default term-order
+%% comparator, and event keys (dots) carry a fixed value per key, so
+%% presence and value agree.
 compute_frontier_for(_MST, []) ->
     undefined;
 compute_frontier_for(MST, PeerRoots) ->
-    PeerSets = [keys_set_at_root(MST, R) || R <- PeerRoots, is_binary(R)],
-    case PeerSets of
+    case [R || R <- PeerRoots, is_binary(R)] of
         [] ->
             undefined;
-        [_ | _] ->
-            LocalKeys = lists:reverse(
-                bondy_mst:fold(
-                    MST,
-                    fun({K, _V}, Acc) -> [K | Acc] end,
-                    []
-                )
-            ),
-            longest_common_prefix(LocalKeys, PeerSets, undefined)
+        [_ | _] = Roots ->
+            case global_first_hole(MST, Roots) of
+                no_hole ->
+                    %% Every local key is confirmed by every peer.
+                    case bondy_mst:last(MST) of
+                        {K, _V} -> K;
+                        undefined -> undefined
+                    end;
+                Hole ->
+                    %% Largest local key strictly below the first hole.
+                    case bondy_mst:last_n(MST, Hole, 1) of
+                        [{K, _V}] -> K;
+                        [] -> undefined
+                    end
+            end
     end.
 
 %% @private
-%% Commits the worker's result atomically inside the gen_server.
-%% Truncation uses the *current* state.mst — events appended during
-%% the worker's run sort above Frontier and are preserved.
+%% Smallest local key absent-or-different in some peer root, or `no_hole`
+%% when the local tree is fully confirmed by every peer.
+global_first_hole(MST, Roots) ->
+    lists:foldl(
+        fun(R, Acc) ->
+            case peer_first_hole(MST, R) of
+                no_hole -> Acc;
+                H -> min_hole(H, Acc)
+            end
+        end,
+        no_hole,
+        Roots
+    ).
+
+%% @private
+%% Term-order min; the instance MST's default comparator is `<`.
+min_hole(H, no_hole) -> H;
+min_hole(H, Acc) when H < Acc -> H;
+min_hole(_H, Acc) -> Acc.
+
+%% @private
+%% First (smallest) local key genuinely divergent from peer root `R`,
+%% walking the read-only structural diff (ascending key order) and
+%% skipping present-and-equal false-positives. `no_hole` when local is a
+%% subset of the peer (diff empty or all false-positives).
+peer_first_hole(MST, R) ->
+    first_genuine_hole(MST, R, bondy_mst:diff_to_list(MST, R)).
+
+%% @private
+first_genuine_hole(_MST, _R, []) ->
+    no_hole;
+first_genuine_hole(MST, R, [{K, V} | Rest]) ->
+    case bondy_mst:get(MST, K, R) of
+        V ->
+            %% Structural false-positive: present and equal in the peer.
+            first_genuine_hole(MST, R, Rest);
+        _ ->
+            %% Absent (`undefined`) or a different value: a genuine hole.
+            K
+    end.
+
+%% @private
+%% True when this instance has a projection that materialises its state
+%% (an applier with a resolved `cell_apply_target`). Catalogue
+%% compaction only truncates the MST when a projection holds the state;
+%% a bare fold instance with no projection must keep its events in the
+%% MST.
+has_projection(InstanceId) ->
+    try
+        case bondy_oplog_registry:applier_pid(InstanceId) of
+            undefined ->
+                false;
+            ApplierPid ->
+                case bondy_oplog_applier:cell_apply_target(ApplierPid) of
+                    {ok, _} -> true;
+                    undefined -> false
+                end
+        end
+    catch
+        _:_ -> false
+    end.
+
+%% @private
+%% Folds any events not yet applied to the projection into it, so the
+%% projection reflects every event in the MST before the catalogue
+%% truncate drops the stable prefix. Local events are folded before their
+%% MST install, so only remote (peer-merged) events can lag.
+%%
+%% The catch-up diff is computed HERE — in the instance gen_server, which
+%% OWNS the pack store's sealed-pack raw fds — and only the apply (a
+%% projection write that never reads the MST) is delegated to the applier
+%% (`apply_replayed_pairs/3`). This is what makes durable compaction work:
+%% a stale `last_replayed_root` makes the diff a full MST fold that reaches
+%% sealed packs, and only the fd owner can `prim_file:pread` them. (Earlier
+%% this called `replay_cell_events_sync/1`, which ran the fold in the
+%% applier process and raised `not_on_controlling_process` on sealed packs
+%% → durable compaction deferred.)
+%%
+%% Returns `ok` only when the apply succeeded; any other result defers the
+%% truncate so a transient applier failure never drops un-folded events.
+ensure_projection_caught_up(InstanceId, MST) ->
+    case bondy_oplog_registry:applier_pid(InstanceId) of
+        undefined ->
+            {error, no_applier};
+        ApplierPid ->
+            try
+                LastRoot = bondy_oplog_applier:last_replayed_root(ApplierPid),
+                case bondy_mst:root(MST) of
+                    LastRoot ->
+                        %% Projection already current — nothing to fold.
+                        ok;
+                    CurrentRoot ->
+                        Pairs = replay_diff_pairs(MST, LastRoot),
+                        bondy_oplog_applier:apply_replayed_pairs(
+                            ApplierPid, Pairs, CurrentRoot
+                        )
+                end
+            catch
+                C:R -> {error, {C, R}}
+            end
+    end.
+
+%% @private
+%% The `[{Key, Value}]` to fold into the projection: the read-only diff of
+%% the live MST against the applier's last replayed root. Computed in the
+%% instance (the sealed-pack fd owner). A GC'd/unknown prior root falls
+%% back to the full list (same contract as the applier's `diff_pairs/3`).
+replay_diff_pairs(MST, undefined) ->
+    bondy_mst:to_list(MST);
+replay_diff_pairs(MST, LastRoot) ->
+    try
+        bondy_mst:diff_to_list(MST, LastRoot)
+    catch
+        _:_ -> bondy_mst:to_list(MST)
+    end.
+
+%% @private
+%% Counts events in the open range (Watermark0, Frontier] over the
+%% captured MST without materialising the event records. Used by the
+%% catalogue truncate-only path for `live_size` bookkeeping (the
+%% monolithic path counts via `length(events_in_open_range/3)` because
+%% it already builds the list for `interpret_cog`).
+count_in_open_range(MST, undefined, Frontier) ->
+    bondy_mst:fold(
+        MST,
+        fun
+            ({K, _V}, N) when K =< Frontier -> N + 1;
+            (_, N) -> N
+        end,
+        0
+    );
+count_in_open_range(MST, W0, Frontier) ->
+    bondy_mst:fold(
+        MST,
+        fun
+            ({K, _V}, N) when K > W0, K =< Frontier -> N + 1;
+            (_, N) -> N
+        end,
+        0
+    ).
+
+%% @private
+%% Commits the compaction result atomically inside the gen_server, and
+%% returns `{Reply, NewState}` to the synchronous `compact` handler.
+%% Truncation uses the *current* state.mst.
+commit_compaction(State, Started, {ok, no_change}) ->
+    emit_compaction_telemetry(State, Started, undefined, 0),
+    {{ok, no_change}, State};
 commit_compaction(
-    #state{compaction = #{from := From, started_at := Started}} = State,
-    {ok, no_change}
+    State,
+    Started,
+    {ok, {catalogue_compacted, Frontier}}
 ) ->
-    gen_server:reply(From, {ok, no_change}),
-    Duration = erlang:monotonic_time() - Started,
-    telemetry:execute(
-        [bondy_oplog, compaction, ok],
-        #{duration => Duration, event_count => 0},
-        #{instance_id => State#state.instance_id, frontier => undefined}
-    ),
-    State#state{compaction = undefined};
+    %% Projection-backed (catalogue) compaction. The per-cell
+    %% `interpret_cog` checkpoint IS the durable projection: the applier's
+    %% cell kernel maintains each cell's materialised state via
+    %% `interpret_cog` on write (`apply_op` == `interpret_cog` for the
+    %% commutative case; the read path merges live events via
+    %% `interpret_cog` too — `architecture_regrounding_plan.md` §7 step 4).
+    %% So compaction does NOT fold a separate per-cell checkpoint blob —
+    %% that would duplicate the projection (double storage + writes) for
+    %% no gain; the checkpoint store is "not a durability layer for the
+    %% projection" (`bondy_oplog_compaction_checkpoint` moduledoc).
+    %% Compaction's only job here is to bound the MST.
+    %%
+    %% Before dropping the stable prefix, synchronously fold any remote
+    %% events the async `replay_cell_events` path has not yet applied
+    %% (local events are folded before their MST install, so only remote
+    %% events can lag). This handler is serial with `integrate_peer_root`
+    %% in the instance gen_server, so nothing un-folded can slip in
+    %% between the flush and the truncate. If the flush fails (applier
+    %% gone / errored) we defer rather than risk truncating an un-folded
+    %% event; the next tick retries. The checkpoint envelope records only
+    %% the watermark; its state slot is the `projection_managed` marker —
+    %% "the materialised state is the projection" — which on restart is
+    %% loaded but never fed to `interpret_cog` (the projection is the
+    %% authoritative read source). Verified by
+    %% `bondy_oplog_catalogue_compaction_test:crdt_kernel_compaction_matches_from_scratch`
+    %% (post-compaction read == from-scratch `interpret_cog`).
+    case ensure_projection_caught_up(State#state.instance_id, State#state.mst) of
+        ok ->
+            ok = (State#state.compaction_checkpoint):put_checkpoint(
+                State#state.compaction_checkpoint_state,
+                Frontier,
+                projection_managed
+            ),
+            MST1 = truncate_below_or_equal(State#state.mst, Frontier),
+            %% Derive the removed-event count from the live-size delta
+            %% computed over the *truncated* tree (O(remaining)), rather
+            %% than folding the whole pre-truncate tree to count the stable
+            %% prefix (O(N)). When compaction keeps up, the remaining tree
+            %% is small, so this — like the frontier scan over the live
+            %% tree — stays cheap and the cycle cost stays bounded.
+            LiveSize1 = compute_live_size(MST1),
+            EventCount = max(0, State#state.live_size - LiveSize1),
+            _ = bondy_oplog_hlc:update(
+                State#state.hlc, bondy_oplog_event:key_hlc(Frontier)
+            ),
+            State1 = State#state{
+                mst = MST1,
+                watermark = Frontier,
+                cached_checkpoint = {Frontier, projection_managed},
+                live_size = LiveSize1
+            },
+            emit_compaction_telemetry(State, Started, Frontier, EventCount),
+            {{ok, {compacted, Frontier, EventCount}}, State1};
+        {error, _} ->
+            {{ok, no_change}, State}
+    end;
 commit_compaction(
-    #state{compaction = #{from := From, started_at := Started}} = State,
+    State,
+    Started,
     {ok, {compacted, Frontier, NewCheckpoint, EventCount}}
 ) ->
     MST1 = truncate_below_or_equal(State#state.mst, Frontier),
@@ -3046,35 +3284,35 @@ commit_compaction(
         mst = MST1,
         watermark = Frontier,
         cached_checkpoint = {Frontier, NewCheckpoint},
-        live_size = max(0, State#state.live_size - EventCount),
-        compaction = undefined
+        live_size = max(0, State#state.live_size - EventCount)
     },
+    emit_compaction_telemetry(State, Started, Frontier, EventCount),
+    {{ok, {compacted, Frontier, EventCount}}, State1};
+commit_compaction(State, _Started, {error, _} = Error) ->
+    {Error, State}.
+
+%% @private
+emit_compaction_telemetry(State, Started, Frontier, EventCount) ->
     Duration = erlang:monotonic_time() - Started,
     telemetry:execute(
         [bondy_oplog, compaction, ok],
-        #{duration => Duration, event_count => EventCount},
+        #{
+            duration => Duration,
+            duration_us => erlang:convert_time_unit(
+                Duration, native, microsecond
+            ),
+            event_count => EventCount
+        },
         #{instance_id => State#state.instance_id, frontier => Frontier}
-    ),
-    gen_server:reply(From, {ok, {compacted, Frontier, EventCount}}),
-    State1;
-commit_compaction(
-    #state{compaction = #{from := From}} = State,
-    {error, _} = Error
-) ->
-    gen_server:reply(From, Error),
-    State#state{compaction = undefined}.
+    ).
 
 %% @private
 %% Bootstrap: install a peer-supplied snapshot at the given watermark.
 %% See `load_snapshot/3` for the contract.
 %%
-%% Refuses to run while a compaction worker is in flight — the two
-%% operations both mutate the watermark/snapshot, and serialising them
-%% is the simplest correctness story.
-do_load_snapshot(#state{compaction = InFlight} = State, _, _) when
-    InFlight =/= undefined
-->
-    {reply, {error, compaction_in_progress}, State};
+%% Compaction is fully synchronous in this gen_server, so a `load_snapshot`
+%% call can never interleave with a compaction cycle — they serialise
+%% naturally as separate messages.
 do_load_snapshot(State, NewWatermark, Snapshot) ->
     case State#state.watermark of
         undefined ->
@@ -3135,37 +3373,6 @@ events_in_open_range(MST, W0, Frontier) ->
             []
         )
     ).
-
-%% Stability frontier:
-%%   "the largest event key K such that every event with key ≤ K
-%%    is reachable from every peer's confirmed root"
-%%
-%% Algorithm:
-%%   1. For each PeerRoot, compute the set of keys reachable.
-%%   2. Intersect with the local key set in key order.
-%%   3. Return the largest K such that all keys up to and including K
-%%      are in every peer's set.
-%%
-%% See `compute_frontier_for/2` for the worker-process variant used
-%% during async compaction.
-
-%% @private
-keys_set_at_root(MST, Root) ->
-    bondy_mst:fold(
-        MST,
-        fun({K, _V}, Acc) -> sets:add_element(K, Acc) end,
-        sets:new([{version, 2}]),
-        [{root, Root}]
-    ).
-
-%% @private
-longest_common_prefix([], _PeerSets, Acc) ->
-    Acc;
-longest_common_prefix([K | Rest], PeerSets, Acc) ->
-    case lists:all(fun(S) -> sets:is_element(K, S) end, PeerSets) of
-        true -> longest_common_prefix(Rest, PeerSets, K);
-        false -> Acc
-    end.
 
 %% @private
 %% Builds the underlying MST struct.
@@ -3557,13 +3764,18 @@ resolve_fold_config(InstanceId, Opts) ->
             ok = assert_fold_opts(FoldOpts0),
             {undefined, FoldOpts0};
         Strategy ->
-            case bondy_oplog_fold:validate(Strategy) of
-                ok ->
+            %% PR-Z: the per-instance projection runs the native CRDT twin
+            %% of the `fold_module` label. A label is valid iff it resolves
+            %% to a twin; an unknown label has none.
+            case bondy_oplog_cell_kernel:default_crdt_for_fold(Strategy) of
+                undefined ->
+                    erlang:error(
+                        {invalid_fold_module, InstanceId, {unknown, Strategy}}
+                    );
+                _CrdtMod ->
                     FoldOpts = maps:get(fold_opts, Opts, #{}),
                     ok = assert_fold_opts(FoldOpts),
-                    {Strategy, FoldOpts};
-                {error, Reason} ->
-                    erlang:error({invalid_fold_module, InstanceId, Reason})
+                    {Strategy, FoldOpts}
             end
     end.
 

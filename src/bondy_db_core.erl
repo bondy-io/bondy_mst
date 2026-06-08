@@ -195,16 +195,18 @@ read_state(NS, Index, Key) ->
 read_state(NS, Index, Bucket, Key) ->
     case resolve_shard(NS, Index, Bucket, Key) of
         {ok, Entry} ->
-            Strategy = bondy_db_core_registry:entry_fold_module(Entry),
+            Kernel = kernel_for(Entry),
             {ProjState, ProjHlc, ProjHadFrame} =
-                read_projection_state_with_hlc(Entry, Bucket, Key, Strategy),
+                read_projection_state_with_hlc(Entry, Bucket, Key, Kernel),
             Overlay = read_overlay(Entry, Bucket, Key, ProjHlc),
             case {ProjHadFrame, Overlay} of
                 {false, []} ->
                     undefined;
                 _ ->
                     {NewState, NewHlc} =
-                        fold_state(Strategy, ProjState, ProjHlc, Overlay),
+                        bondy_oplog_cell_kernel:interpret_overlay(
+                            Kernel, ProjState, ProjHlc, Overlay
+                        ),
                     {NewState, NewHlc}
             end;
         {error, _} = Err ->
@@ -586,6 +588,16 @@ resolve_shard(NS, Index, Bucket, Key) ->
             Err
     end.
 
+%% The per-cell projection kernel for a shard: a configured `crdt_module`
+%% selects the operation-based path, otherwise the `fold_module` drives
+%% the legacy fold path. Every read helper projects/decodes/merges
+%% through this kernel so a CRDT table's read path interprets the COG
+%% (`interpret_cog`) and never folds events through `apply_event`.
+kernel_for(Entry) ->
+    Fold = bondy_db_core_registry:entry_fold_module(Entry),
+    Crdt = bondy_db_core_registry:entry_crdt_module(Entry),
+    bondy_oplog_cell_kernel:from_modules(Fold, Crdt).
+
 do_read_traced(Entry, Bucket, Key) ->
     CA = bondy_db_core_registry:entry_cache_adapter(Entry),
     CH = bondy_db_core_registry:entry_cache_handle(Entry),
@@ -597,38 +609,41 @@ do_read_traced(Entry, Bucket, Key) ->
     end.
 
 slow_read_traced(Entry, Bucket, Key) ->
-    Strategy = bondy_db_core_registry:entry_fold_module(Entry),
+    Kernel = kernel_for(Entry),
     case read_projection_head(Entry, Bucket, Key) of
         not_found ->
-            slow_read_no_projection(Entry, Bucket, Key, Strategy);
+            slow_read_no_projection(Entry, Bucket, Key, Kernel);
         {ok, ProjHlc, ValueBytes} ->
             slow_read_with_projection(
-                Entry, Bucket, Key, Strategy, ProjHlc, ValueBytes
+                Entry, Bucket, Key, Kernel, ProjHlc, ValueBytes
             )
     end.
 
-slow_read_no_projection(Entry, Bucket, Key, Strategy) ->
+slow_read_no_projection(Entry, Bucket, Key, Kernel) ->
     case read_overlay(Entry, Bucket, Key, 0) of
         [] ->
             {undefined, projection};
         Events ->
-            InitState = bondy_oplog_fold:initial_value(Strategy),
-            {NewState, NewHlc} = fold_state(Strategy, InitState, 0, Events),
+            InitState = bondy_oplog_cell_kernel:init(Kernel),
+            {NewState, NewHlc} =
+                bondy_oplog_cell_kernel:interpret_overlay(
+                    Kernel, InitState, 0, Events
+                ),
             finalise_slow_read(
                 Entry,
                 Bucket,
                 Key,
-                Strategy,
+                Kernel,
                 NewState,
                 NewHlc,
                 overlay_only
             )
     end.
 
-slow_read_with_projection(Entry, Bucket, Key, Strategy, ProjHlc, ValueBytes) ->
+slow_read_with_projection(Entry, Bucket, Key, Kernel, ProjHlc, ValueBytes) ->
     case read_overlay(Entry, Bucket, Key, ProjHlc) of
         [] ->
-            case decode_value_bytes(Strategy, ValueBytes) of
+            case bondy_oplog_cell_kernel:decode_value_bytes(Kernel, ValueBytes) of
                 undefined ->
                     {undefined, projection};
                 Value ->
@@ -639,22 +654,24 @@ slow_read_with_projection(Entry, Bucket, Key, Strategy, ProjHlc, ValueBytes) ->
         Events ->
             %% Overlay events need the full state to apply incrementally.
             %% HEAD bytes alone don't carry enough — re-read the full frame.
-            State = read_projection_state(Entry, Bucket, Key, Strategy),
+            State = read_projection_state(Entry, Bucket, Key, Kernel),
             {NewState, NewHlc} =
-                fold_state(Strategy, State, ProjHlc, Events),
+                bondy_oplog_cell_kernel:interpret_overlay(
+                    Kernel, State, ProjHlc, Events
+                ),
             finalise_slow_read(
                 Entry,
                 Bucket,
                 Key,
-                Strategy,
+                Kernel,
                 NewState,
                 NewHlc,
                 projection_with_overlay
             )
     end.
 
-finalise_slow_read(Entry, Bucket, Key, Strategy, NewState, NewHlc, Source) ->
-    case bondy_oplog_fold:to_value(Strategy, NewState) of
+finalise_slow_read(Entry, Bucket, Key, Kernel, NewState, NewHlc, Source) ->
+    case bondy_oplog_cell_kernel:to_value(Kernel, NewState) of
         undefined ->
             {undefined, Source};
         Value ->
@@ -698,45 +715,30 @@ read_projection_head(Entry, Bucket, Key) ->
 %% Slow-path projection read: returns the **decoded state** (not the
 %% value). Used by the overlay-merge path, by `read_at_hlc/4`, and by
 %% the bootstrap-snapshot send path via `read_state/3`.
-read_projection_state(Entry, Bucket, Key, Strategy) ->
+read_projection_state(Entry, Bucket, Key, Kernel) ->
     PA = bondy_db_core_registry:entry_projection_adapter(Entry),
     PH = bondy_db_core_registry:entry_projection_handle(Entry),
     case PA:get(PH, Bucket, Key) of
         not_found ->
-            bondy_oplog_fold:initial_value(Strategy);
+            bondy_oplog_cell_kernel:init(Kernel);
         {ok, Frame} ->
             {_Hlc, StateBytes, _ValueBytes} =
                 bondy_oplog_cell_frame:decode_full(Frame),
-            bondy_oplog_fold:decode_state(Strategy, StateBytes)
+            bondy_oplog_cell_kernel:decode_state(Kernel, StateBytes)
     end.
 
 %% Slow-path projection read with HLC: returns `{State, Hlc, HadFrame}`.
 %% Used by paths that need both the state (for folding) and the HLC.
-read_projection_state_with_hlc(Entry, Bucket, Key, Strategy) ->
+read_projection_state_with_hlc(Entry, Bucket, Key, Kernel) ->
     PA = bondy_db_core_registry:entry_projection_adapter(Entry),
     PH = bondy_db_core_registry:entry_projection_handle(Entry),
     case PA:get(PH, Bucket, Key) of
         not_found ->
-            {bondy_oplog_fold:initial_value(Strategy), 0, false};
+            {bondy_oplog_cell_kernel:init(Kernel), 0, false};
         {ok, Frame} ->
             {Hlc, StateBytes, _ValueBytes} =
                 bondy_oplog_cell_frame:decode_full(Frame),
-            {bondy_oplog_fold:decode_state(Strategy, StateBytes), Hlc, true}
-    end.
-
-%% Decode the `ValueBytes` slot of a HEAD frame back into a fold value.
-%% For value-equals-state folds (HasValueColumn=0 on the cell frame),
-%% the bytes are the encoded *state*; `to_value/1` then collapses to
-%% the identity. For every other fold the bytes are
-%% `term_to_binary(to_value(State))` and a straight `binary_to_term/1`
-%% reproduces the value.
-decode_value_bytes(Strategy, ValueBytes) when is_binary(ValueBytes) ->
-    case bondy_oplog_fold:value_equals_state(Strategy) of
-        true ->
-            State = bondy_oplog_fold:decode_state(Strategy, ValueBytes),
-            bondy_oplog_fold:to_value(Strategy, State);
-        false ->
-            binary_to_term(ValueBytes)
+            {bondy_oplog_cell_kernel:decode_state(Kernel, StateBytes), Hlc, true}
     end.
 
 read_overlay(Entry, Bucket, Key, AfterHlc) ->
@@ -744,25 +746,6 @@ read_overlay(Entry, Bucket, Key, AfterHlc) ->
         disabled -> [];
         Tab -> bondy_oplog_db_overlay:events_for(Tab, Bucket, Key, AfterHlc)
     end.
-
-%% Fold overlay events on top of a starting state. Returns
-%% `{NewState, NewHlc}` — the state is needed by callers that subsequently
-%% need either the value (`to_value/2`) or the encoded state (snapshot).
-fold_state(_Strategy, State, Hlc, []) ->
-    {State, Hlc};
-fold_state(Strategy, State0, _Hlc0, Events) ->
-    NewState = lists:foldl(
-        fun(Event, Acc) ->
-            Op = bondy_oplog_event:op(Event),
-            Meta = bondy_oplog_event:key(Event),
-            {S, _Delta} = bondy_oplog_fold:apply_event(Strategy, Acc, Op, Meta),
-            S
-        end,
-        State0,
-        Events
-    ),
-    NewHlc = bondy_oplog_fold:hlc(Strategy, NewState),
-    {NewState, NewHlc}.
 
 %% =============================================================================
 %% Batch read path
@@ -834,16 +817,18 @@ read_at_fence(NS, Index, Bucket, Key, Fence) ->
     end.
 
 fenced_read(Entry, Bucket, Key, Fence) ->
-    Strategy = bondy_db_core_registry:entry_fold_module(Entry),
+    Kernel = kernel_for(Entry),
     %% Batch reads always pay the full-state fetch since a fence may
     %% include overlay events; using the HEAD fast-path here would
     %% require a second trip on every overlay-present cell.
     {ProjState, ProjHlc, _ProjHadFrame} =
-        read_projection_state_with_hlc(Entry, Bucket, Key, Strategy),
+        read_projection_state_with_hlc(Entry, Bucket, Key, Kernel),
     OverlayEvents = fenced_overlay(Entry, Bucket, Key, ProjHlc, Fence),
     {NewState, NewHlc} =
-        fold_state(Strategy, ProjState, ProjHlc, OverlayEvents),
-    case bondy_oplog_fold:to_value(Strategy, NewState) of
+        bondy_oplog_cell_kernel:interpret_overlay(
+            Kernel, ProjState, ProjHlc, OverlayEvents
+        ),
+    case bondy_oplog_cell_kernel:to_value(Kernel, NewState) of
         undefined -> undefined;
         Value -> {Value, NewHlc}
     end.
@@ -918,7 +903,7 @@ do_range(Entry, Bucket, Low, High, Opts) ->
     Direction = maps:get(direction, Opts, asc),
     IncludeOverlay = maps:get(include_overlay, Opts, true),
     Fence = maps:get(fence, Opts, infinity),
-    Strategy = bondy_db_core_registry:entry_fold_module(Entry),
+    Kernel = kernel_for(Entry),
     PA = bondy_db_core_registry:entry_projection_adapter(Entry),
     PH = bondy_db_core_registry:entry_projection_handle(Entry),
 
@@ -927,7 +912,7 @@ do_range(Entry, Bucket, Low, High, Opts) ->
             OverlayEntries = overlay_for_range(
                 Entry, Bucket, Low, High, Fence, IncludeOverlay
             ),
-            Merged = merge_range(Strategy, ProjEntries, OverlayEntries),
+            Merged = merge_range(Kernel, ProjEntries, OverlayEntries),
             Ordered =
                 case Direction of
                     asc -> Merged;
@@ -950,7 +935,7 @@ overlay_for_range(Entry, Bucket, Low, High, Fence, true) ->
             )
     end.
 
-merge_range(Strategy, ProjEntries, OverlayEntries) ->
+merge_range(Kernel, ProjEntries, OverlayEntries) ->
     Init = maps:from_list([{K, {F, []}} || {K, F} <- ProjEntries]),
     Grouped = lists:foldl(
         fun({K, E}, M) ->
@@ -965,7 +950,7 @@ merge_range(Strategy, ProjEntries, OverlayEntries) ->
     Cells = lists:keysort(1, maps:to_list(Grouped)),
     lists:filtermap(
         fun({K, {Frame, Events}}) ->
-            case emit_range_cell(Strategy, Frame, lists:reverse(Events)) of
+            case emit_range_cell(Kernel, Frame, lists:reverse(Events)) of
                 undefined -> false;
                 {V, H} -> {true, {K, V, H}}
             end
@@ -1018,15 +1003,15 @@ merge_sorted_ranges(PerShardRows, Direction) ->
         end,
     lists:sort(Comparator, Flat).
 
-emit_range_cell(Strategy, Frame, Events) ->
+emit_range_cell(Kernel, Frame, Events) ->
     {ProjState, ProjHlc} =
         case Frame of
             undefined ->
-                {bondy_oplog_fold:initial_value(Strategy), 0};
+                {bondy_oplog_cell_kernel:init(Kernel), 0};
             Bin when is_binary(Bin) ->
                 {H, StateBytes, _ValueBytes} =
                     bondy_oplog_cell_frame:decode_full(Bin),
-                {bondy_oplog_fold:decode_state(Strategy, StateBytes), H}
+                {bondy_oplog_cell_kernel:decode_state(Kernel, StateBytes), H}
         end,
     Applicable = [
         E
@@ -1034,8 +1019,10 @@ emit_range_cell(Strategy, Frame, Events) ->
         bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)) > ProjHlc
     ],
     {NewState, NewHlc} =
-        fold_state(Strategy, ProjState, ProjHlc, Applicable),
-    case bondy_oplog_fold:to_value(Strategy, NewState) of
+        bondy_oplog_cell_kernel:interpret_overlay(
+            Kernel, ProjState, ProjHlc, Applicable
+        ),
+    case bondy_oplog_cell_kernel:to_value(Kernel, NewState) of
         undefined -> undefined;
         Value -> {Value, NewHlc}
     end.
@@ -1045,21 +1032,23 @@ emit_range_cell(Strategy, Frame, Events) ->
 %% =============================================================================
 
 do_read_at_hlc(Entry, Bucket, Key, T) ->
-    Strategy = bondy_db_core_registry:entry_fold_module(Entry),
+    Kernel = kernel_for(Entry),
     {ProjState, ProjHlc, _ProjHadFrame} =
-        read_projection_state_with_hlc(Entry, Bucket, Key, Strategy),
+        read_projection_state_with_hlc(Entry, Bucket, Key, Kernel),
     case ProjHlc > T of
         true ->
             {error, {historical_read_unavailable, ProjHlc, T}};
         false ->
             OverlayEvents = fenced_overlay(Entry, Bucket, Key, ProjHlc, T),
             {NewState, NewHlc} =
-                fold_state(Strategy, ProjState, ProjHlc, OverlayEvents),
-            case bondy_oplog_fold:to_value(Strategy, NewState) of
+                bondy_oplog_cell_kernel:interpret_overlay(
+                    Kernel, ProjState, ProjHlc, OverlayEvents
+                ),
+            case bondy_oplog_cell_kernel:to_value(Kernel, NewState) of
                 undefined ->
                     {ok,
-                        bondy_oplog_fold:to_value(
-                            Strategy, bondy_oplog_fold:initial_value(Strategy)
+                        bondy_oplog_cell_kernel:to_value(
+                            Kernel, bondy_oplog_cell_kernel:init(Kernel)
                         ),
                         0};
                 Value ->

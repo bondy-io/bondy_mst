@@ -459,14 +459,12 @@ event_to_op(EventRecord) ->
 %% =============================================================================
 
 initial() ->
-    bondy_oplog_fold:initial_value(?STRATEGY).
+    bondy_oplog_crdt_lww_register:init().
 
 fold_events(State, Events) ->
     lists:foldl(
         fun(E, Acc) ->
-            {NewState, _Delta} =
-                bondy_oplog_fold:apply_event(?STRATEGY, Acc, E, undefined),
-            NewState
+            bondy_oplog_crdt_lww_register:apply_op(Acc, E, undefined)
         end,
         State,
         Events
@@ -488,7 +486,7 @@ expected_read(Events) ->
         Events
     ),
     State = fold_events(initial(), Sorted),
-    case bondy_oplog_fold:to_value(?STRATEGY, State) of
+    case bondy_oplog_crdt_lww_register:to_value(State) of
         undefined -> undefined;
         Value -> {Value, hlc_of(State)}
     end.
@@ -538,23 +536,22 @@ build_lineage(Events) ->
     %% Step 2's read API returns `to_value(State)`, not the raw state.
     {Map, _} = lists:foldl(
         fun(E, {Acc, Prev}) ->
-            {New, _Delta} =
-                bondy_oplog_fold:apply_event(?STRATEGY, Prev, E, undefined),
+            New = bondy_oplog_crdt_lww_register:apply_op(Prev, E, undefined),
             H =
                 case New of
                     undefined -> 0;
                     _ -> hlc_of(New)
                 end,
-            Value = bondy_oplog_fold:to_value(?STRATEGY, New),
+            Value = bondy_oplog_crdt_lww_register:to_value(New),
             {maps:put(H, Value, Acc), New}
         end,
-        {#{0 => bondy_oplog_fold:to_value(?STRATEGY, initial())}, initial()},
+        {#{0 => bondy_oplog_crdt_lww_register:to_value(initial())}, initial()},
         Sorted
     ),
     Map.
 
 in_lineage({undefined, 0}, Lineage) ->
-    InitValue = bondy_oplog_fold:to_value(?STRATEGY, initial()),
+    InitValue = bondy_oplog_crdt_lww_register:to_value(initial()),
     maps:get(0, Lineage, undefined) =:= InitValue;
 in_lineage({V, H}, Lineage) ->
     case maps:get(H, Lineage, missing) of

@@ -24,10 +24,21 @@ machinery; the consumer supplies the interpretation function.
 
 ## Required callbacks
 
-- `causal_tier/0` declares which Tier of metadata events of this CRDT
-  carry (`tier_0` = none, `tier_1` = dot sets, `tier_2` = version
-  vectors). The library does not enforce the declaration; it is a
-  hint for tooling and documentation.
+- `causal_tier/0` declares which Tier of causal metadata this CRDT's
+  cells carry, and selects the substrate clock provisioned for the
+  table:
+  - `tier_0` = none — scalar HLC only. Correct for commutative types
+    (registers, counters, sets): HLC-monotonic delivery is a causal
+    linearization and order cannot change the result.
+  - `tier_1` = dot sets — per-operation observed dots (e.g. the legacy
+    observed-remove map).
+  - `tier_2` = version vectors — a per-cell causal context (a Dotted
+    Version Vector, `bondy_dvvset`) carried in the event `meta`, so
+    `interpret_cog/2` can compute true *happens-before* and resolve
+    concurrency-detecting types (multi-value register, add-wins map)
+    that scalar HLC cannot express. The substrate stamps the context
+    generically at the origin (it already mints the HLC dot); the CRDT
+    only consumes it.
 
 - `init/0` returns the bottom state — what the CRDT looks like when
   no events have ever been applied. Pure; called at first compaction
@@ -43,15 +54,76 @@ machinery; the consumer supplies the interpretation function.
 - `query(Query, State) -> Result` projects the CRDT state for a
   client query. Pure.
 
+## Projection-seam callbacks
+
+These let the applier keep a materialised projection value current on
+write (the eager-materialised projection, `architecture_regrounding_plan.md`
+§6 Option B), with `interpret_cog/2` as the sole convergence kernel.
+
+- `to_value(State) -> Value` projects a CRDT state to the user-facing
+  value stored in the projection / served on reads. Pure.
+
+- `hlc(State) -> hlc()` the state's logical timestamp — non-decreasing
+  as operations are interpreted. Drives `gc_threshold/1` and the
+  projection's per-cell HEAD HLC.
+
+- `encode_state(State) -> binary()` / `decode_state(binary()) -> State`
+  serialise the state for the compaction checkpoint and the projection
+  HEAD column. There is deliberately **no** `encode_event/decode_event`:
+  operations travel as opaque terms in the WAL/MST — the substrate never
+  asks the CRDT to (de)serialise an op.
+
 ## Optional callbacks
+
+- `gc_threshold(State) -> hlc() | undefined` the highest HLC fully
+  absorbed into `State`; every operation with `hlc <= threshold` is safe
+  to drop from the WAL/MST at compaction. `undefined` means "nothing is
+  collectable yet".
+
+- `value_equals_state() -> boolean()` declares that `to_value/1` is the
+  identity (the projection value *is* the state) — a storage optimisation
+  for value-carrying CRDTs (e.g. g-sets). Default `false`.
+
+- `order_independent() -> boolean()` the **commutativity marker** the
+  applier uses to pick the projection-maintenance path: `true` selects
+  the O(1) incremental step (apply one op onto the materialised state,
+  safe because order cannot change the result); `false` selects
+  re-interpretation of the cell's live group via `interpret_cog/2`
+  (the only correct path for non-commutative CRDTs, e.g. an observed-remove
+  map or a bounded counter). It is a property of the CRDT *module*,
+  validated by test — never an arrival-order heuristic. Default `false`.
 
 - `state_to_ops(OldState, NewState) -> [op()]` — for consumers whose
   external interface accepts state diffs (PUT-style APIs) instead of
-  operations. Stage-5+ feature; not yet wired.
+  operations. Not yet wired.
 
 - `merge_values(Key, V1, V2) -> Merged` — for CRDT-valued events
   where the same MST key may be written with CRDT values that need
-  merging (vs. the strict-uniqueness default). Stage-5+ feature.
+  merging (vs. the strict-uniqueness default).
+
+- `context_of(State) -> term()` — **tier_2 only.** Returns the cell's
+  current causal context (a version vector, e.g. `bondy_dvvset:join/1`).
+  The substrate reads this at the origin to stamp a new write's observed
+  context into the event `meta`, so `interpret_cog/2` can later resolve
+  concurrency. tier_0 CRDTs do not export it.
+
+- `reap_origins(State, RetiredOrigins) -> {NewState, Reaped}` — **tier_2
+  only.** Garbage-collect the per-cell causal context entries of
+  permanently-retired origins. A tier_2 CRDT carries one version-vector
+  entry per origin that ever wrote the cell; an origin whose node is
+  decommissioned leaves that entry behind forever (the one cost that grows
+  with cluster *churn* rather than op count). Given a set of retired
+  origins, this drops only the entries that carry **no live value** —
+  pure causal bookkeeping whose every value has already been dominated —
+  so the projection's value (`to_value/1`) is unchanged. An origin still
+  holding a surviving sibling is *retained* (its value is real data) and
+  excluded from `Reaped`, which lists exactly the origins actually
+  dropped. The substrate cannot know which origins are retired (membership
+  is delegated to the consumer); the *operator* supplies `RetiredOrigins`
+  and the obligation that they are permanently gone and causally stable
+  cluster-wide, exactly as it owns origin-uniqueness. This callback only
+  enforces the local value-preserving gate. tier_0 CRDTs (whose per-origin
+  entries are value, not bookkeeping) do not export it.
 
 ## Determinism invariant
 
@@ -62,7 +134,11 @@ same events will produce different snapshots and the system will
 silently diverge.
 """).
 
--callback causal_tier() -> tier_0 | tier_1 | tier_2.
+-type tier() :: tier_0 | tier_1 | tier_2.
+
+-export_type([tier/0]).
+
+-callback causal_tier() -> tier().
 
 -callback init() -> State :: term().
 
@@ -73,6 +149,25 @@ silently diverge.
 
 -callback query(Query :: term(), State :: term()) -> Result :: term().
 
+%% Projection-seam callbacks (operation-based projection, Option B).
+
+-callback to_value(State :: term()) -> Value :: term().
+
+-callback hlc(State :: term()) -> bondy_oplog_hlc:hlc().
+
+-callback encode_state(State :: term()) -> binary().
+
+-callback decode_state(binary()) -> State :: term().
+
+%% Optional callbacks.
+
+-callback gc_threshold(State :: term()) ->
+    bondy_oplog_hlc:hlc() | undefined.
+
+-callback value_equals_state() -> boolean().
+
+-callback order_independent() -> boolean().
+
 -callback state_to_ops(OldState :: term(), NewState :: term()) ->
     [bondy_oplog_event:op()].
 
@@ -82,4 +177,19 @@ silently diverge.
     V2 :: term()
 ) -> Merged :: term().
 
--optional_callbacks([state_to_ops/2, merge_values/3]).
+-callback context_of(State :: term()) -> Context :: term().
+
+-callback reap_origins(
+    State :: term(),
+    RetiredOrigins :: [term()]
+) -> {NewState :: term(), Reaped :: [term()]}.
+
+-optional_callbacks([
+    gc_threshold/1,
+    value_equals_state/0,
+    order_independent/0,
+    state_to_ops/2,
+    merge_values/3,
+    context_of/1,
+    reap_origins/2
+]).

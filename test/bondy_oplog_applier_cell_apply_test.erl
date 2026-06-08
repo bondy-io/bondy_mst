@@ -71,7 +71,7 @@ apply_writes_projection() ->
     _ = barrier(Id),
     {ok, Frame} = bondy_oplog_projection_ets:get(Proj, ?B, <<"alice">>),
     {Hlc, Body, _} = bondy_oplog_cell_frame:decode_full(Frame),
-    State = bondy_oplog_fold:decode_state(lww_register, Body),
+    State = bondy_oplog_crdt_lww_register:decode_state(Body),
     ?assertEqual({set, <<"v1">>, 1}, State),
     ?assertEqual(1, Hlc),
     teardown_instance(Id, NS, Cache, Proj).

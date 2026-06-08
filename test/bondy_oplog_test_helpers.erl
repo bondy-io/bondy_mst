@@ -27,15 +27,17 @@
 ) -> binary().
 
 frame(Strategy, State, Hlc) ->
-    frame(Strategy, State, Hlc, bondy_oplog_fold:value_equals_state(Strategy)).
+    Mod = crdt_mod(Strategy),
+    frame(Strategy, State, Hlc, Mod:value_equals_state()).
 
 frame(Strategy, State, Hlc, true) ->
-    StateBytes = bondy_oplog_fold:encode_state(Strategy, State),
+    Mod = crdt_mod(Strategy),
+    StateBytes = Mod:encode_state(State),
     bondy_oplog_cell_frame:encode(Hlc, StateBytes, undefined, true);
 frame(Strategy, State, Hlc, false) ->
-    StateBytes = bondy_oplog_fold:encode_state(Strategy, State),
-    Value = bondy_oplog_fold:to_value(Strategy, State),
-    ValueBytes = term_to_binary(Value),
+    Mod = crdt_mod(Strategy),
+    StateBytes = Mod:encode_state(State),
+    ValueBytes = term_to_binary(Mod:to_value(State)),
     bondy_oplog_cell_frame:encode(Hlc, StateBytes, ValueBytes, false).
 
 %% Convenience: the value that `bondy_db_core:read/3` is expected to
@@ -43,4 +45,9 @@ frame(Strategy, State, Hlc, false) ->
 -spec value_of(Strategy :: atom(), State :: term()) -> term().
 
 value_of(Strategy, State) ->
-    bondy_oplog_fold:to_value(Strategy, State).
+    (crdt_mod(Strategy)):to_value(State).
+
+%% Resolve a `fold_module` label to its native CRDT twin (PR-Z).
+crdt_mod(Strategy) ->
+    {crdt, Mod} = bondy_oplog_cell_kernel:from_modules(Strategy, undefined),
+    Mod.

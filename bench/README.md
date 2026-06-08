@@ -15,7 +15,7 @@ just bench              # full suite (~10–20 min)
 just bench-quick        # smoke run (~10 s)
 just bench-mst          # MST primitives only
 just bench-primitives   # HLC / cell-frame / overlay
-just bench-folds        # CRDT fold strategies
+just bench-folds        # native CRDT primitives (apply_op, interpret_cog)
 just bench-db           # bondy_mst_db substrate
 just bench-oplog        # oplog instance end-to-end
 just bench-wal          # WAL append / fsync / batch
@@ -55,7 +55,7 @@ project under `bench/` reuses the rebar3-built beams from
 | Script                       | What it measures                                 |
 |------------------------------|--------------------------------------------------|
 | `benchmarks/primitives.exs`  | `bondy_oplog_hlc` (now/peek/update/encode/decode), `bondy_oplog_cell_frame` (encode/decode at 64B/1KB/64KB), `bondy_oplog_db_overlay` (insert/events_for/range) |
-| `benchmarks/folds.exs`       | CRDT fold strategies — `apply_event/2`, `merge_states/2`, codec for `lww_register`, `or_set`, `presence_basic`, `strict_register` |
+| `benchmarks/folds.exs`       | Native op-based CRDT primitives — `apply_op/3`, `interpret_cog/2` (the SEC group fold), state codec for `lww_register`, `g_set`, `pn_counter`, `aw_map` (PR-Z; the fold family is retired) |
 
 ### Substrate end-to-end
 
@@ -119,6 +119,26 @@ and fsyncs rarely (batched), while durable pays a `per_write` fsync per
 event plus the leveled journal and pack-store MST. (Legacy `ets` /
 `leveled` values stay projection-only and honour `MST_BACKEND` /
 `WAL_FSYNC`, so existing recipes are unchanged.)
+
+**Op-based CRDT model + throughput targets.** Since PR-Z every table is a
+native `bondy_oplog_crdt` (the fold family is gone); the e2e pipeline
+writes through the cell kernel's `apply_op` and is registered with
+`crdt_module` (default `bondy_oplog_crdt_lww_register`; override with
+`CRDT=g_set` / `pn_counter` / `aw_map`). The console summary for each
+`write_only` run prints **applier ops/s per instance** and a PASS/BELOW
+verdict against the per-instance write-throughput targets:
+
+| Stack       | Target (writes/s/instance) |
+|-------------|----------------------------|
+| `durable`   | **4,000** (leveled)        |
+| `ephemeral` | **20,000** (ets)           |
+
+Per-instance throughput is the end-to-end applier rate divided by the
+shard count, so the head-to-head answers "did the op-based model gain or
+lose throughput vs the targets?" directly. Note macOS is ~8× slower on the
+write path than Linux (see `_design/latest` QA #14); the targets are
+validated on the Fly perf-8x Linux substrate
+(`just bench-fly-8x-ephemeral-vs-leveled`).
 
 > **Durable instances need `seed: true`.** A durable MST backend
 > (`storage_path` set) gates the applier on the bootstrap lifecycle —

@@ -16,7 +16,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(FOLD, bondy_oplog_fold_lww_register).
+-define(FOLD, bondy_oplog_crdt_lww_register).
 -define(SHARDS, 4).
 -define(KEYS, 60).
 -define(DB, mst_multi_shard_e2e_db).

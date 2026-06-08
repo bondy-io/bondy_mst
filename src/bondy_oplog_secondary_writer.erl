@@ -106,6 +106,9 @@ projection-handle owner keeps it.
 }).
 
 -define(DEFAULT_COALESCE_MS, 5).
+%% The native op-based CRDT backing every secondary-index cell (PR-Z; the
+%% op-based twin of the retired `bondy_oplog_fold_index_entry`).
+-define(INDEX_CRDT, bondy_oplog_crdt_index_entry).
 
 %% =============================================================================
 %% API
@@ -368,9 +371,10 @@ build_writes(Adapter, Handle, Ops) ->
         fun(Op, Acc) ->
             {Bucket, Key, Event, _H} = op_parts(Op),
             State0 = current_state(Adapter, Handle, Acc, Bucket, Key),
-            {State1, none} = bondy_oplog_fold:apply_event(
-                index_entry, State0, Event, undefined
-            ),
+            %% The native op-based index-entry CRDT (`apply_op/3`); `Key` (the
+            %% event dot) is unused — the entry carries its own primary HLC in
+            %% the operation. Byte-identical to the retired fold.
+            State1 = ?INDEX_CRDT:apply_op(State0, Event, undefined),
             Acc#{{Bucket, Key} => State1}
         end,
         #{},
@@ -380,10 +384,10 @@ build_writes(Adapter, Handle, Ops) ->
     %% high-water HLC together (order is irrelevant — it is a put_batch).
     maps:fold(
         fun({Bucket, Key}, State, {Ws, MaxH}) ->
-            Hlc = bondy_oplog_fold:hlc(index_entry, State),
+            Hlc = ?INDEX_CRDT:hlc(State),
             Frame = bondy_oplog_cell_frame:encode(
                 Hlc,
-                bondy_oplog_fold:encode_state(index_entry, State),
+                ?INDEX_CRDT:encode_state(State),
                 undefined,
                 true
             ),
@@ -403,11 +407,11 @@ current_state(Adapter, Handle, Shadow, Bucket, Key) ->
         undefined ->
             case Adapter:get(Handle, Bucket, Key) of
                 not_found ->
-                    bondy_oplog_fold:initial_value(index_entry);
+                    ?INDEX_CRDT:init();
                 {ok, Frame} ->
                     {_Hlc, StateBytes, _Value} =
                         bondy_oplog_cell_frame:decode_full(Frame),
-                    bondy_oplog_fold:decode_state(index_entry, StateBytes)
+                    ?INDEX_CRDT:decode_state(StateBytes)
             end;
         State ->
             State

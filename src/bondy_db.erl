@@ -99,7 +99,7 @@ registered with `overlay = disabled`. Read-your-writes is provided by
 
 {ok, Users}  = bondy_db:open_table(Db, users,  #{}),
 {ok, Tags}   = bondy_db:open_table(Db, tags,   #{
-    fold_module => orset
+    fold_module => g_set
 }),
 
 H = bondy_db:tick(Users),
@@ -125,9 +125,6 @@ it).
 -export([tick/1]).
 -export([apply/4]).
 -export([counter_inc/4]).
--export([aw_put/5]).
--export([aw_apply/5]).
--export([aw_remove/4]).
 -export([read/3]).
 -export([range/5]).
 -export([index_get/5]).
@@ -386,6 +383,27 @@ open_table_provision(
     DbName = maps:get(name, Db),
     NS = namespace_atom(DbName, EntityType),
     OplogOpts = maps:get(oplog_instance_opts, Merged, #{}),
+    %% Native operation-based CRDT for the cell projection. An explicit
+    %% `crdt_module` wins; otherwise the `fold_module` is mapped to its
+    %% native op-based twin via
+    %% `bondy_oplog_cell_kernel:default_crdt_for_fold/1` (PR-Z: every former
+    %% fold has a byte-identical CRDT twin, so durable cells decode either
+    %% way). An unknown label maps to `undefined`; the kernel's
+    %% `from_modules/2` then errors at open. Threaded only into the registry
+    %% Config (not the oplog instance opts — that would engage the
+    %% monolithic CRDT path).
+    CrdtModule =
+        case maps:get(crdt_module, Merged, undefined) of
+            undefined ->
+                bondy_oplog_cell_kernel:default_crdt_for_fold(FoldModule);
+            ExplicitCrdt ->
+                ExplicitCrdt
+        end,
+    %% Fail fast: a `tier_2` CRDT MUST be `order_independent` (its eager
+    %% `apply_op` must equal the group `interpret_cog`, since the DVV join
+    %% is commutative). Catches a mis-declared module at open, not at the
+    %% first silent divergence.
+    ok = assert_causal_tier_consistency(CrdtModule),
     %% Static secondary-index descriptors (already validated). The primary
     %% appliers need them at start to term-diff and dispatch index updates;
     %% the live writers they dispatch to are resolved from the registry, so
@@ -400,6 +418,7 @@ open_table_provision(
                     EntityType,
                     ShardCount,
                     FoldModule,
+                    CrdtModule,
                     OplogOpts,
                     SecIndexes,
                     Topology,
@@ -425,6 +444,8 @@ open_table_provision(
                                 namespace => NS,
                                 shard_count => ShardCount,
                                 fold_module => FoldModule,
+                                crdt_module => CrdtModule,
+                                causal_tier => causal_tier_of(CrdtModule),
                                 projection_backend => Backend,
                                 table_state => TableState,
                                 instance_ids => InstanceIds,
@@ -603,26 +624,34 @@ apply(
 ->
     Bucket = Topology:bucket_for(EntityType, Realm, TableState),
     InstanceId = instance_id_for(Table, Bucket, Key),
-    try maybe_resolve(InstanceId, Bucket, Key, Event) of
+    case maps:get(causal_tier, Table, tier_0) of
+        tier_2 ->
+            apply_with_context(InstanceId, Bucket, Key, Event);
+        _ ->
+            %% tier_0 / tier_1 write path: the op carries whatever
+            %% causality the type needs in-band, so the write is a
+            %% straight WAL append with no server-side round-trip.
+            append_and_await(
+                InstanceId, {cell_apply, Bucket, Key, Event}, undefined
+            )
+    end.
+
+%% @private
+%% tier_2 write path: stamp the cell's CURRENT causal context (a version
+%% vector, read in the applier's single-cell scope) into the event
+%% `meta`, so `interpret_cog/2` can resolve concurrency. The op itself
+%% stays pure (no state-inspecting resolution). This is the ORIGIN
+%% stamp; remote events arrive
+%% already-stamped via `append_remote` and are never re-stamped.
+%% Read-your-writes holds because `await/1` commits each write's
+%% projection before the next write reads context.
+apply_with_context(InstanceId, Bucket, Key, Event) ->
+    try cell_context(InstanceId, Bucket, Key) of
         {error, _} = Err ->
             Err;
-        passthrough ->
-            %% Resolved logical event has no effect (target absent /
-            %% tombstoned). Skip WAL append; treat as ok.
-            ok;
-        Resolved ->
-            Op = {cell_apply, Bucket, Key, Resolved},
-            try bondy_oplog:append(InstanceId, Op) of
-                {error, _} = Err ->
-                    Err;
-                _EventKey ->
-                    await(InstanceId)
-            catch
-                exit:{noproc, _} ->
-                    {error, {instance_unavailable, InstanceId}};
-                exit:{shutdown, _} ->
-                    {error, {instance_unavailable, InstanceId}}
-            end
+        {ok, Context} ->
+            Op = {cell_apply, Bucket, Key, Event},
+            append_and_await(InstanceId, Op, Context)
     catch
         exit:{noproc, _} ->
             {error, {instance_unavailable, InstanceId}};
@@ -630,39 +659,32 @@ apply(
             {error, {instance_unavailable, InstanceId}}
     end.
 
-%% Logical events have application-level shapes that the fold's
-%% `resolve_event/2` callback translates into physical events against
-%% the current projection state. Resolution must happen before WAL
-%% append so cross-replica convergence holds (the WAL stores the
-%% resolved form).
-%%
-%% Pattern-matched here rather than always-calling-resolve so the
-%% hot path (regular events) skips the applier round-trip.
-maybe_resolve(InstanceId, Bucket, Key, Event) ->
-    case is_logical_event(Event) of
-        false ->
-            Event;
-        true ->
-            case bondy_oplog_registry:applier_pid(InstanceId) of
-                undefined ->
-                    {error, {instance_unavailable, InstanceId}};
-                ApplierPid ->
-                    case
-                        bondy_oplog_applier:resolve_logical_event(
-                            ApplierPid, Bucket, Key, Event
-                        )
-                    of
-                        {ok, R} -> R;
-                        {error, _} = Err -> Err
-                    end
-            end
+%% @private
+append_and_await(InstanceId, Op, Meta) ->
+    try bondy_oplog:append(InstanceId, Op, Meta) of
+        {error, _} = Err ->
+            Err;
+        _EventKey ->
+            await(InstanceId)
+    catch
+        exit:{noproc, _} ->
+            {error, {instance_unavailable, InstanceId}};
+        exit:{shutdown, _} ->
+            {error, {instance_unavailable, InstanceId}}
     end.
 
-%% Add new logical-event tags here as folds register them. Folds
-%% without server-side resolution don't appear in this list (their
-%% events skip the round-trip).
-is_logical_event({remove_aw_key, _}) -> true;
-is_logical_event(_) -> false.
+%% @private
+%% Read the cell's current causal context (`context_of/1`) in the
+%% applier's single-cell scope (so it reflects committed writes for
+%% read-your-writes). Returns `{ok, undefined}` when the CRDT does not
+%% carry a context.
+cell_context(InstanceId, Bucket, Key) ->
+    case bondy_oplog_registry:applier_pid(InstanceId) of
+        undefined ->
+            {error, {instance_unavailable, InstanceId}};
+        ApplierPid ->
+            bondy_oplog_applier:cell_context(ApplierPid, Bucket, Key)
+    end.
 
 -doc """
 Increment the PN-Counter at `(Realm, Key)` in `Table` by `Delta`.
@@ -690,91 +712,6 @@ projection layer.
 
 counter_inc(Table, Realm, Key, Delta) when is_integer(Delta) ->
     ?MODULE:apply(Table, Realm, Key, {inc, Delta}).
-
--doc """
-Put `MapKey` into the AW-Map cell at `(Realm, Key)` in `Table`, using
-`SubFold` as the per-key sub-CRDT and `SubInitState` as its initial
-state.
-
-Convenience wrapper over `apply/4` that synthesises the AW-Map
-`{put, MapKey, SubFold, SubInitState}` physical event. `SubInitState`
-must be a valid state for `SubFold` — typically built by
-`bondy_oplog_fold:initial_value(SubFold)` and then evolved, or
-constructed inline (e.g. `{set, V, H}` for `lww_register`).
-
-The fold module is **not** validated here; using this helper against a
-non-`aw_map` table routes the event into a fold that does not
-understand it and `apply/4` will fail at the projection layer.
-
-A put on a key already live with a different `SubFold` crashes the
-applier with `{strategy_mismatch, MapKey, Stored, SubFold}`.
-""".
--spec aw_put(
-    Table :: table(),
-    Realm :: realm(),
-    Key :: binary(),
-    MapKey :: binary(),
-    {SubFold :: atom(), SubInitState :: term()}
-) -> ok | {error, term()}.
-
-aw_put(Table, Realm, Key, MapKey, {SubFold, SubInitState}) when
-    is_binary(MapKey), is_atom(SubFold)
-->
-    ?MODULE:apply(Table, Realm, Key, {put, MapKey, SubFold, SubInitState}).
-
--doc """
-Apply `SubEvent` to `MapKey` under the AW-Map cell at `(Realm, Key)`
-in `Table`, using `SubFold` as the sub-CRDT strategy.
-
-Convenience wrapper over `apply/4` that synthesises the AW-Map
-`{apply, MapKey, SubFold, SubEvent}` physical event. If `MapKey` is
-absent or tombstoned, the apply revives it by starting from
-`bondy_oplog_fold:initial_value(SubFold)` and folding the sub-event
-in (a contribution dot is added either way — the apply observation
-strengthens the AW claim).
-
-The fold module is **not** validated; routing an `apply` event into a
-non-`aw_map` table fails at the projection layer.
-
-`SubFold` mismatch with an existing live or tombstoned entry crashes
-the applier with `{strategy_mismatch, MapKey, Stored, SubFold}`.
-""".
--spec aw_apply(
-    Table :: table(),
-    Realm :: realm(),
-    Key :: binary(),
-    MapKey :: binary(),
-    {SubFold :: atom(), SubEvent :: term()}
-) -> ok | {error, term()}.
-
-aw_apply(Table, Realm, Key, MapKey, {SubFold, SubEvent}) when
-    is_binary(MapKey), is_atom(SubFold)
-->
-    ?MODULE:apply(Table, Realm, Key, {apply, MapKey, SubFold, SubEvent}).
-
--doc """
-Remove `MapKey` from the AW-Map cell at `(Realm, Key)` in `Table`.
-
-Convenience wrapper that issues the logical
-`{remove_aw_key, MapKey}` event. The substrate's
-`maybe_resolve/4` translates this into a physical
-`{remove, MapKey, ObservedDots}` event by reading the current
-state inside the cell's single-applier scope — the resolved form
-is what lands in the WAL, so cross-replica convergence holds.
-
-If `MapKey` is absent (or already tombstoned, or carries zero
-AddDots) the resolution is a passthrough: no WAL append, returns
-`ok`.
-""".
--spec aw_remove(
-    Table :: table(),
-    Realm :: realm(),
-    Key :: binary(),
-    MapKey :: binary()
-) -> ok | {error, term()}.
-
-aw_remove(Table, Realm, Key, MapKey) when is_binary(MapKey) ->
-    ?MODULE:apply(Table, Realm, Key, {remove_aw_key, MapKey}).
 
 -doc """
 Read the decoded fold state for `(Realm, Key)` from `Table`.
@@ -1083,6 +1020,8 @@ info(#{
         namespace => NS,
         shard_count => SC,
         fold_module => Fold,
+        crdt_module => maps:get(crdt_module, Table, undefined),
+        causal_tier => maps:get(causal_tier, Table, tier_0),
         indexes => maps:map(
             fun(_Name, Provision) ->
                 #{
@@ -1152,6 +1091,7 @@ provision_shards(
     EntityType,
     ShardCount,
     FoldModule,
+    CrdtModule,
     OplogOpts,
     SecIndexes,
     Topology,
@@ -1161,7 +1101,7 @@ provision_shards(
         ShardCount,
         fun(Shard) ->
             provision_shard(
-                NS, DbName, EntityType, ShardCount, FoldModule,
+                NS, DbName, EntityType, ShardCount, FoldModule, CrdtModule,
                 OplogOpts, SecIndexes, Topology, TableState, Shard
             )
         end,
@@ -1177,6 +1117,7 @@ provision_shard(
     EntityType,
     ShardCount,
     FoldModule,
+    CrdtModule,
     OplogOpts,
     SecIndexes,
     Topology,
@@ -1195,6 +1136,12 @@ provision_shard(
                         projection_adapter => ProjAdapter,
                         projection_handle => ProjHandle,
                         fold_module => FoldModule,
+                        %% Optional native CRDT for the cell projection;
+                        %% `undefined` keeps the legacy fold path.
+                        crdt_module => CrdtModule,
+                        %% The CRDT's declared causal tier (default tier_0).
+                        %% tier_2 provisions the per-cell DVV context stamp.
+                        causal_tier => causal_tier_of(CrdtModule),
                         overlay => disabled,
                         %% Recorded so a secondary-index rebuild can find
                         %% this primary shard's applier from the registry.
@@ -1234,6 +1181,46 @@ provision_shard(
             end;
         {error, _} = Err ->
             Err
+    end.
+
+%% @private
+%% @private
+%% A CRDT module's declared causal tier, or `tier_0` when no native CRDT
+%% is configured (the legacy fold path). `tier_2` provisions the per-cell
+%% DVV causal-context stamp for the table's writes.
+causal_tier_of(undefined) ->
+    tier_0;
+causal_tier_of(CrdtModule) when is_atom(CrdtModule) ->
+    %% `ensure_loaded` first: `function_exported/3` reports `false` for a
+    %% not-yet-loaded module, which would silently mis-classify a tier_2
+    %% CRDT as tier_0 (skipping both the DVV stamp and the safety
+    %% assertion). `causal_tier/0` is a required `bondy_oplog_crdt`
+    %% callback, so a loaded native CRDT always exports it.
+    _ = code:ensure_loaded(CrdtModule),
+    case erlang:function_exported(CrdtModule, causal_tier, 0) of
+        true -> CrdtModule:causal_tier();
+        false -> tier_0
+    end.
+
+%% @private
+%% Fail fast at open: a `tier_2` CRDT MUST be `order_independent` — its
+%% eager `apply_op` must equal the group `interpret_cog` (the DVV join is
+%% commutative). A tier_2 type that is not order-independent would diverge
+%% silently between the write and read paths.
+assert_causal_tier_consistency(undefined) ->
+    ok;
+assert_causal_tier_consistency(CrdtModule) when is_atom(CrdtModule) ->
+    case causal_tier_of(CrdtModule) of
+        tier_2 ->
+            IsOI =
+                erlang:function_exported(CrdtModule, order_independent, 0)
+                    andalso CrdtModule:order_independent(),
+            case IsOI of
+                true -> ok;
+                false -> error({tier_2_requires_order_independent, CrdtModule})
+            end;
+        _ ->
+            ok
     end.
 
 %% @private
@@ -1478,10 +1465,11 @@ provision_index_shards(NS, Name, SecShardCount, CoalesceMs, Topology, TableState
 
 %% @private
 %% A secondary shard is a projection table + cache + registry entry + a
-%% `bondy_oplog_secondary_writer` — no oplog instance. The `index_entry`
-%% fold gives the substrate's read/range path the right decode; the writer
-%% (started after the row is registered so its `set_writer_pid/4` stamp
-%% lands) drains dispatched index ops into the projection.
+%% `bondy_oplog_secondary_writer` — no oplog instance. The
+%% `bondy_oplog_crdt_index_entry` CRDT gives the substrate's read/range path
+%% the right decode; the writer (started after the row is registered so its
+%% `set_writer_pid/4` stamp lands) drains dispatched index ops into the
+%% projection.
 provision_index_shard(
     NS, Name, SecShardCount, CoalesceMs, Topology, TableState, Shard
 ) ->
@@ -1495,7 +1483,12 @@ provision_index_shard(
                         cache_handle => CacheHandle,
                         projection_adapter => ProjAdapter,
                         projection_handle => ProjHandle,
-                        fold_module => index_entry,
+                        %% The index cell kernel is the native op-based CRDT
+                        %% twin; `fold_module` is left unset (the read path
+                        %% selects the crdt_module). Byte-identical encoding,
+                        %% so existing durable index cells decode unchanged.
+                        fold_module => undefined,
+                        crdt_module => bondy_oplog_crdt_index_entry,
                         overlay => disabled,
                         %% IDX-4 back-pressure atomics (in-flight count +
                         %% needs_rebuild flag). Index shards only.

@@ -81,7 +81,7 @@ cache_on_matches_cache_off() ->
 %% Re-reading a key in a LATER applier batch (forced by draining between
 %% writes via a read) must take the cache path and emit a hit.
 cache_emits_hits_on_cross_batch_reread() ->
-    {Db, Sup, Dir} = open_db(hit_db, bondy_oplog_fold_lww_register, true),
+    {Db, Sup, Dir} = open_db(hit_db, bondy_oplog_crdt_lww_register, true),
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     K = <<"hotkey">>,
     {Hits, Misses} = with_cache_counter(fun() ->
@@ -99,7 +99,7 @@ cache_emits_hits_on_cross_batch_reread() ->
 
 %% With the cache OFF the applier emits no `oldstate_cache` events at all.
 cache_off_emits_no_events() ->
-    {Db, Sup, Dir} = open_db(nohit_db, bondy_oplog_fold_lww_register, false),
+    {Db, Sup, Dir} = open_db(nohit_db, bondy_oplog_crdt_lww_register, false),
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     K = <<"hotkey">>,
     {Hits, Misses} = with_cache_counter(fun() ->
@@ -121,7 +121,7 @@ cache_off_emits_no_events() ->
 %% reach exactly N. A stale cache would lose increments (< N).
 counter_coherent_across_batches() ->
     N = 20,
-    {Db, Sup, Dir} = open_db(ctr_db, bondy_oplog_fold_pn_counter, true),
+    {Db, Sup, Dir} = open_db(ctr_db, bondy_oplog_crdt_pn_counter, true),
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     K = <<"c">>,
     {Hits, _Misses} = with_cache_counter(fun() ->
@@ -145,8 +145,8 @@ counter_coherent_across_batches() ->
 %% 3b. Coherence vs the catalogue-install write path (Architecture QA fix)
 %% =============================================================================
 
-%% A `merge`-mode catalogue install runs on a LIVE instance (operator
-%% re-bootstrap to repair drift) and writes the projection directly,
+%% A catalogue install (now always `replace` mode — PR-G removed merge-
+%% mode) writes the projection directly via `install_cell_unchecked/9`,
 %% WITHOUT going through the write-through path. If the cache is not
 %% cleared, a subsequent live event folds against the pre-install
 %% OldState — a convergence break. This is the falsifying regression for
@@ -162,12 +162,13 @@ merge_install_does_not_serve_stale_oldstate() ->
         ok = bondy_oplog:await_apply(Id),
         ?assertEqual(<<"v_old">>, read_cell_value(Proj, B, K)),
 
-        %% Merge-install a NEWER frame (HLC 50) on the LIVE instance —
-        %% writes the projection directly, not via write-through. The
-        %% cache still holds the HLC-10 frame unless it is cleared.
+        %% Install a NEWER frame (HLC 50) directly — replace mode is
+        %% skip-if-older, so HLC 50 > 10 installs and writes the
+        %% projection directly, not via write-through. The cache still
+        %% holds the HLC-10 frame unless the install clears it.
         Cell = encoded_lww_cell(B, K, 50, <<"v_installed">>),
         {ok, _} = bondy_oplog_instance:install_catalogue_batch(
-            Id, {merge, [Cell]}
+            Id, {replace, [Cell]}
         ),
         ?assertEqual(<<"v_installed">>, read_cell_value(Proj, B, K)),
 
@@ -269,7 +270,7 @@ cache_primitive_get_put_and_bounded() ->
 %% =============================================================================
 
 run_lww(Name, CacheOn, Seq, Keys) ->
-    {Db, Sup, Dir} = open_db(Name, bondy_oplog_fold_lww_register, CacheOn),
+    {Db, Sup, Dir} = open_db(Name, bondy_oplog_crdt_lww_register, CacheOn),
     {ok, T} = bondy_db:open_table(Db, users, #{}),
     lists:foreach(
         fun({K, C}) ->
@@ -380,7 +381,7 @@ teardown_cell_instance(Id, NS) ->
 %% Build a catalogue cell `{Bucket, Key, Frame}` for the LWW fold at a
 %% given HLC + value (mirrors the install-path frame wire shape).
 encoded_lww_cell(B, K, Hlc, Value) ->
-    StateBytes = bondy_oplog_fold_lww_register:encode_state({set, Value, Hlc}),
+    StateBytes = bondy_oplog_crdt_lww_register:encode_state({set, Value, Hlc}),
     ValueBytes = term_to_binary(Value),
     Frame = bondy_oplog_cell_frame:encode(Hlc, StateBytes, ValueBytes, false),
     {B, K, Frame}.
@@ -390,8 +391,8 @@ read_cell_value(Proj, B, K) ->
     case bondy_oplog_projection_ets:get(Proj, B, K) of
         {ok, Frame} ->
             {_H, StateBytes, _V} = bondy_oplog_cell_frame:decode_full(Frame),
-            State = bondy_oplog_fold_lww_register:decode_state(StateBytes),
-            bondy_oplog_fold_lww_register:to_value(State);
+            State = bondy_oplog_crdt_lww_register:decode_state(StateBytes),
+            bondy_oplog_crdt_lww_register:to_value(State);
         not_found ->
             not_found
     end.

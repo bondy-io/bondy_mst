@@ -4,12 +4,10 @@
 %% =============================================================================
 %% Verifies the HEAD fast-path in `do_install_catalogue_batch/4`:
 %%
-%%   - In `replace` mode the installer reads the existing cell via the
-%%     adapter's optional `head/3` callback (HLC-only). It must NOT
-%%     call `get/3` for the skip-if-older comparison.
-%%
-%%   - In `merge` mode the installer needs the existing state bytes,
-%%     so it must use `get/3`.
+%%   - In `replace` mode (the only mode after PR-G removed merge-mode)
+%%     the installer reads the existing cell via the adapter's optional
+%%     `head/3` callback (HLC-only). It must NOT call `get/3` for the
+%%     skip-if-older comparison.
 %%
 %%   - The `not_found` branch (incoming cell has no local twin) must
 %%     not touch `get/3` in `replace` mode — `head/3` answers the
@@ -43,7 +41,6 @@ cleanup(_) ->
 head_fastpath_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {timeout, 30, fun replace_mode_uses_head_only/0},
-        {timeout, 30, fun merge_mode_uses_get/0},
         {timeout, 30, fun replace_mode_new_cell_uses_head/0},
         {timeout, 30, fun replace_mode_skip_older_uses_head/0}
     ]}.
@@ -66,25 +63,6 @@ replace_mode_uses_head_only() ->
     ?assertEqual(0, maps:get(skipped, Counts)),
     ?assertEqual(2, ?PA:head_count()),
     ?assertEqual(0, ?PA:get_count()),
-    teardown(Id).
-
-merge_mode_uses_get() ->
-    %% Same setup, but install in merge mode. Merge mode needs the
-    %% existing state bytes and must use `get/3`.
-    {Id, _NS, _Cache, Handle} = setup_instance(),
-    ?PA:put_batch(Handle, [encoded_cell(<<"k1">>, 5, <<"old">>)]),
-    ?PA:reset(),
-    Cells = [
-        encoded_cell(<<"k1">>, 10, <<"newer">>),
-        encoded_cell(<<"k2">>, 20, <<"new-key">>)
-    ],
-    {ok, _Counts} = bondy_oplog_instance:install_catalogue_batch(
-        Id, {merge, Cells}
-    ),
-    %% For each cell: one `get/3` (existing lookup). New cell ("k2")
-    %% returns not_found via `get/3`. No `head/3` calls in merge mode.
-    ?assertEqual(2, ?PA:get_count()),
-    ?assertEqual(0, ?PA:head_count()),
     teardown(Id).
 
 replace_mode_new_cell_uses_head() ->
@@ -160,7 +138,7 @@ teardown(Id) ->
 
 encoded_cell(Key, Hlc, Value) ->
     %% LWW-Register `set` state on the wire.
-    StateBytes = bondy_oplog_fold_lww_register:encode_state({set, Value, Hlc}),
+    StateBytes = bondy_oplog_crdt_lww_register:encode_state({set, Value, Hlc}),
     ValueBytes = term_to_binary(Value),
     Frame = bondy_oplog_cell_frame:encode(Hlc, StateBytes, ValueBytes, false),
     {?B, Key, Frame}.

@@ -45,8 +45,7 @@
 -export([peer_unregister_shard/3]).
 -export([peer_open_instance/3, peer_open_instance/4]).
 -export([peer_append_cell/4]).
--export([peer_append_orset_add/5]).
--export([peer_append_orset_remove/5]).
+-export([peer_do_replay/1]).
 -export([peer_read/3]).
 -export([peer_close_instance/2]).
 -export([peer_shard_owner_loop/4]).
@@ -85,9 +84,7 @@ disterl_cell_apply_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         {timeout, 90, fun lww_converges_across_three_nodes/0},
         {timeout, 90, fun later_hlc_wins_after_sync/0},
-        {timeout, 90, fun new_node_catches_up_via_sync/0},
-        {timeout, 90, fun orset_union_converges_across_three_nodes/0},
-        {timeout, 90, fun orset_remove_propagates_via_sync/0}
+        {timeout, 90, fun new_node_catches_up_via_sync/0}
     ]}.
 
 %% =============================================================================
@@ -261,6 +258,7 @@ new_node_catches_up_via_sync() ->
                 %% projection with both x and y.
                 ok = peer_sync_from(NC, InstId, [node()]),
                 ok = peer_await_apply(NC, InstId),
+                ok = peer_replay(NC, InstId),
                 ?assertEqual(
                     {<<"vx">>, 1},
                     remote_read(NC, NS, <<"x">>)
@@ -285,155 +283,6 @@ new_node_catches_up_via_sync() ->
         peer:stop(PB)
     end.
 
-%% Each node adds distinct elements to the same OR-set key. After
-%% pairwise sync, every node's projection holds the union of the
-%% three live sets. This is the in-process analogue of the Jepsen
-%% `set` workload with `--fold-module orset`.
-orset_union_converges_across_three_nodes() ->
-    {ok, PB, NB} = start_peer_node("nbos"),
-    {ok, PC, NC} = start_peer_node("ncos"),
-    try
-        ok = setup_peer(NB),
-        ok = setup_peer(NC),
-        InstId = mk_id(),
-        NS = ns_of(InstId),
-        {Cache, Proj} = register_shard(NS, primary, 0, orset),
-        ok = peer_register_shard_at(NB, NS, primary, 0, orset),
-        ok = peer_register_shard_at(NC, NS, primary, 0, orset),
-        OriginA = bondy_oplog_origin:new(),
-        OriginB = bondy_oplog_origin:new(),
-        OriginC = bondy_oplog_origin:new(),
-        {ok, _} = open_instance(InstId, NS, OriginA, orset),
-        ok = erpc:call(
-            NB,
-            ?MODULE,
-            peer_open_instance,
-            [InstId, NS, OriginB, orset]
-        ),
-        ok = erpc:call(
-            NC,
-            ?MODULE,
-            peer_open_instance,
-            [InstId, NS, OriginC, orset]
-        ),
-        try
-            Key = <<"bag">>,
-            %% Three distinct adds, each from a different origin —
-            %% dots are unique by `(NodeId, Counter)` and by their
-            %% containing origin's HLC.
-            ok = append_orset_add(
-                InstId,
-                Key,
-                1,
-                <<"alpha">>,
-                {<<"a">>, 1}
-            ),
-            ok = peer_append_orset_add_at(
-                NB,
-                InstId,
-                Key,
-                2,
-                <<"beta">>,
-                {<<"b">>, 1}
-            ),
-            ok = peer_append_orset_add_at(
-                NC,
-                InstId,
-                Key,
-                3,
-                <<"gamma">>,
-                {<<"c">>, 1}
-            ),
-            sync_full_mesh(InstId, [{NB, NB}, {NC, NC}]),
-            ok = peer_sync_from(NB, InstId, [node(), NC]),
-            ok = peer_sync_from(NC, InstId, [node(), NB]),
-            _ = bondy_oplog_instance:await_apply(InstId),
-            ok = peer_await_apply(NB, InstId),
-            ok = peer_await_apply(NC, InstId),
-            Expected = [<<"alpha">>, <<"beta">>, <<"gamma">>],
-            assert_orset_live(NS, Key, Expected),
-            assert_orset_live_remote(NB, NS, Key, Expected),
-            assert_orset_live_remote(NC, NS, Key, Expected)
-        after
-            ok = bondy_oplog:stop_instance(InstId),
-            _ = erpc:call(NB, bondy_oplog, stop_instance, [InstId]),
-            _ = erpc:call(NC, bondy_oplog, stop_instance, [InstId]),
-            ok = bondy_db_core_registry:unregister(NS, primary, 0),
-            _ = peer_unregister_shard_at(NB, NS, primary, 0),
-            _ = peer_unregister_shard_at(NC, NS, primary, 0),
-            close_shard(Cache, Proj)
-        end
-    after
-        peer:stop(PB),
-        peer:stop(PC)
-    end.
-
-%% OR-set remove semantics across nodes. Node A adds an element; after
-%% it propagates to B and C, node B issues a remove naming that
-%% element's observed dot. After re-sync, the element is tombstoned
-%% on every node.
-orset_remove_propagates_via_sync() ->
-    {ok, PB, NB} = start_peer_node("nbosr"),
-    {ok, PC, NC} = start_peer_node("ncosr"),
-    try
-        ok = setup_peer(NB),
-        ok = setup_peer(NC),
-        InstId = mk_id(),
-        NS = ns_of(InstId),
-        {Cache, Proj} = register_shard(NS, primary, 0, orset),
-        ok = peer_register_shard_at(NB, NS, primary, 0, orset),
-        ok = peer_register_shard_at(NC, NS, primary, 0, orset),
-        OriginA = bondy_oplog_origin:new(),
-        OriginB = bondy_oplog_origin:new(),
-        OriginC = bondy_oplog_origin:new(),
-        {ok, _} = open_instance(InstId, NS, OriginA, orset),
-        ok = peer_open_instance_orset_at(NB, InstId, NS, OriginB),
-        ok = peer_open_instance_orset_at(NC, InstId, NS, OriginC),
-        try
-            Key = <<"bag">>,
-            Dot = {<<"a">>, 1},
-            %% A adds; propagate to B and C; B removes; propagate.
-            ok = append_orset_add(InstId, Key, 1, <<"alpha">>, Dot),
-            sync_full_mesh(InstId, [{NB, NB}, {NC, NC}]),
-            ok = peer_sync_from(NB, InstId, [node()]),
-            ok = peer_sync_from(NC, InstId, [node()]),
-            ok = peer_await_apply(NB, InstId),
-            ok = peer_await_apply(NC, InstId),
-            %% Pre-remove: every node sees alpha.
-            assert_orset_live_remote(NB, NS, Key, [<<"alpha">>]),
-            %% B issues the remove (observed-dot semantics).
-            ok = peer_append_orset_remove_at(
-                NB,
-                InstId,
-                Key,
-                5,
-                <<"alpha">>,
-                [Dot]
-            ),
-            ok = peer_await_apply(NB, InstId),
-            %% Re-sync: B's tombstone reaches A and C.
-            {ok, _} = bondy_oplog:sync(InstId, NB, sync_opts()),
-            ok = peer_sync_from(NC, InstId, [NB]),
-            _ = bondy_oplog_instance:await_apply(InstId),
-            ok = peer_await_apply(NC, InstId),
-            %% Post-remove: every node's live set is empty.
-            assert_orset_live(NS, Key, []),
-            assert_orset_live_remote(NB, NS, Key, []),
-            assert_orset_live_remote(NC, NS, Key, [])
-        after
-            ok = bondy_oplog:stop_instance(InstId),
-            _ = erpc:call(NB, bondy_oplog, stop_instance, [InstId]),
-            _ = erpc:call(NC, bondy_oplog, stop_instance, [InstId]),
-            ok = bondy_db_core_registry:unregister(NS, primary, 0),
-            _ = peer_unregister_shard_at(NB, NS, primary, 0),
-            _ = peer_unregister_shard_at(NC, NS, primary, 0),
-            close_shard(Cache, Proj)
-        end
-    after
-        peer:stop(PB),
-        peer:stop(PC)
-    end.
-
 %% =============================================================================
 %% Assertions
 %% =============================================================================
@@ -447,21 +296,6 @@ assert_all_three_cells_remote(Node, NS) ->
     ?assertEqual({<<"v-a">>, 10}, remote_read(Node, NS, <<"a">>)),
     ?assertEqual({<<"v-b">>, 20}, remote_read(Node, NS, <<"b">>)),
     ?assertEqual({<<"v-c">>, 30}, remote_read(Node, NS, <<"c">>)).
-
-assert_orset_live(NS, Key, Expected) ->
-    Got = orset_live_elements(bondy_db_core:read(NS, primary, Key)),
-    ?assertEqual(lists:sort(Expected), lists:sort(Got)).
-
-assert_orset_live_remote(Node, NS, Key, Expected) ->
-    Got = orset_live_elements(remote_read(Node, NS, Key)),
-    ?assertEqual(lists:sort(Expected), lists:sort(Got)).
-
-orset_live_elements(undefined) ->
-    [];
-orset_live_elements({Value, _Hlc}) ->
-    %% Post-§3.6 the read API returns the fold's `to_value/1`, which
-    %% for orset is an ordset of the currently live elements.
-    Value.
 
 %% =============================================================================
 %% Local helpers
@@ -517,46 +351,6 @@ append_cell(InstanceId, Key, Hlc, Value) ->
     ),
     _ = bondy_oplog:projection(InstanceId),
     ok.
-
-append_orset_add(InstanceId, Key, Hlc, Elem, Dot) ->
-    _ = bondy_oplog:append(
-        InstanceId,
-        {cell_apply, ?B, Key, {add, Hlc, Elem, Dot}}
-    ),
-    _ = bondy_oplog:projection(InstanceId),
-    ok.
-
-peer_register_shard_at(Node, NS, Index, Shard, FoldModule) ->
-    erpc:call(
-        Node,
-        ?MODULE,
-        peer_register_shard,
-        [NS, Index, Shard, FoldModule]
-    ).
-
-peer_open_instance_orset_at(Node, InstId, NS, Origin) ->
-    erpc:call(
-        Node,
-        ?MODULE,
-        peer_open_instance,
-        [InstId, NS, Origin, orset]
-    ).
-
-peer_append_orset_add_at(Node, InstId, Key, Hlc, Elem, Dot) ->
-    erpc:call(
-        Node,
-        ?MODULE,
-        peer_append_orset_add,
-        [InstId, Key, Hlc, Elem, Dot]
-    ).
-
-peer_append_orset_remove_at(Node, InstId, Key, Hlc, Elem, Dots) ->
-    erpc:call(
-        Node,
-        ?MODULE,
-        peer_append_orset_remove,
-        [InstId, Key, Hlc, Elem, Dots]
-    ).
 
 sync_opts() ->
     #{
@@ -647,12 +441,28 @@ peer_await_apply(Node, InstId) ->
     _ = erpc:call(Node, bondy_oplog_instance, await_apply, [InstId]),
     ok.
 
+%% Force the synchronous peer-event replay barrier on `Node`: project the
+%% events a sync session installed into the MST onto the per-cell
+%% projection. `await_apply` drains the WAL applier but NOT the async
+%% `replay_cell_events` cast `integrate_peer_root` fires, so a read issued
+%% straight after a single pull can miss the just-synced cells. The
+%% production read-after-sync path is eventually-consistent via that cast;
+%% tests force the barrier for determinism (same gotcha as the
+%% mv_register / aw_map e2e tests).
+peer_replay(Node, InstId) ->
+    _ = erpc:call(Node, ?MODULE, peer_do_replay, [InstId]),
+    ok.
+
 remote_read(Node, NS, Key) ->
     erpc:call(Node, ?MODULE, peer_read, [NS, primary, Key]).
 
 %% =============================================================================
 %% Helpers invoked on the peer node
 %% =============================================================================
+
+peer_do_replay(InstId) ->
+    Pid = bondy_oplog_registry:applier_pid(InstId),
+    bondy_oplog_applier:replay_cell_events_sync(Pid).
 
 peer_register_shard(NS, Index, Shard) ->
     peer_register_shard(NS, Index, Shard, lww_register).
@@ -753,26 +563,6 @@ peer_append_cell(InstId, Key, Hlc, Value) ->
     _ = bondy_oplog:append(
         InstId,
         {cell_apply, <<>>, Key, {set, Hlc, Value}}
-    ),
-    _ = bondy_oplog:projection(InstId),
-    ok.
-
-peer_append_orset_add(InstId, Key, Hlc, Elem, Dot) ->
-    _ = bondy_oplog:append(
-        InstId,
-        {cell_apply, <<>>, Key, {add, Hlc, Elem, Dot}}
-    ),
-    _ = bondy_oplog:projection(InstId),
-    ok.
-
-peer_append_orset_remove(InstId, Key, Hlc, _Elem, Dots) ->
-    %% `remove` events tombstone the listed dots; the OR-set fold
-    %% scrubs them from every element's live set regardless of which
-    %% `_Elem` name is passed (matches the fold's contract — see
-    %% `bondy_oplog_fold_orset:apply_event/3`).
-    _ = bondy_oplog:append(
-        InstId,
-        {cell_apply, <<>>, Key, {remove, Hlc, _Elem, Dots}}
     ),
     _ = bondy_oplog:projection(InstId),
     ok.

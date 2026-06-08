@@ -154,6 +154,7 @@ hash.
 -export([set_store/2]).
 -export([to_list/1]).
 -export([to_list/2]).
+-export([truncate/2]).
 
 -export([format_error/2]).
 
@@ -625,6 +626,50 @@ delete(#?MODULE{store = Store0} = T, Key) ->
                         Store = bondy_mst_store:set_root(Store1, NewRoot),
                         T#?MODULE{store = Store}
                 end
+        end
+    end,
+    bondy_mst_store:transaction(Store0, Fun).
+
+?DOC("""
+Structurally removes every key `=< Watermark` from the tree, keeping
+only the suffix of keys strictly greater than `Watermark`. Returns a
+new tree whose root is the canonical MST of the remaining key set.
+
+Unlike calling `delete/2` once per stale key — which is `O(P·log N)` in
+the prefix size `P` and rebuilds a spine per deletion — this walks only
+the **left spine** of the tree once: it rewrites `O(log N)` pages and
+leaves the dropped subtrees unreferenced for the store's garbage
+collector to reclaim (the same page lifecycle as `split/4`/`put/3`).
+
+The result is byte-identical (same root hash) to the equivalent
+sequence of `delete/2` calls and to a fresh tree built from
+`{K | K > Watermark}`, because the MST is history-independent: a given
+key set has a single canonical structure.
+
+Used by compaction to drop the stable prefix once it has been folded
+into the projection/checkpoint. Returns the tree unchanged when it is
+empty.
+""").
+-spec truncate(Tree1 :: t(), Watermark :: key()) -> Tree2 :: t().
+
+truncate(#?MODULE{store = Store0} = T, Watermark) ->
+    Fun = fun() ->
+        case root(T) of
+            undefined ->
+                T;
+            Root ->
+                {NewRoot, Store1} = truncate_at(T, Store0, Root, Watermark),
+                Store =
+                    case NewRoot of
+                        undefined ->
+                            %% `free/3` already nulled the store root when
+                            %% it freed the old root page (mirrors the
+                            %% empty-tree branch of delete/2).
+                            Store1;
+                        _ when is_binary(NewRoot) ->
+                            bondy_mst_store:set_root(Store1, NewRoot)
+                    end,
+                T#?MODULE{store = Store}
         end
     end,
     bondy_mst_store:transaction(Store0, Fun).
@@ -1163,6 +1208,69 @@ split_aux(T, Store0, Key, Level, [First, Second | Rest0]) ->
     end.
 
 %% @private
+%% Structural prefix-truncate: returns the root hash of the subtree
+%% containing exactly the keys strictly greater than `W`, freeing the
+%% pages it rewrites along the left spine. Dropped subtrees are left
+%% unreferenced for GC (same lifecycle as `split/4`). Mirrors
+%% `split_page/5` but routes keys `=< W` to the discard side, so an
+%% exact match on `W` (always an existing key for compaction) is dropped
+%% rather than raising `inconsistency`.
+truncate_at(_, Store, undefined, _) ->
+    {undefined, Store};
+truncate_at(T, Store0, Hash, W) ->
+    case get_page(T, Store0, Hash) of
+        undefined ->
+            %% Dangling hash — treat the subtree as empty rather than
+            %% crashing (see the dangling-page note above `merge_aux`).
+            log_dangling_page("truncate: page missing", T, Store0, Hash, W),
+            {undefined, Store0};
+        Page ->
+            Level = bondy_mst_page:level(Page),
+            Low = bondy_mst_page:low(Page),
+            List0 = bondy_mst_page:list(Page),
+            Store1 = bondy_mst_store:free(Store0, Hash, Page),
+            truncate_scan(T, Store1, W, Level, Low, List0)
+    end.
+
+%% @private
+%% Walks the page's entry list left-to-right. `Prev` is the child
+%% subtree immediately to the left of the current entry (its keys are
+%% all `< CurrentKey`); it starts as the page's `low`. Keys `=< W` are
+%% dropped together with their left subtrees; the first child that
+%% straddles `W` is truncated recursively and becomes the new `low` of
+%% the rebuilt page.
+truncate_scan(T, Store0, W, _Level, Prev, []) ->
+    %% Every entry was `=< W`; only the rightmost child (`Prev`, keys
+    %% `> last key`) can hold survivors. The page level collapses.
+    truncate_at(T, Store0, Prev, W);
+truncate_scan(T, Store0, W, Level, Prev, [{K, _V, R} | Rest] = List) ->
+    case compare(T, W, K) of
+        lt ->
+            %% W < K: K and everything after it survive. `Prev` (keys
+            %% `< K`) straddles W → truncate it into the new low.
+            {NewLow, Store} = truncate_at(T, Store0, Prev, W),
+            rebuild_truncated(Store, Level, NewLow, List);
+        eq ->
+            %% W == K: K is dropped; `Prev` (keys `< K =< W`) is dropped
+            %% wholesale. R (keys in `(K, next)`, all `> W`) becomes the
+            %% new low; the remaining entries survive untouched.
+            rebuild_truncated(Store0, Level, R, Rest);
+        gt ->
+            %% W > K: K is dropped; advance, R becomes the next `Prev`.
+            truncate_scan(T, Store0, W, Level, R, Rest)
+    end.
+
+%% @private
+%% Builds the rebuilt page for the surviving entries, or collapses to a
+%% bare subtree hash when no entries survive at this level.
+rebuild_truncated(Store, _Level, NewLow, []) ->
+    {NewLow, Store};
+rebuild_truncated(Store0, Level, NewLow, [_ | _] = List) ->
+    NewPage = bondy_mst_page:new(Level, NewLow, List),
+    {NewHash, Store} = bondy_mst_store:put(Store0, NewPage),
+    {NewHash, Store}.
+
+%% @private
 get_page(T, Store, Hash) ->
     case bondy_mst_store:get(Store, Hash) of
         undefined ->
@@ -1375,77 +1483,215 @@ do_foreach(Store, Fun, Opts, Root) ->
     end.
 
 %% @private
-diff_to_list(_, _, R, _, R) ->
-    [];
-diff_to_list(_, _, undefined, _, _) ->
-    [];
-diff_to_list(_, Store1, ARoot, _, undefined) ->
-    lists:reverse(
-        do_fold(Store1, fun(E, Acc) -> [E | Acc] end, [], [], ARoot)
-    );
+%% Read-only diff entry. Tree comparison in a Merkle Search Tree is
+%% read-only by design (Auvolat & Taïani, SRDS 2019): descend both roots,
+%% prune any subtree whose Merkle hash matches on both sides, and surface
+%% only the differing entries. Aligning two differently-shaped trees at a
+%% key boundary still needs `split`-style partition pages, but those pages
+%% are *synthetic* — here they live in an in-memory overlay (`Acc ::
+%% #{hash() => page()}`) threaded through the descent, never written to
+%% the store and never freed. So neither input tree is mutated (cf. the
+%% earlier split-based implementation, which `free`d live pages and
+%% corrupted mutable ETS/pack stores). The overlay is content-addressed,
+%% so a synthetic page is keyed by its own hash exactly as
+%% `bondy_mst_store:put/2` would key it, and reads resolve overlay-first.
 diff_to_list(T, Store1, ARoot, Store2, BRoot) ->
-    APage = bondy_mst_store:get(Store1, ARoot),
+    {List, _Acc} = do_diff(T, Store1, ARoot, Store2, BRoot, #{}),
+    List.
+
+%% @private
+do_diff(_, _, R, _, R, Acc) ->
+    {[], Acc};
+do_diff(_, _, undefined, _, _, Acc) ->
+    {[], Acc};
+do_diff(T, Store1, ARoot, _, undefined, Acc) ->
+    {ro_to_list(T, Store1, Acc, ARoot), Acc};
+do_diff(T, Store1, ARoot, Store2, BRoot, Acc) ->
+    APage = ro_store_get(Store1, Acc, ARoot),
     ALow = bondy_mst_page:low(APage),
     AEntries = bondy_mst_page:list(APage),
     ALevel = bondy_mst_page:level(APage),
 
-    BPage = bondy_mst_store:get(Store2, BRoot),
+    BPage = ro_store_get(Store2, Acc, BRoot),
     BEntries = bondy_mst_page:list(BPage),
     BLow = bondy_mst_page:low(BPage),
     BLevel = bondy_mst_page:level(BPage),
 
     case BLevel of
         ALevel ->
-            diff_to_list_rec(T, Store1, ALow, AEntries, Store2, BLow, BEntries);
+            do_diff_rec(T, Store1, ALow, AEntries, Store2, BLow, BEntries, Acc);
         BLevel when ALevel > BLevel ->
-            diff_to_list_rec(T, Store1, ALow, AEntries, Store2, BRoot, []);
+            do_diff_rec(T, Store1, ALow, AEntries, Store2, BRoot, [], Acc);
         BLevel when ALevel < BLevel ->
-            diff_to_list_rec(T, Store1, ARoot, [], Store2, BLow, BEntries)
+            do_diff_rec(T, Store1, ARoot, [], Store2, BLow, BEntries, Acc)
     end.
 
 %% @private
-diff_to_list_rec(T, Store1, ALow, [], Store2, BLow, []) ->
-    diff_to_list(T, Store1, ALow, Store2, BLow);
-diff_to_list_rec(T, Store1_0, ALow, [], Store2, BLow, [{K, _, R} | Rest2]) ->
-    {ALowL, ALowH, Store1} = split(T, Store1_0, ALow, K),
-    diff_to_list(T, Store1, ALowL, Store2, BLow) ++
-        diff_to_list_rec(T, Store1, ALowH, [], Store2, R, Rest2);
-diff_to_list_rec(T, Store1, ALow, [{K, V, R} | Rest1], Store2_0, BLow, []) ->
-    {BLowL, BLowH, Store2} = split(T, Store2_0, BLow, K),
-    diff_to_list(T, Store1, ALow, Store2, BLowL) ++
-        [{K, V} | diff_to_list_rec(T, Store1, R, Rest1, Store2, BLowH, [])];
-diff_to_list_rec(T, Store1_0, ALow, AEntries, Store2_0, BLow, BEntries) ->
+do_diff_rec(T, Store1, ALow, [], Store2, BLow, [], Acc) ->
+    do_diff(T, Store1, ALow, Store2, BLow, Acc);
+do_diff_rec(T, Store1, ALow, [], Store2, BLow, [{K, _, R} | Rest2], Acc0) ->
+    {ALowL, ALowH, Acc1} = ro_split(T, Store1, Acc0, ALow, K),
+    {L1, Acc2} = do_diff(T, Store1, ALowL, Store2, BLow, Acc1),
+    {L2, Acc} = do_diff_rec(T, Store1, ALowH, [], Store2, R, Rest2, Acc2),
+    {L1 ++ L2, Acc};
+do_diff_rec(T, Store1, ALow, [{K, V, R} | Rest1], Store2, BLow, [], Acc0) ->
+    {BLowL, BLowH, Acc1} = ro_split(T, Store2, Acc0, BLow, K),
+    {L1, Acc2} = do_diff(T, Store1, ALow, Store2, BLowL, Acc1),
+    {L2, Acc} = do_diff_rec(T, Store1, R, Rest1, Store2, BLowH, [], Acc2),
+    {L1 ++ [{K, V} | L2], Acc};
+do_diff_rec(T, Store1, ALow, AEntries, Store2, BLow, BEntries, Acc0) ->
     [{K1, V1, ARoot} | Rest1] = AEntries,
     [{K2, V2, BRoot} | Rest2] = BEntries,
 
     case compare(T, K1, K2) of
         lt ->
-            {BLowL, BLowH, Store2} = split(T, Store2_0, BLow, K1),
-            diff_to_list(T, Store1_0, ALow, Store2, BLowL) ++
-                [
-                    {K1, V1}
-                    | diff_to_list_rec(
-                        T, Store1_0, ARoot, Rest1, Store2, BLowH, BEntries
-                    )
-                ];
-        gt ->
-            {ALowL, ALowH, Store1} = split(T, Store1_0, ALow, K2),
-            diff_to_list(T, Store1, ALowL, Store2_0, BLow) ++
-                diff_to_list_rec(
-                    T, Store1, ALowH, AEntries, Store2_0, BRoot, Rest2
-                );
-        eq ->
-            L0 = diff_to_list_rec(
-                T, Store1_0, ARoot, Rest1, Store2_0, BRoot, Rest2
+            {BLowL, BLowH, Acc1} = ro_split(T, Store2, Acc0, BLow, K1),
+            {L1, Acc2} = do_diff(T, Store1, ALow, Store2, BLowL, Acc1),
+            {L2, Acc} = do_diff_rec(
+                T, Store1, ARoot, Rest1, Store2, BLowH, BEntries, Acc2
             ),
+            {L1 ++ [{K1, V1} | L2], Acc};
+        gt ->
+            {ALowL, ALowH, Acc1} = ro_split(T, Store1, Acc0, ALow, K2),
+            {L1, Acc2} = do_diff(T, Store1, ALowL, Store2, BLow, Acc1),
+            {L2, Acc} = do_diff_rec(
+                T, Store1, ALowH, AEntries, Store2, BRoot, Rest2, Acc2
+            ),
+            {L1 ++ L2, Acc};
+        eq ->
+            {L0, Acc1} = do_diff_rec(
+                T, Store1, ARoot, Rest1, Store2, BRoot, Rest2, Acc0
+            ),
+            {LL, Acc} = do_diff(T, Store1, ALow, Store2, BLow, Acc1),
 
             case V1 == V2 of
                 true ->
-                    diff_to_list(T, Store1_0, ALow, Store2_0, BLow) ++ L0;
+                    {LL ++ L0, Acc};
                 false ->
-                    L = [{K1, V1} | L0],
-                    diff_to_list(T, Store1_0, ALow, Store2_0, BLow) ++ L
+                    {LL ++ [{K1, V1} | L0], Acc}
             end
+    end.
+
+%% @private
+%% Overlay-aware page read for the top-level diff descent (mirrors the old
+%% `bondy_mst_store:get(Store, Hash)` reads — no `T`-store fallback): a
+%% synthetic page minted by `ro_split/5` resolves from `Acc`, any real
+%% page from `Store`.
+ro_store_get(Store, Acc, Hash) ->
+    case Acc of
+        #{Hash := Page} -> Page;
+        _ -> bondy_mst_store:get(Store, Hash)
+    end.
+
+%% @private
+%% Overlay-aware page read for `ro_split/5` (mirrors `split/4`'s
+%% `get_page/3`, which additionally falls back to `T`'s own store).
+ro_get_page(T, Store, Acc, Hash) ->
+    case Acc of
+        #{Hash := Page} -> Page;
+        _ -> get_page(T, Store, Hash)
+    end.
+
+%% @private
+%% Read-only counterpart of `split/4`: partitions the subtree rooted at
+%% `Hash` at `Key` into `{Low, High}` exactly as `split/4` does, but emits
+%% the synthetic partition pages into the overlay `Acc` rather than the
+%% store, and never `free`s the page it rewrites. Returns the two child
+%% hashes plus the grown overlay.
+ro_split(_, _, Acc, undefined, _) ->
+    {undefined, undefined, Acc};
+ro_split(T, Store, Acc, Hash, Key) ->
+    case ro_get_page(T, Store, Acc, Hash) of
+        undefined ->
+            %% Dangling hash — treat the subtree as empty (see the
+            %% dangling-page note above `merge_aux`); `split/4` does the
+            %% same.
+            {undefined, undefined, Acc};
+        Page ->
+            ro_split_page(T, Store, Acc, Key, Page)
+    end.
+
+%% @private
+ro_split_page(T, Store, Acc0, Key, Page) ->
+    Level = bondy_mst_page:level(Page),
+    Low = bondy_mst_page:low(Page),
+    [{K0, _, _} | _] = List0 = bondy_mst_page:list(Page),
+
+    case compare(T, Key, K0) of
+        lt ->
+            {LowLow, LowHi, Acc1} = ro_split(T, Store, Acc0, Low, Key),
+            NewPage = bondy_mst_page:new(Level, LowHi, List0),
+            {NewPageHash, Acc} = ro_put(T, Acc1, NewPage),
+            {LowLow, NewPageHash, Acc};
+        gt ->
+            {List, P2, Acc1} = ro_split_aux(T, Store, Acc0, Key, Level, List0),
+            NewPage = bondy_mst_page:new(Level, Low, List),
+            {NewPageHash, Acc} = ro_put(T, Acc1, NewPage),
+            {NewPageHash, P2, Acc}
+    end.
+
+%% @private
+ro_split_aux(T, Store, Acc0, Key, _, [{K1, V1, R1}]) ->
+    case compare(T, K1, Key) of
+        eq ->
+            error(inconsistency);
+        _ ->
+            {R1L, R1H, Acc} = ro_split(T, Store, Acc0, R1, Key),
+            {[{K1, V1, R1L}], R1H, Acc}
+    end;
+ro_split_aux(T, Store, Acc0, Key, Level, [First, Second | Rest0]) ->
+    {K1, V1, R1} = First,
+    {K2, _, _} = Second,
+
+    case compare(T, Key, K2) of
+        eq ->
+            error(inconsistency);
+        lt ->
+            {R1L, R1H, Acc1} = ro_split(T, Store, Acc0, R1, Key),
+            NewPage = bondy_mst_page:new(Level, R1H, [Second | Rest0]),
+            {NewPageHash, Acc} = ro_put(T, Acc1, NewPage),
+            {[{K1, V1, R1L}], NewPageHash, Acc};
+        gt ->
+            {Rest, Hi, Acc} = ro_split_aux(
+                T, Store, Acc0, Key, Level, [Second | Rest0]
+            ),
+            {[First | Rest], Hi, Acc}
+    end.
+
+%% @private
+%% Mints a synthetic partition page into the overlay, keyed by the same
+%% content hash `bondy_mst_store:put/2` would assign (`bondy_mst_page:hash/2`
+%% with the tree's hash algorithm), so downstream `ro_*_get` reads resolve
+%% it identically to a stored page.
+ro_put(#?MODULE{hash_algorithm = Algo}, Acc, Page) ->
+    Hash = bondy_mst_page:hash(Page, Algo),
+    {Hash, maps:put(Hash, Page, Acc)}.
+
+%% @private
+%% In-order `{Key, Value}` list of the subtree rooted at `Root`,
+%% overlay-aware. Replaces the `do_fold/5`-based full-list fallback used
+%% when the B side is `undefined`; identical ordering, but resolves
+%% synthetic pages from `Acc`.
+ro_to_list(T, Store, Acc, Root) ->
+    lists:reverse(ro_fold(T, Store, Acc, Root, [])).
+
+%% @private
+ro_fold(_, _, _, undefined, L) ->
+    L;
+ro_fold(T, Store, Acc, Root, L0) ->
+    case ro_store_get(Store, Acc, Root) of
+        undefined ->
+            L0;
+        Page ->
+            Low = bondy_mst_page:low(Page),
+            L1 = ro_fold(T, Store, Acc, Low, L0),
+            bondy_mst_page:fold(
+                Page,
+                fun({K, V, Hash}, A0) ->
+                    ro_fold(T, Store, Acc, Hash, [{K, V} | A0])
+                end,
+                L1
+            )
     end.
 
 %% @private

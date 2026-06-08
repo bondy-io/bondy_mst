@@ -252,17 +252,11 @@ saturation_drops_then_rebuild_converges({Db, _Sup, _Dir}) ->
         %% First set the indexed field, then push several updates to a
         %% NON-indexed field — each re-dispatches a put for the same term
         %% "active", growing the (never-flushed) backlog past the cap.
-        ok = bondy_db:aw_put(
-            T, R, K, <<"status">>,
-            {lww_register, {set, <<"active">>, bondy_db:tick(T)}}
-        ),
+        ok = bondy_db:apply(T, R, K, {put, <<"status">>, <<"active">>}),
         lists:foreach(
             fun(N) ->
                 Name = <<"n", (integer_to_binary(N))/binary>>,
-                ok = bondy_db:aw_put(
-                    T, R, K, <<"name">>,
-                    {lww_register, {set, Name, bondy_db:tick(T)}}
-                )
+                ok = bondy_db:apply(T, R, K, {put, <<"name">>, Name})
             end,
             lists:seq(1, 8)
         ),
@@ -284,7 +278,13 @@ saturation_drops_then_rebuild_converges({Db, _Sup, _Dir}) ->
     ),
     {ok, [{<<"u1">>, Cols}]} =
         bondy_db:index_get(T, R, by_status, <<"active">>, #{}),
-    ?assertEqual(<<"n8">>, maps:get([<<"name">>], Cols)),
+    %% The rebuild's projected column EXACTLY matches the live cell value
+    %% (`[n8]`), with no spurious siblings. The rebuild re-indexes from the
+    %% converged projection value rather than replaying historical events
+    %% (which, on a context-carrying tier_2 CRDT, would re-introduce
+    %% superseded dots as spurious MV-leaf siblings — e.g. `[n7, n8]`). See
+    %% `bondy_db_tier2_index_rebuild_test` for the dedicated regression.
+    ?assertEqual([<<"n8">>], maps:get([<<"name">>], Cols)),
     ok = bondy_db:close_table(T).
 
 %% =============================================================================
@@ -299,7 +299,8 @@ open_lww(Db) ->
 
 open_saturating(Db) ->
     bondy_db:open_table(Db, profiles, #{
-        fold_module => aw_map,
+        fold_module => lww_register,
+        crdt_module => bondy_oplog_crdt_aw_map,
         indexes => [
             #{
                 name => by_status,
@@ -345,7 +346,7 @@ inject_orphan(Table, IndexName, Term, PrimaryKey) ->
     State = {live, <<>>, Hlc},
     Frame = bondy_oplog_cell_frame:encode(
         Hlc,
-        bondy_oplog_fold:encode_state(index_entry, State),
+        bondy_oplog_crdt_index_entry:encode_state(State),
         undefined,
         true
     ),

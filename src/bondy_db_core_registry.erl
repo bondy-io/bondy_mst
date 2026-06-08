@@ -104,7 +104,7 @@ keeps reads parallel.
     projection_adapter :: module(),
     projection_handle :: term(),
     overlay :: disabled | bondy_oplog_db_overlay:tid(),
-    fold_module :: bondy_oplog_fold:strategy(),
+    fold_module :: atom() | undefined,
     %% Per-shard freshness counter, written by the applier on each
     %% projection commit (or by anti-entropy on each successful round).
     %% Stored as `monotonic_time(millisecond)`; read wait-free by
@@ -148,7 +148,23 @@ keeps reads parallel.
     %% namespace from the registry alone (no table handle), re-fold each
     %% one's MST, and re-dispatch the index ops. `undefined` for secondary
     %% (index) shards, which have no oplog instance.
-    instance_id = undefined :: binary() | undefined
+    instance_id = undefined :: binary() | undefined,
+    %% Optional native operation-based CRDT module
+    %% (`bondy_oplog_crdt`) for this table's cell projection. When set,
+    %% the applier's cell kernel routes through `interpret_cog`/`apply_op`
+    %% instead of the `fold_module` (`architecture_regrounding_plan.md`
+    %% §7 step 3). `undefined` (default) keeps the legacy fold path, so
+    %% the selector is reversible per table. Appended last so existing
+    %% `#entry`-index `ets:update_element` writes stay valid.
+    crdt_module = undefined :: module() | undefined,
+    %% The CRDT module's declared causal tier (`bondy_oplog_crdt:tier()`),
+    %% read from `crdt_module:causal_tier()` at table open. `tier_0`
+    %% (default) = scalar HLC only; `tier_2` = the applier stamps a
+    %% per-cell causal context (DVV) into the event `meta` for this
+    %% table's writes (`architecture_regrounding_plan.md` tier_2 path).
+    %% Appended last so existing `#entry`-index `ets:update_element`
+    %% writes stay valid.
+    causal_tier = tier_0 :: bondy_oplog_crdt:tier()
 }).
 
 -record(state, {
@@ -171,7 +187,14 @@ keeps reads parallel.
     cache_handle := term(),
     projection_adapter := module(),
     projection_handle := term(),
-    fold_module := bondy_oplog_fold:strategy(),
+    fold_module := atom() | undefined,
+    %% Optional. Native operation-based CRDT module for the cell
+    %% projection; when present it takes precedence over `fold_module`.
+    crdt_module => module(),
+    %% Optional. The `crdt_module`'s declared `causal_tier()`. Defaults
+    %% to `tier_0` (scalar HLC). `tier_2` provisions the per-cell DVV
+    %% causal-context stamp for this table's writes.
+    causal_tier => bondy_oplog_crdt:tier(),
     %% Required. Pass `disabled` to opt out of overlay-merge on the read
     %% path (the facade does this — `apply/4`'s `await_apply` step
     %% provides read-your-writes without an overlay). Pass a `tid()`
@@ -242,6 +265,8 @@ keeps reads parallel.
 -export([entry_writer_pid/1]).
 -export([entry_inflight_ref/1]).
 -export([entry_instance_id/1]).
+-export([entry_crdt_module/1]).
+-export([entry_causal_tier/1]).
 -export([entry_last_ae/1]).
 -export([entry_ever_freshened/1]).
 
@@ -593,6 +618,12 @@ entry_consistency_class(#entry{consistency_class = V}) -> V.
 entry_writer_pid(#entry{writer_pid = V}) -> V.
 entry_inflight_ref(#entry{inflight_ref = V}) -> V.
 entry_instance_id(#entry{instance_id = V}) -> V.
+entry_crdt_module(#entry{crdt_module = V}) -> V.
+
+-doc "The shard's CRDT causal tier (`tier_0` default).".
+-spec entry_causal_tier(shard_entry()) -> bondy_oplog_crdt:tier().
+
+entry_causal_tier(#entry{causal_tier = V}) -> V.
 
 %% Last AE-freshness timestamp (monotonic ms), read straight off the
 %% entry's atomics — the sentinel `?STALE_SENTINEL` for a never-freshened
@@ -776,7 +807,9 @@ handle_call({register, NS, Index, Shard, Owner, Config}, _From, State0) ->
         high_water_ref = HighWater,
         consistency_class = maps:get(consistency_class, Config, ap),
         inflight_ref = maps:get(inflight_atomics, Config, undefined),
-        instance_id = maps:get(instance_id, Config, undefined)
+        instance_id = maps:get(instance_id, Config, undefined),
+        crdt_module = maps:get(crdt_module, Config, undefined),
+        causal_tier = maps:get(causal_tier, Config, tier_0)
     },
     true = ets:insert(?TABLE, Entry),
     State2 = State1#state{

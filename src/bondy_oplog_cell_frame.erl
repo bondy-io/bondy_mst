@@ -105,7 +105,7 @@ For every other fold, `ValueBytes` is the output of
 
 `ValueEqualsState` is the fold's declared mode (the encoder doesn't
 look at the fold itself; the caller resolves the boolean via
-`bondy_oplog_fold:value_equals_state/1`).
+the CRDT `value_equals_state/0` callback).
 """.
 -spec encode(
     Hlc :: bondy_oplog_hlc:hlc(),

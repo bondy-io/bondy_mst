@@ -1,64 +1,73 @@
-# Fold strategies: pluggable CRDT merge
+# The CRDT catalogue (formerly: fold strategies)
 
 > Audience: anyone declaring a new namespace, or curious why one
-> substrate can serve LWW, OR-Set, presence, and strict-uniqueness
-> all at once.
+> substrate can serve LWW, counters, sets, presence and concurrency-
+> detecting types all at once.
 > Time to read: ~15 min.
 
-`bondy_mst` is **fold-agnostic**. The substrate appends events,
+> **As-built status (PR-Z, 2026-06).** The state-based **fold** family
+> (`bondy_oplog_fold` + `bondy_oplog_fold_*`) described historically in
+> this chapter has been **retired**. Every cell type is now a native
+> **operation-based CRDT** implementing the `bondy_oplog_crdt` behaviour,
+> selected per table via `crdt_module` (a `fold_module` label is accepted
+> as a zero-migration alias and resolved to its byte-identical CRDT twin
+> by `bondy_oplog_cell_kernel:default_crdt_for_fold/1`). The sections
+> below are kept for the conceptual model (idempotency, causal
+> monotonicity, the per-type merge rules) — read `apply_event/3 →
+> apply_op/3`, `merge_states` → "removed (convergence is op-based via
+> `interpret_cog`)", and "fold module" → "CRDT module". The two design
+> dials are now load-bearing (see below).
+
+`bondy_mst` is **CRDT-agnostic**. The substrate appends events,
 replicates them, applies them — but it does not know what an event
-*means*. The meaning lives in a per-namespace **fold module** that
-implements the `bondy_oplog_fold` behaviour.
+*means*. The meaning lives in a per-table **CRDT module** that
+implements the `bondy_oplog_crdt` behaviour.
 
-A fold module is — at its core — a function:
+A CRDT module is — at its core — a single-operation step plus a
+projection:
 
 ```
-{state', delta} = apply_event(state, event, meta)
-value           = to_value(state)
+state' = apply_op(state, op, key)          %% one operation, in key order
+state' = interpret_cog(events, state)      %% a group, the SEC primitive
+value  = to_value(state)
 ```
 
-Idempotent, monotonic, deterministic. That is the entire contract.
-With it, you can build any op-based CRDT.
+Idempotent, commutative (for `order_independent` types), deterministic.
+`apply_op/3` is the eager O(1) write step the applier runs to maintain
+the materialised cell; `interpret_cog/2` re-interprets a whole group in
+canonical key order (the Strong-Eventual-Consistency primitive used on
+read overlays and compaction). For a commutative CRDT the two agree, so
+the applier never re-folds history on the hot path.
 
-`apply_event/3` is the op-handler. Each call returns **both** the new
-fold accumulator and the value-delta the operation produced. A `none`
-delta signals "this op did not move the value" (dedup, no-op,
-monotone-rejected); any other term is fold-defined and combined into
-the cell's value column via `apply_value_delta/2`. Because the
-op-handler is the single source of truth for value motion, there is no
-separate "delta detector" function that has to probe state shape to
-recover what `apply_event/3` already knew.
+## The two design dials
 
-`apply_event/3` takes a third `meta` argument carrying the WAL event
-key (`{Hlc, Origin, Seq}`); folds use it when their merge rule reads
-the per-event HLC or needs the originating replica's identity (PN-
-Counter dedups per-Origin Seq; G-Set tracks `max(Hlc)`). Older
-single-event folds ignore the argument and behave as before.
+Every CRDT declares two orthogonal properties (`architecture_regrounding`
+§2):
 
-`to_value/1` projects the user-visible value out of the internal
-state. For most folds the value is a structural subset of the state
-(LWW returns `V` from `{V, Hlc}`; G-Set returns the ordset from
-`{Set, MaxHlc}`); for PN-Counter the value is a derived sum. The
-substrate calls `to_value(initial_value())` once at cold-start to seed
-the value column; from then on, the column is **maintained
-incrementally** by `apply_value_delta/2` on each non-`none` delta the
-op-handler emits. The cell frame stores both the encoded state and the
-projected value so reads can serve the value byte-for-byte without
+- **`causal_tier()`** — the clock. `tier_0` rides the scalar HLC dot
+  (sufficient for commutative types: LWW, counters, sets, max/min,
+  presence). `tier_2` carries a per-cell **Dotted Version Vector**
+  (`bondy_dvvset`) so `interpret_cog` can detect true concurrency — the
+  multi-value register (`bondy_oplog_crdt_mv_register`) and the add-wins
+  map (`bondy_oplog_crdt_aw_map`), which a scalar HLC cannot express.
+- **`order_independent()`** — `true` for the O(1) eager step (the
+  common case); `false` for a type that must re-interpret its live group
+  on write (e.g. `bounded_counter`, deferred — no production use).
+
+A `tier_2` CRDT must be `order_independent` (the DVV join is
+commutative); the open-table path asserts this.
+
+`to_value/1` projects the user-visible value out of the internal state.
+A CRDT with `value_equals_state() -> true` (e.g. the secondary
+`index_entry` CRDT) stores no separate value column — the state bytes
+*are* the value bytes; otherwise the frame stores `term_to_binary(
+to_value(state))` so reads serve the value byte-for-byte without
 re-folding.
 
-> **Not in this chapter.** Two adjacent behaviours are easy to
-> confuse with `bondy_oplog_fold`:
->
-> - **`bondy_oplog_crdt`** — the **compaction-time COG interpreter**
->   (`interpret_cog/2` over the stable prefix). Different callbacks,
->   different concern. Covered in [chapter 06](06_compaction_and_bootstrap.md).
-> - **`bondy_oplog_merge_strategy`** — a one-callback behaviour
->   (`merge/3`) that resolves the rare case where the MST sees two
->   values for the same event key (default is strict-uniqueness:
->   crash loudly).
->
-> The substrate carries all three as separate fields on the instance
-> (`fold_module`, `crdt_module`, `merge_strategy`).
+> **Adjacent behaviour.** `bondy_oplog_merge_strategy` — a one-callback
+> behaviour (`merge/3`) — resolves the rare case where the MST sees two
+> values for the same event key (default is strict-uniqueness: crash
+> loudly). It is unrelated to the CRDT catalogue and survives unchanged.
 
 ## The behaviour, at a glance
 

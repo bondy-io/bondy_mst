@@ -655,7 +655,6 @@ fold_config_test_() ->
     {setup, fun setup/0, fun cleanup/1, [
         fun fold_module_defaults_to_undefined/0,
         fun fold_module_shorthand_accepted/0,
-        fun fold_module_map_of_fields_accepted/0,
         fun fold_module_custom_module_accepted/0,
         fun fold_module_unknown_atom_crashes_init/0,
         fun fold_module_non_atom_crashes_init/0,
@@ -684,22 +683,9 @@ fold_module_shorthand_accepted() ->
     ?assertEqual(#{}, maps:get(fold_opts, Info)),
     ok = bondy_oplog:stop_instance(Id).
 
-fold_module_map_of_fields_accepted() ->
-    Id = mk_id(),
-    Opts = #{<<"f_lww">> => lww_register},
-    {ok, _} = bondy_oplog:start_instance(Id, #{
-        fold_module => map_of_fields,
-        fold_opts => #{fields => Opts}
-    }),
-    Info = bondy_oplog:info(Id),
-    ?assertEqual(map_of_fields, maps:get(fold_module, Info)),
-    ?assertEqual(#{fields => Opts}, maps:get(fold_opts, Info)),
-    ok = bondy_oplog:stop_instance(Id).
-
 fold_module_custom_module_accepted() ->
-    %% A loaded module that happens to export all mandatory fold
-    %% callbacks is acceptable — `validate/1` doesn't require the
-    %% module to declare `-behaviour(bondy_oplog_fold)` explicitly.
+    %% The fully-qualified former-fold module name is a valid label — it
+    %% resolves to its native CRDT twin (PR-Z) and is recorded verbatim.
     Id = mk_id(),
     {ok, _} = bondy_oplog:start_instance(Id, #{
         fold_module => bondy_oplog_fold_lww_register
@@ -713,11 +699,11 @@ fold_module_unknown_atom_crashes_init() ->
     Result = bondy_oplog:start_instance(Id, #{
         fold_module => not_a_real_fold_module_xyz
     }),
-    %% init/1 raises; the supervisor surfaces the wrapped reason.
-    %% We assert on the unwrapped structured reason and skip
-    %% stop_instance — the instance never started.
+    %% init/1 raises (the label has no native CRDT twin); the supervisor
+    %% surfaces the wrapped reason. We assert on the unwrapped structured
+    %% reason and skip stop_instance — the instance never started.
     ?assertMatch(
-        {error, {invalid_fold_module, Id, {module_not_loadable, _, _}}},
+        {error, {invalid_fold_module, Id, {unknown, not_a_real_fold_module_xyz}}},
         normalize_start_error(Result)
     ).
 
@@ -725,7 +711,7 @@ fold_module_non_atom_crashes_init() ->
     Id = mk_id(),
     Result = bondy_oplog:start_instance(Id, #{fold_module => 42}),
     ?assertMatch(
-        {error, {invalid_fold_module, Id, {unknown_strategy, 42}}},
+        {error, {invalid_fold_module, Id, {unknown, 42}}},
         normalize_start_error(Result)
     ).
 
@@ -753,14 +739,14 @@ fold_opts_passed_through_verbatim() ->
 registry_exposes_fold_fields() ->
     Id = mk_id(),
     {ok, _} = bondy_oplog:start_instance(Id, #{
-        fold_module => strict_register,
+        fold_module => lww_register,
         fold_opts => #{tag => abc}
     }),
-    ?assertEqual(strict_register, bondy_oplog_registry:fold_module(Id)),
+    ?assertEqual(lww_register, bondy_oplog_registry:fold_module(Id)),
     ?assertEqual(#{tag => abc}, bondy_oplog_registry:fold_opts(Id)),
     %% Also verify presence in the full lookup map.
     {ok, Entry} = bondy_oplog_registry:lookup(Id),
-    ?assertMatch(#{fold_module := strict_register}, Entry),
+    ?assertMatch(#{fold_module := lww_register}, Entry),
     ?assertMatch(#{fold_opts := #{tag := abc}}, Entry),
     ok = bondy_oplog:stop_instance(Id).
 

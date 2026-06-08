@@ -22,7 +22,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(FOLD, bondy_oplog_fold_lww_register).
+-define(FOLD, bondy_oplog_crdt_lww_register).
 -define(SHARDS, 4).
 -define(KEYS, 32).
 -define(DB, mst_pack_leveled_e2e_db).
@@ -347,7 +347,7 @@ counter_inc_round_trip({_Topo, Db, _Sup, _LDir, _PDir}) ->
     %% out the PR-3 carry-over that requested a write-then-read e2e
     %% for `counter_inc/4` (§4.7).
     {ok, T} = bondy_db:open_table(Db, counters, #{
-        fold_module => bondy_oplog_fold_pn_counter
+        fold_module => bondy_oplog_crdt_pn_counter
     }),
     Realm = <<"r1">>,
     Key = <<"visits">>,

@@ -7,11 +7,25 @@ Bench.setup()
 # then starts a `bondy_oplog` instance per shard with the substrate
 # wired as the applier's `cell_apply_target`. Writes flow:
 #
-#     client → :bondy_oplog.append({cell_apply, B, K, Event})
-#            → WAL → applier.drain → fold → ProjectionEts.put_batch
+#     client → :bondy_oplog.append({cell_apply, B, K, Op})
+#            → WAL → applier.drain
+#            → cell kernel apply_op (op-based CRDT, PR-Z)
+#            → ProjectionEts.put_batch
 #
 # Reads flow through the substrate: cache-fast, projection on miss
 # (which populates the cache).
+#
+# TARGETS (per instance / per shard): 4,000 writes/s on the durable stack
+# (leveled projection + pack MST + per_write fsync) and 20,000 writes/s on
+# the ephemeral stack (ets projection + ets MST + batched fsync). The
+# console summary prints the per-instance applier rate and PASS/BELOW vs
+# these targets for `write_only` scenarios.
+#
+# COMPACTION (COMPACT=true, default): periodic compaction bounds the MST so
+# the run is steady-state-production-realistic (without it the MST grows
+# unbounded and `mst_install` dominates — an artifact). Use long durations
+# (DURATION_S=300..600) to measure sustained throughput. See the compaction
+# block near the bottom.
 #
 # Tune via env: DURATION_S (default 10), WARMUP_MS (default 500),
 # SHARDS (default 4), PREPOPULATE (default 10000), WRITERS (default 4),
@@ -152,7 +166,36 @@ IO.puts(
 )
 
 bucket = ""
-fold = :bondy_oplog_fold_lww_register
+
+# Op-based CRDT module the cells are projected through (PR-Z: the fold
+# family is retired; every table is a native `bondy_oplog_crdt`). Default
+# `lww_register` — the register the original bench used, now its byte-
+# identical native twin. Override with `CRDT=g_set` / `pn_counter` to bench
+# a different commutative type, or `CRDT=aw_map` for the tier_2 add-wins map.
+# The write op (`build_cell_op`) is `{:set, hlc, v}`, which lww_register
+# consumes directly; for a different CRDT, adjust `build_cell_op`.
+crdt_label = System.get_env("CRDT", "lww_register")
+
+crdt_module =
+  case crdt_label do
+    "lww_register" -> :bondy_oplog_crdt_lww_register
+    "g_set" -> :bondy_oplog_crdt_g_set
+    "pn_counter" -> :bondy_oplog_crdt_pn_counter
+    "g_counter" -> :bondy_oplog_crdt_g_counter
+    "aw_map" -> :bondy_oplog_crdt_aw_map
+    other -> String.to_atom("bondy_oplog_crdt_" <> other)
+  end
+
+# The oplog INSTANCE needs a `fold_module` LABEL on its start opts so its
+# compaction guard (`do_compact_async`) treats it as compaction-eligible —
+# production `bondy_db:start_shard_instance/9` pins this. It only gates the
+# guard + chooses the compaction path; the applier's per-instance fold
+# projection is gated on the REGISTRY `fold_module` (kept `:undefined` here),
+# so this adds NO per-event fold work. Worker `crdt_module` stays undefined →
+# the projection-backed catalogue (truncate-only) path.
+instance_fold_label = String.to_atom(crdt_label)
+
+IO.puts("[e2e] crdt_module=#{crdt_module} (op-based)")
 
 leveled_root = "/tmp/bondy_mst_bench_leveled/#{:os.getpid()}"
 
@@ -253,7 +296,11 @@ make_ctx = fn prefix, profile ->
         projection_adapter: adapter,
         projection_handle: ph,
         overlay: ov,
-        fold_module: fold,
+        # The op-based kernel: `crdt_module` drives the cell projection
+        # (`bondy_oplog_cell_kernel:from_modules/2` selects `{crdt, _}`).
+        # `fold_module` is unset (the fold path is retired).
+        fold_module: :undefined,
+        crdt_module: crdt_module,
         owner: self()
       }
 
@@ -291,7 +338,16 @@ make_ctx = fn prefix, profile ->
         :bondy_oplog.start_instance(
           instance_id,
           Map.merge(mst_opts, %{
-            fold_module: fold,
+            # The cell projection runs through the registry entry's
+            # `crdt_module` (cell_apply_target → cell_apply_ctx). The
+            # per-instance fold projection is unused by this bench.
+            #
+            # `fold_module` LABEL marks the instance compaction-eligible
+            # (matches production `bondy_db:start_shard_instance/9`); without
+            # it `do_compact_async` returns `{error, no_crdt_module}` and the
+            # MST grows unbounded. It does NOT enable the per-instance fold
+            # projection (that's gated on the registry fold_module, undefined).
+            fold_module: instance_fold_label,
             fsync_mode: profile.fsync,
             max_install_in_flight: max_in_flight,
             install_coalesce_max: install_coalesce_max,
@@ -576,6 +632,57 @@ scenarios =
 
       filtered
   end
+
+# ----- compaction (production-realistic MST bounding) -----
+#
+# Without compaction the MST grows unbounded over the run and `mst_install`
+# (the spine rebuild) comes to dominate throughput — a bench artifact, not a
+# production limit (production compacts to bound the MST). `COMPACT=true`
+# (default) periodically advances each shard's stability frontier via a
+# self-peer ack, then compacts — keeping the MST small like a steady-state
+# production node. The gc_scheduler's built-in `default_trigger` compacts
+# but CANNOT advance the frontier in a single-node bench (no peer acks a
+# root), so it truncates nothing; the explicit self-peer here is what makes
+# compaction effective. `COMPACT_INTERVAL_MS` tunes the cadence (smaller =
+# smaller MST + faster installs + more compaction overhead).
+compact? = System.get_env("COMPACT", "true") in ["1", "true"]
+
+compact_interval_ms =
+  String.to_integer(System.get_env("COMPACT_INTERVAL_MS", "1000"))
+
+if compact? do
+  compact_trigger = fn instance_id ->
+    try do
+      case :bondy_oplog.root_hash(instance_id) do
+        :undefined ->
+          :ok
+
+        root ->
+          :bondy_oplog_peer_state.record_sync_complete(
+            {:peer, :bench_compact},
+            instance_id,
+            root
+          )
+
+          :bondy_oplog_peer_state.sync()
+          _ = :bondy_oplog.compact(instance_id)
+          :ok
+      end
+    catch
+      _kind, _reason -> :ok
+    end
+  end
+
+  :ok = :bondy_oplog_gc_scheduler.set_trigger(compact_trigger)
+  :ok = :bondy_oplog_gc_scheduler.set_interval_ms(compact_interval_ms)
+
+  IO.puts(
+    "[e2e] compaction ENABLED (self-peer frontier, interval=#{compact_interval_ms}ms)"
+  )
+else
+  :ok = :bondy_oplog_gc_scheduler.set_trigger(:undefined)
+  IO.puts("[e2e] compaction DISABLED (MST grows unbounded — install-bound)")
+end
 
 runs =
   for profile <- profiles,

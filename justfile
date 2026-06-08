@@ -50,7 +50,7 @@ bench-primitives:
     cd {{bench_dir}} && mix deps.get
     cd {{bench_dir}} && mix run benchmarks/primitives.exs
 
-# Run the CRDT fold benchmarks (apply_event, merge_states, codec).
+# Run the native CRDT primitive benchmarks (apply_op, interpret_cog, codec).
 bench-folds:
     rebar3 compile
     cd {{bench_dir}} && mix deps.get

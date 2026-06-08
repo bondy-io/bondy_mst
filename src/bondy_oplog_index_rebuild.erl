@@ -17,10 +17,10 @@ Serialised rebuild orchestrator for the secondary indexes
 
 A secondary index is a deterministic function of the primary and is never
 persisted (always ETS, wiped on node death). It is therefore *rebuildable*
-at any time by re-folding the primary's MST — the authoritative source.
-This singleton gen_server is the one place rebuilds run, so they never
-race each other (a clear interleaving another rebuild's flush would lose
-data).
+at any time from the primary's converged projection — the authoritative
+source. This singleton gen_server is the one place rebuilds run, so they
+never race each other (a clear interleaving another rebuild's flush would
+lose data).
 
 ## What a rebuild does
 
@@ -31,10 +31,13 @@ For one index `(NS, IndexName)`:
    shard's ETS projection (so orphaned terms do not survive), reset the
    in-flight counter, and reset freshness to stale so reads refuse mid
    rebuild.
-2. **Re-fold** every primary shard's MST via
-   `bondy_oplog_applier:rebuild_indexes_sync/1`. That walks the whole MST
-   and re-dispatches a `put` for every live term of every cell, bypassing
-   the back-pressure cap so the full working set lands in one pass.
+2. **Re-derive** every primary shard's index via
+   `bondy_oplog_applier:rebuild_indexes_sync/1`. That reads each live
+   cell's CURRENT projection value and re-dispatches a `put` for every live
+   term of every cell, bypassing the back-pressure cap so the full working
+   set lands in one pass. (Reading the converged value, rather than
+   replaying the cell's events, is what keeps a context-carrying tier_2
+   index from latching superseded multi-value siblings.)
 3. **Flush** every secondary writer in the namespace (the target index
    plus any sibling indexes that received idempotent re-puts from the
    shared re-fold), draining buffers and decrementing in-flight counters.
