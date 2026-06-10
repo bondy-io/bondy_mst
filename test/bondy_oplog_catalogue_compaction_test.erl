@@ -59,7 +59,9 @@ catalogue_compaction_test_() ->
         {timeout, 30, fun idempotent_after_truncation/0},
         {timeout, 30, fun no_projection_defers_truncation/0},
         {timeout, 30, fun neither_fold_nor_crdt_returns_error/0},
-        {timeout, 30, fun crdt_kernel_compaction_matches_from_scratch/0}
+        {timeout, 30, fun crdt_kernel_compaction_matches_from_scratch/0},
+        {timeout, 30, fun remote_event_survives_catalogue_compaction/0},
+        {timeout, 30, fun async_catch_up_uses_cast_not_sync_calls/0}
     ]}.
 
 %% =============================================================================
@@ -265,6 +267,137 @@ crdt_kernel_compaction_matches_from_scratch() ->
         close_shard(BC, BP)
     end.
 
+%% A genuinely-REMOTE event (authored on B, pulled into A via sync, so it
+%% carries B's origin) must survive A's catalogue compaction. The pre-truncate
+%% catch-up runs only when `remote_events_pending` is set (by
+%% `integrate_peer_root`), and folds only remote-origin events
+%% (`remote_pairs/2`). If either gate were wrong the remote event would be
+%% dropped by the truncate and lost — this pins that it is folded into A's
+%% projection before the truncate.
+remote_event_survives_catalogue_compaction() ->
+    AId = mk_id(),
+    ANS = ns_of(AId),
+    BId = mk_id(),
+    BNS = ns_of(BId),
+    {AC, AP} = register_shard(ANS, primary, 0, lww_register),
+    {BC, BP} = register_shard(BNS, primary, 0, lww_register),
+    {ok, _} = open_instance(AId, ANS, bondy_oplog_origin:new(), lww_register),
+    {ok, _} = open_instance(BId, BNS, bondy_oplog_origin:new(), lww_register),
+    try
+        %% A local event on A.
+        append_cell(AId, <<"l">>, 60, <<"lval">>),
+        _ = bondy_oplog_instance:await_apply(AId),
+        %% A remote event authored on B.
+        append_cell(BId, <<"r">>, 50, <<"rval">>),
+        _ = bondy_oplog_instance:await_apply(BId),
+        %% A pulls B's r-event into its MST (B-origin → remote on A). This
+        %% sets A's `remote_events_pending`. Compact immediately (no await)
+        %% so the catch-up — not the async replay — does the fold.
+        {ok, _} = bondy_oplog:sync(AId, BId),
+
+        %% Frontier = whole tree ⇒ truncate everything, including r.
+        ARoot = bondy_oplog_instance:root_hash(AId),
+        %% With a remote event pending, the catch-up is ASYNCHRONOUS: the
+        %% instance hands the remote pairs to the applier (`catch_up_apply/3`)
+        %% and DEFERS the truncate until the applier casts `{catch_up_done}`
+        %% back — the cross-node deadlock fix. So `compact/2` returns
+        %% `{ok, compaction_pending}` and the MST empties a beat later. (If
+        %% the async `replay_cell_events` had already folded r, the remote
+        %% set is empty and the truncate runs inline as `{ok, {compacted,…}}`
+        %% — either reply is acceptable.)
+        Res = bondy_oplog_instance:compact(AId, [ARoot]),
+        ?assert(
+            Res =:= {ok, compaction_pending} orelse
+                (is_tuple(Res) andalso element(1, Res) =:= ok)
+        ),
+        ok = await_size(AId, 0, 200),
+
+        %% Both cells read back from A's projection post-truncation.
+        ?assertEqual({<<"rval">>, 50}, bondy_db_core:read(ANS, primary, <<"r">>)),
+        ?assertEqual({<<"lval">>, 60}, bondy_db_core:read(ANS, primary, <<"l">>))
+    after
+        ok = bondy_oplog:stop_instance(AId),
+        ok = bondy_oplog:stop_instance(BId),
+        ok = bondy_db_core_registry:unregister(ANS, primary, 0),
+        ok = bondy_db_core_registry:unregister(BNS, primary, 0),
+        close_shard(AC, AP),
+        close_shard(BC, BP)
+    end.
+
+%% Falsifies the cross-node compaction↔commit deadlock. With a remote event
+%% pending, the compaction commit MUST hand the projection fold to the
+%% applier via a CAST (`catch_up_apply/3`) and make ZERO synchronous calls
+%% back to the applier. The removed synchronous calls — `last_replayed_root/1`
+%% and `apply_replayed_pairs/3` — are exactly what deadlocked against the
+%% applier's own synchronous `drain_install_queue` call (`commit_now/1`) the
+%% moment a compaction overlapped a commit boundary. We trace the applier API
+%% during `compact/2` and assert the sync calls are gone and the cast is used.
+%% (The remote event `r` sits in the whole-tree truncation range, so the
+%% async path is taken deterministically — `RemotePairs` is non-empty.)
+async_catch_up_uses_cast_not_sync_calls() ->
+    AId = mk_id(),
+    ANS = ns_of(AId),
+    BId = mk_id(),
+    BNS = ns_of(BId),
+    {AC, AP} = register_shard(ANS, primary, 0, lww_register),
+    {BC, BP} = register_shard(BNS, primary, 0, lww_register),
+    {ok, _} = open_instance(AId, ANS, bondy_oplog_origin:new(), lww_register),
+    {ok, _} = open_instance(BId, BNS, bondy_oplog_origin:new(), lww_register),
+    Patterns = [
+        {bondy_oplog_applier, last_replayed_root, 1},
+        {bondy_oplog_applier, apply_replayed_pairs, 3},
+        {bondy_oplog_applier, catch_up_apply, 3}
+    ],
+    try
+        append_cell(AId, <<"l">>, 60, <<"lval">>),
+        _ = bondy_oplog_instance:await_apply(AId),
+        append_cell(BId, <<"r">>, 50, <<"rval">>),
+        _ = bondy_oplog_instance:await_apply(BId),
+        %% A pulls B's r-event in → A.remote_events_pending = true.
+        {ok, _} = bondy_oplog:sync(AId, BId),
+
+        [erlang:trace_pattern(P, true, [global]) || P <- Patterns],
+        _ = erlang:trace(all, true, [call]),
+        try
+            ARoot = bondy_oplog_instance:root_hash(AId),
+            _ = bondy_oplog_instance:compact(AId, [ARoot]),
+            ok = await_size(AId, 0, 200)
+        after
+            _ = erlang:trace(all, false, [call]),
+            [erlang:trace_pattern(P, false, [global]) || P <- Patterns]
+        end,
+        {LastRoot, ApplyPairs, CatchUp} = collect_applier_trace(0, 0, 0),
+        %% The deadlock-causing synchronous calls are GONE.
+        ?assertEqual(0, LastRoot),
+        ?assertEqual(0, ApplyPairs),
+        %% The async cast path was taken (and the deferred truncate landed —
+        %% `await_size` above already proved that).
+        ?assert(CatchUp >= 1),
+        %% And the remote event survived the truncate.
+        ?assertEqual({<<"rval">>, 50}, bondy_db_core:read(ANS, primary, <<"r">>))
+    after
+        ok = bondy_oplog:stop_instance(AId),
+        ok = bondy_oplog:stop_instance(BId),
+        ok = bondy_db_core_registry:unregister(ANS, primary, 0),
+        ok = bondy_db_core_registry:unregister(BNS, primary, 0),
+        close_shard(AC, AP),
+        close_shard(BC, BP)
+    end.
+
+%% Drains call-trace messages for the three applier MFAs, returning the
+%% per-MFA counts.
+collect_applier_trace(L, A, C) ->
+    receive
+        {trace, _, call, {bondy_oplog_applier, last_replayed_root, _}} ->
+            collect_applier_trace(L + 1, A, C);
+        {trace, _, call, {bondy_oplog_applier, apply_replayed_pairs, _}} ->
+            collect_applier_trace(L, A + 1, C);
+        {trace, _, call, {bondy_oplog_applier, catch_up_apply, _}} ->
+            collect_applier_trace(L, A, C + 1)
+    after 100 ->
+        {L, A, C}
+    end.
+
 %% An instance with neither a fold nor a crdt module still reports
 %% `{error, no_crdt_module}` — the guard only enables compaction when at
 %% least one is configured.
@@ -283,6 +416,20 @@ neither_fold_nor_crdt_returns_error() ->
 %% =============================================================================
 %% Helpers
 %% =============================================================================
+
+%% Polls `bondy_oplog:size/1` until it reaches `Want` (the async compaction
+%% truncate lands a beat after `compact/2` returns `{ok, compaction_pending}`)
+%% or `Retries` 10ms ticks elapse.
+await_size(_InstId, _Want, 0) ->
+    {error, timeout};
+await_size(InstId, Want, Retries) ->
+    case bondy_oplog:size(InstId) of
+        Want ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            await_size(InstId, Want, Retries - 1)
+    end.
 
 mk_id() ->
     list_to_binary(

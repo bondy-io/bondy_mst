@@ -79,6 +79,17 @@ defmodule Bench.E2E do
     mem_start = :erlang.memory(:total)
     {mem_probe, mem_probe_ref} = spawn_monitor_mem_probe(mem_start)
 
+    # Mid-run telemetry sampler. Prints the accumulated stage
+    # trajectory (applied Δ/s, compaction p50/p99 + events removed,
+    # mst_install p50/p99) to stdout every SAMPLE_MS ms while the run is
+    # in flight. The default-off behaviour is preserved by SAMPLE_MS=0.
+    # Crucial for the sync-compaction diagnostic: `Telemetry.collect`
+    # only fires AFTER the barrier, so when the drain hangs the
+    # cumulative table is the only thing we'd otherwise see — and it
+    # can't tell a growing per-cycle cost (runaway) from a starved
+    # install pipeline. The sampler shows the trajectory live.
+    sampler = spawn_sampler(telemetry_state, name)
+
     op_hists = Map.new(workloads, fn {label, _} -> {label, Hist.new()} end)
 
     op_errors =
@@ -134,9 +145,34 @@ defmodule Bench.E2E do
     # `applier_applied` count covers everything the workers appended,
     # not just whatever happened to be drained while they were busy.
     # Measure the drain so reports can show how long the tail took.
+    # The barrier (drain) is wrapped so a timeout/crash does NOT abort
+    # the run: we still stop the sampler, collect the (partial)
+    # telemetry, and let the sweep continue to the next shard count.
+    # `drain_failed?` is surfaced in the run map + console so a
+    # non-drained result is never mistaken for a clean one — its
+    # ops/sec is optimistic (events still in the overlay).
     drain_t0 = :erlang.monotonic_time(:millisecond)
-    _ = barrier_fun.(ctx)
+
+    drain_result =
+      try do
+        _ = barrier_fun.(ctx)
+        :ok
+      rescue
+        e -> {:drain_failed, Exception.message(e)}
+      catch
+        kind, reason -> {:drain_failed, {kind, reason}}
+      end
+
     drain_ms = :erlang.monotonic_time(:millisecond) - drain_t0
+    drain_failed? = match?({:drain_failed, _}, drain_result)
+    stop_sampler(sampler)
+
+    if drain_failed? do
+      IO.puts(
+        "[e2e] ⚠ DRAIN FAILED after #{drain_ms}ms (#{inspect(drain_result)}) — " <>
+          "collecting PARTIAL telemetry; reported ops/sec is optimistic"
+      )
+    end
 
     stage_stats = Telemetry.collect(telemetry_state)
 
@@ -164,6 +200,7 @@ defmodule Bench.E2E do
       name: name,
       duration_seconds: duration_s,
       drain_ms: drain_ms,
+      drain_failed: drain_failed?,
       warmup_ms: warmup_ms,
       shard_count: shard_count,
       ops: op_stats,
@@ -191,6 +228,69 @@ defmodule Bench.E2E do
   """
   def write_index(runs) when is_list(runs) do
     Report.write_index(@output_subdir, runs)
+  end
+
+  # ----- mid-run telemetry sampler -----
+  #
+  # A plain (unlinked) process so a crash in the main run does NOT take
+  # it down before it prints the trajectory leading up to the crash —
+  # and so it never perturbs the trap_exit worker-wait. It self-stops on
+  # `:stop` (sent after the barrier) and otherwise dies with the VM at
+  # the end of this `mix run` invocation (each sweep point is its own
+  # BEAM). SAMPLE_MS=0 disables it.
+
+  defp spawn_sampler(telemetry_state, name) do
+    interval_ms = String.to_integer(System.get_env("SAMPLE_MS", "5000"))
+
+    if interval_ms <= 0 do
+      nil
+    else
+      t0 = :erlang.monotonic_time(:millisecond)
+      spawn(fn -> sampler_loop(telemetry_state, name, t0, interval_ms, %{}) end)
+    end
+  end
+
+  defp stop_sampler(nil), do: :ok
+
+  defp stop_sampler(pid) do
+    send(pid, :stop)
+    :ok
+  end
+
+  defp sampler_loop(telemetry_state, name, t0, interval_ms, prev) do
+    receive do
+      :stop -> :ok
+    after
+      interval_ms ->
+        snap = Telemetry.snapshot(telemetry_state)
+        elapsed_s = (:erlang.monotonic_time(:millisecond) - t0) / 1_000
+        print_sample(name, elapsed_s, snap, prev, interval_ms)
+        sampler_loop(telemetry_state, name, t0, interval_ms, snap)
+    end
+  end
+
+  defp print_sample(name, elapsed_s, snap, prev, interval_ms) do
+    ivl_s = interval_ms / 1_000
+    r0 = fn x -> round(x) end
+
+    applied = get_in(snap, [:applier_applied, :count]) || 0
+    d_applied = applied - (get_in(prev, [:applier_applied, :count]) || 0)
+
+    comp = snap[:compaction]
+    d_comp_calls = comp.batches - (get_in(prev, [:compaction, :batches]) || 0)
+    d_comp_removed = comp.count - (get_in(prev, [:compaction, :count]) || 0)
+
+    inst = snap[:mst_install]
+    cell = snap[:batch_cell_apply]
+
+    IO.puts(
+      "[sample #{name} t=+#{r0.(elapsed_s)}s] " <>
+        "applied=#{applied} (#{r0.(d_applied / ivl_s)}/s) | " <>
+        "comp n=#{comp.batches}(+#{d_comp_calls}) removed=#{comp.count}(+#{d_comp_removed}) " <>
+        "p50=#{r0.(comp.p50_us)}µs p99=#{r0.(comp.p99_us)}µs | " <>
+        "mst_install n=#{inst.batches} p50=#{r0.(inst.p50_us)}µs p99=#{r0.(inst.p99_us)}µs | " <>
+        "cell_apply p50=#{r0.(cell.p50_us)}µs p99=#{r0.(cell.p99_us)}µs"
+    )
   end
 
   # ----- worker loop -----

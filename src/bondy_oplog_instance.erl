@@ -11,6 +11,11 @@
 -include("bondy_mst.hrl").
 -include("bondy_oplog.hrl").
 
+%% Watchdog for an in-flight async compaction catch-up: if the applier
+%% never casts `{catch_up_done, _}` back (crash mid-fold, dropped cast),
+%% clear the pending record after this long so compaction can resume.
+-define(CATCH_UP_TIMEOUT_MS, 30000).
+
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
 The per-instance Merkle Search Tree owner
@@ -56,6 +61,20 @@ and Seq counters live in `atomics` cells inside the state record so
 a future lock-free local-append path can move out of the gen_server
 without protocol changes.
 """).
+
+%% An asynchronous compaction catch-up in flight (the cross-node
+%% deadlock fix). Set when the `{compact}` handler hands the
+%% remote-origin pairs to the applier via `catch_up_apply/3` and DEFERS
+%% the truncate until the applier casts `{catch_up_done, Token}` back.
+%% `remote_gen` is the value captured at step 1; if it has advanced by
+%% step 2, a peer event slipped into the window and the truncate is
+%% aborted (next tick recomputes). See `begin_async_catch_up/3`.
+-record(pending_compaction, {
+    frontier :: bondy_oplog_event:event_key(),
+    remote_gen :: non_neg_integer(),
+    token :: non_neg_integer(),
+    started :: integer()
+}).
 
 -record(state, {
     instance_id :: binary(),
@@ -171,7 +190,42 @@ without protocol changes.
     %% gate its WAL drain on the durable two-state machine
     %% (`pre_bootstrap | live`). See
     %% `_design/catalogue_expansion_plan.md` §2.
-    lifecycle :: bondy_oplog_bootstrap_lifecycle:handle()
+    lifecycle :: bondy_oplog_bootstrap_lifecycle:handle(),
+    %% Set when a peer-merged (remote) event has entered the MST since the
+    %% last catalogue compaction. ONLY remote events need the pre-truncate
+    %% projection catch-up (`begin_async_catch_up/3`): local events are
+    %% written to the projection by the applier's WAL-drain path before
+    %% their MST install, so they are always already materialised. When this
+    %% is `false` the catch-up is skipped entirely and the compaction
+    %% commits the truncate inline. When `true` the truncate is deferred
+    %% behind the applier's `catch_up_apply/3` fold (the cross-node deadlock
+    %% fix). Set in the `integrate_peer_root` handler; cleared on a
+    %% successful truncate in `finalize_catalogue_compaction/3`.
+    remote_events_pending = false :: boolean(),
+    %% Memoised "does a projection materialise this instance's state?"
+    %% (the applier has a resolved `cell_apply_target`). It is an
+    %% IMMUTABLE property fixed at applier init, but the only way to learn
+    %% it is a `gen_server:call` to the applier — which MUST NOT happen on
+    %% every compaction: the applier issues a synchronous
+    %% `drain_install_queue` call back to the instance on every commit
+    %% boundary, so an instance→applier call from inside the (synchronous)
+    %% compaction handler deadlocks both gen_servers whenever a compaction
+    %% overlaps a commit. So resolve it ONCE and cache the definitive
+    %% answer here; every later compaction reads the cache and makes no
+    %% applier call. See `resolve_has_projection/1`.
+    has_projection = undefined :: undefined | boolean(),
+    %% Monotonic counter bumped every time a peer-merged event enters the
+    %% MST (`integrate_peer_root`). Captured at the start of an async
+    %% compaction catch-up and re-checked at the truncate so a peer event
+    %% arriving mid-catch-up aborts (and defers) the truncate rather than
+    %% dropping an un-folded event. See `pending_compaction`.
+    remote_gen = 0 :: non_neg_integer(),
+    %% The in-flight async compaction catch-up, or `undefined`. While set,
+    %% the `{compact}` handler skips (one catch-up per instance at a time).
+    pending_compaction = undefined :: undefined | #pending_compaction{},
+    %% Token source disambiguating a `{catch_up_done, _}` / compaction
+    %% watchdog from a superseded cycle.
+    compaction_token = 0 :: non_neg_integer()
 }).
 
 -type backend() :: map | ets | module().
@@ -317,6 +371,8 @@ without protocol changes.
 -ifdef(TEST).
 %% Exposed for the stability-frontier equivalence test.
 -export([compute_frontier_for/2]).
+%% Exposed for the catch-up remote-origin filter test.
+-export([remote_pairs/2]).
 -endif.
 
 %% =============================================================================
@@ -2054,7 +2110,14 @@ do_handle_call(
     {reply, ok, State#state{
         mst = MST2,
         live_size = compute_live_size(MST2),
-        max_local_installed_seq = MaxLocalSeq
+        max_local_installed_seq = MaxLocalSeq,
+        %% A peer-merged event entered the MST — the next catalogue
+        %% compaction must run the projection catch-up before truncating.
+        remote_events_pending = true,
+        %% Bump the generation so an async catch-up already in flight (or
+        %% one that captured this state) detects the new event at its
+        %% truncate guard and defers rather than truncating it un-folded.
+        remote_gen = State#state.remote_gen + 1
     }};
 do_handle_call(current_watermark, _From, State) ->
     {reply, State#state.watermark, State};
@@ -2065,6 +2128,14 @@ do_handle_call(get_compaction_checkpoint, _From, State) ->
         State#state.compaction_checkpoint_state
     ),
     {reply, Reply, State};
+do_handle_call({compact, _PeerRoots}, _From, #state{
+    pending_compaction = P
+} = State) when P =/= undefined ->
+    %% A two-step compaction catch-up is already in flight (awaiting the
+    %% applier's `{catch_up_done, _}`). Skip this tick — compaction is
+    %% idempotent and the next tick retries once the in-flight one
+    %% commits or aborts.
+    {reply, {ok, no_change}, State};
 do_handle_call({compact, PeerRoots}, _From, State) ->
     do_compact_sync(State, PeerRoots);
 do_handle_call({load_snapshot, NewWatermark, Snapshot}, _From, State) ->
@@ -2127,6 +2198,39 @@ handle_cast(check_drain_waiters, State) ->
     %% next install batch shrank the overlay, even though the overlay
     %% is already empty.
     {noreply, maybe_signal_drain_waiters(State)};
+handle_cast(
+    {catch_up_done, Token},
+    #state{
+        pending_compaction = #pending_compaction{
+            token = Token,
+            frontier = Frontier,
+            remote_gen = StartGen,
+            started = Started
+        }
+    } = State
+) when State#state.remote_gen =:= StartGen ->
+    %% Step 2 of the async catalogue catch-up. The applier confirmed the
+    %% remote pairs are folded into the projection AND no peer event entered
+    %% the MST during the catch-up window (`remote_gen` unchanged), so it is
+    %% safe to drop the stable prefix. Truncate + re-anchor + publish.
+    {_Reply, State1} = finalize_catalogue_compaction(State, Started, Frontier),
+    ok = publish(State1),
+    {noreply, State1};
+handle_cast(
+    {catch_up_done, Token},
+    #state{pending_compaction = #pending_compaction{token = Token}} = State
+) ->
+    %% A peer event landed during the catch-up window (`remote_gen`
+    %% advanced past the value captured at step 1). The applier folded the
+    %% (now possibly-stale) pairs idempotently, but truncating at this
+    %% frontier could drop the NEW remote event un-folded — so ABORT, leave
+    %% `remote_events_pending` set, and let the next compaction tick
+    %% recompute the frontier + catch-up against the fresh state.
+    {noreply, State#state{pending_compaction = undefined}};
+handle_cast({catch_up_done, _Token}, State) ->
+    %% Stale/superseded `{catch_up_done, _}` (no matching pending
+    %% compaction — already committed, aborted, or timed out). Ignore.
+    {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -2138,6 +2242,26 @@ handle_info(
     %% cache so the next append re-resolves the new pid via the
     %% registry.
     {noreply, State#state{wal_pid = undefined, wal_pid_monitor = undefined}};
+handle_info(
+    {compaction_catch_up_timeout, Token},
+    #state{pending_compaction = #pending_compaction{token = Token}} = State
+) ->
+    %% The applier never cast `{catch_up_done, _}` for this catch-up (crash
+    %% mid-fold, or a dropped cast). Clear the pending record so compaction
+    %% can resume; `remote_events_pending` stays true so the next tick
+    %% retries. No truncate ran, so nothing un-folded was dropped.
+    ?LOG_WARNING(#{
+        description =>
+            "bondy_oplog_instance compaction catch-up timed out; "
+            "deferring truncate to the next compaction tick",
+        instance_id => State#state.instance_id,
+        token => Token
+    }),
+    {noreply, State#state{pending_compaction = undefined}};
+handle_info({compaction_catch_up_timeout, _Token}, State) ->
+    %% Stale watchdog — the catch-up already committed, aborted, or was
+    %% superseded. Ignore.
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -2904,18 +3028,26 @@ truncate_below_or_equal(MST, Watermark) ->
 %% The truncate + projection flush + checkpoint always ran here; only the
 %% frontier moved in.
 %%
-%% A compaction is fully serial with every other gen_server message
-%% (appends, reads, `load_snapshot`), so there is no in-flight bookkeeping
-%% and no concurrency window. (This replaces the earlier async worker,
-%% whose sole justification — keeping an O(N) frontier off the gen_server —
-%% is gone now that the frontier is O(diff).)
+%% Compaction is serial with every other gen_server message (appends,
+%% reads, `load_snapshot`) EXCEPT the catalogue catch-up, which when a
+%% remote event is pending hands the projection fold to the applier and
+%% defers the truncate to a later `{catch_up_done, _}` cast (one such
+%% catch-up per instance at a time, tracked in `pending_compaction`). That
+%% deferral is what keeps the instance from blocking on the applier inside
+%% the compaction handler — the cross-node deadlock. Every other path
+%% (no projection, bare CRDT, or a projection with nothing remote to fold)
+%% still commits inline with no applier interaction.
 do_compact_sync(
     #state{crdt_module = undefined, fold_module = undefined} = State,
     _PeerRoots
 ) ->
     {reply, {error, no_crdt_module}, State};
-do_compact_sync(#state{} = State, PeerRoots) ->
+do_compact_sync(#state{} = State0, PeerRoots) ->
     Started = erlang:monotonic_time(),
+    %% Resolve (and memoise) projection-presence BEFORE the compaction body
+    %% so the body makes no per-cycle `gen_server:call` to the applier (the
+    %% instance↔applier deadlock — see the `has_projection` state field).
+    {HasProjection, State} = resolve_has_projection(State0),
     Result = run_compaction(
         State#state.instance_id,
         State#state.mst,
@@ -2924,11 +3056,22 @@ do_compact_sync(#state{} = State, PeerRoots) ->
         State#state.compaction_checkpoint,
         State#state.compaction_checkpoint_state,
         State#state.cached_checkpoint,
-        State#state.crdt_module
+        State#state.crdt_module,
+        HasProjection
     ),
-    {Reply, State1} = commit_compaction(State, Started, Result),
-    ok = publish(State1),
-    {reply, Reply, State1}.
+    case Result of
+        {ok, {catalogue_compacted, Frontier}} when
+            State#state.remote_events_pending
+        ->
+            %% Remote events may lag the projection — fold them via the
+            %% applier (async) BEFORE truncating. Step 1 here; step 2 is
+            %% `handle_cast({catch_up_done, _})`.
+            begin_async_catch_up(State, Started, Frontier);
+        _ ->
+            {Reply, State1} = commit_compaction(State, Started, Result),
+            ok = publish(State1),
+            {reply, Reply, State1}
+    end.
 
 %% @private
 run_compaction(
@@ -2939,7 +3082,8 @@ run_compaction(
     CkptMod,
     CkptState,
     CachedCheckpoint,
-    CrdtMod
+    CrdtMod,
+    HasProjection
 ) ->
     try
         case compute_frontier_for(MST, PeerRoots) of
@@ -2958,7 +3102,9 @@ run_compaction(
                 %% `interpret_cog` on write) takes the catalogue path even
                 %% though it also has a `crdt_module`. See
                 %% `architecture_regrounding_plan.md` §7 step 4.
-                case has_projection(InstanceId) of
+                %% `HasProjection` is the memoised value (see
+                %% `resolve_has_projection/1`) — NOT a per-cycle applier call.
+                case HasProjection of
                     true ->
                         %% Catalogue (projection-backed): the projection IS
                         %% the durable checkpoint, so compaction only bounds
@@ -3104,16 +3250,41 @@ first_genuine_hole(MST, R, [{K, V} | Rest]) ->
     end.
 
 %% @private
-%% True when this instance has a projection that materialises its state
-%% (an applier with a resolved `cell_apply_target`). Catalogue
-%% compaction only truncates the MST when a projection holds the state;
-%% a bare fold instance with no projection must keep its events in the
-%% MST.
-has_projection(InstanceId) ->
+%% Returns the memoised projection-presence, resolving it ONCE from the
+%% applier and caching the first DEFINITIVE answer. Caching only a
+%% `true | false` (never the transient `unknown` from an applier that has
+%% not registered yet) keeps a momentary startup race from pinning a wrong
+%% `false`. Once cached, no `gen_server:call` to the applier is ever made
+%% again — which is what keeps the synchronous compaction handler free of
+%% the instance↔applier deadlock (see the `has_projection` state field).
+resolve_has_projection(#state{has_projection = HP} = State) when
+    is_boolean(HP)
+->
+    {HP, State};
+resolve_has_projection(#state{instance_id = Id} = State) ->
+    case resolve_projection_state(Id) of
+        unknown ->
+            %% Applier not ready yet — treat as no-projection this cycle
+            %% (so we defer the truncate rather than risk it) and retry on
+            %% the next cycle without caching.
+            {false, State};
+        HP ->
+            {HP, State#state{has_projection = HP}}
+    end.
+
+%% @private
+%% `true` when this instance has a projection that materialises its state
+%% (an applier with a resolved `cell_apply_target`); `false` when the
+%% applier is up but has no target (a bare fold/CRDT instance whose events
+%% must stay in the MST); `unknown` when the applier is not yet resolvable.
+%% Catalogue compaction only truncates the MST when a projection holds the
+%% state. This makes the one `gen_server:call` to the applier; callers go
+%% through `resolve_has_projection/1` so it runs at most once per instance.
+resolve_projection_state(InstanceId) ->
     try
         case bondy_oplog_registry:applier_pid(InstanceId) of
             undefined ->
-                false;
+                unknown;
             ApplierPid ->
                 case bondy_oplog_applier:cell_apply_target(ApplierPid) of
                     {ok, _} -> true;
@@ -3121,61 +3292,32 @@ has_projection(InstanceId) ->
                 end
         end
     catch
-        _:_ -> false
+        _:_ -> unknown
     end.
 
 %% @private
-%% Folds any events not yet applied to the projection into it, so the
-%% projection reflects every event in the MST before the catalogue
-%% truncate drops the stable prefix. Local events are folded before their
-%% MST install, so only remote (peer-merged) events can lag.
-%%
-%% The catch-up diff is computed HERE — in the instance gen_server, which
-%% OWNS the pack store's sealed-pack raw fds — and only the apply (a
-%% projection write that never reads the MST) is delegated to the applier
-%% (`apply_replayed_pairs/3`). This is what makes durable compaction work:
-%% a stale `last_replayed_root` makes the diff a full MST fold that reaches
-%% sealed packs, and only the fd owner can `prim_file:pread` them. (Earlier
-%% this called `replay_cell_events_sync/1`, which ran the fold in the
-%% applier process and raised `not_on_controlling_process` on sealed packs
-%% → durable compaction deferred.)
-%%
-%% Returns `ok` only when the apply succeeded; any other result defers the
-%% truncate so a transient applier failure never drops un-folded events.
-ensure_projection_caught_up(InstanceId, MST) ->
+%% Keeps only the pairs whose event key originated at a DIFFERENT replica.
+%% Local-origin events are already materialised in the projection (the
+%% applier writes them before their MST install), so the async catch-up
+%% (`begin_async_catch_up/3`) folds only the remote ones.
+remote_pairs(Pairs, Origin) ->
+    [
+        P
+     || {K, _V} = P <- Pairs,
+        not bondy_oplog_event:is_key(K) orelse
+            bondy_oplog_event:key_origin(K) =/= Origin
+    ].
+
+%% @private
+%% Re-anchors the applier's replay cursor (`last_replayed_root`) on the
+%% post-truncate root so the next catch-up diff stays incremental. No-op
+%% when there is no applier (a bare instance without a projection).
+advance_projection_watermark(InstanceId, NewRoot) ->
     case bondy_oplog_registry:applier_pid(InstanceId) of
         undefined ->
-            {error, no_applier};
+            ok;
         ApplierPid ->
-            try
-                LastRoot = bondy_oplog_applier:last_replayed_root(ApplierPid),
-                case bondy_mst:root(MST) of
-                    LastRoot ->
-                        %% Projection already current — nothing to fold.
-                        ok;
-                    CurrentRoot ->
-                        Pairs = replay_diff_pairs(MST, LastRoot),
-                        bondy_oplog_applier:apply_replayed_pairs(
-                            ApplierPid, Pairs, CurrentRoot
-                        )
-                end
-            catch
-                C:R -> {error, {C, R}}
-            end
-    end.
-
-%% @private
-%% The `[{Key, Value}]` to fold into the projection: the read-only diff of
-%% the live MST against the applier's last replayed root. Computed in the
-%% instance (the sealed-pack fd owner). A GC'd/unknown prior root falls
-%% back to the full list (same contract as the applier's `diff_pairs/3`).
-replay_diff_pairs(MST, undefined) ->
-    bondy_mst:to_list(MST);
-replay_diff_pairs(MST, LastRoot) ->
-    try
-        bondy_mst:diff_to_list(MST, LastRoot)
-    catch
-        _:_ -> bondy_mst:to_list(MST)
+            bondy_oplog_applier:advance_replayed_root(ApplierPid, NewRoot)
     end.
 
 %% @private
@@ -3215,62 +3357,14 @@ commit_compaction(
     Started,
     {ok, {catalogue_compacted, Frontier}}
 ) ->
-    %% Projection-backed (catalogue) compaction. The per-cell
-    %% `interpret_cog` checkpoint IS the durable projection: the applier's
-    %% cell kernel maintains each cell's materialised state via
-    %% `interpret_cog` on write (`apply_op` == `interpret_cog` for the
-    %% commutative case; the read path merges live events via
-    %% `interpret_cog` too — `architecture_regrounding_plan.md` §7 step 4).
-    %% So compaction does NOT fold a separate per-cell checkpoint blob —
-    %% that would duplicate the projection (double storage + writes) for
-    %% no gain; the checkpoint store is "not a durability layer for the
-    %% projection" (`bondy_oplog_compaction_checkpoint` moduledoc).
-    %% Compaction's only job here is to bound the MST.
-    %%
-    %% Before dropping the stable prefix, synchronously fold any remote
-    %% events the async `replay_cell_events` path has not yet applied
-    %% (local events are folded before their MST install, so only remote
-    %% events can lag). This handler is serial with `integrate_peer_root`
-    %% in the instance gen_server, so nothing un-folded can slip in
-    %% between the flush and the truncate. If the flush fails (applier
-    %% gone / errored) we defer rather than risk truncating an un-folded
-    %% event; the next tick retries. The checkpoint envelope records only
-    %% the watermark; its state slot is the `projection_managed` marker —
-    %% "the materialised state is the projection" — which on restart is
-    %% loaded but never fed to `interpret_cog` (the projection is the
-    %% authoritative read source). Verified by
-    %% `bondy_oplog_catalogue_compaction_test:crdt_kernel_compaction_matches_from_scratch`
-    %% (post-compaction read == from-scratch `interpret_cog`).
-    case ensure_projection_caught_up(State#state.instance_id, State#state.mst) of
-        ok ->
-            ok = (State#state.compaction_checkpoint):put_checkpoint(
-                State#state.compaction_checkpoint_state,
-                Frontier,
-                projection_managed
-            ),
-            MST1 = truncate_below_or_equal(State#state.mst, Frontier),
-            %% Derive the removed-event count from the live-size delta
-            %% computed over the *truncated* tree (O(remaining)), rather
-            %% than folding the whole pre-truncate tree to count the stable
-            %% prefix (O(N)). When compaction keeps up, the remaining tree
-            %% is small, so this — like the frontier scan over the live
-            %% tree — stays cheap and the cycle cost stays bounded.
-            LiveSize1 = compute_live_size(MST1),
-            EventCount = max(0, State#state.live_size - LiveSize1),
-            _ = bondy_oplog_hlc:update(
-                State#state.hlc, bondy_oplog_event:key_hlc(Frontier)
-            ),
-            State1 = State#state{
-                mst = MST1,
-                watermark = Frontier,
-                cached_checkpoint = {Frontier, projection_managed},
-                live_size = LiveSize1
-            },
-            emit_compaction_telemetry(State, Started, Frontier, EventCount),
-            {{ok, {compacted, Frontier, EventCount}}, State1};
-        {error, _} ->
-            {{ok, no_change}, State}
-    end;
+    %% Reached only when there is nothing remote to fold first — either
+    %% `remote_events_pending = false`, or the async catch-up
+    %% (`begin_async_catch_up/3`) already folded the at-risk remote pairs
+    %% via the applier and we are now in step 2. The pre-truncate projection
+    %% fold (the cross-node-deadlock-prone synchronous catch-up that used to
+    %% live here) has moved OUT to the two-step `begin_async_catch_up/3` /
+    %% `handle_cast({catch_up_done, _})`. So this only bounds the MST.
+    finalize_catalogue_compaction(State, Started, Frontier);
 commit_compaction(
     State,
     Started,
@@ -3290,6 +3384,201 @@ commit_compaction(
     {{ok, {compacted, Frontier, EventCount}}, State1};
 commit_compaction(State, _Started, {error, _} = Error) ->
     {Error, State}.
+
+%% @private
+%% Step 1 of the async catalogue catch-up (the cross-node deadlock fix).
+%% Extracts the remote-origin events in the about-to-be-truncated range
+%% `(watermark, frontier]` straight from the MST — the instance owns its
+%% sealed-pack fds, so this read is safe here and ONLY here — then hands
+%% them to the applier via `catch_up_apply/3` (a CAST) and DEFERS the
+%% truncate to `handle_cast({catch_up_done, _})`. The instance never blocks
+%% on the applier, so the applier's own synchronous `drain_install_queue`
+%% call (`commit_now/1`) can no longer wedge it (the deadlock).
+%%
+%% Local events in the range are already in the projection (the applier
+%% writes them before their MST install), so only remote ones need folding
+%% — `remote_pairs/2` keeps just those. An empty remote set (the common
+%% case: the async `replay_cell_events` path already folded them) skips the
+%% round-trip and finalizes inline.
+begin_async_catch_up(State, Started, Frontier) ->
+    RemotePairs = remote_pairs(
+        pairs_in_open_range(State#state.mst, State#state.watermark, Frontier),
+        State#state.origin
+    ),
+    case RemotePairs of
+        [] ->
+            {Reply, State1} = finalize_catalogue_compaction(
+                State, Started, Frontier
+            ),
+            ok = publish(State1),
+            {reply, Reply, State1};
+        _ ->
+            case bondy_oplog_registry:applier_pid(State#state.instance_id) of
+                undefined ->
+                    %% No applier to fold the remote pairs — defer; the next
+                    %% tick retries once the applier is back.
+                    {reply, {ok, no_change}, State};
+                ApplierPid ->
+                    Token = State#state.compaction_token + 1,
+                    ok = bondy_oplog_applier:catch_up_apply(
+                        ApplierPid, RemotePairs, Token
+                    ),
+                    Pending = #pending_compaction{
+                        frontier = Frontier,
+                        remote_gen = State#state.remote_gen,
+                        token = Token,
+                        started = Started
+                    },
+                    %% Watchdog: a lost `{catch_up_done, _}` (applier crash
+                    %% mid-fold) would otherwise wedge compaction for this
+                    %% instance. On timeout we clear the pending record and
+                    %% retry next tick (no truncate happened → nothing lost).
+                    _ = erlang:send_after(
+                        ?CATCH_UP_TIMEOUT_MS, self(),
+                        {compaction_catch_up_timeout, Token}
+                    ),
+                    {reply, {ok, compaction_pending}, State#state{
+                        pending_compaction = Pending,
+                        compaction_token = Token
+                    }}
+            end
+    end.
+
+%% @private
+%% The MST-bounding tail of a catalogue compaction: persist the watermark
+%% checkpoint, truncate the stable prefix, re-anchor the applier's replay
+%% cursor (a CAST — never blocks on the applier), recompute `live_size`,
+%% and clear the catch-up bookkeeping. Reached once the projection is known
+%% current up to `Frontier` (nothing remote to fold, or the async catch-up
+%% already folded it). Makes NO synchronous applier call, so it is
+%% deadlock-free.
+%%
+%% The checkpoint envelope records only the watermark; its state slot is
+%% the `projection_managed` marker — "the materialised state is the
+%% projection" — which on restart is loaded but never fed to
+%% `interpret_cog` (the projection is the authoritative read source).
+%% Verified by
+%% `bondy_oplog_catalogue_compaction_test:crdt_kernel_compaction_matches_from_scratch`.
+finalize_catalogue_compaction(State, Started, Frontier) ->
+    {ok, CkptUs} = tc(fun() ->
+        (State#state.compaction_checkpoint):put_checkpoint(
+            State#state.compaction_checkpoint_state,
+            Frontier,
+            projection_managed
+        )
+    end),
+    {MST1, TruncateUs} = tc(fun() ->
+        truncate_below_or_equal(State#state.mst, Frontier)
+    end),
+    %% Re-anchor the applier's replay cursor on the post-truncate (live)
+    %% root so the next `do_replay_cell_events` diff stays incremental (the
+    %% pre-truncate root's pages are freed by the truncate, so a stale
+    %% cursor would force a full `to_list/1` fold every cycle). A cast.
+    {ok, WatermarkUs} = tc(fun() ->
+        advance_projection_watermark(
+            State#state.instance_id, bondy_mst:root(MST1)
+        )
+    end),
+    %% Derive the removed-event count from the live-size delta over the
+    %% *truncated* tree (O(remaining)) rather than folding the whole
+    %% pre-truncate tree (O(N)); bounded when compaction keeps up.
+    {LiveSize1, LiveSizeUs} = tc(fun() -> compute_live_size(MST1) end),
+    EventCount = max(0, State#state.live_size - LiveSize1),
+    maybe_trace_compaction(
+        State#state.instance_id, Started, EventCount, LiveSize1,
+        #{
+            checkpoint_us => CkptUs,
+            truncate_us => TruncateUs,
+            watermark_us => WatermarkUs,
+            live_size_us => LiveSizeUs
+        }
+    ),
+    _ = bondy_oplog_hlc:update(
+        State#state.hlc, bondy_oplog_event:key_hlc(Frontier)
+    ),
+    State1 = State#state{
+        mst = MST1,
+        watermark = Frontier,
+        cached_checkpoint = {Frontier, projection_managed},
+        live_size = LiveSize1,
+        remote_events_pending = false,
+        pending_compaction = undefined
+    },
+    emit_compaction_telemetry(State, Started, Frontier, EventCount),
+    {{ok, {compacted, Frontier, EventCount}}, State1}.
+
+%% @private
+%% The raw `{Key, Value}` MST pairs whose key falls in the
+%% about-to-be-truncated range `(W0, Frontier]` (`undefined` W0 = from the
+%% start). Mirrors `events_in_open_range/3` but yields the
+%% projection-apply pairs (no `event_from_value/2` wrapping) that the
+%% applier's `apply_cell_pairs/3` consumes. Folds the (bounded) live tree;
+%% it reaches sealed pages, so it must run in the instance that owns their
+%% fds — never off-process.
+pairs_in_open_range(MST, undefined, Frontier) ->
+    lists:reverse(
+        bondy_mst:fold(
+            MST,
+            fun
+                ({K, _V} = P, Acc) when K =< Frontier -> [P | Acc];
+                (_, Acc) -> Acc
+            end,
+            []
+        )
+    );
+pairs_in_open_range(MST, W0, Frontier) ->
+    lists:reverse(
+        bondy_mst:fold(
+            MST,
+            fun
+                ({K, _V} = P, Acc) when K > W0, K =< Frontier -> [P | Acc];
+                (_, Acc) -> Acc
+            end,
+            []
+        )
+    ).
+
+%% @private
+%% Times `Fun`, returning `{Result, Microseconds}`. Diagnostic helper for
+%% the per-cycle compaction sub-stage trace.
+tc(Fun) ->
+    T0 = erlang:monotonic_time(),
+    R = Fun(),
+    {R, erlang:convert_time_unit(erlang:monotonic_time() - T0, native, microsecond)}.
+
+%% @private
+%% Gated per-cycle compaction sub-stage trace. Prints the wall-time split
+%% (frontier derived as total − measured sub-stages) directly to the node's
+%% stdout so a Fly bench run captures which sub-step dominates the
+%% synchronous cycle, without bench-side telemetry plumbing. Off unless the
+%% `COMPACTION_TRACE` env var is set (the diagnostic recipe sets it).
+maybe_trace_compaction(InstanceId, Started, EventCount, LiveSize, Stages) ->
+    case os:getenv("COMPACTION_TRACE") of
+        false ->
+            ok;
+        _ ->
+            TotalUs = erlang:convert_time_unit(
+                erlang:monotonic_time() - Started, native, microsecond
+            ),
+            #{
+                checkpoint_us := CkptUs,
+                truncate_us := TruncateUs,
+                watermark_us := WatermarkUs,
+                live_size_us := LiveSizeUs
+            } = Stages,
+            FrontierUs = max(
+                0, TotalUs - CkptUs - TruncateUs - WatermarkUs - LiveSizeUs
+            ),
+            io:format(
+                "[compaction-trace ~s] removed=~p live=~p total=~pus "
+                "frontier=~pus ckpt=~pus truncate=~pus watermark=~pus "
+                "live_size=~pus~n",
+                [
+                    InstanceId, EventCount, LiveSize, TotalUs, FrontierUs,
+                    CkptUs, TruncateUs, WatermarkUs, LiveSizeUs
+                ]
+            )
+    end.
 
 %% @private
 emit_compaction_telemetry(State, Started, Frontier, EventCount) ->

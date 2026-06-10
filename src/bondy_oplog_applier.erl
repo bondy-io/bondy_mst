@@ -383,6 +383,8 @@ configured; defaults are no-ops so existing instances are unaffected.
 -export([replay_cell_events_sync/1]).
 -export([last_replayed_root/1]).
 -export([apply_replayed_pairs/3]).
+-export([catch_up_apply/3]).
+-export([advance_replayed_root/2]).
 -export([rederive_projection_sync/1]).
 -export([rebuild_indexes/1]).
 -export([rebuild_indexes_sync/1]).
@@ -576,6 +578,62 @@ already in the projection is safe.
 """.
 apply_replayed_pairs(ApplierPid, Pairs, NewRoot) when is_pid(ApplierPid) ->
     gen_server:call(ApplierPid, {apply_replayed_pairs, Pairs, NewRoot}, infinity).
+
+-spec advance_replayed_root(pid(), bondy_mst:hash() | undefined) -> ok.
+
+-doc """
+Advances `last_replayed_root` to `NewRoot` WITHOUT applying any pairs.
+
+Called by the instance's compaction commit right after it truncates the
+MST: the projection is already current up to the pre-truncate root (the
+catch-up `apply_replayed_pairs/3` ran first), so the post-truncate root is
+a fully-replayed root. Re-anchoring the watermark on it keeps the next
+catch-up diff INCREMENTAL — the pre-truncate root's pages are freed by the
+truncate, so without this the next `diff_to_list/2` raises and falls back
+to a full `to_list/1` of the whole tree on every compaction cycle (an
+O(N)-per-cycle synchronous fold that starves the applier under sustained
+writes). Idempotent.
+""".
+advance_replayed_root(ApplierPid, NewRoot) when is_pid(ApplierPid) ->
+    %% MUST be a cast, NOT a call. The instance issues this from inside its
+    %% compaction commit handler, and the applier issues a synchronous
+    %% `drain_install_queue` call back to the instance on every commit
+    %% boundary (`commit_now/1`). A synchronous call here would let the two
+    %% gen_servers wait on each other with `infinity` timeouts whenever a
+    %% compaction overlaps a commit — a hard deadlock that freezes the whole
+    %% pipeline under sustained writes (instance stops installing, applier
+    %% stops applying, the MST stops being bounded). Re-anchoring is a
+    %% non-critical perf hint (only the cross-node catch-up reads
+    %% `last_replayed_root`, and `replay_diff_pairs/2` safely falls back to a
+    %% full `to_list/1` over the now-bounded tree if it is momentarily stale),
+    %% so fire-and-forget is correct.
+    gen_server:cast(ApplierPid, {advance_replayed_root, NewRoot}).
+
+-spec catch_up_apply(pid(), [{term(), term()}], non_neg_integer()) -> ok.
+
+-doc """
+Step 2 of the asynchronous compaction catch-up (the cross-node
+deadlock fix). The instance computes `Pairs` — the remote-origin events
+in the about-to-be-truncated range `(watermark, frontier]`, read from the
+MST it owns — and casts them here. We fold them into the projection
+(`apply_cell_pairs/3`, which reads OldValue from the projection/cache and
+never touches the MST), then cast `{catch_up_done, Token}` back so the
+instance can truncate.
+
+BOTH directions are casts — never calls — so the instance and the applier
+can never wait on each other. The previous synchronous catch-up
+(`last_replayed_root` + `apply_replayed_pairs/3` issued from inside the
+instance's compaction handler) deadlocked against the applier's own
+synchronous `drain_install_queue` call (`commit_now/1`) the moment a
+compaction overlapped a commit boundary while a remote event was pending.
+
+Does NOT advance `last_replayed_root`: the instance's post-truncate
+`advance_replayed_root/2` re-anchors the cursor on the truncated root. A
+no-op (still signals done) when `cell_apply_target` is not configured.
+""".
+catch_up_apply(ApplierPid, Pairs, Token)
+when is_pid(ApplierPid), is_list(Pairs), is_integer(Token) ->
+    gen_server:cast(ApplierPid, {catch_up_apply, Pairs, Token}).
 
 -spec rederive_projection_sync(pid()) -> ok.
 
@@ -1141,6 +1199,19 @@ handle_call(
 handle_call(_Req, _From, State) ->
     {reply, {error, badcall}, State}.
 
+handle_cast({advance_replayed_root, NewRoot}, State) ->
+    %% Re-anchor the replay cursor on the post-truncate root without
+    %% applying anything. Cast (not call) to avoid an instance↔applier
+    %% deadlock — see `advance_replayed_root/2`.
+    {noreply, State#state{last_replayed_root = NewRoot}};
+handle_cast({catch_up_apply, Pairs, Token}, State) ->
+    %% Step 2 of the async compaction catch-up. Fold the instance's
+    %% pre-truncate remote pairs into the projection, then cast the
+    %% instance back so it can truncate. Cast both ways — see
+    %% `catch_up_apply/3`.
+    State1 = do_catch_up_apply(State, Pairs),
+    ok = signal_catch_up_done(State1, Token),
+    {noreply, State1};
 handle_cast({refresh_validator, Reason}, State) ->
     {noreply, do_refresh_validator(Reason, State)};
 handle_cast(replay_cell_events, State) ->
@@ -2689,6 +2760,31 @@ do_apply_replayed_pairs(
 ) ->
     _ = apply_cell_pairs(Ctx, Id, Pairs),
     State#state{last_replayed_root = NewRoot}.
+
+%% @private
+%% Write half of the async compaction catch-up (`catch_up_apply/3`).
+%% Unlike `do_apply_replayed_pairs/3` it does NOT touch `last_replayed_root`
+%% — the instance's post-truncate `advance_replayed_root/2` re-anchors the
+%% cursor on the truncated root. With no projection there is nothing to
+%% apply; the caller still signals done.
+do_catch_up_apply(#state{cell_apply_ctx = undefined} = State, _Pairs) ->
+    State;
+do_catch_up_apply(#state{cell_apply_ctx = Ctx, instance_id = Id} = State, Pairs) ->
+    _ = apply_cell_pairs(Ctx, Id, Pairs),
+    State.
+
+%% @private
+%% Tell the instance the catch-up apply is done so it can truncate. A
+%% cast (never a call) — the instance must never block on the applier
+%% from inside its compaction commit (the deadlock). A narrow `noproc`
+%% catch covers the benign instance-shutdown race.
+signal_catch_up_done(#state{instance_pid = InstancePid}, Token) ->
+    try
+        gen_server:cast(InstancePid, {catch_up_done, Token})
+    catch
+        _:_ -> ok
+    end,
+    ok.
 
 do_replay_cell_events(#state{cell_apply_ctx = undefined} = State) ->
     State;

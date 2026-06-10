@@ -124,6 +124,103 @@ diff_frontier_bounds_to_recent_batch() ->
         close_shard(Cache, Proj)
     end.
 
+%% -----------------------------------------------------------------------------
+
+watermark_reanchored_on_truncated_root_test_() ->
+    {setup, fun setup/0, fun cleanup/1,
+        {timeout, 30, fun watermark_reanchored_on_truncated_root/0}}.
+
+%% Regression for the compaction "runaway under sustained writes" that the
+%% durable Fly bench surfaced: `ensure_projection_caught_up` advances the
+%% applier's replay cursor (`last_replayed_root`) to the PRE-truncate root,
+%% then the truncate frees that root's pages. Unless the cursor is re-anchored
+%% on the post-truncate (live) root, the NEXT cycle's catch-up
+%% `diff_to_list/2` raises (root gone) and falls back to a full `to_list/1` of
+%% the whole tree — an O(N)-per-cycle synchronous fold that starves the applier
+%% and stalls writes. This pins the invariant: after a partial-truncate
+%% compaction the cursor equals the current (truncated, non-empty) root, so the
+%% next diff stays incremental.
+watermark_reanchored_on_truncated_root() ->
+    InstId = mk_id(),
+    NS = ns_of(InstId),
+    {Cache, Proj} = register_shard(NS, primary, 0, lww_register),
+    {ok, _} = open_instance(InstId, NS, lww_register),
+    try
+        Batch = 25,
+        %% Batch 1: a peer confirms exactly this prefix.
+        append_batch(InstId, 1, Batch),
+        _ = bondy_oplog_instance:await_apply(InstId),
+        PeerRoot1 = bondy_oplog_instance:root_hash(InstId),
+
+        %% Batch 2: local, unconfirmed.
+        append_batch(InstId, 2, Batch),
+        _ = bondy_oplog_instance:await_apply(InstId),
+
+        %% Compact against the lagging peer → truncate batch 1, leave batch 2
+        %% (a PARTIAL truncate: the tree is non-empty afterwards).
+        ?assertMatch(
+            {ok, {compacted, _, _}},
+            bondy_oplog_instance:compact(InstId, [PeerRoot1])
+        ),
+        Root2 = bondy_oplog_instance:root_hash(InstId),
+        ?assertEqual(Batch, bondy_oplog:size(InstId)),
+        ?assertNotEqual(undefined, Root2),
+
+        %% The applier's replay cursor was re-anchored on the live truncated
+        %% root — NOT left on the freed pre-truncate root. The re-anchor is an
+        %% async cast (it MUST be, to avoid an instance↔applier deadlock under
+        %% load — see `bondy_oplog_applier:advance_replayed_root/2`), so poll.
+        ApplierPid = bondy_oplog_registry:applier_pid(InstId),
+        ?assert(await_replayed_root(ApplierPid, Root2, 100)),
+
+        %% And the next cycle still works (incremental diff against the live
+        %% root): batch 3, peer confirms the full tree, compaction drops it.
+        append_batch(InstId, 3, Batch),
+        _ = bondy_oplog_instance:await_apply(InstId),
+        Root3 = bondy_oplog_instance:root_hash(InstId),
+        ?assertMatch(
+            {ok, {compacted, _, _}},
+            bondy_oplog_instance:compact(InstId, [Root3])
+        ),
+        ?assertEqual(0, bondy_oplog:size(InstId))
+    after
+        ok = bondy_oplog:stop_instance(InstId),
+        ok = bondy_db_core_registry:unregister(NS, primary, 0),
+        close_shard(Cache, Proj)
+    end.
+
+%% -----------------------------------------------------------------------------
+
+%% White-box: the catch-up fold keeps ONLY remote-origin events. Local-origin
+%% events are already in the projection (the applier's WAL-drain path wrote
+%% them before their MST install), so re-applying them every compaction cycle
+%% is the redundant work that starves the applier under sustained writes; the
+%% filter drops them. Remote (peer-merged) events bypass the WAL path and MUST
+%% be kept so the truncate does not drop an un-folded value. Non-event keys are
+%% kept defensively.
+remote_pairs_keeps_only_remote_origin_test() ->
+    Own = <<"own_origin_aaaaa">>,
+    Remote = <<"remote_origin_bb">>,
+    KOwn1 = bondy_oplog_event:key(10, Own, 1),
+    KRem = bondy_oplog_event:key(20, Remote, 1),
+    KOwn2 = bondy_oplog_event:key(30, Own, 2),
+    Pairs = [
+        {KOwn1, va},
+        {KRem, vb},
+        {KOwn2, vc},
+        {<<"not-an-event-key">>, vd}
+    ],
+    %% Remote-origin event + non-event-key kept; both local-origin dropped.
+    ?assertEqual(
+        [{KRem, vb}, {<<"not-an-event-key">>, vd}],
+        bondy_oplog_instance:remote_pairs(Pairs, Own)
+    ),
+    %% A local-only diff filters to empty → the catch-up is a no-op.
+    ?assertEqual(
+        [],
+        bondy_oplog_instance:remote_pairs([{KOwn1, va}, {KOwn2, vc}], Own)
+    ).
+
 %% =============================================================================
 %% Helpers
 %% =============================================================================
@@ -181,3 +278,17 @@ append_batch(InstanceId, I, Batch) ->
 
 key(I, J) ->
     <<"k_", (integer_to_binary(I))/binary, "_", (integer_to_binary(J))/binary>>.
+
+%% Polls the applier's replay cursor until it reaches `Root` (the re-anchor
+%% is an async cast). Returns `true` once it matches, `false` if it never
+%% does within `Retries` × 10ms.
+await_replayed_root(_ApplierPid, _Root, 0) ->
+    false;
+await_replayed_root(ApplierPid, Root, Retries) ->
+    case bondy_oplog_applier:last_replayed_root(ApplierPid) of
+        Root ->
+            true;
+        _ ->
+            timer:sleep(10),
+            await_replayed_root(ApplierPid, Root, Retries - 1)
+    end.

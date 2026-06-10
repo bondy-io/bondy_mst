@@ -328,6 +328,29 @@ defmodule Bench.E2E.Telemetry do
     stages
   end
 
+  @doc """
+  Non-destructive snapshot of every stage for mid-run sampling.
+
+  Unlike `collect/1` it does NOT detach handlers, so it can be called
+  repeatedly from a periodic sampler while the run is in flight. Returns
+  a lean map `stage_key => %{count, batches, p50_us, p99_us}` — enough to
+  print a trajectory line and compute per-interval deltas without the
+  full histogram-bin payload `collect/1` produces.
+  """
+  def snapshot(%{config: cfg}) do
+    Map.new(cfg.stages, fn {key, s} ->
+      pcts = Hist.percentiles(s.hist, [50, 99])
+
+      {key,
+       %{
+         count: :counters.get(s.events, 1),
+         batches: :counters.get(s.calls, 1),
+         p50_us: Map.get(pcts, 50, 0) / 1_000,
+         p99_us: Map.get(pcts, 99, 0) / 1_000
+       }}
+    end)
+  end
+
   defp handler_id(name, path) do
     "bench-e2e-" <> name <> "-" <> Enum.map_join(path, "-", &to_string/1)
   end
