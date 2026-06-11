@@ -202,18 +202,18 @@ without protocol changes.
     %% fix). Set in the `integrate_peer_root` handler; cleared on a
     %% successful truncate in `finalize_catalogue_compaction/3`.
     remote_events_pending = false :: boolean(),
-    %% Memoised "does a projection materialise this instance's state?"
-    %% (the applier has a resolved `cell_apply_target`). It is an
-    %% IMMUTABLE property fixed at applier init, but the only way to learn
-    %% it is a `gen_server:call` to the applier — which MUST NOT happen on
-    %% every compaction: the applier issues a synchronous
-    %% `drain_install_queue` call back to the instance on every commit
-    %% boundary, so an instance→applier call from inside the (synchronous)
-    %% compaction handler deadlocks both gen_servers whenever a compaction
-    %% overlaps a commit. So resolve it ONCE and cache the definitive
-    %% answer here; every later compaction reads the cache and makes no
-    %% applier call. See `resolve_has_projection/1`.
-    has_projection = undefined :: undefined | boolean(),
+    %% "Does a projection materialise this instance's state?" — i.e. the
+    %% applier is configured with a `cell_apply_target` (every `bondy_db`
+    %% table). An IMMUTABLE property, set at THIS instance's `init/1` from
+    %% the same opts the supervisor uses to start the applier
+    %% (`Opts.applier.cell_apply_target`), so the compaction handler NEVER
+    %% asks the applier. Asking it (a synchronous `cell_apply_target` call)
+    %% deadlocks against the applier's own synchronous `drain_install_queue`
+    %% call (`commit_now/1`) whenever a compaction overlaps a commit — and
+    %% under batched / high-throughput load that overlap hits on the FIRST
+    %% compaction, before any low-load warmup window (the freeze that broke
+    %% multi-shard batched-fsync runs). See `resolve_has_projection/1`.
+    has_projection = false :: boolean(),
     %% Monotonic counter bumped every time a peer-merged event enters the
     %% MST (`integrate_peer_root`). Captured at the start of an async
     %% compaction catch-up and re-checked at the truncate so a peer event
@@ -1648,6 +1648,22 @@ init({InstanceId, Opts}) ->
     %% `ets:select_delete/2` from any process. No heir — the table
     %% dies with this process; a one_for_all subtree restart creates
     %% a fresh one.
+    %% Whether a projection materialises this instance's state — i.e. the
+    %% applier is configured with a `cell_apply_target` (every `bondy_db`
+    %% table). Derived at init from the SAME opts the supervisor uses to
+    %% start the applier (`bondy_oplog_instance_sup:applier_opts/2`), so the
+    %% instance NEVER asks the applier for it. That call (a synchronous
+    %% `cell_apply_target` from the compaction handler) deadlocks against
+    %% the applier's own synchronous `drain_install_queue` call
+    %% (`commit_now/1`) — the cross-node deadlock — and under batched /
+    %% high-throughput load it hits on the FIRST compaction, before any
+    %% low-load warmup window. The applier FAILS to start if its
+    %% `cell_apply_target` is not registered, so a live instance with the
+    %% opt set always has a resolved projection (configured ⟹ resolved).
+    HasProjection =
+        maps:get(
+            cell_apply_target, maps:get(applier, Opts, #{}), undefined
+        ) =/= undefined,
     Overlay = ets:new(bondy_oplog_overlay, [
         ordered_set,
         public,
@@ -1689,7 +1705,8 @@ init({InstanceId, Opts}) ->
         install_coalesce_max = validate_coalesce_max(
             maps:get(install_coalesce_max, Opts, 16)
         ),
-        lifecycle = bondy_oplog_bootstrap_lifecycle:open(InstanceId, Opts)
+        lifecycle = bondy_oplog_bootstrap_lifecycle:open(InstanceId, Opts),
+        has_projection = HasProjection
     },
     ok = publish(State),
     %% Publish the overlay tid via a dedicated setter so a stale tid
@@ -3257,43 +3274,8 @@ first_genuine_hole(MST, R, [{K, V} | Rest]) ->
 %% `false`. Once cached, no `gen_server:call` to the applier is ever made
 %% again — which is what keeps the synchronous compaction handler free of
 %% the instance↔applier deadlock (see the `has_projection` state field).
-resolve_has_projection(#state{has_projection = HP} = State) when
-    is_boolean(HP)
-->
-    {HP, State};
-resolve_has_projection(#state{instance_id = Id} = State) ->
-    case resolve_projection_state(Id) of
-        unknown ->
-            %% Applier not ready yet — treat as no-projection this cycle
-            %% (so we defer the truncate rather than risk it) and retry on
-            %% the next cycle without caching.
-            {false, State};
-        HP ->
-            {HP, State#state{has_projection = HP}}
-    end.
-
-%% @private
-%% `true` when this instance has a projection that materialises its state
-%% (an applier with a resolved `cell_apply_target`); `false` when the
-%% applier is up but has no target (a bare fold/CRDT instance whose events
-%% must stay in the MST); `unknown` when the applier is not yet resolvable.
-%% Catalogue compaction only truncates the MST when a projection holds the
-%% state. This makes the one `gen_server:call` to the applier; callers go
-%% through `resolve_has_projection/1` so it runs at most once per instance.
-resolve_projection_state(InstanceId) ->
-    try
-        case bondy_oplog_registry:applier_pid(InstanceId) of
-            undefined ->
-                unknown;
-            ApplierPid ->
-                case bondy_oplog_applier:cell_apply_target(ApplierPid) of
-                    {ok, _} -> true;
-                    undefined -> false
-                end
-        end
-    catch
-        _:_ -> unknown
-    end.
+resolve_has_projection(#state{has_projection = HP} = State) ->
+    {HP, State}.
 
 %% @private
 %% Keeps only the pairs whose event key originated at a DIFFERENT replica.

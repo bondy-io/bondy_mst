@@ -558,24 +558,25 @@ bench-fly-8x-ephemeral-vs-leveled duration="60" shards="4" cache="false":
 #
 #   just bench-fly-8x-shard-scaling                  # 90s × {1,2,4,8}, 2 w/shard
 #   just bench-fly-8x-shard-scaling 120 "1 2 4" 4    # 4 writers/shard
-bench-fly-8x-shard-scaling duration="90" shard_list="1 2 4 8" writers_per_shard="2" oldstate_cache="false":
+#   just bench-fly-8x-shard-scaling 90 "1 2 4" 2 true batched   # A3 + batched fsync
+bench-fly-8x-shard-scaling duration="90" shard_list="1 2 4 8" writers_per_shard="2" oldstate_cache="false" fsync="per_write":
     fly ssh console --config fly-8x.toml -C \
       "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
         ts=\$(date +%Y%m%d_%H%M%S); \
-        out=/data/results/shard_scaling_8x_oc{{oldstate_cache}}_\$ts.log; \
-        echo \"=== perf-8x durable shard-scaling — write_only, pack MST, per_write, {{duration}}s/point, shards={{shard_list}}, {{writers_per_shard}} writers/shard, oldstate_cache={{oldstate_cache}} ===\" \
+        out=/data/results/shard_scaling_8x_oc{{oldstate_cache}}_{{fsync}}_\$ts.log; \
+        echo \"=== perf-8x durable shard-scaling — write_only, pack MST, {{fsync}}, {{duration}}s/point, shards={{shard_list}}, {{writers_per_shard}} writers/shard, oldstate_cache={{oldstate_cache}} ===\" \
           | tee \$out; \
         for s in {{shard_list}}; do \
           w=\$((s * {{writers_per_shard}})); \
-          echo \"--- shards=\$s writers=\$w oldstate_cache={{oldstate_cache}} ---\" | tee -a \$out; \
+          echo \"--- shards=\$s writers=\$w oldstate_cache={{oldstate_cache}} fsync={{fsync}} ---\" | tee -a \$out; \
           MST_BACKEND=pack WRITERS=\$w SCENARIOS=write_only \
           APPLY_BATCH_MAX_EVENTS=256 INSTALL_COALESCE_MAX=16 \
           OLDSTATE_CACHE={{oldstate_cache}} \
-            just bench-e2e {{duration}} \$s per_write 1 false leveled \
-              2>&1 | tee /data/results/shard_scaling_8x_oc{{oldstate_cache}}_s\${s}_\$ts.txt \
+            just bench-e2e {{duration}} \$s {{fsync}} 1 false leveled \
+              2>&1 | tee /data/results/shard_scaling_8x_oc{{oldstate_cache}}_{{fsync}}_s\${s}_\$ts.txt \
               | tee -a \$out; \
         done; \
-        echo \"Done. Per-point tables: /data/results/shard_scaling_8x_oc{{oldstate_cache}}_s*_\$ts.txt\" \
+        echo \"Done. Per-point tables: /data/results/shard_scaling_8x_oc{{oldstate_cache}}_{{fsync}}_s*_\$ts.txt\" \
           | tee -a \$out'"
 
 # Pull /data/results from the perf-8x VM into a fresh local dir.

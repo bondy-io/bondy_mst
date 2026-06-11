@@ -63,6 +63,10 @@ topology_suite(Topology) ->
         test(
             "counter_inc_round_trip/" ++ Tag,
             fun counter_inc_round_trip/1
+        ),
+        test(
+            "oldstate_cache_default_on_for_leveled/" ++ Tag,
+            fun oldstate_cache_default_on_for_leveled/1
         )
     ]}.
 
@@ -131,6 +135,40 @@ put_read_round_trip({_Topo, Db, _Sup, _LDir, _PDir}) ->
     ok = bondy_db:apply(T, Realm, Key, {set, H, V}),
     ?assertEqual({ok, V, H}, bondy_db:read(T, Realm, Key)),
     ok = bondy_db:close_table(T).
+
+oldstate_cache_default_on_for_leveled({_Topo, Db, _Sup, _LDir, _PDir}) ->
+    %% A3 — a leveled (durable) `bondy_db` table must get the applier's
+    %% OldValue frame-cache ON by DEFAULT, with no `oldstate_cache` opt set
+    %% anywhere. Proven by the `[bondy_oplog, applier, oldstate_cache]`
+    %% telemetry, which the applier emits per OldValue resolve ONLY when the
+    %% cache is enabled (zero events when off — an ets table, or a leveled
+    %% table opened with an explicit `oldstate_cache => false`).
+    {ok, T} = bondy_db:open_table(Db, cache_default_users, #{}),
+    HandlerId = {?MODULE, oldstate_default, erlang:unique_integer()},
+    Self = self(),
+    ok = telemetry:attach(
+        HandlerId,
+        [bondy_oplog, applier, oldstate_cache],
+        fun(_Event, Meas, Meta, _Cfg) -> Self ! {oldstate_event, Meas, Meta} end,
+        undefined
+    ),
+    try
+        Realm = <<"r1">>,
+        Key = <<"carol">>,
+        H = bondy_db:tick(T),
+        ok = bondy_db:apply(T, Realm, Key, {set, H, <<"v1">>}),
+        %% The resolve (and its telemetry) fires on the applier during the
+        %% async WAL drain — `read/3` returns from the overlay and does not
+        %% prove the drain ran, so wait on the event directly.
+        receive
+            {oldstate_event, _Meas, _Meta} -> ok
+        after 5000 ->
+            erlang:error(no_oldstate_cache_event_so_cache_is_off_by_default)
+        end
+    after
+        telemetry:detach(HandlerId),
+        ok = bondy_db:close_table(T)
+    end.
 
 multi_shard_fanout({Topology, Db, _Sup, _LDir, _PDir}) ->
     %% Apply ?KEYS keys and confirm they fan out across all shards and
