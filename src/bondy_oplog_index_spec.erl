@@ -113,7 +113,6 @@ validate(Spec) when is_map(Spec) ->
         fun check_coalesce_ms/1
     ],
     run_checks(Steps, Spec);
-
 validate(Other) ->
     {error, {not_a_spec, Other}}.
 

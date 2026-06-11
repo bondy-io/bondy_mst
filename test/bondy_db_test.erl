@@ -46,8 +46,7 @@ ets_owner_survives_caller_death_test_() ->
             {ok, _} = application:ensure_all_started(bondy_mst),
             ok
         end,
-        fun(_) -> ok end,
-        fun ets_owner_survives_caller_death/0}.
+        fun(_) -> ok end, fun ets_owner_survives_caller_death/0}.
 
 topology_suite(Topology) ->
     Tag = atom_to_list(Topology),
@@ -305,7 +304,9 @@ ets_owner_survives_caller_death() ->
         H = bondy_db:tick(T),
         ok = bondy_db:apply(T, <<"r1">>, <<"alice">>, {set, H, <<"v1">>}),
         Parent ! {captured, T},
-        receive stop -> ok end
+        receive
+            stop -> ok
+        end
     end),
     Table =
         receive
@@ -345,10 +346,14 @@ ets_owner_survives_caller_death() ->
     %% NEW write + read, all through the surviving substrate. Pre-fix this
     %% raised (dead projection/cache tid) or returned a read error (the
     %% registry row was gone).
-    ?assertMatch({ok, <<"v1">>, _}, bondy_db:read(Table, <<"r1">>, <<"alice">>)),
+    ?assertMatch(
+        {ok, <<"v1">>, _}, bondy_db:read(Table, <<"r1">>, <<"alice">>)
+    ),
     H2 = bondy_db:tick(Table),
     ok = bondy_db:apply(Table, <<"r1">>, <<"alice">>, {set, H2, <<"v2">>}),
-    ?assertEqual({ok, <<"v2">>, H2}, bondy_db:read(Table, <<"r1">>, <<"alice">>)),
+    ?assertEqual(
+        {ok, <<"v2">>, H2}, bondy_db:read(Table, <<"r1">>, <<"alice">>)
+    ),
     %% Teardown through the normal facade path — every delete is routed
     %% through the owner (cache + registry + projection). The owner is
     %% orphaned (no surviving Db handle), so stop it explicitly.
@@ -366,9 +371,7 @@ ets_owner_survives_caller_death() ->
 %% `bondy_db_topology_memory` provider; the leveled topology is left
 %% untouched. The full read/write/range contract is identical to leveled.
 ets_backend_in_leveled_db_test_() ->
-    {setup,
-        fun() -> setup(bondy_db_topology_per_entity) end,
-        fun cleanup/1,
+    {setup, fun() -> setup(bondy_db_topology_per_entity) end, fun cleanup/1,
         fun(Ctx) -> {"ets_backend_e2e", fun() -> ets_backend_e2e(Ctx) end} end}.
 
 ets_backend_e2e({Db, _Sup, _Dir}) ->
@@ -401,9 +404,7 @@ ets_backend_e2e({Db, _Sup, _Dir}) ->
 %% ephemeral (ets) table coexist and stay isolated — the headline
 %% intra-DB-mixing capability.
 intra_db_mixing_test_() ->
-    {setup,
-        fun() -> setup(bondy_db_topology_per_entity) end,
-        fun cleanup/1,
+    {setup, fun() -> setup(bondy_db_topology_per_entity) end, fun cleanup/1,
         fun(Ctx) -> {"intra_db_mixing", fun() -> intra_db_mixing(Ctx) end} end}.
 
 intra_db_mixing({Db, _Sup, _Dir}) ->
@@ -415,7 +416,9 @@ intra_db_mixing({Db, _Sup, _Dir}) ->
     ?assertEqual(leveled, maps:get(projection_backend, bondy_db:info(Durable))),
     ?assertEqual(ets, maps:get(projection_backend, bondy_db:info(Ephemeral))),
     Hd = bondy_db:tick(Durable),
-    ok = bondy_db:apply(Durable, <<"r1">>, <<"acct">>, {set, Hd, <<"balance">>}),
+    ok = bondy_db:apply(
+        Durable, <<"r1">>, <<"acct">>, {set, Hd, <<"balance">>}
+    ),
     He = bondy_db:tick(Ephemeral),
     ok = bondy_db:apply(Ephemeral, <<"r1">>, <<"sess">>, {set, He, <<"conn">>}),
     ?assertEqual(
@@ -434,9 +437,7 @@ intra_db_mixing({Db, _Sup, _Dir}) ->
 %% layout: it bypasses the leveled topology, so no `<Dir>/<entity>/...`
 %% subtree is ever laid out for it.
 ets_backend_no_disk_artifacts_test_() ->
-    {setup,
-        fun() -> setup(bondy_db_topology_per_entity) end,
-        fun cleanup/1,
+    {setup, fun() -> setup(bondy_db_topology_per_entity) end, fun cleanup/1,
         fun(Ctx) ->
             {"ets_backend_no_disk_artifacts", fun() ->
                 ets_backend_no_disk_artifacts(Ctx)
@@ -468,8 +469,7 @@ memory_db_rejects_leveled_backend_test_() ->
             {ok, _} = application:ensure_all_started(bondy_mst),
             ok
         end,
-        fun(_) -> ok end,
-        fun memory_db_rejects_leveled_backend/0}.
+        fun(_) -> ok end, fun memory_db_rejects_leveled_backend/0}.
 
 memory_db_rejects_leveled_backend() ->
     {ok, Db} = bondy_db:open(mem_reject_db, #{
@@ -478,8 +478,9 @@ memory_db_rejects_leveled_backend() ->
         fold_module => ?FOLD
     }),
     ?assertMatch(
-        {error, {unsupported_projection_backend,
-            {leveled, bondy_db_topology_memory}}},
+        {error,
+            {unsupported_projection_backend,
+                {leveled, bondy_db_topology_memory}}},
         bondy_db:open_table(Db, t, #{projection_backend => leveled})
     ),
     ?assertMatch(

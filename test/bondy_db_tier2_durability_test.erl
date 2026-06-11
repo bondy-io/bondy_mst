@@ -175,7 +175,10 @@ open(CrdtMod, Dirs) ->
 %% leveled supervisor. The on-disk leveled/pack/WAL state survives.
 close(Db, Sup) ->
     _ = catch bondy_db:close(Db),
-    _ = [catch bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
+    _ = [
+        catch bondy_oplog:stop_instance(I)
+     || I <- bondy_oplog:list_instances()
+    ],
     case is_process_alive(Sup) of
         true -> bondy_db_leveled_sup:stop(Sup);
         false -> ok
@@ -183,7 +186,10 @@ close(Db, Sup) ->
     ok.
 
 stop_everything() ->
-    _ = [catch bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
+    _ = [
+        catch bondy_oplog:stop_instance(I)
+     || I <- bondy_oplog:list_instances()
+    ],
     ok.
 
 %% Strip the read HLC; tier_2 reads return `{ok, Value, Hlc}`.

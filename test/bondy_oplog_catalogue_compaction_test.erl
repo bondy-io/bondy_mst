@@ -313,8 +313,12 @@ remote_event_survives_catalogue_compaction() ->
         ok = await_size(AId, 0, 200),
 
         %% Both cells read back from A's projection post-truncation.
-        ?assertEqual({<<"rval">>, 50}, bondy_db_core:read(ANS, primary, <<"r">>)),
-        ?assertEqual({<<"lval">>, 60}, bondy_db_core:read(ANS, primary, <<"l">>))
+        ?assertEqual(
+            {<<"rval">>, 50}, bondy_db_core:read(ANS, primary, <<"r">>)
+        ),
+        ?assertEqual(
+            {<<"lval">>, 60}, bondy_db_core:read(ANS, primary, <<"l">>)
+        )
     after
         ok = bondy_oplog:stop_instance(AId),
         ok = bondy_oplog:stop_instance(BId),
@@ -374,7 +378,9 @@ async_catch_up_uses_cast_not_sync_calls() ->
         %% `await_size` above already proved that).
         ?assert(CatchUp >= 1),
         %% And the remote event survived the truncate.
-        ?assertEqual({<<"rval">>, 50}, bondy_db_core:read(ANS, primary, <<"r">>))
+        ?assertEqual(
+            {<<"rval">>, 50}, bondy_db_core:read(ANS, primary, <<"r">>)
+        )
     after
         ok = bondy_oplog:stop_instance(AId),
         ok = bondy_oplog:stop_instance(BId),

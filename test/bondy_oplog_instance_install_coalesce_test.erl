@@ -196,7 +196,10 @@ wait_mailbox(Pid, N, Remaining) ->
 %% every one as a fast local install.
 mk_events(Origin, N) ->
     Clock = bondy_oplog_hlc:new(),
-    [mk_event(Origin, bondy_oplog_hlc:now(Clock), Seq) || Seq <- lists:seq(1, N)].
+    [
+        mk_event(Origin, bondy_oplog_hlc:now(Clock), Seq)
+     || Seq <- lists:seq(1, N)
+    ].
 
 mk_event(Origin, Hlc, Seq) ->
     Key = bondy_oplog_event:key(Hlc, Origin, Seq),

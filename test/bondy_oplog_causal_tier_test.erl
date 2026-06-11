@@ -125,10 +125,16 @@ teardown_shard(NS, C, P) ->
 
 with_db(Opts, Fun) ->
     Name = mk_ns(),
-    {ok, Db} = bondy_db:open(Name, maps:merge(#{
-        topology => bondy_db_topology_memory,
-        shard_count => 1
-    }, Opts)),
+    {ok, Db} = bondy_db:open(
+        Name,
+        maps:merge(
+            #{
+                topology => bondy_db_topology_memory,
+                shard_count => 1
+            },
+            Opts
+        )
+    ),
     try
         Fun(Db)
     after

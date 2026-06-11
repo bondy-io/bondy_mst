@@ -69,16 +69,24 @@ sequential_put_overwrites_test() ->
 %% the empty context): both values survive as concurrent siblings.
 concurrent_put_are_siblings_test() ->
     S0 = ?MOD:init(),
-    Ea = mk_event(10, <<"a">>, 1, {put, <<"k">>, <<"va">>}, ?MOD:context_of(S0)),
-    Eb = mk_event(11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)),
+    Ea = mk_event(
+        10, <<"a">>, 1, {put, <<"k">>, <<"va">>}, ?MOD:context_of(S0)
+    ),
+    Eb = mk_event(
+        11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)
+    ),
     S1 = apply_event(apply_event(S0, Ea), Eb),
     ?assertEqual(#{<<"k">> => [<<"va">>, <<"vb">>]}, ?MOD:to_value(S1)).
 
 %% Sibling merge is order-independent.
 concurrent_put_order_independent_test() ->
     S0 = ?MOD:init(),
-    Ea = mk_event(10, <<"a">>, 1, {put, <<"k">>, <<"va">>}, ?MOD:context_of(S0)),
-    Eb = mk_event(11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)),
+    Ea = mk_event(
+        10, <<"a">>, 1, {put, <<"k">>, <<"va">>}, ?MOD:context_of(S0)
+    ),
+    Eb = mk_event(
+        11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)
+    ),
     Sab = apply_event(apply_event(S0, Ea), Eb),
     Sba = apply_event(apply_event(S0, Eb), Ea),
     ?assertEqual(Sab, Sba).
@@ -97,7 +105,9 @@ add_wins_concurrent_put_survives_remove_test() ->
     %% `a` puts k=va, dot {a,1}.
     Sa1 = write(S0, 10, <<"a">>, 1, {put, <<"k">>, <<"va">>}),
     %% `b`'s concurrent put observed only the empty S0.
-    Eb = mk_event(11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)),
+    Eb = mk_event(
+        11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)
+    ),
     %% `a` removes, with the context it observed at write time — only its
     %% own dot {a,1} (stamped from Sa1, NOT from a later merged state). The
     %% event's observed context is immutable thereafter.
@@ -144,11 +154,17 @@ interpret_cog_matches_eager_and_permutation_invariant_test() ->
     S0 = ?MOD:init(),
     %% Two concurrent puts to k, then a remove from `a` that observed only
     %% its own dot, plus an independent put to k2.
-    Ea = mk_event(10, <<"a">>, 1, {put, <<"k">>, <<"va">>}, ?MOD:context_of(S0)),
-    Eb = mk_event(11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)),
+    Ea = mk_event(
+        10, <<"a">>, 1, {put, <<"k">>, <<"va">>}, ?MOD:context_of(S0)
+    ),
+    Eb = mk_event(
+        11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)
+    ),
     SaConc = apply_event(S0, Ea),
     Erm = mk_event(20, <<"a">>, 2, {rmv, <<"k">>}, ?MOD:context_of(SaConc)),
-    Ek2 = mk_event(21, <<"a">>, 3, {put, <<"k2">>, <<"vc">>}, ?MOD:context_of(S0)),
+    Ek2 = mk_event(
+        21, <<"a">>, 3, {put, <<"k2">>, <<"vc">>}, ?MOD:context_of(S0)
+    ),
     Events = [Ea, Eb, Erm, Ek2],
     Eager = lists:foldl(fun(E, S) -> apply_event(S, E) end, S0, Events),
     Group = ?MOD:interpret_cog(Events, S0),
@@ -164,8 +180,12 @@ interpret_cog_matches_eager_and_permutation_invariant_test() ->
 encode_decode_roundtrip_test() ->
     S0 = ?MOD:init(),
     S1 = write(S0, 10, <<"a">>, 1, {put, <<"k">>, <<"va">>}),
-    Eb = mk_event(11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)),
-    Ek2 = mk_event(12, <<"a">>, 2, {put, <<"k2">>, <<"vc">>}, ?MOD:context_of(S1)),
+    Eb = mk_event(
+        11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)
+    ),
+    Ek2 = mk_event(
+        12, <<"a">>, 2, {put, <<"k2">>, <<"vc">>}, ?MOD:context_of(S1)
+    ),
     S2 = apply_event(apply_event(S1, Eb), Ek2),
     lists:foreach(
         fun(S) ->
@@ -178,8 +198,12 @@ encode_decode_roundtrip_test() ->
 %% concurrent writes were absorbed (the convergence/encoding gate).
 encoding_is_canonical_under_order_test() ->
     S0 = ?MOD:init(),
-    Ea = mk_event(10, <<"a">>, 1, {put, <<"k">>, <<"va">>}, ?MOD:context_of(S0)),
-    Eb = mk_event(11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)),
+    Ea = mk_event(
+        10, <<"a">>, 1, {put, <<"k">>, <<"va">>}, ?MOD:context_of(S0)
+    ),
+    Eb = mk_event(
+        11, <<"b">>, 1, {put, <<"k">>, <<"vb">>}, ?MOD:context_of(S0)
+    ),
     Sab = apply_event(apply_event(S0, Ea), Eb),
     Sba = apply_event(apply_event(S0, Eb), Ea),
     ?assertEqual(?MOD:encode_state(Sab), ?MOD:encode_state(Sba)).

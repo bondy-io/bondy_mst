@@ -643,7 +643,9 @@ slow_read_no_projection(Entry, Bucket, Key, Kernel) ->
 slow_read_with_projection(Entry, Bucket, Key, Kernel, ProjHlc, ValueBytes) ->
     case read_overlay(Entry, Bucket, Key, ProjHlc) of
         [] ->
-            case bondy_oplog_cell_kernel:decode_value_bytes(Kernel, ValueBytes) of
+            case
+                bondy_oplog_cell_kernel:decode_value_bytes(Kernel, ValueBytes)
+            of
                 undefined ->
                     {undefined, projection};
                 Value ->
@@ -738,7 +740,11 @@ read_projection_state_with_hlc(Entry, Bucket, Key, Kernel) ->
         {ok, Frame} ->
             {Hlc, StateBytes, _ValueBytes} =
                 bondy_oplog_cell_frame:decode_full(Frame),
-            {bondy_oplog_cell_kernel:decode_state(Kernel, StateBytes), Hlc, true}
+            {
+                bondy_oplog_cell_kernel:decode_state(Kernel, StateBytes),
+                Hlc,
+                true
+            }
     end.
 
 read_overlay(Entry, Bucket, Key, AfterHlc) ->
@@ -1166,7 +1172,8 @@ batch_summary({ok, Results, _Fence}) ->
         fun
             ({V, _H}, Acc) when V =/= undefined ->
                 Acc + erlang:external_size(V);
-            (_, Acc) -> Acc
+            (_, Acc) ->
+                Acc
         end,
         0,
         Values

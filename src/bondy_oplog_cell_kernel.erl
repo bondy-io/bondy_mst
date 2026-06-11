@@ -102,22 +102,32 @@ and durable cells decode unchanged.
 -spec default_crdt_for_fold(atom() | module() | undefined) ->
     module() | undefined.
 
-default_crdt_for_fold(lww_register) -> bondy_oplog_crdt_lww_register;
+default_crdt_for_fold(lww_register) ->
+    bondy_oplog_crdt_lww_register;
 default_crdt_for_fold(bondy_oplog_fold_lww_register) ->
     bondy_oplog_crdt_lww_register;
-default_crdt_for_fold(g_counter) -> bondy_oplog_crdt_g_counter;
-default_crdt_for_fold(bondy_oplog_fold_g_counter) -> bondy_oplog_crdt_g_counter;
-default_crdt_for_fold(pn_counter) -> bondy_oplog_crdt_pn_counter;
-default_crdt_for_fold(bondy_oplog_fold_pn_counter) -> bondy_oplog_crdt_pn_counter;
-default_crdt_for_fold(g_set) -> bondy_oplog_crdt_g_set;
-default_crdt_for_fold(bondy_oplog_fold_g_set) -> bondy_oplog_crdt_g_set;
-default_crdt_for_fold(max_register) -> bondy_oplog_crdt_max_register;
+default_crdt_for_fold(g_counter) ->
+    bondy_oplog_crdt_g_counter;
+default_crdt_for_fold(bondy_oplog_fold_g_counter) ->
+    bondy_oplog_crdt_g_counter;
+default_crdt_for_fold(pn_counter) ->
+    bondy_oplog_crdt_pn_counter;
+default_crdt_for_fold(bondy_oplog_fold_pn_counter) ->
+    bondy_oplog_crdt_pn_counter;
+default_crdt_for_fold(g_set) ->
+    bondy_oplog_crdt_g_set;
+default_crdt_for_fold(bondy_oplog_fold_g_set) ->
+    bondy_oplog_crdt_g_set;
+default_crdt_for_fold(max_register) ->
+    bondy_oplog_crdt_max_register;
 default_crdt_for_fold(bondy_oplog_fold_max_register) ->
     bondy_oplog_crdt_max_register;
-default_crdt_for_fold(min_register) -> bondy_oplog_crdt_min_register;
+default_crdt_for_fold(min_register) ->
+    bondy_oplog_crdt_min_register;
 default_crdt_for_fold(bondy_oplog_fold_min_register) ->
     bondy_oplog_crdt_min_register;
-default_crdt_for_fold(index_entry) -> bondy_oplog_crdt_index_entry;
+default_crdt_for_fold(index_entry) ->
+    bondy_oplog_crdt_index_entry;
 default_crdt_for_fold(bondy_oplog_fold_index_entry) ->
     bondy_oplog_crdt_index_entry;
 default_crdt_for_fold(Mod) when is_atom(Mod), Mod =/= undefined ->

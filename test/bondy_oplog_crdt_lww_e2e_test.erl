@@ -64,11 +64,12 @@ crdt_lww_public_api_test_() ->
             }),
             Db
         end,
-        fun(Db) -> ok = bondy_db:close(Db) end,
-        fun(Db) ->
+        fun(Db) -> ok = bondy_db:close(Db) end, fun(Db) ->
             [
                 {"info reports crdt_module", fun() -> pub_info(Db) end},
-                {"apply then read on crdt kernel", fun() -> pub_apply_read(Db) end}
+                {"apply then read on crdt kernel", fun() ->
+                    pub_apply_read(Db)
+                end}
             ]
         end}.
 
@@ -98,13 +99,17 @@ pub_apply_read(Db) ->
 crdt_lww_overlay_test_() ->
     {setup, fun ov_setup/0, fun ov_teardown/1, fun(Ctx) ->
         [
-            {"overlay sets interpreted as a COG (highest HLC wins, "
+            {
+                "overlay sets interpreted as a COG (highest HLC wins, "
                 "order-independent)",
-                fun() -> ov_highest_hlc_wins(Ctx) end},
-            {"overlay clear above the projection clears the cell",
-                fun() -> ov_clear_clears(Ctx) end},
-            {"overlay below the projection HLC is not merged",
-                fun() -> ov_below_projection_ignored(Ctx) end}
+                fun() -> ov_highest_hlc_wins(Ctx) end
+            },
+            {"overlay clear above the projection clears the cell", fun() ->
+                ov_clear_clears(Ctx)
+            end},
+            {"overlay below the projection HLC is not merged", fun() ->
+                ov_below_projection_ignored(Ctx)
+            end}
         ]
     end}.
 
@@ -140,7 +145,9 @@ crdt_kernel_writes_projection() ->
     %% `decode_state/1` — proving the crdt kernel, not the fold, produced
     %% it.
     {Id, NS, Cache, Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"alice">>, {set, 1, <<"v1">>}}),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"alice">>, {set, 1, <<"v1">>}}
+    ),
     _ = barrier(Id),
     {ok, Frame} = bondy_oplog_projection_ets:get(Proj, ?B, <<"alice">>),
     {Hlc, StateBytes, _ValueBytes} = bondy_oplog_cell_frame:decode_full(Frame),
@@ -157,8 +164,12 @@ crdt_read_round_trips() ->
 
 later_hlc_wins() ->
     {Id, NS, Cache, Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>, {set, 1, <<"first">>}}),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>, {set, 2, <<"second">>}}),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"k">>, {set, 1, <<"first">>}}
+    ),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"k">>, {set, 2, <<"second">>}}
+    ),
     _ = barrier(Id),
     ?assertEqual({<<"second">>, 2}, bondy_db_core:read(NS, primary, <<"k">>)),
     teardown_instance(Id, NS, Cache, Proj).
@@ -168,8 +179,12 @@ earlier_hlc_is_absorbed() ->
     %% unchanged — proving the crdt kernel does a true read-modify-write
     %% (`apply_op/3` reads current state), not a blind overwrite.
     {Id, NS, Cache, Proj} = setup_instance(),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>, {set, 5, <<"newer">>}}),
-    _ = bondy_oplog:append(Id, {cell_apply, ?B, <<"k">>, {set, 3, <<"older">>}}),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"k">>, {set, 5, <<"newer">>}}
+    ),
+    _ = bondy_oplog:append(
+        Id, {cell_apply, ?B, <<"k">>, {set, 3, <<"older">>}}
+    ),
     _ = barrier(Id),
     ?assertEqual({<<"newer">>, 5}, bondy_db_core:read(NS, primary, <<"k">>)),
     teardown_instance(Id, NS, Cache, Proj).

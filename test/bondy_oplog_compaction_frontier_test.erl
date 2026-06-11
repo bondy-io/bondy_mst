@@ -114,18 +114,22 @@ scenarios() ->
         {"identical", [lists:seq(1, 10)], lists:seq(1, 10), 10},
         {"peer_superset", [lists:seq(1, 10)], lists:seq(1, 6), 6},
         {"gap_in_middle", [[1, 2, 3, 5, 6, 7, 8, 9, 10]], lists:seq(1, 10), 3},
-        {"two_peers_min", [lists:seq(1, 8), lists:seq(1, 5)], lists:seq(1, 10), 5},
+        {"two_peers_min", [lists:seq(1, 8), lists:seq(1, 5)], lists:seq(1, 10),
+            5},
         {"disjoint", [lists:seq(6, 10)], lists:seq(1, 5), undefined},
         {"no_peers", [], lists:seq(1, 10), undefined},
         {"empty_local", [lists:seq(1, 5)], [], undefined},
-        {"two_full_peers", [lists:seq(1, 10), lists:seq(1, 10)], lists:seq(1, 10), 10},
+        {"two_full_peers", [lists:seq(1, 10), lists:seq(1, 10)],
+            lists:seq(1, 10), 10},
         {"peer_extra_and_hole", [[1, 2, 3, 11, 12]], lists:seq(1, 10), 3}
     ].
 
 frontier_scenarios_test_() ->
     [
         {Name, fun() ->
-            {Local, PeerRoots} = setup("frontier_" ++ Name, PeerKeysets, LocalKeys),
+            {Local, PeerRoots} = setup(
+                "frontier_" ++ Name, PeerKeysets, LocalKeys
+            ),
             New = bondy_oplog_instance:compute_frontier_for(Local, PeerRoots),
             Oracle = oracle_frontier(Local, PeerRoots),
             ?assertEqual(Oracle, New),
@@ -145,7 +149,10 @@ random_sweep_test() ->
     lists:foreach(
         fun(N) ->
             NPeers = 1 + rand:uniform(3),
-            PeerKeysets = [random_subset(Universe) || _ <- lists:seq(1, NPeers)],
+            PeerKeysets = [
+                random_subset(Universe)
+             || _ <- lists:seq(1, NPeers)
+            ],
             LocalKeys = random_subset(Universe),
             {Local, PeerRoots} = setup(
                 "sweep_" ++ integer_to_list(N), PeerKeysets, LocalKeys

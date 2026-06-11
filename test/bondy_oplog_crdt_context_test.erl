@@ -60,7 +60,9 @@ interpret_cog_threads_event_meta_test() ->
 kernel_apply6_threads_context_test() ->
     Kernel = {crdt, ?PROBE},
     {NewState, _Hlc, _SB, _VB, _VES} =
-        ?K:apply(Kernel, ?PROBE:init(), undefined, op1, ek(1, <<"n">>, 1), ctx1),
+        ?K:apply(
+            Kernel, ?PROBE:init(), undefined, op1, ek(1, <<"n">>, 1), ctx1
+        ),
     ?assertEqual([{op1, ctx1}], NewState).
 
 %% apply/5 (context-free) == apply/6 with undefined context.

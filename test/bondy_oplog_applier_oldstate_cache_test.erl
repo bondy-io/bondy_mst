@@ -229,7 +229,8 @@ cache_primitive_get_put_and_bounded() ->
     %% Disabled: every op a no-op.
     ?assertEqual(undefined, bondy_oplog_applier:oldstate_cache_new(false, 10)),
     ?assertEqual(
-        miss, bondy_oplog_applier:oldstate_cache_get(undefined, <<"b">>, <<"k">>)
+        miss,
+        bondy_oplog_applier:oldstate_cache_get(undefined, <<"b">>, <<"k">>)
     ),
     ?assertEqual(
         ok, bondy_oplog_applier:oldstate_cache_put_entries(undefined, [])
@@ -278,7 +279,10 @@ run_lww(Name, CacheOn, Seq, Keys) ->
         end,
         Seq
     ),
-    Result = lists:sort([{K, read_value(bondy_db:read(T, ?REALM, K))} || K <- Keys]),
+    Result = lists:sort([
+        {K, read_value(bondy_db:read(T, ?REALM, K))}
+     || K <- Keys
+    ]),
     close_db(Db, Sup, Dir),
     Result.
 
@@ -309,7 +313,10 @@ open_db(Name, Fold, CacheOn) ->
 
 close_db(Db, Sup, Dir) ->
     _ = catch bondy_db:close(Db),
-    _ = [catch bondy_oplog:stop_instance(I) || I <- bondy_oplog:list_instances()],
+    _ = [
+        catch bondy_oplog:stop_instance(I)
+     || I <- bondy_oplog:list_instances()
+    ],
     case is_process_alive(Sup) of
         true -> bondy_db_leveled_sup:stop(Sup);
         false -> ok

@@ -149,7 +149,9 @@ oldstate_cache_default_on_for_leveled({_Topo, Db, _Sup, _LDir, _PDir}) ->
     ok = telemetry:attach(
         HandlerId,
         [bondy_oplog, applier, oldstate_cache],
-        fun(_Event, Meas, Meta, _Cfg) -> Self ! {oldstate_event, Meas, Meta} end,
+        fun(_Event, Meas, Meta, _Cfg) ->
+            Self ! {oldstate_event, Meas, Meta}
+        end,
         undefined
     ),
     try

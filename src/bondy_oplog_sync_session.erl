@@ -397,7 +397,6 @@ pull_install_loop(
             E
     end.
 
-
 ?DOC("""
 Spawns a `bootstrap/3` (single-CRDT) session in a separate process and
 returns immediately. Failures are logged and the process exits with

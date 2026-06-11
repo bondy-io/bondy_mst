@@ -2145,9 +2145,13 @@ do_handle_call(get_compaction_checkpoint, _From, State) ->
         State#state.compaction_checkpoint_state
     ),
     {reply, Reply, State};
-do_handle_call({compact, _PeerRoots}, _From, #state{
-    pending_compaction = P
-} = State) when P =/= undefined ->
+do_handle_call(
+    {compact, _PeerRoots},
+    _From,
+    #state{
+        pending_compaction = P
+    } = State
+) when P =/= undefined ->
     %% A two-step compaction catch-up is already in flight (awaiting the
     %% applier's `{catch_up_done, _}`). Skip this tick — compaction is
     %% idempotent and the next tick retries once the in-flight one
@@ -3416,7 +3420,8 @@ begin_async_catch_up(State, Started, Frontier) ->
                     %% instance. On timeout we clear the pending record and
                     %% retry next tick (no truncate happened → nothing lost).
                     _ = erlang:send_after(
-                        ?CATCH_UP_TIMEOUT_MS, self(),
+                        ?CATCH_UP_TIMEOUT_MS,
+                        self(),
                         {compaction_catch_up_timeout, Token}
                     ),
                     {reply, {ok, compaction_pending}, State#state{
@@ -3467,7 +3472,10 @@ finalize_catalogue_compaction(State, Started, Frontier) ->
     {LiveSize1, LiveSizeUs} = tc(fun() -> compute_live_size(MST1) end),
     EventCount = max(0, State#state.live_size - LiveSize1),
     maybe_trace_compaction(
-        State#state.instance_id, Started, EventCount, LiveSize1,
+        State#state.instance_id,
+        Started,
+        EventCount,
+        LiveSize1,
         #{
             checkpoint_us => CkptUs,
             truncate_us => TruncateUs,
@@ -3526,7 +3534,10 @@ pairs_in_open_range(MST, W0, Frontier) ->
 tc(Fun) ->
     T0 = erlang:monotonic_time(),
     R = Fun(),
-    {R, erlang:convert_time_unit(erlang:monotonic_time() - T0, native, microsecond)}.
+    {R,
+        erlang:convert_time_unit(
+            erlang:monotonic_time() - T0, native, microsecond
+        )}.
 
 %% @private
 %% Gated per-cycle compaction sub-stage trace. Prints the wall-time split
@@ -3556,8 +3567,15 @@ maybe_trace_compaction(InstanceId, Started, EventCount, LiveSize, Stages) ->
                 "frontier=~pus ckpt=~pus truncate=~pus watermark=~pus "
                 "live_size=~pus~n",
                 [
-                    InstanceId, EventCount, LiveSize, TotalUs, FrontierUs,
-                    CkptUs, TruncateUs, WatermarkUs, LiveSizeUs
+                    InstanceId,
+                    EventCount,
+                    LiveSize,
+                    TotalUs,
+                    FrontierUs,
+                    CkptUs,
+                    TruncateUs,
+                    WatermarkUs,
+                    LiveSizeUs
                 ]
             )
     end.

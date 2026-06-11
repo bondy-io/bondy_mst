@@ -64,9 +64,15 @@ sequential_collapse() ->
     {Db, _O} = open_db(mvreg_seq),
     {ok, T} = bondy_db:open_table(Db, items, #{}),
     ok = bondy_db:apply(T, <<"r">>, <<"k">>, {set, <<"v1">>}),
-    ?assertEqual({ok, [<<"v1">>], read_hlc}, normalise(bondy_db:read(T, <<"r">>, <<"k">>))),
+    ?assertEqual(
+        {ok, [<<"v1">>], read_hlc},
+        normalise(bondy_db:read(T, <<"r">>, <<"k">>))
+    ),
     ok = bondy_db:apply(T, <<"r">>, <<"k">>, {set, <<"v2">>}),
-    ?assertEqual({ok, [<<"v2">>], read_hlc}, normalise(bondy_db:read(T, <<"r">>, <<"k">>))),
+    ?assertEqual(
+        {ok, [<<"v2">>], read_hlc},
+        normalise(bondy_db:read(T, <<"r">>, <<"k">>))
+    ),
     ok = bondy_db:close(Db).
 
 distinct_cells() ->
@@ -74,8 +80,14 @@ distinct_cells() ->
     {ok, T} = bondy_db:open_table(Db, items, #{}),
     ok = bondy_db:apply(T, <<"r">>, <<"k1">>, {set, <<"a">>}),
     ok = bondy_db:apply(T, <<"r">>, <<"k2">>, {set, <<"b">>}),
-    ?assertEqual({ok, [<<"a">>], read_hlc}, normalise(bondy_db:read(T, <<"r">>, <<"k1">>))),
-    ?assertEqual({ok, [<<"b">>], read_hlc}, normalise(bondy_db:read(T, <<"r">>, <<"k2">>))),
+    ?assertEqual(
+        {ok, [<<"a">>], read_hlc},
+        normalise(bondy_db:read(T, <<"r">>, <<"k1">>))
+    ),
+    ?assertEqual(
+        {ok, [<<"b">>], read_hlc},
+        normalise(bondy_db:read(T, <<"r">>, <<"k2">>))
+    ),
     ok = bondy_db:close(Db).
 
 %% Two replicas (distinct origins) write the same cell without observing
@@ -122,7 +134,9 @@ survives_compaction() ->
     I = instance_of(T),
     %% Single-replica self-peer so the compaction watermark can advance.
     LocalRoot = bondy_oplog:root_hash(I),
-    bondy_oplog_peer_state:record_sync_complete({peer, mvreg_dummy}, I, LocalRoot),
+    bondy_oplog_peer_state:record_sync_complete(
+        {peer, mvreg_dummy}, I, LocalRoot
+    ),
     bondy_oplog_peer_state:sync(),
     {ok, {compacted, _, _}} = bondy_oplog:compact(I),
     {ok, V, _} = bondy_db:read(T, <<"r">>, <<"k">>),

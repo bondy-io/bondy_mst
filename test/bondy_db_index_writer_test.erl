@@ -35,12 +35,20 @@ writer_test_() ->
         test("lww_value_index_populates", fun lww_value_index_populates/1),
         test("lww_value_change_retracts", fun lww_value_change_retracts/1),
         test("lww_multi_key_same_term", fun lww_multi_key_same_term/1),
-        test("lww_index_range_after_writes", fun lww_index_range_after_writes/1),
-        test("backfill_freshens_empty_index", fun backfill_freshens_empty_index/1),
+        test(
+            "lww_index_range_after_writes", fun lww_index_range_after_writes/1
+        ),
+        test(
+            "backfill_freshens_empty_index", fun backfill_freshens_empty_index/1
+        ),
         test("writer_pid_registered", fun writer_pid_registered/1),
         test("aw_map_field_extract_index", fun aw_map_field_extract_index/1),
-        test("aw_map_status_change_retracts", fun aw_map_status_change_retracts/1),
-        test("replay_rebuilds_cleared_index", fun replay_rebuilds_cleared_index/1)
+        test(
+            "aw_map_status_change_retracts", fun aw_map_status_change_retracts/1
+        ),
+        test(
+            "replay_rebuilds_cleared_index", fun replay_rebuilds_cleared_index/1
+        )
     ]}.
 
 test(Title, Fn) ->

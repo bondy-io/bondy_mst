@@ -65,7 +65,9 @@ decode_state_dispatch_test() ->
 
 encode_state_dispatch_test() ->
     State = {set, <<"v">>, 5},
-    ?assertEqual(?LWW:encode_state(State), ?K:encode_state({crdt, ?LWW}, State)).
+    ?assertEqual(
+        ?LWW:encode_state(State), ?K:encode_state({crdt, ?LWW}, State)
+    ).
 
 to_value_dispatch_test() ->
     ?assertEqual(<<"v">>, ?K:to_value({crdt, ?LWW}, {set, <<"v">>, 5})).
@@ -78,7 +80,9 @@ crdt_apply_sets_value_test() ->
     Kernel = {crdt, ?LWW},
     Old = ?K:init(Kernel),
     {NewState, Hlc, StateBytes, ValueBytes, VES} =
-        ?K:apply(Kernel, Old, undefined, {set, 10, <<"v1">>}, ek(10, <<"n1">>, 1)),
+        ?K:apply(
+            Kernel, Old, undefined, {set, 10, <<"v1">>}, ek(10, <<"n1">>, 1)
+        ),
     ?assertEqual({set, <<"v1">>, 10}, NewState),
     ?assertEqual(10, Hlc),
     ?assertEqual(?LWW:encode_state(NewState), StateBytes),
@@ -89,10 +93,22 @@ crdt_apply_sets_value_test() ->
 crdt_apply_threads_old_state_test() ->
     Kernel = {crdt, ?LWW},
     {S1, _, _, _, _} =
-        ?K:apply(Kernel, undefined, undefined, {set, 10, <<"v1">>}, ek(10, <<"n1">>, 1)),
+        ?K:apply(
+            Kernel,
+            undefined,
+            undefined,
+            {set, 10, <<"v1">>},
+            ek(10, <<"n1">>, 1)
+        ),
     %% A lower-HLC set must be rejected (LWW); the state is unchanged.
     {S2, _, _, V2, _} =
-        ?K:apply(Kernel, S1, term_to_binary(<<"v1">>), {set, 5, <<"old">>}, ek(5, <<"n2">>, 1)),
+        ?K:apply(
+            Kernel,
+            S1,
+            term_to_binary(<<"v1">>),
+            {set, 5, <<"old">>},
+            ek(5, <<"n2">>, 1)
+        ),
     ?assertEqual(S1, S2),
     ?assertEqual(term_to_binary(<<"v1">>), V2).
 

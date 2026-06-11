@@ -46,7 +46,9 @@ perms(L) ->
 naive_apply(Events, {V0, H0}) ->
     lists:foldl(
         fun(E, {V, H}) ->
-            H1 = erlang:max(H, bondy_oplog_event:key_hlc(bondy_oplog_event:key(E))),
+            H1 = erlang:max(
+                H, bondy_oplog_event:key_hlc(bondy_oplog_event:key(E))
+            ),
             V1 =
                 case bondy_oplog_event:op(E) of
                     {inc, N} -> V + N;
@@ -129,7 +131,9 @@ two_replica_reorder_convergence_test() ->
         ev(40, <<"b">>, 2, {inc, 1})
     ],
     ReplicaA = lists:reverse(Es),
-    ReplicaB = [lists:nth(3, Es), lists:nth(1, Es), lists:nth(4, Es), lists:nth(2, Es)],
+    ReplicaB = [
+        lists:nth(3, Es), lists:nth(1, Es), lists:nth(4, Es), lists:nth(2, Es)
+    ],
     Init = ?CRDT:init(),
     SA = ?CRDT:interpret_cog(ReplicaA, Init),
     SB = ?CRDT:interpret_cog(ReplicaB, Init),

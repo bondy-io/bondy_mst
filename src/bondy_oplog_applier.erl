@@ -577,7 +577,9 @@ touches sealed packs. Idempotent (the cell fold is), so re-applying a pair
 already in the projection is safe.
 """.
 apply_replayed_pairs(ApplierPid, Pairs, NewRoot) when is_pid(ApplierPid) ->
-    gen_server:call(ApplierPid, {apply_replayed_pairs, Pairs, NewRoot}, infinity).
+    gen_server:call(
+        ApplierPid, {apply_replayed_pairs, Pairs, NewRoot}, infinity
+    ).
 
 -spec advance_replayed_root(pid(), bondy_mst:hash() | undefined) -> ok.
 
@@ -631,8 +633,9 @@ Does NOT advance `last_replayed_root`: the instance's post-truncate
 `advance_replayed_root/2` re-anchors the cursor on the truncated root. A
 no-op (still signals done) when `cell_apply_target` is not configured.
 """.
-catch_up_apply(ApplierPid, Pairs, Token)
-when is_pid(ApplierPid), is_list(Pairs), is_integer(Token) ->
+catch_up_apply(ApplierPid, Pairs, Token) when
+    is_pid(ApplierPid), is_list(Pairs), is_integer(Token)
+->
     gen_server:cast(ApplierPid, {catch_up_apply, Pairs, Token}).
 
 -spec rederive_projection_sync(pid()) -> ok.
@@ -1131,7 +1134,8 @@ handle_call(rederive_projection, _From, State) ->
     %% `replace`-mode catalogue install clobbered on a live re-bootstrap
     %% (PR-G's op-replay). The single-applier scope makes the reset + fold
     %% atomic w.r.t. other reads.
-    {reply, ok, do_replay_cell_events(State#state{last_replayed_root = undefined})};
+    {reply, ok,
+        do_replay_cell_events(State#state{last_replayed_root = undefined})};
 handle_call(rebuild_indexes, _From, State) ->
     %% Full secondary-index rebuild (IDX-4): re-derive every live term from
     %% each cell's current projection value with the back-pressure cap
@@ -1550,16 +1554,15 @@ collect_frames(Iter0, Max, AccRev, N, LastPos) ->
             AccRev1 = [Batch | AccRev],
             case N1 >= Max of
                 true ->
-                    {frames, lists:append(lists:reverse(AccRev1)),
-                        NextPos, NewIter, more};
+                    {frames, lists:append(lists:reverse(AccRev1)), NextPos,
+                        NewIter, more};
                 false ->
                     collect_frames(NewIter, Max, AccRev1, N1, NextPos)
             end;
         end_of_log when AccRev == [] ->
             {empty, Iter0};
         end_of_log ->
-            {frames, lists:append(lists:reverse(AccRev)),
-                LastPos, Iter0, eol};
+            {frames, lists:append(lists:reverse(AccRev)), LastPos, Iter0, eol};
         {error, Reason} ->
             {error, Reason}
     end.
@@ -2116,8 +2119,10 @@ stamp_ctx_guard(#state{ctx_guard = Guard} = State, Bucket, Key, Context) ->
                     %% accepting it would let a used dot be re-minted.
                     {{error, {context_regression, Bucket, Key}}, State};
                 false ->
-                    {{ok, Context},
-                        record_ctx_guard(State, CellKey, Prev, Context)}
+                    {
+                        {ok, Context},
+                        record_ctx_guard(State, CellKey, Prev, Context)
+                    }
             end;
         undefined ->
             {{ok, Context}, record_ctx_guard(State, CellKey, [], Context)}
@@ -2330,7 +2335,10 @@ dispatch_index_ops({NS, SecIndexes}, IdxAcc, MaxHlc, Bypass) ->
             _ -> MaxHlc
         end,
     Caps = maps:from_list([
-        {maps:get(index_name, D), maps:get(max_inflight, D, ?DEFAULT_MAX_INFLIGHT)}
+        {
+            maps:get(index_name, D),
+            maps:get(max_inflight, D, ?DEFAULT_MAX_INFLIGHT)
+        }
      || D <- SecIndexes
     ]),
     maps:foreach(
@@ -2551,7 +2559,12 @@ do_reap_origins(
                         fun(CellKey, Acc) ->
                             case
                                 reap_one_cell(
-                                    Adapter, Handle, Kernel, Id, CellKey, Retired
+                                    Adapter,
+                                    Handle,
+                                    Kernel,
+                                    Id,
+                                    CellKey,
+                                    Retired
                                 )
                             of
                                 skip -> Acc;
@@ -2651,8 +2664,9 @@ finish_reap(State, Ctx, Scanned, Reaped) ->
                 #{instance_id => Id}
             ),
             Report = reap_report(true, Scanned, OriginsReaped),
-            {{ok, Report#{cells_reaped => length(Reaped)}},
-                State#state{ctx_guard = Guard1}};
+            {{ok, Report#{cells_reaped => length(Reaped)}}, State#state{
+                ctx_guard = Guard1
+            }};
         {error, Reason} ->
             ?LOG_WARNING(#{
                 description =>
@@ -2753,7 +2767,9 @@ index_puts_for_one(
 %% from the projection/cache, never the MST. With no projection there is
 %% nothing to apply, so we leave the cursor untouched (matching
 %% `do_replay_cell_events/1`).
-do_apply_replayed_pairs(#state{cell_apply_ctx = undefined} = State, _Pairs, _NewRoot) ->
+do_apply_replayed_pairs(
+    #state{cell_apply_ctx = undefined} = State, _Pairs, _NewRoot
+) ->
     State;
 do_apply_replayed_pairs(
     #state{cell_apply_ctx = Ctx, instance_id = Id} = State, Pairs, NewRoot
@@ -2769,7 +2785,9 @@ do_apply_replayed_pairs(
 %% apply; the caller still signals done.
 do_catch_up_apply(#state{cell_apply_ctx = undefined} = State, _Pairs) ->
     State;
-do_catch_up_apply(#state{cell_apply_ctx = Ctx, instance_id = Id} = State, Pairs) ->
+do_catch_up_apply(
+    #state{cell_apply_ctx = Ctx, instance_id = Id} = State, Pairs
+) ->
     _ = apply_cell_pairs(Ctx, Id, Pairs),
     State.
 
@@ -3653,9 +3671,11 @@ validate_substrate_opts(Opts) ->
                                 ok -> validate_oldstate_cache_opts(Opts);
                                 {error, _} = Err -> Err
                             end;
-                        {error, _} = Err -> Err
+                        {error, _} = Err ->
+                            Err
                     end;
-                {error, _} = Err -> Err
+                {error, _} = Err ->
+                    Err
             end;
         {error, _} = Err ->
             Err
@@ -3664,7 +3684,9 @@ validate_substrate_opts(Opts) ->
 %% @private
 %% A2 coalescing threshold must be a positive integer (`1` = disabled).
 validate_apply_batch_max_events(Opts) ->
-    case maps:get(apply_batch_max_events, Opts, ?DEFAULT_APPLY_BATCH_MAX_EVENTS) of
+    case
+        maps:get(apply_batch_max_events, Opts, ?DEFAULT_APPLY_BATCH_MAX_EVENTS)
+    of
         N when is_integer(N), N >= 1 ->
             ok;
         Bad ->
@@ -3677,7 +3699,9 @@ validate_apply_batch_max_events(Opts) ->
 validate_oldstate_cache_opts(Opts) ->
     case maps:get(oldstate_cache, Opts, false) of
         B when is_boolean(B) ->
-            case maps:get(oldstate_cache_max, Opts, ?DEFAULT_OLDSTATE_CACHE_MAX) of
+            case
+                maps:get(oldstate_cache_max, Opts, ?DEFAULT_OLDSTATE_CACHE_MAX)
+            of
                 M when is_integer(M), M >= 1 ->
                     ok;
                 BadM ->

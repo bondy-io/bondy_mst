@@ -180,8 +180,12 @@ order_independent() ->
 
 encode_state({Presence, Cols, H}) when is_binary(Cols), is_integer(H) ->
     ColsSize = byte_size(Cols),
-    <<(rank(Presence)):8, H:64/big-unsigned, ColsSize:32/big-unsigned,
-        Cols/binary>>.
+    <<
+        (rank(Presence)):8,
+        H:64/big-unsigned,
+        ColsSize:32/big-unsigned,
+        Cols/binary
+    >>.
 
 -spec decode_state(binary()) -> state().
 

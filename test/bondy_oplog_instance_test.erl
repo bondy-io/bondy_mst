@@ -703,7 +703,8 @@ fold_module_unknown_atom_crashes_init() ->
     %% surfaces the wrapped reason. We assert on the unwrapped structured
     %% reason and skip stop_instance — the instance never started.
     ?assertMatch(
-        {error, {invalid_fold_module, Id, {unknown, not_a_real_fold_module_xyz}}},
+        {error,
+            {invalid_fold_module, Id, {unknown, not_a_real_fold_module_xyz}}},
         normalize_start_error(Result)
     ).
 

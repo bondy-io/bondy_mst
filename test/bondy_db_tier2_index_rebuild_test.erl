@@ -127,7 +127,10 @@ preserves_concurrent_siblings() ->
     %% The converged cell on A holds both color siblings.
     {ok, Va, _} = bondy_db:read(Ta, R, K),
     ?assertEqual(
-        #{<<"status">> => [<<"active">>], <<"color">> => [<<"blue">>, <<"red">>]},
+        #{
+            <<"status">> => [<<"active">>],
+            <<"color">> => [<<"blue">>, <<"red">>]
+        },
         Va
     ),
 

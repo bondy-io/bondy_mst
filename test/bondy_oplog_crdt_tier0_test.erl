@@ -30,7 +30,9 @@ ev(H, O, S, Op) ->
 
 %% Fold `apply_op/3` over `{Op, Key}` pairs (the eager write path).
 fold(Mod, Pairs) ->
-    lists:foldl(fun({Op, Key}, S) -> Mod:apply_op(S, Op, Key) end, Mod:init(), Pairs).
+    lists:foldl(
+        fun({Op, Key}, S) -> Mod:apply_op(S, Op, Key) end, Mod:init(), Pairs
+    ).
 
 %% Assert `interpret_cog/2` is invariant under a few input permutations.
 assert_cog_perm_invariant(Mod, Events) ->
@@ -41,7 +43,8 @@ assert_cog_perm_invariant(Mod, Events) ->
      || P <- [lists:reverse(Events), rotate(Events, 1), rotate(Events, 2)]
     ].
 
-rotate([], _) -> [];
+rotate([], _) ->
+    [];
 rotate(L, N) ->
     {A, B} = lists:split(N rem length(L), L),
     B ++ A.

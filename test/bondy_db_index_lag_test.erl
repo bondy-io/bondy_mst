@@ -30,14 +30,21 @@
 
 lag_test_() ->
     {foreach, fun setup/0, fun cleanup/1, [
-        test("rebuild_after_clear_repopulates", fun rebuild_after_clear_repopulates/1),
+        test(
+            "rebuild_after_clear_repopulates",
+            fun rebuild_after_clear_repopulates/1
+        ),
         test("rebuild_removes_orphans", fun rebuild_removes_orphans/1),
-        test("backfill_freshens_all_shards", fun backfill_freshens_all_shards/1),
+        test(
+            "backfill_freshens_all_shards", fun backfill_freshens_all_shards/1
+        ),
         test("stale_refusal_carries_lag", fun stale_refusal_carries_lag/1),
         test("primary_scan_fallback", fun primary_scan_fallback/1),
         test("index_lag_reports_fresh", fun index_lag_reports_fresh/1),
-        test("saturation_drops_then_rebuild_converges",
-            fun saturation_drops_then_rebuild_converges/1)
+        test(
+            "saturation_drops_then_rebuild_converges",
+            fun saturation_drops_then_rebuild_converges/1
+        )
     ]}.
 
 test(Title, Fn) ->

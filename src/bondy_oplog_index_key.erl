@@ -118,10 +118,8 @@ Exposed for the bounds helpers and for callers building keys directly.
 
 encode_term(Term) when is_binary(Term) ->
     escape(Term);
-
 encode_term(Term) when is_integer(Term), Term >= ?INT_MIN, Term =< ?INT_MAX ->
     escape(<<(Term + ?INT_BIAS):64/big-unsigned>>);
-
 encode_term(Term) when is_integer(Term) ->
     %% Outside the signed 64-bit range supported in v1.
     erlang:error(badarg, [Term]).
@@ -176,7 +174,8 @@ MUST agree on this layout — it is the single source of truth.
 bucket(PrimaryBucket, IndexName) when
     is_binary(PrimaryBucket), is_atom(IndexName)
 ->
-    <<PrimaryBucket/binary, ?IDX_INFIX, (atom_to_binary(IndexName, utf8))/binary>>.
+    <<PrimaryBucket/binary, ?IDX_INFIX,
+        (atom_to_binary(IndexName, utf8))/binary>>.
 
 -doc """
 The secondary shard a term lands in: `phash2({Bucket, Term}, ShardCount)`.

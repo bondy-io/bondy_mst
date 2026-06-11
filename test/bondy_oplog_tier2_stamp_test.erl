@@ -32,12 +32,12 @@ tier2_stamp_test_() ->
             }),
             Db
         end,
-        fun(Db) -> ok = bondy_db:close(Db) end,
-        fun(Db) ->
+        fun(Db) -> ok = bondy_db:close(Db) end, fun(Db) ->
             [
                 {"info reports tier_2", fun() -> reports_tier_2(Db) end},
-                {"stamps evolving context (read-your-writes)",
-                    fun() -> stamps_evolving_context(Db) end}
+                {"stamps evolving context (read-your-writes)", fun() ->
+                    stamps_evolving_context(Db)
+                end}
             ]
         end}.
 

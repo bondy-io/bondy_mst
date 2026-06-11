@@ -370,8 +370,6 @@ the message would be pure noise. Exported for unit testing.
 -spec warn_default_wal_path(Opts :: map()) -> boolean().
 
 warn_default_wal_path(Opts) ->
-    not (
-        maps:is_key(wal_dir, Opts) orelse
+    not (maps:is_key(wal_dir, Opts) orelse
         maps:is_key(storage_path, Opts) orelse
-        maps:get(durability, Opts, durable) =:= ephemeral
-    ).
+        maps:get(durability, Opts, durable) =:= ephemeral).

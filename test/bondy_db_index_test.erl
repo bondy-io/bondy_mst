@@ -64,14 +64,19 @@ cleanup({Db, Table, Sup, Dir}) ->
     ok.
 
 with_table(Title, Fn) ->
-    {Title, {setup, fun setup/0, fun cleanup/1, fun(Ctx) ->
-        {Title, fun() -> Fn(Ctx) end}
-    end}}.
+    {Title,
+        {setup, fun setup/0, fun cleanup/1, fun(Ctx) ->
+            {Title, fun() -> Fn(Ctx) end}
+        end}}.
 
 index_test_() ->
     [
-        with_table("provision_reports_indexes", fun provision_reports_indexes/1),
-        with_table("secondary_shards_registered", fun secondary_shards_registered/1),
+        with_table(
+            "provision_reports_indexes", fun provision_reports_indexes/1
+        ),
+        with_table(
+            "secondary_shards_registered", fun secondary_shards_registered/1
+        ),
         with_table("custom_sec_shard_count", fun custom_sec_shard_count/1),
         with_table("empty_index_get", fun empty_index_get/1),
         with_table("empty_index_range", fun empty_index_range/1),
@@ -81,7 +86,9 @@ index_test_() ->
         with_table("pointer_only_index", fun pointer_only_index/1),
         with_table("index_range_ordered", fun index_range_ordered/1),
         with_table("realm_isolation", fun realm_isolation/1),
-        with_table("teardown_unregisters_shards", fun teardown_unregisters_shards/1)
+        with_table(
+            "teardown_unregisters_shards", fun teardown_unregisters_shards/1
+        )
     ].
 
 %% =============================================================================
@@ -139,7 +146,8 @@ custom_sec_shard_count({_Db, Table, _Sup, _Dir}) ->
 
 empty_index_get({_Db, Table, _Sup, _Dir}) ->
     ?assertEqual(
-        {ok, []}, bondy_db:index_get(Table, <<"r1">>, by_status, <<"active">>, #{})
+        {ok, []},
+        bondy_db:index_get(Table, <<"r1">>, by_status, <<"active">>, #{})
     ).
 
 empty_index_range({_Db, Table, _Sup, _Dir}) ->
@@ -232,7 +240,9 @@ index_range_ordered({_Db, Table, _Sup, _Dir}) ->
     ).
 
 realm_isolation({_Db, Table, _Sup, _Dir}) ->
-    put_index_entry(Table, <<"rA">>, by_status, <<"active">>, <<"u1">>, <<>>, 7),
+    put_index_entry(
+        Table, <<"rA">>, by_status, <<"active">>, <<"u1">>, <<>>, 7
+    ),
     ?assertEqual(
         {ok, [{<<"u1">>, #{}}]},
         bondy_db:index_get(Table, <<"rA">>, by_status, <<"active">>, #{})
@@ -249,8 +259,8 @@ teardown_unregisters_shards({_Db, Table, _Sup, _Dir}) ->
     ok = bondy_db:close_table(Table),
     ?assertEqual(not_found, bondy_db_core_registry:lookup(NS, by_status, 0)),
     ?assertEqual(not_found, bondy_db_core_registry:lookup(NS, by_age, 0)).
-    %% The fixture's `catch bondy_db:close_table(Table)` re-runs teardown;
-    %% unregister/release_cache/close_table are all idempotent.
+%% The fixture's `catch bondy_db:close_table(Table)` re-runs teardown;
+%% unregister/release_cache/close_table are all idempotent.
 
 %% =============================================================================
 %% Spec validation (no fixture — these assert open_table rejects)
@@ -302,7 +312,9 @@ invalid_sec_shard_count_test() ->
         ?assertEqual(
             {error, {invalid_sec_shard_count, 0}},
             bondy_db:open_table(Db, t, #{
-                indexes => [#{name => by_x, extract => [a], sec_shard_count => 0}]
+                indexes => [
+                    #{name => by_x, extract => [a], sec_shard_count => 0}
+                ]
             })
         )
     end).

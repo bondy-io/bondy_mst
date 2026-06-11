@@ -880,7 +880,9 @@ index_get(Table, Realm, IndexName, Term, Opts) when
                 read_index(NS, IndexName, SecBucket, Low, High, RangeOpts);
             {stale, Lag} ->
                 stale_or_fallback(
-                    Opts, IndexName, Lag,
+                    Opts,
+                    IndexName,
+                    Lag,
                     fun() ->
                         primary_scan_eq(Table, Realm, Spec, Norm, Opts)
                     end
@@ -928,7 +930,10 @@ index_range(Table, Realm, IndexName, LoTerm, HiTerm, Opts) when
                 {Low, High} = bondy_oplog_index_key:range_bounds(Lo, Hi),
                 case
                     bondy_db_core:range_all(
-                        NS, IndexName, SecBucket, {Low, High},
+                        NS,
+                        IndexName,
+                        SecBucket,
+                        {Low, High},
                         index_range_opts(Opts)
                     )
                 of
@@ -937,7 +942,9 @@ index_range(Table, Realm, IndexName, LoTerm, HiTerm, Opts) when
                 end;
             {stale, Lag} ->
                 stale_or_fallback(
-                    Opts, IndexName, Lag,
+                    Opts,
+                    IndexName,
+                    Lag,
                     fun() ->
                         primary_scan_range(Table, Realm, Spec, Lo, Hi, Opts)
                     end
@@ -1013,14 +1020,16 @@ info(#{name := Name, topology := Topology, opts := Opts}) ->
         topology => Topology,
         opts => Opts
     };
-info(#{
-    entity_type := ET,
-    shard_count := SC,
-    fold_module := Fold,
-    db_name := DbName,
-    db_topology := Topology,
-    namespace := NS
-} = Table) ->
+info(
+    #{
+        entity_type := ET,
+        shard_count := SC,
+        fold_module := Fold,
+        db_name := DbName,
+        db_topology := Topology,
+        namespace := NS
+    } = Table
+) ->
     #{
         kind => table,
         db_name => DbName,
@@ -1076,8 +1085,12 @@ provision_seq(Count, ProvisionFun, TeardownFun, Shard, AccA, AccB) ->
     case ProvisionFun(Shard) of
         {ok, ValA, ValB} ->
             provision_seq(
-                Count, ProvisionFun, TeardownFun, Shard + 1,
-                AccA#{Shard => ValA}, AccB#{Shard => ValB}
+                Count,
+                ProvisionFun,
+                TeardownFun,
+                Shard + 1,
+                AccA#{Shard => ValA},
+                AccB#{Shard => ValB}
             );
         {error, _} = Err ->
             lists:foreach(
@@ -1111,8 +1124,17 @@ provision_shards(
         ShardCount,
         fun(Shard) ->
             provision_shard(
-                NS, DbName, EntityType, ShardCount, FoldModule, CrdtModule,
-                OplogOpts, SecIndexes, Topology, TableState, Shard
+                NS,
+                DbName,
+                EntityType,
+                ShardCount,
+                FoldModule,
+                CrdtModule,
+                OplogOpts,
+                SecIndexes,
+                Topology,
+                TableState,
+                Shard
             )
         end,
         fun(S, Ids, Caches) ->
@@ -1223,8 +1245,8 @@ assert_causal_tier_consistency(CrdtModule) when is_atom(CrdtModule) ->
     case causal_tier_of(CrdtModule) of
         tier_2 ->
             IsOI =
-                erlang:function_exported(CrdtModule, order_independent, 0)
-                    andalso CrdtModule:order_independent(),
+                erlang:function_exported(CrdtModule, order_independent, 0) andalso
+                    CrdtModule:order_independent(),
             case IsOI of
                 true -> ok;
                 false -> error({tier_2_requires_order_independent, CrdtModule})
@@ -1350,8 +1372,11 @@ teardown_shard_common(
     NS, Index, Shard, WorkerMap, StopFun, CacheHandles, Topology, TableState
 ) ->
     case maps:get(Shard, WorkerMap, undefined) of
-        undefined -> ok;
-        Worker -> _ = StopFun(Worker), ok
+        undefined ->
+            ok;
+        Worker ->
+            _ = StopFun(Worker),
+            ok
     end,
     _ = bondy_db_core_registry:unregister(NS, Index, Shard),
     case maps:get(Shard, CacheHandles, undefined) of
@@ -1366,8 +1391,14 @@ teardown_shard_common(
 %% @private
 teardown_shard(NS, Shard, InstanceIds, CacheHandles, Topology, TableState) ->
     teardown_shard_common(
-        NS, ?INDEX, Shard, InstanceIds, fun bondy_oplog:stop_instance/1,
-        CacheHandles, Topology, TableState
+        NS,
+        ?INDEX,
+        Shard,
+        InstanceIds,
+        fun bondy_oplog:stop_instance/1,
+        CacheHandles,
+        Topology,
+        TableState
     ).
 
 %% =============================================================================
@@ -1485,7 +1516,9 @@ provision_index(Db, NS, Spec, DefaultShardCount) ->
     end.
 
 %% @private
-provision_index_shards(NS, Name, SecShardCount, CoalesceMs, Topology, TableState) ->
+provision_index_shards(
+    NS, Name, SecShardCount, CoalesceMs, Topology, TableState
+) ->
     provision_seq(
         SecShardCount,
         fun(Shard) ->
@@ -1599,10 +1632,18 @@ teardown_indexes(NS, IndexMap) ->
     ).
 
 %% @private
-teardown_index_shard(NS, Name, Shard, CacheHandles, Writers, Topology, TableState) ->
+teardown_index_shard(
+    NS, Name, Shard, CacheHandles, Writers, Topology, TableState
+) ->
     teardown_shard_common(
-        NS, Name, Shard, Writers, fun bondy_oplog_secondary_sup:stop_writer/1,
-        CacheHandles, Topology, TableState
+        NS,
+        Name,
+        Shard,
+        Writers,
+        fun bondy_oplog_secondary_sup:stop_writer/1,
+        CacheHandles,
+        Topology,
+        TableState
     ).
 
 %% @private
@@ -1614,7 +1655,9 @@ index_descriptors(Specs, DefaultShardCount) ->
         #{
             index_name => bondy_oplog_index_spec:name(Spec),
             spec => Spec,
-            sec_shard_count => maps:get(sec_shard_count, Spec, DefaultShardCount),
+            sec_shard_count => maps:get(
+                sec_shard_count, Spec, DefaultShardCount
+            ),
             %% IDX-4 back-pressure cap, read by the primary applier at
             %% dispatch to decide whether to drop a saturating batch.
             max_inflight => bondy_oplog_index_spec:max_inflight(Spec)
@@ -1838,7 +1881,10 @@ primary_cells(#{namespace := NS} = Table, Realm) ->
     PrimaryBucket = primary_bucket(Table, Realm),
     case
         bondy_db_core:range_all(
-            NS, ?INDEX, PrimaryBucket, {<<>>, infinity},
+            NS,
+            ?INDEX,
+            PrimaryBucket,
+            {<<>>, infinity},
             #{limit => ?PRIMARY_SCAN_LIMIT, include_overlay => false}
         )
     of
@@ -1871,7 +1917,9 @@ primary_bucket(
 
 %% @private
 read_index(NS, IndexName, SecBucket, Low, High, RangeOpts) ->
-    case bondy_db_core:range(NS, IndexName, SecBucket, {Low, High}, RangeOpts) of
+    case
+        bondy_db_core:range(NS, IndexName, SecBucket, {Low, High}, RangeOpts)
+    of
         {ok, Rows} -> {ok, index_rows(Rows)};
         {error, _} = Err -> Err
     end.

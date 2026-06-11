@@ -101,7 +101,9 @@ markers_test() ->
     ?assertNot(?CRDT:value_equals_state()).
 
 gc_threshold_tracks_hlc_test() ->
-    S = ?CRDT:interpret_cog([ev(77, <<"n1">>, 1, {set, 77, <<"v">>})], ?CRDT:init()),
+    S = ?CRDT:interpret_cog(
+        [ev(77, <<"n1">>, 1, {set, 77, <<"v">>})], ?CRDT:init()
+    ),
     ?assertEqual(77, ?CRDT:gc_threshold(S)),
     ?assertEqual(undefined, ?CRDT:gc_threshold(?CRDT:init())).
 
@@ -112,6 +114,8 @@ encode_decode_roundtrip_test() ->
         {cleared, 99}
     ],
     lists:foreach(
-        fun(S) -> ?assertEqual(S, ?CRDT:decode_state(?CRDT:encode_state(S))) end,
+        fun(S) ->
+            ?assertEqual(S, ?CRDT:decode_state(?CRDT:encode_state(S)))
+        end,
         States
     ).
