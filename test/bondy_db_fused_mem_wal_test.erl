@@ -25,7 +25,11 @@ fused_mem_wal_test_() ->
         {"single + bulk writes round-trip through the mem WAL",
             {timeout, 30, fun bulk_writes_round_trip/0}},
         {"two mem-backed replicas converge via sync",
-            {timeout, 30, fun mem_replicas_converge/0}}
+            {timeout, 30, fun mem_replicas_converge/0}},
+    {"single-node fused self-peer compaction bounds the MST",
+            {timeout, 30, fun compaction_bounds_mst/0}},
+    {"fused compaction truncates UNDER concurrent writes",
+            {timeout, 60, fun compaction_under_concurrent_writes/0}}
     ]}.
 
 setup() ->
@@ -81,6 +85,12 @@ bulk_writes_round_trip() ->
     Info = bondy_oplog_wal_mem:info(bondy_oplog_registry:wal_pid(Id)),
     ?assert(maps:get(head_seq, Info) >= N),
     ?assert(maps:get(append_count, Info) >= N),
+    %% GC must have fired: the live (un-GC'd) set is bounded by the commit
+    %% cadence, NOT the whole run. Without GC `live_events` would be ~N (the
+    %% O(n²)-decay / unbounded-memory regression). All N writes are installed +
+    %% committed by now, so the live set is a small tail.
+    LiveEvents = maps:get(live_events, Info),
+    ?assert(LiveEvents < N div 2),
     ok = bondy_db:close(Db).
 
 %% A writes k1, B writes k2; after a bidirectional sync both replicas answer
@@ -104,6 +114,112 @@ mem_replicas_converge() ->
     ?assertEqual(bondy_oplog:root_hash(Ia), bondy_oplog:root_hash(Ib)),
     ok = bondy_db:close(DbA),
     ok = bondy_db:close(DbB).
+
+%% Reproduces the bench's self-peer compaction (record live root as synced →
+%% sync → compact) WITHOUT the bench's error-swallowing catch, and asserts the
+%% MST actually shrinks. The bench shows `comp n=0` for single-node fused — this
+%% pins whether fused single-node compaction truncates at all (the bounded-MST
+%% lever for the install tail) or silently no-ops.
+compaction_bounds_mst() ->
+    {Db, T, Id} = open_fused_mem(fmw_compact),
+    N = 2000,
+    [
+        begin
+            H = bondy_db:tick(T),
+            ok = bondy_db:apply(T, <<"r">>, key(I), {set, H, val_for(I)})
+        end
+     || I <- lists:seq(1, N)
+    ],
+    ok = wait_live(Id, N),
+    Before = live_size(Id),
+    %% The bench's compact_trigger steps, verbatim but un-caught.
+    Root = bondy_oplog:root_hash(Id),
+    ?assert(is_binary(Root)),
+    ok = bondy_oplog_peer_state:record_sync_complete(
+        {peer, fmw_compact_dummy}, Id, Root
+    ),
+    bondy_oplog_peer_state:sync(),
+    Result = bondy_oplog:compact(Id),
+    bondy_oplog_peer_state:forget_peer({peer, fmw_compact_dummy}),
+    After = live_size(Id),
+    %% Diagnostics surface in the eunit output if the assertion fails.
+    ?debugFmt("compact result=~p live_size before=~p after=~p", [
+        Result, Before, After
+    ]),
+    ?assertMatch({ok, {compacted, _, _}}, Result),
+    ?assert(After < Before),
+    ok = bondy_db:close(Db).
+
+%% The bug PR-5 hit: under CONTINUOUS writes the overlay never drains to 0, so
+%% `bondy_oplog:compact`'s old `await_apply` barrier timed out every cycle and
+%% compaction never ran (the MST grew unbounded → install latency climbed). This
+%% drives a writer that never pauses, runs several compaction cycles concurrently,
+%% and asserts the MST is actually bounded (live_size stays far below the total
+%% written) — i.e. compaction truncates WHILE writes are in flight.
+compaction_under_concurrent_writes() ->
+    {Db, T, Id} = open_fused_mem(fmw_concurrent),
+    Parent = self(),
+    %% Fire-and-forget writers (NO per-write await) keep the overlay non-empty,
+    %% reproducing the "overlay never drains to 0" condition under which the old
+    %% `await_apply` barrier made compaction time out every cycle. Two writers
+    %% over a UNIQUE growing keyspace — without effective compaction the MST
+    %% grows toward the full install count (tens of thousands in a few seconds).
+    W1 = spawn_link(fun() -> ff_writer(T, Id, 0, Parent) end),
+    W2 = spawn_link(fun() -> ff_writer(T, Id, 1, Parent) end),
+    %% Run compaction cycles concurrently (the bench's self-peer frontier).
+    [
+        begin
+            timer:sleep(250),
+            Root = bondy_oplog_instance:root_hash(Id),
+            is_binary(Root) andalso
+                begin
+                    bondy_oplog_peer_state:record_sync_complete(
+                        {peer, fmw_cc_dummy}, Id, Root
+                    ),
+                    bondy_oplog_peer_state:sync(),
+                    _ = bondy_oplog:compact(Id)
+                end
+        end
+     || _ <- lists:seq(1, 10)
+    ],
+    W1 ! stop,
+    W2 ! stop,
+    ok = recv_done(),
+    ok = recv_done(),
+    %% Drain the tail, then one final compaction, and assert the MST is BOUNDED
+    %% — far below the ~thousands of unique keys written. Broken compaction
+    %% leaves live_size in the tens of thousands; working compaction keeps it
+    %% to a small recent tail.
+    _ = bondy_oplog_instance:await_apply(Id, 5000),
+    Root2 = bondy_oplog_instance:root_hash(Id),
+    ok = bondy_oplog_peer_state:record_sync_complete(
+        {peer, fmw_cc_dummy}, Id, Root2
+    ),
+    bondy_oplog_peer_state:sync(),
+    _ = bondy_oplog:compact(Id),
+    Live = live_size(Id),
+    ?debugFmt("concurrent compaction: final live_size=~p", [Live]),
+    bondy_oplog_peer_state:forget_peer({peer, fmw_cc_dummy}),
+    ?assert(Live < 5000),
+    ok = bondy_db:close(Db).
+
+%% Self-paced writer (one in-flight write at a time via `bondy_db:apply`, which
+%% awaits its own install), striped by start offset so two writers don't collide
+%% on keys. Self-pacing keeps the instance mailbox bounded (mirrors the bench's
+%% append+await loop) while still applying continuous concurrent load — unlike a
+%% pure fire-and-forget loop, which floods the mailbox and starves everything.
+ff_writer(T, Id, N, Parent) ->
+    receive
+        stop -> Parent ! {writer_done, self()}
+    after 0 ->
+        K = list_to_binary("ck" ++ integer_to_list(N)),
+        H = bondy_db:tick(T),
+        _ = catch bondy_db:apply(T, <<"r">>, K, {set, H, <<"v">>}),
+        ff_writer(T, Id, N + 2, Parent)
+    end.
+
+recv_done() ->
+    receive {writer_done, _} -> ok after 5000 -> ok end.
 
 %% =============================================================================
 %% Helpers

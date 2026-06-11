@@ -22,6 +22,15 @@
 %% knobs; the ephemeral fused path reuses the applier's state-free drain
 %% leaves (`collect_frames/2`, `resume_position/2`, `resolve_cell_apply_ctx/1`).
 -define(FUSED_AWAIT_DURABLE_TIMEOUT_MS, 200).
+%% Max apply batches the fused drain processes per `handle_info(fused_drain)`
+%% before yielding back to the gen_server mailbox. The fused drain IS the
+%% instance process, so an unbounded drain loop (to `eol`) under a continuous
+%% write stream — which never reaches `eol` — would monopolise the process and
+%% STARVE every `handle_call`/`handle_cast` (compact, `integrate_peer_root`,
+%% `await_overlay_drained`, …). Yielding every N batches bounds control-plane
+%% latency to ~N·apply_batch_max events while amortising the message-loop
+%% overhead. 8 × 256 ≈ 2k events ≈ a few ms at steady state.
+-define(FUSED_DRAIN_MAX_BATCHES, 8).
 -define(FUSED_COMMIT_EVERY, 64).
 -define(FUSED_APPLY_BATCH_MAX, 256).
 -define(FUSED_RETRY_MS, 50).
@@ -2587,8 +2596,15 @@ fused_open_reader(#state{fused_drain = FD} = State0) ->
                 State1#state.mst, State1#state.watermark
             ),
             ReaderMod = fused_reader_mod(FD#fused_drain.wal_backend),
+            %% `chunk` caps the mem reader's per-`next` events at the apply
+            %% batch max so a mem batch matches the disk path's batch size
+            %% (disk ignores the opt). Oversized batches inflate the
+            %% install-latency that bounds the bounded-writer→await pipeline.
+            ReaderOpts = [
+                {follow, false}, {chunk, FD#fused_drain.apply_batch_max}
+            ],
             case
-                ReaderMod:open(WalPid, StartPos, [{follow, false}])
+                ReaderMod:open(WalPid, StartPos, ReaderOpts)
             of
                 {ok, Iter} ->
                     self() ! fused_drain,
@@ -2625,20 +2641,24 @@ run_fused_drain(#state{fused_drain = #fused_drain{iter = undefined}} = State) ->
     State;
 run_fused_drain(State0) ->
     State1 = fused_cancel_idle_waiter(State0),
-    case fused_drain_loop(State1) of
+    case fused_drain_loop(State1, ?FUSED_DRAIN_MAX_BATCHES) of
         {ok, State2} -> fused_arm_idle_waiter(State2);
+        %% Budget exhausted with work still pending: `fused_drain` was already
+        %% re-queued, so do NOT park an idle waiter (that would double-drive
+        %% the drain). The instance now services the rest of its mailbox.
+        {yield, State2} -> State2;
         {error, State2} -> fused_arm_idle_waiter(State2)
     end.
 
 %% @private
-fused_drain_loop(State) ->
+fused_drain_loop(State, Budget) ->
     case fused_lifecycle_live(State) of
         false ->
             %% Pre-bootstrap: do not touch the projection yet. Re-armed on
             %% the next durable frame (the lifecycle flips in place to live).
             {ok, State};
         true ->
-            fused_drain_step(State)
+            fused_drain_step(State, Budget)
     end.
 
 %% @private
@@ -2648,7 +2668,7 @@ fused_lifecycle_live(#state{lifecycle = H}) ->
     bondy_oplog_bootstrap_lifecycle:is_live(H).
 
 %% @private
-fused_drain_step(#state{fused_drain = FD} = State0) ->
+fused_drain_step(#state{fused_drain = FD} = State0, Budget) ->
     #fused_drain{iter = Iter, apply_batch_max = Max} = FD,
     case fused_collect_frames(FD#fused_drain.wal_backend, Iter, Max) of
         {frames, Batch, {NextSeg, NextOff}, NewIter, More} ->
@@ -2658,8 +2678,14 @@ fused_drain_step(#state{fused_drain = FD} = State0) ->
             FD2 = fused_bump_offset(FD1, NextSeg, NextOff, LastHlc, Count),
             State2 = State1#state{fused_drain = FD2},
             case More of
+                more when Budget =< 1 ->
+                    %% Budget spent but the WAL still has frames. Re-queue the
+                    %% drain and yield so the instance services its mailbox
+                    %% (control-plane calls) before the next chunk.
+                    self() ! fused_drain,
+                    {yield, fused_maybe_commit(State2)};
                 more ->
-                    fused_drain_loop(fused_maybe_commit(State2));
+                    fused_drain_loop(fused_maybe_commit(State2), Budget - 1);
                 eol ->
                     {ok, fused_commit_now(State2)}
             end;
@@ -2684,7 +2710,16 @@ fused_drain_step(#state{fused_drain = FD} = State0) ->
 %% precedes the MST install (the `await_apply` contract: by the time the
 %% overlay is empty, the projection has observed the events).
 fused_apply_batch(#state{fused_drain = FD, instance_id = Id} = State0, Batch) ->
+    VerifyT0 = erlang:monotonic_time(microsecond),
     {Verified, Rejected} = fused_verify_batch(State0, Batch, [], []),
+    %% Reuse the applier's `batch_verify` event (the fused path has no applier,
+    %% so this lights up the existing bench/observability stage for fused too).
+    telemetry:execute(
+        [bondy_oplog, applier, batch_verify],
+        #{duration_us => erlang:monotonic_time(microsecond) - VerifyT0,
+            count => length(Batch)},
+        #{instance_id => Id}
+    ),
     State1 =
         case Rejected of
             [] ->
@@ -2704,7 +2739,15 @@ fused_apply_batch(#state{fused_drain = FD, instance_id = Id} = State0, Batch) ->
                     FD#fused_drain.cell_apply_ctx, Id, CellEvents
                 ),
                 StateA = install_local_batch(State1, Verified),
+                PublishT0 = erlang:monotonic_time(microsecond),
                 ok = publish(StateA),
+                telemetry:execute(
+                    [bondy_oplog, applier, batch_publish],
+                    #{duration_us =>
+                        erlang:monotonic_time(microsecond) - PublishT0,
+                        count => length(Verified)},
+                    #{instance_id => Id}
+                ),
                 StateB = evict_overlay_batch(StateA, Verified),
                 maybe_signal_drain_waiters(StateB)
         end,
@@ -2811,9 +2854,11 @@ fused_commit_now(
 fused_commit_now(
     #state{fused_drain = #fused_drain{wal_backend = mem} = FD} = State0
 ) ->
-    %% Mem WAL has no on-disk consumer offset and `set_committed_segment` is a
-    %% no-op (single logical segment, GC by Seq is PR-3). Just mirror the
-    %% applier's AE-freshness bump and clear the uncommitted count.
+    %% Mem WAL has no on-disk consumer offset. GC the WAL up to the reader
+    %% cursor (everything read + installed before the cursor advanced) so the
+    %% ETS table — and the `ets:next` reader walk — stay bounded; then mirror
+    %% the applier's AE-freshness bump and clear the uncommitted count.
+    ok = fused_mem_gc(State0, FD),
     ok = fused_bump_ae_targets(FD#fused_drain.ae_targets),
     State0#state{fused_drain = FD#fused_drain{uncommitted = 0}};
 fused_commit_now(#state{fused_drain = FD} = State0) ->
@@ -2919,6 +2964,19 @@ fused_mem_collect_frames(Iter0, Max, AccRev, N, LastPos) ->
             {frames, lists:append(lists:reverse(AccRev)), LastPos, Iter0, eol};
         {error, Reason} ->
             {error, Reason}
+    end.
+
+%% @private
+%% Best-effort GC of the mem WAL up to the drain's reader cursor (the last Seq
+%% read + installed). A cast — never blocks the commit. No-op for the disk
+%% backend or before the reader is open.
+fused_mem_gc(_State, #fused_drain{iter = undefined}) ->
+    ok;
+fused_mem_gc(#state{instance_id = Id}, #fused_drain{iter = Iter}) ->
+    {_Seg, Seq} = bondy_oplog_wal_mem_reader:position(Iter),
+    case bondy_oplog_registry:wal_pid(Id) of
+        undefined -> ok;
+        WalPid -> bondy_oplog_wal_mem:set_committed_seq(WalPid, Seq)
     end.
 
 %% @private

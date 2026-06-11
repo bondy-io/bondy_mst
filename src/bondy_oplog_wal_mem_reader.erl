@@ -39,10 +39,12 @@ The drain dispatches to this module (vs `bondy_oplog_wal_reader`) on the
 instance's `wal_backend` flag; `bondy_oplog_wal_reader` itself is untouched.
 """).
 
-%% Read up to this many rows per `ets:select`. The fused drain's
-%% `collect_frames`-equivalent aggregates these into apply batches; a chunk
-%% >= the apply-batch-max returns a full batch in one select.
--define(CHUNK, 512).
+%% Default events read per `next/1` when the caller does not pass `{chunk, _}`.
+%% Set at `open/3` from the fused drain's `apply_batch_max` so a mem batch
+%% matches the disk path's batch size (the disk reader's `collect_frames`
+%% aggregates frames up to `apply_batch_max`). A too-large chunk inflates the
+%% install-batch latency that bounds the bounded-writer→await pipeline.
+-define(DEFAULT_CHUNK, 256).
 
 -record(mem_iter, {
     wal_pid :: pid(),
@@ -55,7 +57,7 @@ instance's `wal_backend` flag; `bondy_oplog_wal_reader` itself is untouched.
     %% `{offset, _, _}`. Re-applying an already-installed event is idempotent
     %% by the CRDT contract, so this only avoids redundant work.
     min_hlc :: undefined | term(),
-    chunk = ?CHUNK :: pos_integer()
+    chunk = ?DEFAULT_CHUNK :: pos_integer()
 }).
 
 -opaque t() :: #mem_iter{}.
@@ -87,10 +89,13 @@ cursor has caught up to the head.
 -spec open(pid(), bondy_oplog_wal_reader:start_position(), list()) ->
     {ok, t()} | {error, term()}.
 
-open(WalPid, Start, _Opts) when is_pid(WalPid) ->
+open(WalPid, Start, Opts) when is_pid(WalPid) ->
     try bondy_oplog_wal_mem:reader_view(WalPid) of
         #{tab := Tab, mem_seg := Seg} ->
-            Iter0 = #mem_iter{wal_pid = WalPid, tab = Tab, seg = Seg},
+            Chunk = proplists:get_value(chunk, Opts, ?DEFAULT_CHUNK),
+            Iter0 = #mem_iter{
+                wal_pid = WalPid, tab = Tab, seg = Seg, chunk = Chunk
+            },
             {ok, apply_start(Iter0, Start)}
     catch
         exit:{noproc, _} -> {error, wal_unavailable};
@@ -104,26 +109,28 @@ open(WalPid, Start, _Opts) when is_pid(WalPid) ->
 Returns the next chunk of events with `Seq > cursor` (up to `chunk`), or
 `end_of_log` when the cursor has reached the head. The position returned is the
 `Seq` of the last event in the batch.
+
+Walks forward with `ets:next/2` (an O(log n) tree successor per step) — NOT
+`ets:select` with a `{'>', key, cursor}` guard, which does not prune the
+ordered_set traversal and rescans every already-consumed entry on each read
+(O(consumed) per read → O(n²) over the log; measured 13µs near the head vs
+8.8ms after 499k consumed). `ets:next` keeps reads O(chunk·log n) regardless of
+how far the cursor has advanced or whether GC has caught up.
 """).
 -spec next(t()) -> bondy_oplog_wal_reader:next_result().
 
-next(#mem_iter{tab = Tab, seg = Seg, cursor = Cursor, chunk = Chunk} = Iter) ->
-    %% `ets:select/3` with a match spec on the key — NOT tab2list + filter —
-    %% so an ordered_set scan returns the next `Chunk` rows in Seq order.
-    MatchSpec = [{{'$1', '$2'}, [{'>', '$1', Cursor}], [{{'$1', '$2'}}]}],
-    case ets:select(Tab, MatchSpec, Chunk) of
-        '$end_of_table' ->
+next(#mem_iter{seg = Seg, cursor = Cursor} = Iter) ->
+    #mem_iter{tab = Tab, chunk = Chunk, min_hlc = Min} = Iter,
+    case walk(Tab, Cursor, Chunk, Min, []) of
+        {[], Cursor} ->
+            %% Nothing past the cursor — caught up to the head.
             end_of_log;
-        {Rows, _Cont} ->
-            case filter_rows(Rows, Iter#mem_iter.min_hlc) of
-                {[], LastSeq} ->
-                    %% Every row in this chunk was below `min_hlc` (already
-                    %% installed). Advance past them and try the next chunk.
-                    next(Iter#mem_iter{cursor = LastSeq});
-                {Events, LastSeq} ->
-                    {ok, Events, [], {Seg, LastSeq},
-                        Iter#mem_iter{cursor = LastSeq}}
-            end
+        {[], NewCursor} ->
+            %% Only skipped entries (below `min_hlc`); advance and retry.
+            next(Iter#mem_iter{cursor = NewCursor});
+        {AccRev, NewCursor} ->
+            {ok, lists:reverse(AccRev), [], {Seg, NewCursor},
+                Iter#mem_iter{cursor = NewCursor}}
     end.
 
 
@@ -159,21 +166,36 @@ apply_start(Iter, {hlc, Hlc}) ->
 
 
 %% @private
-%% Split a chunk into (kept events, last Seq seen). When `min_hlc` is set, drop
-%% events whose key HLC precedes it.
-filter_rows(Rows, undefined) ->
-    Events = [E || {_Seq, E} <- Rows],
-    {Events, last_seq(Rows)};
-filter_rows(Rows, MinHlc) ->
-    Events = [
-        E
-     || {_Seq, E} <- Rows,
-        bondy_oplog_event:key_hlc(bondy_oplog_event:key(E)) >= MinHlc
-    ],
-    {Events, last_seq(Rows)}.
+%% Walk forward from `Cursor` collecting up to `K` kept events (reversed). Each
+%% step is `ets:next/2` (O(log n)) + a point lookup. A `min_hlc` skip advances
+%% the cursor WITHOUT consuming a slot (so already-installed events are stepped
+%% over for free); a GC race (key vanished) is skipped likewise. Returns the
+%% reversed events and the last Seq advanced to.
+walk(_Tab, Cursor, 0, _Min, Acc) ->
+    {Acc, Cursor};
+walk(Tab, Cursor, K, Min, Acc) ->
+    case ets:next(Tab, Cursor) of
+        '$end_of_table' ->
+            {Acc, Cursor};
+        NextSeq ->
+            case ets:lookup(Tab, NextSeq) of
+                [{NextSeq, Event}] ->
+                    case keep(Event, Min) of
+                        true ->
+                            walk(Tab, NextSeq, K - 1, Min, [Event | Acc]);
+                        false ->
+                            walk(Tab, NextSeq, K, Min, Acc)
+                    end;
+                [] ->
+                    %% Raced with GC — the row was deleted between `next` and
+                    %% `lookup`. Skip it (does not consume a slot).
+                    walk(Tab, NextSeq, K, Min, Acc)
+            end
+    end.
 
 
 %% @private
-last_seq(Rows) ->
-    {Seq, _E} = lists:last(Rows),
-    Seq.
+keep(_Event, undefined) ->
+    true;
+keep(Event, MinHlc) ->
+    bondy_oplog_event:key_hlc(bondy_oplog_event:key(Event)) >= MinHlc.

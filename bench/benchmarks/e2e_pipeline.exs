@@ -106,12 +106,24 @@ oldstate_cache = System.get_env("OLDSTATE_CACHE", "false") in ["1", "true"]
 # MST profiles (the `fused ⇒ ephemeral` invariant); ignored for pack/leveled.
 fused? = System.get_env("FUSED", "false") in ["1", "true"]
 
+# Ephemeral ETS WAL (task #50). When `mem`, a fused ephemeral instance uses the
+# in-memory `bondy_oplog_wal_mem` backend instead of the disk WAL: events live
+# in an ETS ordered_set and the fused drain reads them the instant they are
+# inserted, dropping the WAL-durability LATENCY (the ~42%-util floor that the
+# fused writer alone could not clear). Only honoured for a fused ets-MST
+# instance (the supervisor gates `mem` on `fused`); ignored otherwise.
+wal_backend =
+  case System.get_env("WAL_BACKEND", "disk") do
+    "mem" -> :mem
+    _ -> :disk
+  end
+
 IO.puts(
   "[e2e] config: shards=#{shard_count} writers=#{writers} readers=#{readers} " <>
     "fsync=#{wal_fsync_mode} batch_size=#{batch_size} mst=#{mst_backend} " <>
     "apply_batch_max_events=#{apply_batch_max_events} " <>
     "install_coalesce_max=#{install_coalesce_max} " <>
-    "oldstate_cache=#{oldstate_cache} fused=#{fused?} " <>
+    "oldstate_cache=#{oldstate_cache} fused=#{fused?} wal_backend=#{wal_backend} " <>
     "dirty_io_schedulers=#{:erlang.system_info(:dirty_io_schedulers)}"
 )
 
@@ -349,11 +361,17 @@ make_ctx = fn prefix, profile ->
       # instance builds its cell_apply_ctx from it).
       instance_fused? = fused? and profile.mst == :ets
 
+      # The in-memory WAL backend is gated on fused (the supervisor only
+      # dispatches the mem reader on the fused drain). A non-fused or
+      # non-ephemeral instance keeps the disk WAL.
+      instance_wal_backend = if instance_fused?, do: wal_backend, else: :disk
+
       {:ok, _sup} =
         :bondy_oplog.start_instance(
           instance_id,
           Map.merge(mst_opts, %{
             fused: instance_fused?,
+            wal_backend: instance_wal_backend,
             # The cell projection runs through the registry entry's
             # `crdt_module` (cell_apply_target → cell_apply_ctx). The
             # per-instance fold projection is unused by this bench.
@@ -669,20 +687,33 @@ compact_interval_ms =
 if compact? do
   compact_trigger = fn instance_id ->
     try do
-      case :bondy_oplog.root_hash(instance_id) do
+      # Read the live root via the instance pid + gen_server `root_hash` — NO
+      # `await_apply` overlay barrier (which, like `bondy_oplog.compact`'s
+      # former barrier, blocks 5s under sustained writes and stalls compaction).
+      # The frontier only needs a recently published root, not a
+      # read-your-writes one. (`bondy_oplog_instance.root_hash/1` with a BINARY
+      # reads the registry mst field, which is transiently :undefined; the pid
+      # form reads the instance's live state.)
+      case :bondy_oplog_registry.instance_pid(instance_id) do
         :undefined ->
           :ok
 
-        root ->
-          :bondy_oplog_peer_state.record_sync_complete(
-            {:peer, :bench_compact},
-            instance_id,
-            root
-          )
+        pid ->
+          case :bondy_oplog_instance.root_hash(pid) do
+            :undefined ->
+              :ok
 
-          :bondy_oplog_peer_state.sync()
-          _ = :bondy_oplog.compact(instance_id)
-          :ok
+            root ->
+              :bondy_oplog_peer_state.record_sync_complete(
+                {:peer, :bench_compact},
+                instance_id,
+                root
+              )
+
+              :bondy_oplog_peer_state.sync()
+              _ = :bondy_oplog.compact(instance_id)
+              :ok
+          end
       end
     catch
       _kind, _reason -> :ok

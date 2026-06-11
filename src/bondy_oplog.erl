@@ -510,11 +510,18 @@ Runs one compaction cycle on `InstanceId`. See
     | {error, term()}.
 
 compact(InstanceId) ->
-    %% Drain the local applier so compaction operates on the
-    %% up-to-date MST. Without this, overlay-pending events would be
-    %% missed by the truncation pass and remain in the overlay after
-    %% compaction completes.
-    _ = bondy_oplog_instance:await_apply(InstanceId),
+    %% No `await_apply` overlay-drain barrier here (unlike `truncate_prefix/2`,
+    %% which truncates at a CALLER-supplied watermark that may sit above
+    %% overlay-pending events). Compaction derives its frontier from
+    %% peer-synced roots (`compute_frontier_for/2`), and a peer can only have
+    %% synced events this node has already INSTALLED + PUBLISHED — so the
+    %% frontier is always `=< the installed watermark`, strictly below the
+    %% overlay-pending window. A non-empty overlay therefore cannot affect what
+    %% is truncated. The barrier was not just redundant but harmful: under
+    %% sustained writes the overlay never reaches 0, so the 5s `await_apply`
+    %% timed out every cycle and compaction effectively never ran — most
+    %% visibly for a fused instance (it IS the drain), leaving the MST to grow
+    %% unbounded and `mst_install` latency to climb.
     bondy_oplog_compaction:compact(InstanceId).
 
 -spec current_watermark(instance_id()) ->

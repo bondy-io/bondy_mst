@@ -652,6 +652,69 @@ bench-fly-8x-wal-scaling duration="60" shard_list="1 2 4" writers_per_shard="4" 
         echo \"Done. Per-point: /data/results/wal_ab_8x_r*_*_s*_\$ts.txt\" \
           | tee -a \$out'"
 
+# Ephemeral ETS WAL — 1-shard WRITER-DEPTH sweep on perf-8x. After PR-4 found
+# the 1-shard floor is `mst_install` gated by the bounded-writer→await pipeline
+# (not the WAL), this sweeps writers {4,8,16,32} at a SINGLE shard for both arms
+# (fused+disk vs fused+mem) to find whether deepening the pipeline lets mem's
+# no-fsync immediate visibility approach the ~install-rate ceiling (and whether
+# 20k/instance is reachable). Disk stays fsync-gated no matter the writer count.
+# Credit-controlled: arm order alternates per rep.
+#
+#   just bench-fly-8x-wal-writers                    # 60s, writers {4,8,16,32}, 2 reps
+#   just bench-fly-8x-wal-writers 90 "8 16 32 64" 3
+bench-fly-8x-wal-writers duration="60" writer_list="4 8 16 32" reps="2":
+    fly ssh console --config fly-8x.toml -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        out=/data/results/wal_writers_8x_\$ts.log; \
+        echo \"=== perf-8x EPHEMERAL 1-shard writer-depth A/B (fused) — write_only, ets MST, {{duration}}s/point, writers={{writer_list}}, {{reps}} reps ===\" \
+          | tee \$out; \
+        for r in \$(seq 1 {{reps}}); do \
+          if [ \$((r % 2)) -eq 0 ]; then order=\"disk mem\"; else order=\"mem disk\"; fi; \
+          for w in {{writer_list}}; do \
+            for b in \$order; do \
+              echo \"--- rep=\$r WAL_BACKEND=\$b shards=1 writers=\$w ---\" | tee -a \$out; \
+              WAL_BACKEND=\$b FUSED=true WRITERS=\$w SCENARIOS=write_only PREPOPULATE=10000 \
+                just bench-e2e {{duration}} 1 per_write 1 false ephemeral \
+                  2>&1 | tee /data/results/wal_writers_8x_r\${r}_\${b}_w\${w}_\$ts.txt \
+                  | tee -a \$out; \
+            done; \
+          done; \
+        done; \
+        echo \"Done. Per-point: /data/results/wal_writers_8x_r*_*_w*_\$ts.txt\" \
+          | tee -a \$out'"
+
+# Ephemeral ETS WAL — bounded-MST A/B on perf-8x. After the PR-6 fix (fused drain
+# yields so compaction actually runs under load), this isolates the effect of a
+# BOUNDED MST on mem 1-shard throughput: COMPACT=true (MST truncated every
+# `interval`ms → small, uniform `mst_install`) vs COMPACT=false (MST grows
+# unbounded → install p99 tail inflates 23.7ms→75ms). Tests whether bounding the
+# MST lifts mem past the ~17.5k single-drain plateau toward 20k. mem WAL, fused,
+# 1 shard, fixed writers. Credit-controlled: COMPACT order alternates per rep.
+#
+#   just bench-fly-8x-wal-compact                    # 60s, 8 writers, 3 reps, 500ms
+#   just bench-fly-8x-wal-compact 90 16 3 250
+bench-fly-8x-wal-compact duration="60" writers="8" reps="3" compact_interval="500":
+    fly ssh console --config fly-8x.toml -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        out=/data/results/wal_compact_8x_\$ts.log; \
+        echo \"=== perf-8x EPHEMERAL bounded-MST A/B (mem, fused) — write_only, 1 shard, {{writers}} writers, {{duration}}s/point, {{reps}} reps, compact_interval={{compact_interval}}ms ===\" \
+          | tee \$out; \
+        for r in \$(seq 1 {{reps}}); do \
+          if [ \$((r % 2)) -eq 0 ]; then order=\"false true\"; else order=\"true false\"; fi; \
+          for c in \$order; do \
+            echo \"--- rep=\$r COMPACT=\$c writers={{writers}} ---\" | tee -a \$out; \
+            WAL_BACKEND=mem FUSED=true WRITERS={{writers}} SCENARIOS=write_only PREPOPULATE=10000 \
+              COMPACT=\$c COMPACT_INTERVAL_MS={{compact_interval}} \
+              just bench-e2e {{duration}} 1 per_write 1 false ephemeral \
+                2>&1 | tee /data/results/wal_compact_8x_r\${r}_c\${c}_\$ts.txt \
+                | tee -a \$out; \
+          done; \
+        done; \
+        echo \"Done. Per-point: /data/results/wal_compact_8x_r*_c*_\$ts.txt\" \
+          | tee -a \$out'"
+
 # Pull /data/results from the perf-8x VM into a fresh local dir.
 # Same pattern as bench-fly-results — tarball-then-sftp to dodge
 # `sftp get -r`'s won't-overwrite + won't-auto-start behaviour.

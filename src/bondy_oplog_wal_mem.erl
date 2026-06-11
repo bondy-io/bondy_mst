@@ -80,8 +80,12 @@ operation — see `_design/latest/EPHEMERAL_ETS_WAL_PLAN.md` §2 (Decision A).
 %% the `{Segment, Offset}` position shape the consumer-offset machinery expects.
 -define(MEM_SEG, 0).
 
-%% 8 GiB, matching the disk WAL's `max_total_wal_size` default (WAL_DESIGN §14).
--define(DEFAULT_MAX_BYTES, (8 * 1024 * 1024 * 1024)).
+%% Backpressure cap on the LIVE (un-GC'd) event count: `head_seq -
+%% committed_seq`. With commit-cadence GC the live set is small in steady
+%% state, so this is a safety bound for a stalled drain, not the steady-state
+%% size. Count-based (not bytes) so append stays allocation-free — no
+%% per-event `external_size`.
+-define(DEFAULT_MAX_LIVE_EVENTS, 2_000_000).
 
 -record(waiter, {
     id :: pos_integer(),
@@ -96,8 +100,7 @@ operation — see `_design/latest/EPHEMERAL_ETS_WAL_PLAN.md` §2 (Decision A).
     tab :: ets:tid(),
     head_seq = 0 :: non_neg_integer(),
     committed_seq = 0 :: non_neg_integer(),
-    bytes = 0 :: non_neg_integer(),
-    max_bytes :: pos_integer(),
+    max_live_events :: pos_integer(),
     append_count = 0 :: non_neg_integer(),
     waiter_seq = 0 :: non_neg_integer(),
     waiters = [] :: [#waiter{}]
@@ -106,6 +109,7 @@ operation — see `_design/latest/EPHEMERAL_ETS_WAL_PLAN.md` §2 (Decision A).
 %% API
 -export([start_link/2]).
 -export([reader_view/1]).
+-export([set_committed_seq/2]).
 -export([info/1]).
 
 %% gen_server callbacks
@@ -141,6 +145,19 @@ reader_view(Pid) when is_pid(Pid) ->
     gen_server:call(Pid, reader_view, infinity).
 
 
+?DOC("""
+Marks every event with `Seq =< CommittedSeq` as consumed by the drain (read +
+installed) and GCs them from the table. Cast (best-effort, non-blocking): the
+drain calls this at each commit boundary with its reader cursor. Safe because an
+ephemeral mem WAL is never replayed from disk on restart — durability is
+cluster-provided (re-sync from peers), so an installed event is dead weight.
+""").
+-spec set_committed_seq(pid(), non_neg_integer()) -> ok.
+
+set_committed_seq(Pid, Seq) when is_pid(Pid), is_integer(Seq), Seq >= 0 ->
+    gen_server:cast(Pid, {set_committed_seq, Seq}).
+
+
 ?DOC("Diagnostic snapshot of the mem WAL writer state.").
 -spec info(pid()) -> map().
 
@@ -159,7 +176,7 @@ init({InstanceId, Opts}) ->
         protected,
         {read_concurrency, true}
     ]),
-    MaxBytes = maps:get(max_total_wal_size, Opts, ?DEFAULT_MAX_BYTES),
+    MaxLive = maps:get(max_live_events, Opts, ?DEFAULT_MAX_LIVE_EVENTS),
     Origin = maps:get(origin, Opts, bondy_oplog_origin:default()),
     %% Publish our pid exactly as the disk WAL does, so `ensure_wal_pid/1`,
     %% the caller-side `fast_wal_append_batch/2`, and the fused drain all
@@ -169,7 +186,7 @@ init({InstanceId, Opts}) ->
         instance_id = InstanceId,
         origin = Origin,
         tab = Tab,
-        max_bytes = MaxBytes
+        max_live_events = MaxLive
     }}.
 
 
@@ -198,6 +215,9 @@ handle_call(_Msg, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
 
+handle_cast({set_committed_seq, Seq}, State) ->
+    {noreply, gc_committed(Seq, State)};
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -223,23 +243,24 @@ terminate(_Reason, _State) ->
 %% Assign a contiguous `Seq` range, insert each event keyed by its `Seq`, bump
 %% the head, satisfy any waiters now covered, and reply with the assigned
 %% positions. No fsync, no file write — the reply is the ack. Backpressure is
-%% checked against the byte cap before any insert (whole-batch all-or-nothing,
-%% matching the disk WAL's `check_backpressure/2`).
-do_append_batch(Events, #state{bytes = Bytes, max_bytes = Max} = State0) ->
-    BatchBytes = batch_bytes(Events),
-    case Bytes + BatchBytes > Max of
+%% on the LIVE (un-GC'd) event count: `head - committed + batch > cap` rejects
+%% the whole batch (all-or-nothing, matching the disk WAL's `check_backpressure`).
+do_append_batch(Events, State0) ->
+    #state{head_seq = Head, committed_seq = Committed, max_live_events = Max} =
+        State0,
+    N = length(Events),
+    case (Head - Committed) + N > Max of
         true ->
             telemetry:execute(
                 [bondy_oplog, wal_mem, wal_full],
-                #{bytes => Bytes, batch_bytes => BatchBytes},
+                #{live => Head - Committed, batch => N},
                 #{instance_id => State0#state.instance_id}
             ),
             {reply, {error, wal_full}, State0};
         false ->
             {Entries, State1} = insert_events(Events, State0),
-            State2 = State1#state{bytes = Bytes + BatchBytes},
-            State3 = signal_waiters(State2),
-            {reply, {ok, Entries}, State3}
+            State2 = signal_waiters(State1),
+            {reply, {ok, Entries}, State2}
     end.
 
 
@@ -322,8 +343,18 @@ cancel_timer(Ref) -> erlang:cancel_timer(Ref).
 
 
 %% @private
-batch_bytes(Events) ->
-    lists:foldl(fun(E, Acc) -> Acc + erlang:external_size(E) end, 0, Events).
+%% Delete every consumed row (`Seq =< Committed`) from the head of the
+%% ordered_set. The matches are a contiguous prefix, so `ets:select_delete`
+%% touches only the entries it removes (each deleted once → amortised O(1) per
+%% event). `committed_seq` is monotonic. This is what keeps the table — and the
+%% `ets:next` reader walk — bounded; without it the log grew to the whole run.
+gc_committed(Seq, #state{committed_seq = Old} = State) when Seq =< Old ->
+    State;
+gc_committed(Seq, #state{tab = Tab, head_seq = Head} = State) ->
+    Bounded = min(Seq, Head),
+    MatchSpec = [{{'$1', '_'}, [{'=<', '$1', Bounded}], [true]}],
+    _ = ets:select_delete(Tab, MatchSpec),
+    State#state{committed_seq = Bounded}.
 
 
 %% @private
@@ -333,8 +364,8 @@ info_map(#state{} = S) ->
         backend => mem,
         head_seq => S#state.head_seq,
         committed_seq => S#state.committed_seq,
-        bytes => S#state.bytes,
-        max_bytes => S#state.max_bytes,
+        live_events => S#state.head_seq - S#state.committed_seq,
+        max_live_events => S#state.max_live_events,
         append_count => S#state.append_count,
         waiters => length(S#state.waiters)
     }.
