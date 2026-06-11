@@ -824,16 +824,20 @@ merger(_Key, true, true) ->
     true.
 
 %% @private
-%% Computes the level of a key by hashing and counting leading zeroes.
+%% Computes the level of a key by hashing and counting the leading
+%% zero hex digits of the digest. A leading zero hex digit is exactly a
+%% leading zero 4-bit nibble, so we walk the raw digest's nibbles
+%% directly rather than allocating a hex-encoded binary (2x the digest
+%% size) only to scan it for "0" characters. Byte-for-byte identical
+%% level to the previous `binary:encode_hex/1`-based implementation.
 calc_level(#?MODULE{hash_algorithm = Algo}, Key) ->
-    Hash = binary:encode_hex(bondy_mst_utils:hash(Key, Algo)),
-    count_leading_zeroes(Hash, 0).
+    count_leading_zero_nibbles(bondy_mst_utils:hash(Key, Algo), 0).
 
 %% @private
-%% Counts leading zeroes in a binary hash.
-count_leading_zeroes(<<"0", Rest/binary>>, Acc) ->
-    count_leading_zeroes(Rest, Acc + 1);
-count_leading_zeroes(_, Acc) ->
+%% Counts the leading zero 4-bit nibbles of a binary digest.
+count_leading_zero_nibbles(<<0:4, Rest/bitstring>>, Acc) ->
+    count_leading_zero_nibbles(Rest, Acc + 1);
+count_leading_zero_nibbles(_, Acc) ->
     Acc.
 
 %% @private

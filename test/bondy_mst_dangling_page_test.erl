@@ -51,11 +51,13 @@ split_with_dangling_hash_does_not_crash() ->
     %% Splice the fake hash into the root's Low so the next put
     %% follows a dangling reference. Direct ETS write — synthetic
     %% but matches the exact failure shape we see in the wild.
+    %% ETS store rows are 3-tuples `{Hash, Page, FreedAt}` (FreedAt is a
+    %% per-replica GC column kept outside the page record).
     Root = bondy_mst:root(T1),
-    [{Root, Page}] = ets:lookup(Tab, Root),
-    {bondy_mst_page, Level, _Low, List, FreedAt} = Page,
-    Corrupt = {bondy_mst_page, Level, Fake, List, FreedAt},
-    true = ets:insert(Tab, {Root, Corrupt}),
+    [{Root, Page, RowFreedAt}] = ets:lookup(Tab, Root),
+    {bondy_mst_page, Level, _Low, List, _PageFreedAt} = Page,
+    Corrupt = {bondy_mst_page, Level, Fake, List, undefined},
+    true = ets:insert(Tab, {Root, Corrupt, RowFreedAt}),
 
     %% Put a key whose level forces traversal through Low: must NOT
     %% crash. The dangling-page recovery in split logs a warning and

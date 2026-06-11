@@ -27,6 +27,17 @@ Read-concurrent, MST backend using `ets`.
 %%% to the per-tick gen_server round-trip the fast path avoids.
 -define(ETS_ACCESS, public).
 
+%% Page rows are 3-tuples `{Hash, Page, FreedAt}`. `FreedAt` is a
+%% per-replica GC bookkeeping column (epoch | undefined), kept OUTSIDE
+%% the page record so that `free/3` can mark a page via
+%% `ets:update_element/3` (a single-slot, in-place write) instead of
+%% re-inserting the whole page just to flip one field. The page's own
+%% `freed_at` field is unused on this backend. The root row stays the
+%% 2-tuple `{?ROOT_KEY, Hash}`; the 3-tuple match specs below never
+%% match it (arity differs), so it is naturally excluded from listing
+%% and pruning.
+-define(FREED_AT_POS, 3).
+
 -record(?MODULE, {
     name :: binary(),
     tab :: ets:tid(),
@@ -150,7 +161,7 @@ has(#?MODULE{tab = Tab}, Hash) ->
 
 put(#?MODULE{tab = Tab, hashing_algorithm = Algo} = T, Page) ->
     Hash = bondy_mst_page:hash(Page, Algo),
-    true = ets:insert(Tab, {Hash, Page}),
+    true = ets:insert(Tab, {Hash, Page, undefined}),
     {Hash, T}.
 
 -spec delete(T :: t(), Hash :: binary()) -> T :: t().
@@ -172,23 +183,25 @@ copy(#?MODULE{tab = Tab} = T, OtherStore, Hash) ->
                 T,
                 Refs
             ),
-            true = ets:insert(Tab, {Hash, Page}),
+            true = ets:insert(Tab, {Hash, Page, undefined}),
             T
     end.
 
 -spec list(t()) -> [page()].
 
 list(#?MODULE{tab = Tab}) ->
-    MS = [{{'$1', '$2'}, [{'=/=', '$1', ?ROOT_KEY}], ['$2']}],
+    MS = [{{'$1', '$2', '_'}, [{'=/=', '$1', ?ROOT_KEY}], ['$2']}],
     ets:select(Tab, MS).
 
 -spec free(T :: t(), Hash :: binary(), Page :: page()) -> T :: t().
 
-free(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Hash, Page0) ->
-    %% We keep the hash and page, marking it free.
-    %% gc/2 will actually delete it.
-    Page = bondy_mst_page:set_freed_at(Page0, erlang:monotonic_time()),
-    true = ets:insert(Tab, {Hash, Page}),
+free(#?MODULE{tab = Tab, opts = #{persistent := true}} = T, Hash, _Page0) ->
+    %% Mark the page free by stamping only the FreedAt column in place;
+    %% gc/2 (prune_freed) actually deletes it. `update_element` writes a
+    %% single tuple slot rather than re-copying the whole page into the
+    %% table (as a full re-insert would), so the cost is independent of
+    %% page size. A concurrent reader still sees the intact page.
+    _ = ets:update_element(Tab, Hash, {?FREED_AT_POS, erlang:monotonic_time()}),
     T;
 free(#?MODULE{tab = Tab, opts = #{persistent := false}} = T, Hash, _Page) ->
     %% We immediately delete
@@ -306,7 +319,7 @@ prune_unreachable(#?MODULE{opts = #{persistent := _}} = T, KeepRoots) ->
 
     %% We iterate over all the tree hashes and remove any hash not in the bloom
     %% filter.
-    MS = [{{'$1', '_'}, [{'=/=', '$1', ?ROOT_KEY}], ['$1']}],
+    MS = [{{'$1', '_', '_'}, [{'=/=', '$1', ?ROOT_KEY}], ['$1']}],
     All = ets:select(Tab, MS),
 
     Num = lists:foldl(
@@ -335,13 +348,14 @@ prune_unreachable(#?MODULE{opts = #{persistent := _}} = T, KeepRoots) ->
 %% @private
 prune_freed(#?MODULE{} = T, Epoch) ->
     Tab = T#?MODULE.tab,
-    Idx = bondy_mst_page:field_index(freed_at),
-    Var = list_to_atom("$" ++ integer_to_list(Idx)),
-    VPattern = setelement(Idx, bondy_mst_page:pattern(), Var),
+    %% Delete every page row whose FreedAt column (3rd element) is an
+    %% integer epoch `=< Epoch`. Live pages carry `undefined` and the
+    %% `is_integer` guard excludes them; the 2-tuple root row has no 3rd
+    %% element and never matches this 3-tuple pattern.
     MatchSpec = [
         {
-            {'_', VPattern},
-            [{'=<', Var, {const, Epoch}}],
+            {'_', '_', '$1'},
+            [{is_integer, '$1'}, {'=<', '$1', {const, Epoch}}],
             [true]
         }
     ],
