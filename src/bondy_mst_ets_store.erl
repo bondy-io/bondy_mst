@@ -94,7 +94,13 @@ open(Algo, Opts0) when is_atom(Algo), is_map(Opts0) ->
         Opts
     ),
 
-    Tab = ets:new(undefined, [set, ?ETS_ACCESS, {read_concurrency, true}]),
+    Tab = ets:new(undefined, [
+        set,
+        ?ETS_ACCESS,
+        {read_concurrency, true},
+        {write_concurrency, auto},
+        {decentralized_counters, true}
+    ]),
 
     #?MODULE{
         name = maps:get(name, Opts),
