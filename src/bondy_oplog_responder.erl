@@ -186,6 +186,9 @@ dispatch(InstanceId, {get_catalogue_snapshot_next, Cursor}) when
 
 init([]) ->
     process_flag(trap_exit, true),
+    %% Serves sync/catalogue-snapshot requests in bursts; off_heap mailbox
+    %% so a request burst backlog isn't re-scanned by the GC.
+    process_flag(message_queue_data, off_heap),
     {ok, #{}}.
 
 handle_call({sync_protocol, InstanceId, Request}, From, State) ->

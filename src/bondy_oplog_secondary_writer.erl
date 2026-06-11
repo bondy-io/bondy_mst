@@ -161,6 +161,10 @@ reset(Pid) when is_pid(Pid) ->
 %% =============================================================================
 
 init(#{ns := NS, index_name := IName, shard := Shard} = Args) ->
+    %% Per-op `{idx_update, …}` cast receiver under write load: keep the
+    %% mailbox off the process heap so a transient backlog isn't re-scanned
+    %% by the GC (same rationale as the instance/applier/WAL processes).
+    process_flag(message_queue_data, off_heap),
     CoalesceMs = maps:get(coalesce_ms, Args, ?DEFAULT_COALESCE_MS),
     %% Stamp our pid so the primary applier can dispatch to us. The row
     %% was registered by `bondy_db` provisioning before we were started,

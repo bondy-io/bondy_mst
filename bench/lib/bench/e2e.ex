@@ -105,6 +105,37 @@ defmodule Bench.E2E do
     deadline_ms =
       :erlang.monotonic_time(:millisecond) + warmup_ms + duration_s * 1000
 
+    # Scheduler utilisation over the measured window — the decisive
+    # CPU-saturation number. If normal schedulers sit well under 100%
+    # while throughput is flat, the pipeline is latency/serialisation-
+    # bound, not compute-bound. scheduler_wall_time has negligible
+    # overhead so it's always on; MSACC=true adds a per-state breakdown
+    # (sleep/gc/emulator/check_io/…) but can slightly skew throughput, so
+    # it's opt-in and read from a separate confirmation run.
+    _ = :erlang.system_flag(:scheduler_wall_time, true)
+    # MSACC needs the `runtime_tools` OTP app, which a slimmed release/image
+    # may not ship. Degrade gracefully to "no breakdown" rather than crash
+    # the run; scheduler_wall_time (below) is always available regardless.
+    msacc? =
+      if System.get_env("MSACC") in ["1", "true"] do
+        case Application.ensure_all_started(:runtime_tools) do
+          {:ok, _} ->
+            :msacc.start()
+            true
+
+          _ ->
+            IO.puts(
+              "[e2e] MSACC=true but :runtime_tools is unavailable — " <>
+                "skipping msacc breakdown (scheduler_util still captured)"
+            )
+
+            false
+        end
+      else
+        false
+      end
+    sched0 = :erlang.statistics(:scheduler_wall_time)
+
     workers =
       for {label, %{count: n, op: op}} <- workloads, _ <- 1..n do
         hist = op_hists[label]
@@ -119,6 +150,14 @@ defmodule Bench.E2E do
       end
 
     wait_for_workers(workers)
+
+    sched_util = sched_util(sched0, :erlang.statistics(:scheduler_wall_time))
+
+    if msacc? do
+      IO.puts("\n[e2e] msacc breakdown (#{name}):")
+      :msacc.print()
+      :msacc.stop()
+    end
 
     op_stats =
       Map.new(workloads, fn {label, %{count: n}} ->
@@ -213,13 +252,45 @@ defmodule Bench.E2E do
         peak_mb: mib.(mem_peak),
         end_mb: mib.(mem_end),
         delta_mb: mib.(mem_end - mem_start)
-      }
+      },
+      scheduler_util: sched_util
     }
 
     Report.write(@output_subdir, run)
     Report.print_console(run)
 
+    IO.puts(
+      "    scheduler util (measured window): " <>
+        "normal=#{Float.round(sched_util.normal * 100, 1)}% " <>
+        "all(incl dirty-cpu)=#{Float.round(sched_util.all * 100, 1)}%"
+    )
+
     run
+  end
+
+  # Normal- vs dirty-cpu-scheduler utilisation over a window, from two
+  # `:erlang.statistics(:scheduler_wall_time)` snapshots. Returns the
+  # active/total ratio for the normal schedulers (where gen_server/ETS
+  # work runs — the decisive number) and across all returned schedulers.
+  defp sched_util(sched0, sched1) do
+    n_normal = :erlang.system_info(:schedulers)
+
+    deltas =
+      Enum.zip(Enum.sort(sched0), Enum.sort(sched1))
+      |> Enum.map(fn {{id, a0, t0}, {id, a1, t1}} -> {id, a1 - a0, t1 - t0} end)
+
+    {normal, _dirty_cpu} = Enum.split(deltas, n_normal)
+
+    ratio = fn list ->
+      {a, t} =
+        Enum.reduce(list, {0, 0}, fn {_id, da, dt}, {aa, tt} ->
+          {aa + da, tt + dt}
+        end)
+
+      if t > 0, do: a / t, else: 0.0
+    end
+
+    %{normal: ratio.(normal), all: ratio.(deltas)}
   end
 
   @doc """

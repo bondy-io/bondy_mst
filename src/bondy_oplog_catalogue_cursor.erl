@@ -264,6 +264,9 @@ info() ->
 
 init(Opts) ->
     process_flag(trap_exit, true),
+    %% Streams catalogue-snapshot pages in bursts during bootstrap/sync;
+    %% off_heap mailbox so a page burst backlog isn't re-scanned by the GC.
+    process_flag(message_queue_data, off_heap),
     _Tab = ets:new(?TABLE, [
         named_table,
         set,

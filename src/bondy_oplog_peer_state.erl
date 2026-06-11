@@ -311,6 +311,9 @@ sync() ->
 
 init(Opts) ->
     process_flag(trap_exit, true),
+    %% Absorbs remote-event / anti-entropy bursts during sync; off_heap
+    %% mailbox so a sync burst backlog isn't re-scanned by the GC.
+    process_flag(message_queue_data, off_heap),
     _Tab = ets:new(?TABLE, [
         named_table,
         set,
