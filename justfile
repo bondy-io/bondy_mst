@@ -614,6 +614,44 @@ bench-fly-8x-fused-scaling duration="60" shard_list="1 2 4" writers_per_shard="4
         echo \"Done. Per-point: /data/results/fused_ab_8x_f*_s*_\$ts.txt\" \
           | tee -a \$out'"
 
+# Ephemeral ETS WAL A/B on perf-8x — the PR-4 gate of the ETS-WAL rollout
+# (EPHEMERAL_ETS_WAL_PLAN §6). Isolates the WAL BACKEND: both arms are fused
+# (`FUSED=true`), so disk (the Step-5 ~12.5k/instance fused baseline, WAL
+# durability-latency-bound at ~42% util) vs mem (`bondy_oplog_wal_mem` — events
+# in ETS, drain reads them with no durable-position gate) measures exactly the
+# fsync-on-the-ack-path removal. write_only, ets MST, 4 writers/shard.
+#
+# Target: mem 1-shard ≥ 20k/instance. Burst-credit control: shard-outer /
+# arm-inner (disk & mem for a shard run adjacently under similar credits) and
+# the inner arm order ALTERNATES per rep, so neither arm is systematically
+# first (the Step-5 confound). Compare per-rep, same-shard pairs; ignore
+# absolute swings across reps.
+#
+#   just bench-fly-8x-wal-scaling                  # 60s × {1,2,4}, 4 w/shard, 3 reps
+#   just bench-fly-8x-wal-scaling 90 "1" 4 4       # 1-shard gate, 90s, 4 reps
+bench-fly-8x-wal-scaling duration="60" shard_list="1 2 4" writers_per_shard="4" reps="3":
+    fly ssh console --config fly-8x.toml -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        out=/data/results/wal_ab_8x_\$ts.log; \
+        echo \"=== perf-8x EPHEMERAL WAL-backend A/B (fused) — write_only, ets MST, {{duration}}s/point, shards={{shard_list}}, {{writers_per_shard}} w/shard, {{reps}} reps ===\" \
+          | tee \$out; \
+        for r in \$(seq 1 {{reps}}); do \
+          if [ \$((r % 2)) -eq 0 ]; then order=\"disk mem\"; else order=\"mem disk\"; fi; \
+          for s in {{shard_list}}; do \
+            w=\$((s * {{writers_per_shard}})); \
+            for b in \$order; do \
+              echo \"--- rep=\$r WAL_BACKEND=\$b shards=\$s writers=\$w ---\" | tee -a \$out; \
+              WAL_BACKEND=\$b FUSED=true WRITERS=\$w SCENARIOS=write_only PREPOPULATE=10000 \
+                just bench-e2e {{duration}} \$s per_write 1 false ephemeral \
+                  2>&1 | tee /data/results/wal_ab_8x_r\${r}_\${b}_s\${s}_\$ts.txt \
+                  | tee -a \$out; \
+            done; \
+          done; \
+        done; \
+        echo \"Done. Per-point: /data/results/wal_ab_8x_r*_*_s*_\$ts.txt\" \
+          | tee -a \$out'"
+
 # Pull /data/results from the perf-8x VM into a fresh local dir.
 # Same pattern as bench-fly-results — tarball-then-sftp to dodge
 # `sftp get -r`'s won't-overwrite + won't-auto-start behaviour.

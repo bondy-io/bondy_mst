@@ -127,13 +127,25 @@ init({InstanceId, Opts0}) ->
         modules => [bondy_oplog_instance]
     },
     WalOpts = wal_opts(InstanceId, Opts),
+    %% Ephemeral ETS WAL (task #50): a fused ephemeral instance may opt into an
+    %% in-memory WAL backend (`wal_backend => mem`) that drops the fsync from
+    %% the ack path — see `bondy_oplog_wal_mem`. It is gated on `fused` (the mem
+    %% reader is only dispatched on the fused drain path) and carries no sealed
+    %% segments, so it needs no scrubber. Every other instance keeps the disk
+    %% WAL verbatim.
+    WalBackend = wal_backend(Opts),
+    WalMod =
+        case WalBackend of
+            mem -> bondy_oplog_wal_mem;
+            disk -> bondy_oplog_wal
+        end,
     WalSpec = #{
         id => bondy_oplog_wal,
-        start => {bondy_oplog_wal, start_link, [InstanceId, WalOpts]},
+        start => {WalMod, start_link, [InstanceId, WalOpts]},
         restart => permanent,
         shutdown => 30000,
         type => worker,
-        modules => [bondy_oplog_wal]
+        modules => [WalMod]
     },
     ApplierOpts = applier_opts(InstanceId, Opts),
     ApplierSpec = #{
@@ -159,13 +171,48 @@ init({InstanceId, Opts0}) ->
     %% default-off, so every durable (and non-fused ephemeral) instance
     %% keeps the full applier+instance pipeline verbatim.
     Children =
-        case maps:get(fused, Opts, false) of
-            true ->
+        case {maps:get(fused, Opts, false), WalBackend} of
+            {true, mem} ->
+                %% Fused + in-memory WAL: instance drains inline (no applier),
+                %% mem WAL has no sealed segments (no scrubber).
+                [InstanceSpec, WalSpec];
+            {true, disk} ->
                 [InstanceSpec, WalSpec, ScrubberSpec];
-            false ->
+            {false, _} ->
                 [InstanceSpec, WalSpec, ApplierSpec, ScrubberSpec]
         end,
     {ok, {SupFlags, Children}}.
+
+%% @private
+%% Resolve the WAL storage backend. The in-memory backend (`mem`) is opt-in via
+%% `wal_backend => mem` AND only for fused instances — the mem reader is
+%% dispatched on the fused drain path, so a non-fused `mem` request falls back
+%% to disk with a warning rather than silently mis-wiring the reader.
+wal_backend(Opts) ->
+    case maps:get(wal_backend, Opts, disk) of
+        mem ->
+            case maps:get(fused, Opts, false) of
+                true ->
+                    mem;
+                false ->
+                    ?LOG_WARNING(#{
+                        description =>
+                            "wal_backend => mem requested for a non-fused "
+                            "instance; falling back to the disk WAL",
+                        instance_id => maps:get(instance_id, Opts, undefined)
+                    }),
+                    disk
+            end;
+        disk ->
+            disk;
+        Other ->
+            ?LOG_WARNING(#{
+                description =>
+                    "unknown wal_backend; falling back to the disk WAL",
+                wal_backend => Other
+            }),
+            disk
+    end.
 
 %% =============================================================================
 %% PRIVATE

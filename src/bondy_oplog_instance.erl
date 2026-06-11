@@ -117,7 +117,14 @@ without protocol changes.
     %% fused writer's progress. Mirrors the applier's `ae_targets` (the
     %% applier bumps them in `commit_now`; the fused instance has no
     %% applier so it bumps them itself). Validated at `init/1`.
-    ae_targets = [] :: list()
+    ae_targets = [] :: list(),
+    %% WAL storage backend for the drain READER (task #50, ephemeral ETS
+    %% WAL). `disk` reads segment files via `bondy_oplog_wal_reader`; `mem`
+    %% reads the in-memory `bondy_oplog_wal_mem` table via
+    %% `bondy_oplog_wal_mem_reader`, dropping the durable-position visibility
+    %% gate. Producer/await/commit are protocol-shared, so ONLY the reader
+    %% is dispatched on this flag. Set once at `maybe_init_fused/2`.
+    wal_backend = disk :: disk | mem
 }).
 
 -record(state, {
@@ -1907,7 +1914,14 @@ maybe_init_fused(#state{fused = true} = State, Opts) ->
         idle_waiter = undefined,
         %% Already validated at `init/1` (`validate_ae_targets/1`, which
         %% runs before this); the fused commit + remote replay bump them.
-        ae_targets = maps:get(ae_targets, Opts, [])
+        ae_targets = maps:get(ae_targets, Opts, []),
+        %% Reached here only for fused instances; the supervisor has already
+        %% gated `mem` on `fused`. Anything other than `mem` is the disk WAL.
+        wal_backend =
+            case maps:get(wal_backend, Opts, disk) of
+                mem -> mem;
+                _ -> disk
+            end
     },
     self() ! fused_init,
     State#state{fused_drain = FD}.
@@ -2572,8 +2586,9 @@ fused_open_reader(#state{fused_drain = FD} = State0) ->
             StartPos = bondy_oplog_applier:resume_position(
                 State1#state.mst, State1#state.watermark
             ),
+            ReaderMod = fused_reader_mod(FD#fused_drain.wal_backend),
             case
-                bondy_oplog_wal_reader:open(WalPid, StartPos, [{follow, false}])
+                ReaderMod:open(WalPid, StartPos, [{follow, false}])
             of
                 {ok, Iter} ->
                     self() ! fused_drain,
@@ -2635,7 +2650,7 @@ fused_lifecycle_live(#state{lifecycle = H}) ->
 %% @private
 fused_drain_step(#state{fused_drain = FD} = State0) ->
     #fused_drain{iter = Iter, apply_batch_max = Max} = FD,
-    case bondy_oplog_applier:collect_frames(Iter, Max) of
+    case fused_collect_frames(FD#fused_drain.wal_backend, Iter, Max) of
         {frames, Batch, {NextSeg, NextOff}, NewIter, More} ->
             State1 = fused_apply_batch(State0, Batch),
             {LastHlc, Count} = fused_batch_summary(Batch),
@@ -2748,6 +2763,20 @@ fused_batch_summary(Batch) ->
     {LastHlc, length(Batch)}.
 
 %% @private
+%% Mem WAL: positions are dense `Seq`s, not byte offsets, so the disk-centric
+%% `bondy_oplog_wal_state` consumer-offset (which guards `Off >= header bytes`
+%% and persists to disk) does not apply. There is nothing to resume from on a
+%% fresh BEAM (re-sync from peers), so we only track the uncommitted count for
+%% the AE-freshness commit cadence. (Communicating the committed Seq to the mem
+%% WAL for GC is PR-3.)
+fused_bump_offset(
+    #fused_drain{wal_backend = mem, uncommitted = U} = FD,
+    _Seg,
+    _Off,
+    _LastHlc,
+    Count
+) ->
+    FD#fused_drain{uncommitted = U + Count};
 fused_bump_offset(
     #fused_drain{consumer_offset = CO0, uncommitted = U} = FD,
     Seg,
@@ -2779,6 +2808,14 @@ fused_commit_now(
     #state{fused_drain = #fused_drain{uncommitted = 0}} = State
 ) ->
     State;
+fused_commit_now(
+    #state{fused_drain = #fused_drain{wal_backend = mem} = FD} = State0
+) ->
+    %% Mem WAL has no on-disk consumer offset and `set_committed_segment` is a
+    %% no-op (single logical segment, GC by Seq is PR-3). Just mirror the
+    %% applier's AE-freshness bump and clear the uncommitted count.
+    ok = fused_bump_ae_targets(FD#fused_drain.ae_targets),
+    State0#state{fused_drain = FD#fused_drain{uncommitted = 0}};
 fused_commit_now(#state{fused_drain = FD} = State0) ->
     case ensure_wal_pid(State0) of
         {ok, WalPid, State1} ->
@@ -2807,7 +2844,12 @@ fused_arm_idle_waiter(
 fused_arm_idle_waiter(#state{fused_drain = FD} = State0) ->
     case ensure_wal_pid(State0) of
         {ok, WalPid, State1} ->
-            {Seg, Off} = bondy_oplog_wal_reader:position(FD#fused_drain.iter),
+            {Seg, Off} = fused_reader_position(
+                FD#fused_drain.wal_backend, FD#fused_drain.iter
+            ),
+            %% `await_durable` is protocol-shared between the disk and mem WAL
+            %% gen_servers — the mem WAL interprets `{?MEM_SEG, Off+1}` as
+            %% "head_seq >= Off+1" — so this wrapper call routes to either.
             {_Pid, MRef} = spawn_monitor(fun() ->
                 _ = bondy_oplog_wal:await_durable(
                     WalPid, {Seg, Off + 1}, ?FUSED_AWAIT_DURABLE_TIMEOUT_MS
@@ -2832,6 +2874,52 @@ fused_cancel_idle_waiter(
     State#state{fused_drain = FD#fused_drain{idle_waiter = undefined}};
 fused_cancel_idle_waiter(State) ->
     State.
+
+%% @private
+%% WAL READER dispatch (task #50, ephemeral ETS WAL). Only the reader differs
+%% between the disk and in-memory WAL backends; the producer + `await_durable`
+%% + `set_committed_segment` protocol is shared. These three helpers are the
+%% whole dispatch surface — `bondy_oplog_wal`, `bondy_oplog_wal_reader` and
+%% `bondy_oplog_applier` are untouched.
+fused_reader_mod(mem) -> bondy_oplog_wal_mem_reader;
+fused_reader_mod(disk) -> bondy_oplog_wal_reader.
+
+%% @private
+fused_reader_position(mem, Iter) ->
+    bondy_oplog_wal_mem_reader:position(Iter);
+fused_reader_position(disk, Iter) ->
+    bondy_oplog_wal_reader:position(Iter).
+
+%% @private
+%% Disk reuses the applier's state-free `collect_frames/2` verbatim. Mem uses a
+%% structurally-identical aggregator over `bondy_oplog_wal_mem_reader:next/1`
+%% (same `{frames, Batch, Pos, NewIter, more|eol} | {empty,_} | {error,_}`
+%% shape), so `fused_drain_step/1` is backend-agnostic.
+fused_collect_frames(disk, Iter, Max) ->
+    bondy_oplog_applier:collect_frames(Iter, Max);
+fused_collect_frames(mem, Iter, Max) ->
+    fused_mem_collect_frames(Iter, Max, [], 0, undefined).
+
+%% @private
+fused_mem_collect_frames(Iter0, Max, AccRev, N, LastPos) ->
+    case bondy_oplog_wal_mem_reader:next(Iter0) of
+        {ok, Batch, _Hlcs, NextPos, NewIter} ->
+            N1 = N + length(Batch),
+            AccRev1 = [Batch | AccRev],
+            case N1 >= Max of
+                true ->
+                    {frames, lists:append(lists:reverse(AccRev1)), NextPos,
+                        NewIter, more};
+                false ->
+                    fused_mem_collect_frames(NewIter, Max, AccRev1, N1, NextPos)
+            end;
+        end_of_log when AccRev == [] ->
+            {empty, Iter0};
+        end_of_log ->
+            {frames, lists:append(lists:reverse(AccRev)), LastPos, Iter0, eol};
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
 %% @private
 %% The REMOTE-path analog of `bondy_oplog_applier:do_replay_cell_events/1`,
