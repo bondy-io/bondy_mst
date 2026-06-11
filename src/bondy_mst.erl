@@ -572,6 +572,17 @@ that successive `put/3` calls would do. The receiver's `comparator`,
 `merger`, and `hash_algorithm` are used; the temporary tree uses a
 map-backed store that is discarded once the merge completes.
 
+The temporary tree is built bottom-up from the comparator-sorted
+items rather than by sequential `put/3` calls: the MST is
+history-independent (a given key set has a single canonical
+structure), so constructing the canonical pages directly yields a
+byte-identical tree while serialising and hashing each page exactly
+once — instead of rehashing the insertion spine once per item, which
+profiling showed was ~86% of `put_batch`'s page serialisation work.
+
+Keys that occur more than once in `Items` are pre-merged with the
+receiver's `merger` in batch order (earlier value as the merger's
+existing-value argument), exactly as sequential `put/3` calls would.
 Collisions between an entry's key and a key already in the receiver
 invoke the receiver's `merger` exactly as `put/3` would.
 """).
@@ -589,11 +600,7 @@ put_batch(#?MODULE{} = T, Items) when is_list(Items) ->
         merger => T#?MODULE.merger,
         hash_algorithm => T#?MODULE.hash_algorithm
     }),
-    B = lists:foldl(
-        fun({K, V}, Acc) -> put(Acc, K, V) end,
-        B0,
-        Items
-    ),
+    B = bulk_build(B0, Items),
     merge(T, B).
 
 ?DOC("""
@@ -967,6 +974,100 @@ do_last_n(T, TopBound, N, Low, [{K, V, Low2} | Rest]) ->
         false ->
             last_n(T, TopBound, N, Low)
     end.
+
+%% -----------------------------------------------------------------------------
+%% Bulk canonical construction (put_batch's temporary tree)
+%% -----------------------------------------------------------------------------
+%% Builds the canonical MST of `Items` bottom-up into `B0`'s (map-backed)
+%% store. Because the MST is deterministic/history-independent, this
+%% produces pages byte-identical to those a sequence of `put/3` calls
+%% would converge on, but serialises + hashes each page exactly once
+%% instead of rehashing the insertion spine once per item.
+%%
+%% Construction: within any contiguous key range, the items carrying the
+%% range's maximum level `M` are exactly the entries of the range's top
+%% page (no higher-level separator splits them), and the runs of
+%% lower-level items between consecutive level-`M` items form the page's
+%% child subtrees (`low` for the run before the first entry, the entry's
+%% right-child for the run after it). Recursing on each run yields the
+%% canonical tree of the whole set.
+
+%% @private
+bulk_build(#?MODULE{store = Store0} = B0, Items) ->
+    Sorted = sort_items(B0, Items),
+    Leveled = [{K, V, calc_level(B0, K)} || {K, V} <- Sorted],
+    {Root, Store1} = build_canonical(Leveled, Store0),
+    Store =
+        case Root of
+            undefined ->
+                Store1;
+            _ when is_binary(Root) ->
+                bondy_mst_store:set_root(Store1, Root)
+        end,
+    B0#?MODULE{store = Store}.
+
+%% @private
+%% Comparator-sorted unique items. Duplicate keys are pre-merged with the
+%% tree's `merger` in batch order: the earlier occurrence is passed as the
+%% merger's existing-value argument — the same call sequential `put/3`s
+%% would make. The sort is made stable by tie-breaking on the original
+%% batch index, so merge order never depends on `lists:sort/2` internals.
+sort_items(T, Items) ->
+    Indexed = lists:enumerate(Items),
+    Sorted = lists:sort(
+        fun({IA, {KA, _}}, {IB, {KB, _}}) ->
+            case compare(T, KA, KB) of
+                lt -> true;
+                gt -> false;
+                eq -> IA =< IB
+            end
+        end,
+        Indexed
+    ),
+    merge_duplicates(T, [KV || {_, KV} <- Sorted]).
+
+%% @private
+merge_duplicates(_, []) ->
+    [];
+merge_duplicates(T, [{K, V} | Rest]) ->
+    merge_duplicates(T, K, V, Rest).
+
+%% @private
+merge_duplicates(T, K, V, [{K2, V2} | Rest]) ->
+    case compare(T, K, K2) of
+        eq ->
+            merge_duplicates(T, K, merge_values(T, K, V, V2), Rest);
+        lt ->
+            [{K, V} | merge_duplicates(T, K2, V2, Rest)]
+    end;
+merge_duplicates(_, K, V, []) ->
+    [{K, V}].
+
+%% @private
+%% Recursively builds the canonical subtree of a sorted, unique
+%% `[{Key, Value, Level}]` run. Returns `{RootHash | undefined, Store}`.
+build_canonical([], Store) ->
+    {undefined, Store};
+build_canonical(Items, Store0) ->
+    Max = lists:max([L || {_, _, L} <- Items]),
+    {LowRun, Groups} = lists:splitwith(
+        fun({_, _, L}) -> L < Max end, Items
+    ),
+    {LowHash, Store1} = build_canonical(LowRun, Store0),
+    {Entries, Store2} = build_entries(Groups, Max, Store1),
+    Page = bondy_mst_page:new(Max, LowHash, Entries),
+    bondy_mst_store:put(Store2, Page).
+
+%% @private
+%% `Groups` starts with a level-`Max` item; pair each such separator with
+%% the run of lower-level items that follows it (its right-child subtree).
+build_entries([], _, Store) ->
+    {[], Store};
+build_entries([{K, V, Max} | Rest0], Max, Store0) ->
+    {Run, Rest} = lists:splitwith(fun({_, _, L}) -> L < Max end, Rest0),
+    {RightHash, Store1} = build_canonical(Run, Store0),
+    {Entries, Store} = build_entries(Rest, Max, Store1),
+    {[{K, V, RightHash} | Entries], Store}.
 
 %% @private
 put_at(T, Key, Value, Level) ->
