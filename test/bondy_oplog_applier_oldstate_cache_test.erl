@@ -227,7 +227,9 @@ valid_oldstate_cache_accepted() ->
 %% and never exceeds its cap (coarse clear-on-overflow keeps it bounded).
 cache_primitive_get_put_and_bounded() ->
     %% Disabled: every op a no-op.
-    ?assertEqual(undefined, bondy_oplog_cell_apply:oldstate_cache_new(false, 10)),
+    ?assertEqual(
+        undefined, bondy_oplog_cell_apply:oldstate_cache_new(false, 10)
+    ),
     ?assertEqual(
         miss,
         bondy_oplog_cell_apply:oldstate_cache_get(undefined, <<"b">>, <<"k">>)
@@ -240,7 +242,8 @@ cache_primitive_get_put_and_bounded() ->
     Max = 4,
     Cache = bondy_oplog_cell_apply:oldstate_cache_new(true, Max),
     ?assertEqual(
-        miss, bondy_oplog_cell_apply:oldstate_cache_get(Cache, <<"b">>, <<"k1">>)
+        miss,
+        bondy_oplog_cell_apply:oldstate_cache_get(Cache, <<"b">>, <<"k1">>)
     ),
     ok = bondy_oplog_cell_apply:oldstate_cache_put_entries(
         Cache, [{<<"b">>, <<"k1">>, <<"f1">>}]

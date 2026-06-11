@@ -79,7 +79,6 @@ instance's `wal_backend` flag; `bondy_oplog_wal_reader` itself is untouched.
 open(WalPid, Start) ->
     open(WalPid, Start, []).
 
-
 ?DOC("""
 Opens a reader over the mem WAL's table at `Start`. `Opts` are accepted for
 parity with `bondy_oplog_wal_reader:open/3` (e.g. `{follow, _}`) and ignored —
@@ -103,7 +102,6 @@ open(WalPid, Start, Opts) when is_pid(WalPid) ->
         exit:{normal, _} -> {error, wal_unavailable};
         exit:{shutdown, _} -> {error, wal_unavailable}
     end.
-
 
 ?DOC("""
 Returns the next chunk of events with `Seq > cursor` (up to `chunk`), or
@@ -129,22 +127,20 @@ next(#mem_iter{seg = Seg, cursor = Cursor} = Iter) ->
             %% Only skipped entries (below `min_hlc`); advance and retry.
             next(Iter#mem_iter{cursor = NewCursor});
         {AccRev, NewCursor} ->
-            {ok, lists:reverse(AccRev), [], {Seg, NewCursor},
-                Iter#mem_iter{cursor = NewCursor}}
+            {ok, lists:reverse(AccRev), [], {Seg, NewCursor}, Iter#mem_iter{
+                cursor = NewCursor
+            }}
     end.
-
 
 -spec position(t()) -> {non_neg_integer(), non_neg_integer()}.
 
 position(#mem_iter{seg = Seg, cursor = Cursor}) ->
     {Seg, Cursor}.
 
-
 -spec close(t()) -> ok.
 
 close(#mem_iter{}) ->
     ok.
-
 
 %% =============================================================================
 %% PRIVATE
@@ -163,7 +159,6 @@ apply_start(Iter, {hlc, Hlc}) ->
     %% No persisted Seq↔HLC map (a fresh process has an empty table), so scan
     %% from the start and drop events below the watermark per batch.
     Iter#mem_iter{cursor = 0, min_hlc = Hlc}.
-
 
 %% @private
 %% Walk forward from `Cursor` collecting up to `K` kept events (reversed). Each
@@ -192,7 +187,6 @@ walk(Tab, Cursor, K, Min, Acc) ->
                     walk(Tab, NextSeq, K, Min, Acc)
             end
     end.
-
 
 %% @private
 keep(_Event, undefined) ->

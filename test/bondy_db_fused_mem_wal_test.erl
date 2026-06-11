@@ -26,9 +26,9 @@ fused_mem_wal_test_() ->
             {timeout, 30, fun bulk_writes_round_trip/0}},
         {"two mem-backed replicas converge via sync",
             {timeout, 30, fun mem_replicas_converge/0}},
-    {"single-node fused self-peer compaction bounds the MST",
+        {"single-node fused self-peer compaction bounds the MST",
             {timeout, 30, fun compaction_bounds_mst/0}},
-    {"fused compaction truncates UNDER concurrent writes",
+        {"fused compaction truncates UNDER concurrent writes",
             {timeout, 60, fun compaction_under_concurrent_writes/0}}
     ]}.
 
@@ -219,7 +219,10 @@ ff_writer(T, Id, N, Parent) ->
     end.
 
 recv_done() ->
-    receive {writer_done, _} -> ok after 5000 -> ok end.
+    receive
+        {writer_done, _} -> ok
+    after 5000 -> ok
+    end.
 
 %% =============================================================================
 %% Helpers

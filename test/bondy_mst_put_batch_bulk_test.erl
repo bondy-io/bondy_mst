@@ -68,8 +68,12 @@ duplicate_keys_merge_in_batch_order() ->
     Merger = fun(_K, A, B) -> <<A/binary, "|", B/binary>> end,
     T = new_tree(#{merger => Merger}),
     Items = [
-        {1, <<"a">>}, {2, <<"x">>}, {1, <<"b">>}, {3, <<"q">>},
-        {1, <<"c">>}, {2, <<"y">>}
+        {1, <<"a">>},
+        {2, <<"x">>},
+        {1, <<"b">>},
+        {3, <<"q">>},
+        {1, <<"c">>},
+        {2, <<"y">>}
     ],
     Bulk = bondy_mst:put_batch(T, Items),
     Seq = lists:foldl(
@@ -145,14 +149,16 @@ new_tree() ->
     new_tree(#{}).
 
 new_tree(Extra) ->
-    bondy_mst:new(maps:merge(
-        #{
-            store => bondy_mst_map_store,
-            store_opts => #{},
-            merger => fun(_K, _A, B) -> B end
-        },
-        Extra
-    )).
+    bondy_mst:new(
+        maps:merge(
+            #{
+                store => bondy_mst_map_store,
+                store_opts => #{},
+                merger => fun(_K, _A, B) -> B end
+            },
+            Extra
+        )
+    ).
 
 assert_equivalent(T0, Items) ->
     Bulk = bondy_mst:put_batch(T0, Items),

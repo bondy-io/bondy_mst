@@ -133,7 +133,6 @@ module on `wal_backend => mem`.
 start_link(InstanceId, Opts) when is_binary(InstanceId), is_map(Opts) ->
     gen_server:start_link(?MODULE, {InstanceId, Opts}, []).
 
-
 ?DOC("""
 Returns the read-side view the mem reader needs: the ETS tid and the logical
 segment id. The table is `protected`, so any process holding the tid may read
@@ -143,7 +142,6 @@ it lock-free.
 
 reader_view(Pid) when is_pid(Pid) ->
     gen_server:call(Pid, reader_view, infinity).
-
 
 ?DOC("""
 Marks every event with `Seq =< CommittedSeq` as consumed by the drain (read +
@@ -157,13 +155,11 @@ cluster-provided (re-sync from peers), so an installed event is dead weight.
 set_committed_seq(Pid, Seq) when is_pid(Pid), is_integer(Seq), Seq >= 0 ->
     gen_server:cast(Pid, {set_committed_seq, Seq}).
 
-
 ?DOC("Diagnostic snapshot of the mem WAL writer state.").
 -spec info(pid()) -> map().
 
 info(Pid) when is_pid(Pid) ->
     gen_server:call(Pid, info, infinity).
-
 
 %% =============================================================================
 %% GEN_SERVER CALLBACKS
@@ -189,51 +185,38 @@ init({InstanceId, Opts}) ->
         max_live_events = MaxLive
     }}.
 
-
 handle_call({append_batch, Events}, _From, State) ->
     do_append_batch(Events, State);
-
 handle_call({await_durable, {_Seg, Off}, Timeout}, From, State) ->
     do_await_durable(Off, Timeout, From, State);
-
 handle_call(durable_position, _From, #state{head_seq = H} = State) ->
     {reply, {?MEM_SEG, H}, State};
-
 handle_call({set_committed_segment, _Seg}, _From, State) ->
     %% Retention marker. The committed *Seq* is tracked via the consumer
     %% offset on the drain side; segment-level retention is a no-op for the
     %% single-segment mem log. GC by committed Seq is PR-3.
     {reply, ok, State};
-
 handle_call(reader_view, _From, #state{tab = Tab} = State) ->
     {reply, #{tab => Tab, mem_seg => ?MEM_SEG}, State};
-
 handle_call(info, _From, State) ->
     {reply, info_map(State), State};
-
 handle_call(_Msg, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
-
 handle_cast({set_committed_seq, Seq}, State) ->
     {noreply, gc_committed(Seq, State)};
-
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-
 handle_info({await_timeout, Id}, State) ->
     {noreply, expire_waiter(Id, State)};
-
 handle_info(_Info, State) ->
     {noreply, State}.
-
 
 terminate(_Reason, _State) ->
     %% The `protected` table is owned by this process and is deleted
     %% automatically on exit. An `heir` for process-crash recovery is PR-3.
     ok.
-
 
 %% =============================================================================
 %% PRIVATE
@@ -263,18 +246,15 @@ do_append_batch(Events, State0) ->
             {reply, {ok, Entries}, State2}
     end.
 
-
 %% @private
 insert_events(Events, State) ->
     insert_events(Events, State, []).
-
 
 %% @private
 insert_events([], #state{} = State, Acc) ->
     {lists:reverse(Acc), State#state{
         append_count = State#state.append_count + length(Acc)
     }};
-
 insert_events([Event | Rest], #state{tab = Tab, head_seq = H} = State, Acc) ->
     Seq = H + 1,
     true = ets:insert(Tab, {Seq, Event}),
@@ -282,17 +262,16 @@ insert_events([Event | Rest], #state{tab = Tab, head_seq = H} = State, Acc) ->
     Entry = {Hlc, {?MEM_SEG, Seq}},
     insert_events(Rest, State#state{head_seq = Seq}, [Entry | Acc]).
 
-
 %% @private
 %% Replies `ok` immediately if `head_seq` already covers `Off`; otherwise
 %% registers a waiter (with a timeout) and replies later from `signal_waiters/1`
 %% or `expire_waiter/2`. The caller (the fused idle-waiter helper) ignores the
 %% reply value — it re-drains on its own `DOWN` — so the protocol only needs to
 %% release the helper once the position is visible or the deadline fires.
-do_await_durable(Off, _Timeout, _From, #state{head_seq = H} = State)
-when H >= Off ->
+do_await_durable(Off, _Timeout, _From, #state{head_seq = H} = State) when
+    H >= Off
+->
     {reply, ok, State};
-
 do_await_durable(Off, Timeout, From, State0) ->
     #state{waiter_seq = WS0, waiters = Ws} = State0,
     Id = WS0 + 1,
@@ -300,13 +279,11 @@ do_await_durable(Off, Timeout, From, State0) ->
     Waiter = #waiter{id = Id, from = From, target = Off, timer = TimerRef},
     {noreply, State0#state{waiter_seq = Id, waiters = [Waiter | Ws]}}.
 
-
 %% @private
 arm_timeout(infinity, _Id) ->
     undefined;
 arm_timeout(Timeout, Id) when is_integer(Timeout), Timeout >= 0 ->
     erlang:send_after(Timeout, self(), {await_timeout, Id}).
-
 
 %% @private
 %% Release every waiter whose target Seq is now durable (== visible).
@@ -319,7 +296,6 @@ signal_waiters(#state{waiters = Ws, head_seq = H} = State) ->
     _ = [reply_waiter(W, ok) || W <- Ready],
     State#state{waiters = Pending}.
 
-
 %% @private
 expire_waiter(Id, #state{waiters = Ws} = State) ->
     case lists:keytake(Id, #waiter.id, Ws) of
@@ -330,17 +306,14 @@ expire_waiter(Id, #state{waiters = Ws} = State) ->
             State
     end.
 
-
 %% @private
 reply_waiter(#waiter{from = From, timer = Timer}, Reply) ->
     _ = cancel_timer(Timer),
     gen_server:reply(From, Reply).
 
-
 %% @private
 cancel_timer(undefined) -> ok;
 cancel_timer(Ref) -> erlang:cancel_timer(Ref).
-
 
 %% @private
 %% Delete every consumed row (`Seq =< Committed`) from the head of the
@@ -355,7 +328,6 @@ gc_committed(Seq, #state{tab = Tab, head_seq = Head} = State) ->
     MatchSpec = [{{'$1', '_'}, [{'=<', '$1', Bounded}], [true]}],
     _ = ets:select_delete(Tab, MatchSpec),
     State#state{committed_seq = Bounded}.
-
 
 %% @private
 info_map(#state{} = S) ->

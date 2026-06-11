@@ -83,13 +83,9 @@ behaviour is byte-identical.
 -export([oldstate_cache_get/3]).
 -endif.
 
-
-
 %% =============================================================================
 %% API
 %% =============================================================================
-
-
 
 %% @private
 %% Apply a batch of `cell_apply` events to the projection. For each event,

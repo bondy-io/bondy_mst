@@ -2389,9 +2389,11 @@ do_handle_call(
                 %% applier's `cell_apply_ctx` is `undefined` and the cast
                 %% falls through). Mark the remote events pending so the
                 %% next catalogue compaction folds them before truncating.
-                case bondy_oplog_registry:applier_pid(
-                    State1#state.instance_id
-                ) of
+                case
+                    bondy_oplog_registry:applier_pid(
+                        State1#state.instance_id
+                    )
+                of
                     undefined ->
                         ok;
                     ApplierPid when is_pid(ApplierPid) ->
@@ -2543,7 +2545,9 @@ handle_info(
     %% advanced past our read offset (new frame) or the await timed out.
     %% Either way, re-drain (a spurious wakeup simply re-arms).
     self() ! fused_drain,
-    {noreply, State#state{fused_drain = FD#fused_drain{idle_waiter = undefined}}};
+    {noreply, State#state{
+        fused_drain = FD#fused_drain{idle_waiter = undefined}
+    }};
 handle_info(
     {compaction_catch_up_timeout, Token},
     #state{pending_compaction = #pending_compaction{token = Token}} = State
@@ -2603,9 +2607,7 @@ fused_open_reader(#state{fused_drain = FD} = State0) ->
             ReaderOpts = [
                 {follow, false}, {chunk, FD#fused_drain.apply_batch_max}
             ],
-            case
-                ReaderMod:open(WalPid, StartPos, ReaderOpts)
-            of
+            case ReaderMod:open(WalPid, StartPos, ReaderOpts) of
                 {ok, Iter} ->
                     self() ! fused_drain,
                     State1#state{
@@ -2716,8 +2718,10 @@ fused_apply_batch(#state{fused_drain = FD, instance_id = Id} = State0, Batch) ->
     %% so this lights up the existing bench/observability stage for fused too).
     telemetry:execute(
         [bondy_oplog, applier, batch_verify],
-        #{duration_us => erlang:monotonic_time(microsecond) - VerifyT0,
-            count => length(Batch)},
+        #{
+            duration_us => erlang:monotonic_time(microsecond) - VerifyT0,
+            count => length(Batch)
+        },
         #{instance_id => Id}
     ),
     State1 =
@@ -2743,9 +2747,11 @@ fused_apply_batch(#state{fused_drain = FD, instance_id = Id} = State0, Batch) ->
                 ok = publish(StateA),
                 telemetry:execute(
                     [bondy_oplog, applier, batch_publish],
-                    #{duration_us =>
-                        erlang:monotonic_time(microsecond) - PublishT0,
-                        count => length(Verified)},
+                    #{
+                        duration_us =>
+                            erlang:monotonic_time(microsecond) - PublishT0,
+                        count => length(Verified)
+                    },
                     #{instance_id => Id}
                 ),
                 StateB = evict_overlay_batch(StateA, Verified),
@@ -2835,7 +2841,8 @@ fused_bump_offset(
 
 %% @private
 fused_maybe_commit(
-    #state{fused_drain = #fused_drain{uncommitted = U, commit_every = N}} = State
+    #state{fused_drain = #fused_drain{uncommitted = U, commit_every = N}} =
+        State
 ) when U >= N ->
     fused_commit_now(State);
 fused_maybe_commit(State) ->
@@ -4213,8 +4220,10 @@ finalize_catalogue_compaction(State, Started, Frontier) ->
     %% is re-anchored in `State1` below (`fused_reanchor_cursor/2`).
     {ok, WatermarkUs} = tc(fun() ->
         case State#state.fused of
-            true -> ok;
-            false -> advance_projection_watermark(State#state.instance_id, NewRoot)
+            true ->
+                ok;
+            false ->
+                advance_projection_watermark(State#state.instance_id, NewRoot)
         end
     end),
     %% Derive the removed-event count from the live-size delta over the
