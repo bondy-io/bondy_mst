@@ -227,27 +227,27 @@ valid_oldstate_cache_accepted() ->
 %% and never exceeds its cap (coarse clear-on-overflow keeps it bounded).
 cache_primitive_get_put_and_bounded() ->
     %% Disabled: every op a no-op.
-    ?assertEqual(undefined, bondy_oplog_applier:oldstate_cache_new(false, 10)),
+    ?assertEqual(undefined, bondy_oplog_cell_apply:oldstate_cache_new(false, 10)),
     ?assertEqual(
         miss,
-        bondy_oplog_applier:oldstate_cache_get(undefined, <<"b">>, <<"k">>)
+        bondy_oplog_cell_apply:oldstate_cache_get(undefined, <<"b">>, <<"k">>)
     ),
     ?assertEqual(
-        ok, bondy_oplog_applier:oldstate_cache_put_entries(undefined, [])
+        ok, bondy_oplog_cell_apply:oldstate_cache_put_entries(undefined, [])
     ),
 
     %% Enabled: put-then-get is a hit; absent key is a miss.
     Max = 4,
-    Cache = bondy_oplog_applier:oldstate_cache_new(true, Max),
+    Cache = bondy_oplog_cell_apply:oldstate_cache_new(true, Max),
     ?assertEqual(
-        miss, bondy_oplog_applier:oldstate_cache_get(Cache, <<"b">>, <<"k1">>)
+        miss, bondy_oplog_cell_apply:oldstate_cache_get(Cache, <<"b">>, <<"k1">>)
     ),
-    ok = bondy_oplog_applier:oldstate_cache_put_entries(
+    ok = bondy_oplog_cell_apply:oldstate_cache_put_entries(
         Cache, [{<<"b">>, <<"k1">>, <<"f1">>}]
     ),
     ?assertEqual(
         {hit, <<"f1">>},
-        bondy_oplog_applier:oldstate_cache_get(Cache, <<"b">>, <<"k1">>)
+        bondy_oplog_cell_apply:oldstate_cache_get(Cache, <<"b">>, <<"k1">>)
     ),
 
     %% Bounded: pushing well past the cap never leaves more than `Max`
@@ -256,7 +256,7 @@ cache_primitive_get_put_and_bounded() ->
     {Tab, Max} = Cache,
     lists:foreach(
         fun(I) ->
-            ok = bondy_oplog_applier:oldstate_cache_put_entries(
+            ok = bondy_oplog_cell_apply:oldstate_cache_put_entries(
                 Cache, [{<<"b">>, int_key(I), <<"f">>}]
             ),
             ?assert(ets:info(Tab, size) =< Max)

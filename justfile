@@ -579,6 +579,41 @@ bench-fly-8x-shard-scaling duration="90" shard_list="1 2 4 8" writers_per_shard=
         echo \"Done. Per-point tables: /data/results/shard_scaling_8x_oc{{oldstate_cache}}_{{fsync}}_s*_\$ts.txt\" \
           | tee -a \$out'"
 
+# Ephemeral fused-writer A/B on perf-8x — the Step-5 validation of the
+# fused-writer rollout (EPHEMERAL_FUSED_WRITER_PLAN §5). Reproduces the
+# documented ~11k/instance H1 ceiling baseline (project_ephemeral_20k_ceiling:
+# write_only, BACKENDS=ephemeral = ets projection + ets MST + batched fsync,
+# 4 writers/shard, 60s/point) and runs it for BOTH the non-fused (`false`,
+# the applier↔instance install round-trip = H1) and fused (`true`, H1
+# removed — the instance drains+installs inline, no applier) arms, so the
+# per-instance lift is a same-VM A/B. Filenames embed the arm + shard count.
+#
+# Target: fused 1-shard ≥ 20k/instance (vs the ~11k non-fused ceiling).
+# Watch the first sample's `applied` ramp for the QA Finding-6 first-merge
+# full-fold latency (single-node has no merge, so it should be flat here).
+#
+#   just bench-fly-8x-fused-scaling                  # 60s × {1,2,4}, 4 w/shard, both arms
+#   just bench-fly-8x-fused-scaling 90 "1 2 4 8" 6   # heavier: 8 shards, 6 w/shard
+bench-fly-8x-fused-scaling duration="60" shard_list="1 2 4" writers_per_shard="4":
+    fly ssh console --config fly-8x.toml -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        out=/data/results/fused_ab_8x_\$ts.log; \
+        echo \"=== perf-8x EPHEMERAL fused A/B — write_only, ets MST, batched fsync, {{duration}}s/point, shards={{shard_list}}, {{writers_per_shard}} w/shard ===\" \
+          | tee \$out; \
+        for f in false true; do \
+          for s in {{shard_list}}; do \
+            w=\$((s * {{writers_per_shard}})); \
+            echo \"--- FUSED=\$f shards=\$s writers=\$w ---\" | tee -a \$out; \
+            FUSED=\$f WRITERS=\$w SCENARIOS=write_only PREPOPULATE=10000 \
+              just bench-e2e {{duration}} \$s per_write 1 false ephemeral \
+                2>&1 | tee /data/results/fused_ab_8x_f\${f}_s\${s}_\$ts.txt \
+                | tee -a \$out; \
+          done; \
+        done; \
+        echo \"Done. Per-point: /data/results/fused_ab_8x_f*_s*_\$ts.txt\" \
+          | tee -a \$out'"
+
 # Pull /data/results from the perf-8x VM into a fresh local dir.
 # Same pattern as bench-fly-results — tarball-then-sftp to dodge
 # `sftp get -r`'s won't-overwrite + won't-auto-start behaviour.

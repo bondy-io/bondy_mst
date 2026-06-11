@@ -33,6 +33,7 @@ the latest read-relevant state of every running instance:
 | `applier_pid`  | `bondy_oplog_applier:init/1` |
 | `sup_pid`      | `bondy_oplog_instance_dyn_sup:start_instance/2` |
 | `overlay_tab`  | `init` of the instance gen_server (immutable thereafter) |
+| `fused`        | `init` (immutable thereafter) |
 
 ## Why ETS, not persistent_term
 
@@ -136,7 +137,16 @@ table's lifecycle tied to a supervisor child.
     %% atomic read. `undefined` between the entry's creation and the
     %% instance's `init/1` finishing; treated as "live" by the
     %% applier when missing, matching pre-PR-1 behaviour (no gate).
-    lifecycle :: bondy_oplog_bootstrap_lifecycle:handle() | undefined
+    lifecycle :: bondy_oplog_bootstrap_lifecycle:handle() | undefined,
+    %% Ephemeral fused-writer flag. `true` only for ephemeral (ets
+    %% projection) instances that opt into the single-process write
+    %% path (applier `cell_apply` + instance MST install fused into
+    %% one gen_server, eliminating the install round-trip H1). Seeded
+    %% at instance `init/1` via the register-fallback (immutable
+    %% thereafter); `false` for every durable instance and for
+    %% ephemeral instances that have not opted in. Defaults to `false`
+    %% for any row created by a caller that omits it.
+    fused = false :: boolean()
 }).
 
 -record(state, {}).
@@ -170,7 +180,8 @@ table's lifecycle tied to a supervisor child.
     sup_pid => pid() | undefined,
     overlay_tab => ets:tid() | undefined,
     fast_path => undefined | fast_path(),
-    ae_targets => [{atom(), atom(), non_neg_integer()}]
+    ae_targets => [{atom(), atom(), non_neg_integer()}],
+    fused => boolean()
 }.
 
 -export_type([entry/0]).
@@ -202,6 +213,7 @@ table's lifecycle tied to a supervisor child.
 -export([overlay_tab/1]).
 -export([fast_path/1]).
 -export([ae_targets/1]).
+-export([fused/1]).
 -export([install_in_flight/1]).
 -export([max_install_in_flight/1]).
 -export([lifecycle/1]).
@@ -453,6 +465,18 @@ ae_targets(InstanceId) ->
     field(InstanceId, #entry.ae_targets).
 
 ?DOC("""
+Returns the instance's ephemeral fused-writer flag. `true` only for
+ephemeral (ets projection) instances that opted into the fused
+single-process write path; `false` for every durable instance and
+for ephemeral instances that did not opt in. `undefined` when the row
+is absent (treated as `false` by readers).
+""").
+-spec fused(instance_id()) -> boolean() | undefined.
+
+fused(InstanceId) ->
+    field(InstanceId, #entry.fused).
+
+?DOC("""
 Returns `{OverlayTab, MST}` for an instance in **one** ETS lookup,
 or `undefined` when the row is absent. Used by the hot lock-free
 read paths (`get/2`, `fold_range/5`, `first_key/1`,
@@ -693,7 +717,8 @@ to_record(#{instance_id := Id} = M) ->
         sup_pid = maps:get(sup_pid, M, undefined),
         overlay_tab = maps:get(overlay_tab, M, undefined),
         fast_path = maps:get(fast_path, M, undefined),
-        ae_targets = maps:get(ae_targets, M, [])
+        ae_targets = maps:get(ae_targets, M, []),
+        fused = maps:get(fused, M, false)
     }.
 
 %% @private
@@ -713,7 +738,8 @@ to_map(#entry{
     sup_pid = SupPid,
     overlay_tab = OverlayTab,
     fast_path = FastPath,
-    ae_targets = AeTargets
+    ae_targets = AeTargets,
+    fused = Fused
 }) ->
     #{
         instance_id => Id,
@@ -731,5 +757,6 @@ to_map(#entry{
         sup_pid => SupPid,
         overlay_tab => OverlayTab,
         fast_path => FastPath,
-        ae_targets => AeTargets
+        ae_targets => AeTargets,
+        fused => Fused
     }.

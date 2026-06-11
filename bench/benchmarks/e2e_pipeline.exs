@@ -98,12 +98,20 @@ install_coalesce_max =
 # Lib default is false.
 oldstate_cache = System.get_env("OLDSTATE_CACHE", "false") in ["1", "true"]
 
+# Fused-writer rollout, Step 5 validation. When `true`, ephemeral (ets MST)
+# instances run in `fused` mode: the instance drains its own WAL and installs
+# into BOTH the projection and the MST inline, with NO separate applier — the
+# H1 collapse that lifts single-shard ephemeral throughput past the
+# ~11k/instance applier↔instance install round-trip. Only honoured for ets
+# MST profiles (the `fused ⇒ ephemeral` invariant); ignored for pack/leveled.
+fused? = System.get_env("FUSED", "false") in ["1", "true"]
+
 IO.puts(
   "[e2e] config: shards=#{shard_count} writers=#{writers} readers=#{readers} " <>
     "fsync=#{wal_fsync_mode} batch_size=#{batch_size} mst=#{mst_backend} " <>
     "apply_batch_max_events=#{apply_batch_max_events} " <>
     "install_coalesce_max=#{install_coalesce_max} " <>
-    "oldstate_cache=#{oldstate_cache} " <>
+    "oldstate_cache=#{oldstate_cache} fused=#{fused?} " <>
     "dirty_io_schedulers=#{:erlang.system_info(:dirty_io_schedulers)}"
 )
 
@@ -334,10 +342,18 @@ make_ctx = fn prefix, profile ->
             %{}
         end
 
+      # Fused mode is honoured only for the in-memory (ets) MST — the
+      # `fused ⇒ ephemeral` invariant. The supervisor reads this `fused`
+      # flag to omit the applier child; the instance drains + installs
+      # inline. `applier.cell_apply_target` is still passed (the fused
+      # instance builds its cell_apply_ctx from it).
+      instance_fused? = fused? and profile.mst == :ets
+
       {:ok, _sup} =
         :bondy_oplog.start_instance(
           instance_id,
           Map.merge(mst_opts, %{
+            fused: instance_fused?,
             # The cell projection runs through the registry entry's
             # `crdt_module` (cell_apply_target → cell_apply_ctx). The
             # per-instance fold projection is unused by this bench.

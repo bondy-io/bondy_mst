@@ -136,6 +136,13 @@ it).
 
 -export_type([db/0, table/0, realm/0]).
 
+-ifdef(TEST).
+%% Exposed so the fused-writer rollout can pin the `fused ⇒ ephemeral`
+%% guard directly, without spinning a durable (leveled) Bookie just to
+%% reach its rejection branch.
+-export([assert_fused_requires_ephemeral/2]).
+-endif.
+
 -define(DEFAULT_SHARD_COUNT, 8).
 -define(DEFAULT_FOLD, lww_register).
 -define(INDEX, primary).
@@ -390,9 +397,22 @@ open_table_provision(
     %% Linux: cell_apply 42ms → 7.5ms) — while for ets the OldValue read is
     %% already in-memory, so the cache is pure overhead. A caller-supplied
     %% `oldstate_cache` (under `oplog_instance_opts.applier`) always wins.
-    OplogOpts = default_oldstate_cache_opt(
+    OplogOpts0 = default_oldstate_cache_opt(
         maps:get(oplog_instance_opts, Merged, #{}), Backend
     ),
+    %% Ephemeral fused-writer opt-in (fused-writer rollout, Step 1).
+    %% Only an ephemeral (ets projection) table may fuse the applier
+    %% `cell_apply` with the instance MST install into one process; a
+    %% durable (leveled) table MUST keep the two-process split. The
+    %% authoritative ephemeral signal is the resolved projection
+    %% `Backend`, not the caller's `durability` acknowledgement — so
+    %% the gate lives here, where `Backend` is known. Fail fast at open,
+    %% not at the first fused write. Threaded into the instance opts so
+    %% each shard's instance records + republishes it; nothing reads it
+    %% for behaviour yet (the durable pipeline is untouched).
+    Fused = maps:get(fused, Merged, false),
+    ok = assert_fused_requires_ephemeral(Fused, Backend),
+    OplogOpts = OplogOpts0#{fused => Fused},
     %% Native operation-based CRDT for the cell projection. An explicit
     %% `crdt_module` wins; otherwise the `fold_module` is mapped to its
     %% native op-based twin via
@@ -457,6 +477,7 @@ open_table_provision(
                                 crdt_module => CrdtModule,
                                 causal_tier => causal_tier_of(CrdtModule),
                                 projection_backend => Backend,
+                                fused => Fused,
                                 table_state => TableState,
                                 instance_ids => InstanceIds,
                                 cache_handles => CacheHandles,
@@ -1041,6 +1062,7 @@ info(
         fold_module => Fold,
         crdt_module => maps:get(crdt_module, Table, undefined),
         causal_tier => maps:get(causal_tier, Table, tier_0),
+        fused => maps:get(fused, Table, false),
         indexes => maps:map(
             fun(_Name, Provision) ->
                 #{
@@ -1254,6 +1276,20 @@ assert_causal_tier_consistency(CrdtModule) when is_atom(CrdtModule) ->
         _ ->
             ok
     end.
+
+%% @private
+%% A fused writer fuses the applier `cell_apply` with the instance MST
+%% install into one gen_server — valid ONLY for an ephemeral (ets
+%% projection) table. A durable (leveled) table MUST keep the
+%% two-process split, so reject `fused => true` on it at open_table.
+-spec assert_fused_requires_ephemeral(boolean(), ets | leveled) -> ok.
+
+assert_fused_requires_ephemeral(false, _Backend) ->
+    ok;
+assert_fused_requires_ephemeral(true, ets) ->
+    ok;
+assert_fused_requires_ephemeral(true, Backend) ->
+    error({fused_requires_ephemeral, Backend}).
 
 %% @private
 %% Provision the per-shard read cache. A topology that wants its

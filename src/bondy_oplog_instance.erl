@@ -16,6 +16,16 @@
 %% clear the pending record after this long so compaction can resume.
 -define(CATCH_UP_TIMEOUT_MS, 30000).
 
+%% Ephemeral fused-writer mode (fused-writer rollout, Step 3). When
+%% `#state.fused` is set, the instance drains its own WAL and installs
+%% inline (no applier, no install cast). These mirror the applier's drain
+%% knobs; the ephemeral fused path reuses the applier's state-free drain
+%% leaves (`collect_frames/2`, `resume_position/2`, `resolve_cell_apply_ctx/1`).
+-define(FUSED_AWAIT_DURABLE_TIMEOUT_MS, 200).
+-define(FUSED_COMMIT_EVERY, 64).
+-define(FUSED_APPLY_BATCH_MAX, 256).
+-define(FUSED_RETRY_MS, 50).
+
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""
 The per-instance Merkle Search Tree owner
@@ -74,6 +84,40 @@ without protocol changes.
     remote_gen :: non_neg_integer(),
     token :: non_neg_integer(),
     started :: integer()
+}).
+
+%% Ephemeral fused-writer drain state (fused-writer rollout, Step 3).
+%% Present only when `#state.fused`; the instance runs the WAL drain +
+%% inline install itself (no applier). The `cell_apply_ctx` is built at
+%% `init/1` (the core-registry entry exists before the instance starts);
+%% the WAL `iter` is opened lazily in `handle_info(fused_init)` because
+%% the WAL sibling publishes its pid only after this instance's init
+%% returns. `consumer_offset` tracks the committed segment for WAL
+%% retention; the ephemeral WAL needs no on-disk consumer.offset (a fresh
+%% BEAM re-reads from `resume_position`). `idle_waiter` is a monitored
+%% helper parked on the WAL durable position (the busy-spin-free wakeup,
+%% identical to the applier's).
+-record(fused_drain, {
+    iter :: term() | undefined,
+    cell_apply_ctx :: map() | undefined,
+    consumer_offset :: term(),
+    uncommitted = 0 :: non_neg_integer(),
+    commit_every :: pos_integer(),
+    apply_batch_max :: pos_integer(),
+    idle_waiter = undefined :: undefined | reference(),
+    %% Inline projection-replay cursor for the REMOTE path (Step 4). A
+    %% fused instance has no applier, so it folds peer-merged events into
+    %% the projection itself after `integrate_peer_root`. `undefined` →
+    %% the next replay does a full fold; incremental thereafter. Mirrors
+    %% the applier's `last_replayed_root` and is re-anchored on the
+    %% post-truncate root by compaction (`finalize_catalogue_compaction`).
+    last_replayed_root = undefined :: undefined | bondy_mst:hash(),
+    %% AE-freshness shard keys bumped on every fused commit and after a
+    %% remote replay, so secondary-index reads on those shards observe the
+    %% fused writer's progress. Mirrors the applier's `ae_targets` (the
+    %% applier bumps them in `commit_now`; the fused instance has no
+    %% applier so it bumps them itself). Validated at `init/1`.
+    ae_targets = [] :: list()
 }).
 
 -record(state, {
@@ -171,7 +215,15 @@ without protocol changes.
     %% `max_install_in_flight - 1` (i.e. just freed a slot from a
     %% saturated counter), the instance sends a `drain_resume` cast
     %% to the applier so it can read the next WAL batch. Bounds the
-    %% instance's mailbox at `cap × batch_size` events.
+    %% instance's mailbox at `cap × batch_size` events. Default `64`:
+    %% the disambiguation sweep (2026-06-11) showed the applier stalls
+    %% on the in-flight cap well before any other limiter — 16→64 is
+    %% +47% single-shard (7,358→10,841) for both ephemeral and durable,
+    %% saturating at ~64 (the residual floor is the per-hop cast
+    %% round-trip latency itself). Worst-case backlog is
+    %% `cap × apply_batch_max_events` = 64 × 256 ≈ 16k events; instance
+    %% coalescing (`install_coalesce_max`) keeps the steady state far
+    %% below that.
     install_in_flight :: atomics:atomics_ref() | undefined,
     max_install_in_flight :: pos_integer(),
     %% A4 — instance-side install coalescing. The
@@ -225,7 +277,20 @@ without protocol changes.
     pending_compaction = undefined :: undefined | #pending_compaction{},
     %% Token source disambiguating a `{catch_up_done, _}` / compaction
     %% watchdog from a superseded cycle.
-    compaction_token = 0 :: non_neg_integer()
+    compaction_token = 0 :: non_neg_integer(),
+    %% Ephemeral fused-writer flag. `true` only for ephemeral (ets
+    %% projection) instances that opt into the single-process write
+    %% path where the applier's `cell_apply` and this instance's MST
+    %% install are fused — eliminating the applier↔instance install
+    %% round-trip (H1) that caps single-shard ephemeral throughput.
+    %% Set once at `init/1` from `Opts.fused`; published to the
+    %% registry so the fused writer can read it. Nothing reads it for
+    %% behaviour yet — the durable two-process pipeline is unaffected.
+    %% The `fused ⇒ ephemeral` invariant is enforced at `open_table`.
+    fused = false :: boolean(),
+    %% Fused-writer drain state, or `undefined` for every non-fused
+    %% (durable + non-fused ephemeral) instance. See `#fused_drain{}`.
+    fused_drain = undefined :: undefined | #fused_drain{}
 }).
 
 -type backend() :: map | ets | module().
@@ -766,12 +831,70 @@ append_remote(Target, Event) ->
         {ok, PeerOrigin} ->
             error({remote_event_with_local_origin, PeerOrigin});
         _ ->
-            case applier_pid_for(Target) of
-                {ok, ApplierPid} ->
+            case resolve_remote_route(Target) of
+                {fused, InstancePid} ->
+                    %% Fused (no applier): the instance verifies and
+                    %% installs the remote event itself (Step 4). It still
+                    %% offloads the verify to a spawned worker (the
+                    %% bondy_mst_crdt model — serialise writes, keep verify
+                    %% concurrent) so the drain is not blocked on it.
+                    gen_server:call(
+                        InstancePid, {enqueue_remote, Event}, infinity
+                    );
+                {applier, ApplierPid} ->
                     bondy_oplog_applier:enqueue_remote(ApplierPid, Event);
                 {error, _} = Err ->
                     Err
             end
+    end.
+
+%% @private
+%% Resolves where a remote event for `Target` (instance id or pid) is
+%% verified+installed: a fused instance does it itself (no applier process);
+%% every other instance routes to its applier's `enqueue_remote`.
+resolve_remote_route(Target) ->
+    case to_instance_id(Target) of
+        {ok, Id} ->
+            case bondy_oplog_registry:fused(Id) of
+                true ->
+                    case bondy_oplog_registry:instance_pid(Id) of
+                        undefined -> {error, instance_unavailable};
+                        Pid when is_pid(Pid) -> {fused, Pid}
+                    end;
+                _ ->
+                    case bondy_oplog_registry:applier_pid(Id) of
+                        undefined -> {error, applier_unavailable};
+                        Pid when is_pid(Pid) -> {applier, Pid}
+                    end
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @private
+to_instance_id(Id) when is_binary(Id) ->
+    {ok, Id};
+to_instance_id(Pid) when is_pid(Pid) ->
+    case lookup_instance_id(Pid) of
+        undefined -> {error, applier_unavailable};
+        Id -> {ok, Id}
+    end.
+
+%% @private
+%% Forwards a verified remote event to the fused instance for install
+%% (origin-ban / backpressure / watermark / equivocation), from the verify
+%% worker spawned in the `{enqueue_remote, Event}` clause. Mirrors
+%% `bondy_oplog_applier:forward_remote/2`; the install reply is what the
+%% caller sees. A `noproc` race during subtree restart is surfaced so the
+%% sync session can retry instead of treating the event as accepted.
+fused_forward_remote(InstancePid, Event) ->
+    try gen_server:call(InstancePid, {install_remote, Event}, infinity) of
+        Reply -> Reply
+    catch
+        exit:{noproc, _} -> {error, instance_unavailable};
+        exit:noproc -> {error, instance_unavailable};
+        exit:{normal, _} -> {error, instance_unavailable};
+        exit:{shutdown, _} -> {error, instance_unavailable}
     end.
 
 %% @private
@@ -1401,13 +1524,24 @@ install_catalogue_batch(InstanceId, {replace, Cells}) when
     %% `replace` is the only mode — PR-G removed the CvRDT `merge` mode.
     %% Guard fails fast on a stray `{merge, _}` here rather than letting it
     %% reach the applier (which would function_clause).
-    case bondy_oplog_registry:applier_pid(InstanceId) of
-        undefined ->
-            {error, instance_not_running};
-        ApplierPid ->
-            bondy_oplog_applier:install_catalogue_batch(
-                ApplierPid, {replace, Cells}
-            )
+    case bondy_oplog_registry:fused(InstanceId) of
+        true ->
+            %% A fused instance has no applier to install into. Catalogue-
+            %% snapshot bootstrap targets durable instances; a fused
+            %% (ephemeral) instance defaults to lifecycle `live` and
+            %% converges via AE page-sync (`integrate_peer_root` →
+            %% inline replay), so it is never routed here in practice.
+            %% Surface an explicit, non-misleading error if it ever is.
+            {error, fused_bootstrap_unsupported};
+        _ ->
+            case bondy_oplog_registry:applier_pid(InstanceId) of
+                undefined ->
+                    {error, instance_not_running};
+                ApplierPid ->
+                    bondy_oplog_applier:install_catalogue_batch(
+                        ApplierPid, {replace, Cells}
+                    )
+            end
     end;
 install_catalogue_batch(Pid, ModeAndCells) when is_pid(Pid) ->
     case bondy_oplog_registry:instance_id_by_sup_pid(Pid) of
@@ -1701,12 +1835,17 @@ init({InstanceId, Opts}) ->
         overlay_counters = atomics:new(2, [{signed, false}]),
         max_local_installed_seq = MaxLocalInstalledSeq,
         install_in_flight = atomics:new(1, [{signed, false}]),
-        max_install_in_flight = maps:get(max_install_in_flight, Opts, 16),
+        max_install_in_flight = maps:get(max_install_in_flight, Opts, 64),
         install_coalesce_max = validate_coalesce_max(
             maps:get(install_coalesce_max, Opts, 16)
         ),
         lifecycle = bondy_oplog_bootstrap_lifecycle:open(InstanceId, Opts),
-        has_projection = HasProjection
+        has_projection = HasProjection,
+        %% Ephemeral fused-writer opt-in. The `fused ⇒ ephemeral`
+        %% invariant is enforced upstream at `bondy_db:open_table`
+        %% where the projection backend is authoritatively known;
+        %% the instance only records and republishes the flag.
+        fused = maps:get(fused, Opts, false)
     },
     ok = publish(State),
     %% Publish the overlay tid via a dedicated setter so a stale tid
@@ -1743,7 +1882,35 @@ init({InstanceId, Opts}) ->
     ok = bondy_oplog_registry:set_lifecycle(
         InstanceId, State#state.lifecycle
     ),
-    {ok, State}.
+    {ok, maybe_init_fused(State, Opts)}.
+
+%% @private
+%% Ephemeral fused-writer setup (fused-writer rollout, Step 3). For a
+%% fused instance, build the cell-apply ctx now (the bondy_db_core_registry
+%% entry is registered before this instance starts) and schedule the
+%% deferred WAL-reader open (`handle_info(fused_init)`) — the WAL sibling
+%% publishes its pid only after this init returns. No-op for every
+%% non-fused (durable + non-fused ephemeral) instance.
+maybe_init_fused(#state{fused = false} = State, _Opts) ->
+    State;
+maybe_init_fused(#state{fused = true} = State, Opts) ->
+    ApplierOpts = maps:get(applier, Opts, #{}),
+    {ok, CellCtx} = bondy_oplog_applier:resolve_cell_apply_ctx(ApplierOpts),
+    FD = #fused_drain{
+        iter = undefined,
+        cell_apply_ctx = CellCtx,
+        consumer_offset = bondy_oplog_wal_state:new_consumer_offset(),
+        commit_every = maps:get(commit_every, ApplierOpts, ?FUSED_COMMIT_EVERY),
+        apply_batch_max = maps:get(
+            apply_batch_max_events, ApplierOpts, ?FUSED_APPLY_BATCH_MAX
+        ),
+        idle_waiter = undefined,
+        %% Already validated at `init/1` (`validate_ae_targets/1`, which
+        %% runs before this); the fused commit + remote replay bump them.
+        ae_targets = maps:get(ae_targets, Opts, [])
+    },
+    self() ! fused_init,
+    State#state{fused_drain = FD}.
 
 %% @private
 %% Returns a fast-path bundle map when the configured validator is
@@ -1910,10 +2077,63 @@ do_handle_call(await_overlay_drained, From, State) ->
             Waiters = State#state.drain_waiters,
             {noreply, State#state{drain_waiters = [From | Waiters]}}
     end;
+do_handle_call(
+    {enqueue_remote, Event},
+    From,
+    #state{validator_module = Mod, validator_state = VS, instance_id = Id} =
+        State
+) ->
+    %% Fused-mode remote entry (Step 4): the analog of the applier's
+    %% `{enqueue_remote, Event}` handler, run in the instance because a
+    %% fused instance has no applier. Spawn-and-reply: free the instance
+    %% mailbox immediately so the WAL drain (`handle_info(fused_drain, _)`)
+    %% and other remote events interleave. The worker captures the
+    %% read-only validator snapshot + this instance's pid + the caller's
+    %% `From`, verifies, forwards verified events back to THIS instance for
+    %% origin-ban / backpressure / watermark / install (the existing
+    %% `{install_remote, Event}` clause), and replies on the instance's
+    %% behalf. The outer try/catch guarantees the `infinity` caller never
+    %% hangs.
+    InstancePid = self(),
+    _ = spawn(fun() ->
+        try
+            Reply =
+                case Mod:verify_event(Event, VS) of
+                    ok ->
+                        fused_forward_remote(InstancePid, Event);
+                    {error, Reason} = VerifyErr ->
+                        ?LOG_WARNING(#{
+                            description =>
+                                "bondy_oplog_instance fused verify worker "
+                                "rejected a remote event",
+                            instance_id => Id,
+                            reason => Reason
+                        }),
+                        VerifyErr
+                end,
+            gen_server:reply(From, Reply)
+        catch
+            C:R:S ->
+                ?LOG_WARNING(#{
+                    description =>
+                        "bondy_oplog_instance fused verify worker raised "
+                        "before delivering a reply; the remote event has "
+                        "been rejected",
+                    instance_id => Id,
+                    class => C,
+                    reason => R,
+                    stacktrace => S
+                }),
+                catch gen_server:reply(From, {error, {verify_crashed, R}})
+        end
+    end),
+    {noreply, State};
 do_handle_call({install_remote, Event}, _From, State0) ->
     %% Sole install path for peer-received events. Signature
     %% verification ran in the applier process (see
-    %% `bondy_oplog_applier:enqueue_remote/2`) before this call, so
+    %% `bondy_oplog_applier:enqueue_remote/2`), or — for a fused instance —
+    %% in this instance's own verify worker (the `{enqueue_remote, Event}`
+    %% clause above), before this call, so
     %% we trust the event and run the remaining accept/reject checks:
     %% origin-ban, backpressure, watermark filter, and the
     %% `bondy_mst:get` three-way (undefined/match/equivocation).
@@ -2111,31 +2331,52 @@ do_handle_call(
             undefined -> State#state.max_local_installed_seq;
             S -> erlang:max(S, State#state.max_local_installed_seq)
         end,
-    %% Sync produced new events in the local MST; ask the applier to
-    %% re-fold the cell_apply projection so peer-authored events become
-    %% visible to `bondy_db:read/3`. No-op when the instance was
-    %% started without a `cell_apply_target` (the applier's
-    %% `cell_apply_ctx` is `undefined` and the cast falls through).
-    %% Cast — best-effort; the next sync tick re-arms the request if
-    %% the applier was busy.
-    case bondy_oplog_registry:applier_pid(State#state.instance_id) of
-        undefined ->
-            ok;
-        ApplierPid when is_pid(ApplierPid) ->
-            bondy_oplog_applier:replay_cell_events(ApplierPid)
-    end,
-    {reply, ok, State#state{
+    State1 = State#state{
         mst = MST2,
         live_size = compute_live_size(MST2),
         max_local_installed_seq = MaxLocalSeq,
-        %% A peer-merged event entered the MST — the next catalogue
-        %% compaction must run the projection catch-up before truncating.
-        remote_events_pending = true,
         %% Bump the generation so an async catch-up already in flight (or
         %% one that captured this state) detects the new event at its
         %% truncate guard and defers rather than truncating it un-folded.
+        %% (Non-fused only matters; harmless when fused.)
         remote_gen = State#state.remote_gen + 1
-    }};
+    },
+    %% Sync produced new events in the local MST; the cell_apply projection
+    %% must re-fold so peer-authored events become visible to
+    %% `bondy_db:read/3`.
+    State2 =
+        case State1#state.fused of
+            true ->
+                %% Fused (no applier): fold the peer-merged events into the
+                %% projection INLINE, in this process (Step 4). The
+                %% projection is current on return, so there is nothing for
+                %% a later compaction to catch up — `remote_events_pending`
+                %% stays false. The async catch-up
+                %% (`begin_async_catch_up/3`) exists only to break the
+                %% cross-process instance↔applier deadlock, which a single
+                %% process does not have. Reads see the merged values as
+                %% soon as this handler returns (the merged MST2 is
+                %% auto-published by `maybe_publish/2`).
+                fused_replay_cell_events(State1);
+            false ->
+                %% Durable / non-fused: ask the applier to re-fold the
+                %% projection (a best-effort cast; the next sync tick
+                %% re-arms it if the applier was busy). No-op when the
+                %% instance was started without a `cell_apply_target` (the
+                %% applier's `cell_apply_ctx` is `undefined` and the cast
+                %% falls through). Mark the remote events pending so the
+                %% next catalogue compaction folds them before truncating.
+                case bondy_oplog_registry:applier_pid(
+                    State1#state.instance_id
+                ) of
+                    undefined ->
+                        ok;
+                    ApplierPid when is_pid(ApplierPid) ->
+                        bondy_oplog_applier:replay_cell_events(ApplierPid)
+                end,
+                State1#state{remote_events_pending = true}
+        end,
+    {reply, ok, State2};
 do_handle_call(current_watermark, _From, State) ->
     {reply, State#state.watermark, State};
 do_handle_call(crdt_module, _From, State) ->
@@ -2263,6 +2504,23 @@ handle_info(
     %% cache so the next append re-resolves the new pid via the
     %% registry.
     {noreply, State#state{wal_pid = undefined, wal_pid_monitor = undefined}};
+handle_info(fused_init, State) ->
+    %% Deferred fused-drain WAL-reader open (Step 3). Retries until the
+    %% WAL sibling has published its pid.
+    {noreply, fused_open_reader(State)};
+handle_info(fused_drain, State) ->
+    %% A fused-drain wakeup (init kick, more-loop continuation, or an
+    %% idle-waiter DOWN). Drain the WAL into the projection + MST inline.
+    {noreply, run_fused_drain(State)};
+handle_info(
+    {'DOWN', MRef, process, _Pid, _Reason},
+    #state{fused_drain = #fused_drain{idle_waiter = MRef} = FD} = State
+) ->
+    %% The parked fused idle waiter signalled: the WAL durable position
+    %% advanced past our read offset (new frame) or the await timed out.
+    %% Either way, re-drain (a spurious wakeup simply re-arms).
+    self() ! fused_drain,
+    {noreply, State#state{fused_drain = FD#fused_drain{idle_waiter = undefined}}};
 handle_info(
     {compaction_catch_up_timeout, Token},
     #state{pending_compaction = #pending_compaction{token = Token}} = State
@@ -2285,6 +2543,349 @@ handle_info({compaction_catch_up_timeout, _Token}, State) ->
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
+
+%% =============================================================================
+%% EPHEMERAL FUSED WRITER (fused-writer rollout, Step 3)
+%% =============================================================================
+%% A fused instance owns BOTH single-writer resources (MST + projection) in
+%% this one process, eliminating the applier↔instance install round-trip
+%% (H1) that caps single-shard ephemeral throughput. It drains its own WAL,
+%% verifies, writes the projection via `bondy_oplog_cell_apply`, and installs
+%% into the MST inline (no cast). The drain reuses the applier's STATE-FREE
+%% leaves (`collect_frames/2`, `resume_position/2`, `resolve_cell_apply_ctx/1`)
+%% so the durable applier hot loop stays byte-identical. Verify/serving stay
+%% concurrent (idle waiter offloaded; reads lock-free off the registry).
+%%
+%% Scope of this step: the LOCAL drain path (the H1 removal). Cross-node
+%% remote convergence (peer-merge → projection replay) + AE-target freshness
+%% bumping are wired in Step 4; until then a fused instance is single-node.
+%% Started ONLY when `#state.fused` (the supervisor omits the applier then).
+
+%% @private
+%% Deferred WAL-reader open: the WAL sibling publishes its pid only after
+%% this instance's `init/1` returns, so resolving it is retried.
+fused_open_reader(#state{fused_drain = undefined} = State) ->
+    State;
+fused_open_reader(#state{fused_drain = FD} = State0) ->
+    case ensure_wal_pid(State0) of
+        {ok, WalPid, State1} ->
+            StartPos = bondy_oplog_applier:resume_position(
+                State1#state.mst, State1#state.watermark
+            ),
+            case
+                bondy_oplog_wal_reader:open(WalPid, StartPos, [{follow, false}])
+            of
+                {ok, Iter} ->
+                    self() ! fused_drain,
+                    State1#state{
+                        fused_drain = FD#fused_drain{iter = Iter}
+                    };
+                {error, Reason} ->
+                    ?LOG_ERROR(#{
+                        description =>
+                            "bondy_oplog_instance fused drain could not open "
+                            "the WAL reader; retrying",
+                        instance_id => State1#state.instance_id,
+                        reason => Reason
+                    }),
+                    _ = erlang:send_after(?FUSED_RETRY_MS, self(), fused_init),
+                    State1
+            end;
+        {error, _} ->
+            %% WAL sibling not up yet (`{error, wal_unavailable}`) — retry
+            %% shortly. Keep the original state; the error is NOT a state.
+            _ = erlang:send_after(?FUSED_RETRY_MS, self(), fused_init),
+            State0
+    end.
+
+%% @private
+%% Drain wakeup handler — mirrors the applier's `handle_info(drain)`:
+%% cancel any parked idle waiter, drain to end-of-log, then re-park a
+%% waiter on the WAL durable position (fires the instant a new frame
+%% lands; near-zero idle CPU).
+run_fused_drain(#state{fused_drain = undefined} = State) ->
+    State;
+run_fused_drain(#state{fused_drain = #fused_drain{iter = undefined}} = State) ->
+    %% Reader not open yet (init race) — `fused_init` will arm the drain.
+    State;
+run_fused_drain(State0) ->
+    State1 = fused_cancel_idle_waiter(State0),
+    case fused_drain_loop(State1) of
+        {ok, State2} -> fused_arm_idle_waiter(State2);
+        {error, State2} -> fused_arm_idle_waiter(State2)
+    end.
+
+%% @private
+fused_drain_loop(State) ->
+    case fused_lifecycle_live(State) of
+        false ->
+            %% Pre-bootstrap: do not touch the projection yet. Re-armed on
+            %% the next durable frame (the lifecycle flips in place to live).
+            {ok, State};
+        true ->
+            fused_drain_step(State)
+    end.
+
+%% @private
+fused_lifecycle_live(#state{lifecycle = undefined}) ->
+    true;
+fused_lifecycle_live(#state{lifecycle = H}) ->
+    bondy_oplog_bootstrap_lifecycle:is_live(H).
+
+%% @private
+fused_drain_step(#state{fused_drain = FD} = State0) ->
+    #fused_drain{iter = Iter, apply_batch_max = Max} = FD,
+    case bondy_oplog_applier:collect_frames(Iter, Max) of
+        {frames, Batch, {NextSeg, NextOff}, NewIter, More} ->
+            State1 = fused_apply_batch(State0, Batch),
+            {LastHlc, Count} = fused_batch_summary(Batch),
+            FD1 = (State1#state.fused_drain)#fused_drain{iter = NewIter},
+            FD2 = fused_bump_offset(FD1, NextSeg, NextOff, LastHlc, Count),
+            State2 = State1#state{fused_drain = FD2},
+            case More of
+                more ->
+                    fused_drain_loop(fused_maybe_commit(State2));
+                eol ->
+                    {ok, fused_commit_now(State2)}
+            end;
+        {empty, _Iter} ->
+            {ok, fused_commit_now(State0)};
+        {error, Reason} ->
+            ?LOG_ERROR(#{
+                description =>
+                    "bondy_oplog_instance fused drain reader error; "
+                    "re-arming and retrying on the next durable frame",
+                instance_id => State0#state.instance_id,
+                reason => Reason
+            }),
+            {error, State0}
+    end.
+
+%% @private
+%% The fused apply step: verify → cell_apply (projection) → install into
+%% the MST inline → publish → evict overlay. This is the applier's
+%% `apply_batch` with the `install_local_batch` CAST replaced by the
+%% instance's OWN inline install (the H1 collapse). Projection write
+%% precedes the MST install (the `await_apply` contract: by the time the
+%% overlay is empty, the projection has observed the events).
+fused_apply_batch(#state{fused_drain = FD, instance_id = Id} = State0, Batch) ->
+    {Verified, Rejected} = fused_verify_batch(State0, Batch, [], []),
+    State1 =
+        case Rejected of
+            [] ->
+                State0;
+            _ ->
+                maybe_signal_drain_waiters(
+                    evict_overlay_batch(State0, Rejected)
+                )
+        end,
+    State2 =
+        case Verified of
+            [] ->
+                State1;
+            _ ->
+                {CellEvents, _Other} = fused_partition_cells(Verified),
+                ok = bondy_oplog_cell_apply:apply_cell_batch(
+                    FD#fused_drain.cell_apply_ctx, Id, CellEvents
+                ),
+                StateA = install_local_batch(State1, Verified),
+                ok = publish(StateA),
+                StateB = evict_overlay_batch(StateA, Verified),
+                maybe_signal_drain_waiters(StateB)
+        end,
+    %% Emit the SAME canonical end-to-end throughput event the applier emits
+    %% (`bondy_oplog_applier:apply_batch/2`): "events the writer has fully
+    %% processed end-to-end", once per batch. Fused mode has no applier, so
+    %% the instance emits it itself — keeping benches and production
+    %% monitoring (which key on `[bondy_oplog, applier, applied]`) uniform
+    %% across the fused and non-fused write paths.
+    telemetry:execute(
+        [bondy_oplog, applier, applied],
+        #{count => length(Verified), rejected => length(Rejected)},
+        #{instance_id => Id}
+    ),
+    State2.
+
+%% @private
+fused_verify_batch(_State, [], VAcc, RAcc) ->
+    {lists:reverse(VAcc), lists:reverse(RAcc)};
+fused_verify_batch(
+    #state{validator_module = Mod, validator_state = VS} = State,
+    [Event | Rest],
+    VAcc,
+    RAcc
+) ->
+    case Mod:verify_event(Event, VS) of
+        ok ->
+            fused_verify_batch(State, Rest, [Event | VAcc], RAcc);
+        {error, Reason} ->
+            ?LOG_WARNING(#{
+                description =>
+                    "bondy_oplog_instance fused drain rejected an event at "
+                    "verify; dropping it from the batch",
+                instance_id => State#state.instance_id,
+                reason => Reason
+            }),
+            fused_verify_batch(State, Rest, VAcc, [Event | RAcc])
+    end.
+
+%% @private
+fused_partition_cells(Events) ->
+    lists:partition(
+        fun(E) ->
+            case bondy_oplog_event:op(E) of
+                {cell_apply, _, _, _} -> true;
+                _ -> false
+            end
+        end,
+        Events
+    ).
+
+%% @private
+fused_batch_summary(Batch) ->
+    LastEvent = lists:last(Batch),
+    LastHlc = bondy_oplog_event:key_hlc(bondy_oplog_event:key(LastEvent)),
+    {LastHlc, length(Batch)}.
+
+%% @private
+fused_bump_offset(
+    #fused_drain{consumer_offset = CO0, uncommitted = U} = FD,
+    Seg,
+    Off,
+    LastHlc,
+    Count
+) ->
+    CO1 = bondy_oplog_wal_state:with_position(CO0, Seg, Off),
+    CO2 = bondy_oplog_wal_state:with_hlc(CO1, LastHlc),
+    Old = bondy_oplog_wal_state:commit_count(CO2),
+    CO3 = bondy_oplog_wal_state:with_commit_count(CO2, Old + 1),
+    FD#fused_drain{consumer_offset = CO3, uncommitted = U + Count}.
+
+%% @private
+fused_maybe_commit(
+    #state{fused_drain = #fused_drain{uncommitted = U, commit_every = N}} = State
+) when U >= N ->
+    fused_commit_now(State);
+fused_maybe_commit(State) ->
+    State.
+
+%% @private
+%% No `drain_install_queue` barrier (the install already ran inline in
+%% THIS process before the commit — there is no cross-process cast to
+%% wait on). Advances only the committed-segment marker for WAL retention;
+%% the ephemeral WAL needs no on-disk consumer.offset (a fresh BEAM
+%% re-reads from `resume_position`).
+fused_commit_now(
+    #state{fused_drain = #fused_drain{uncommitted = 0}} = State
+) ->
+    State;
+fused_commit_now(#state{fused_drain = FD} = State0) ->
+    case ensure_wal_pid(State0) of
+        {ok, WalPid, State1} ->
+            Seg = bondy_oplog_wal_state:committed_segment(
+                FD#fused_drain.consumer_offset
+            ),
+            _ = catch bondy_oplog_wal:set_committed_segment(WalPid, Seg),
+            %% AE-freshness: mirror the applier's `commit_now` so
+            %% secondary-index reads on the target shards see the fused
+            %% writer's committed progress (Step 4).
+            ok = fused_bump_ae_targets(FD#fused_drain.ae_targets),
+            State1#state{fused_drain = FD#fused_drain{uncommitted = 0}};
+        {error, _} ->
+            %% WAL mid-restart — keep `uncommitted` and retry the
+            %% retention bump at the next commit boundary.
+            State0
+    end.
+
+%% @private
+%% Park a monitored helper on the WAL durable position; its `DOWN` is the
+%% drain wakeup (busy-spin-free, identical to the applier's idle waiter).
+fused_arm_idle_waiter(
+    #state{fused_drain = #fused_drain{idle_waiter = Ref}} = State
+) when is_reference(Ref) ->
+    State;
+fused_arm_idle_waiter(#state{fused_drain = FD} = State0) ->
+    case ensure_wal_pid(State0) of
+        {ok, WalPid, State1} ->
+            {Seg, Off} = bondy_oplog_wal_reader:position(FD#fused_drain.iter),
+            {_Pid, MRef} = spawn_monitor(fun() ->
+                _ = bondy_oplog_wal:await_durable(
+                    WalPid, {Seg, Off + 1}, ?FUSED_AWAIT_DURABLE_TIMEOUT_MS
+                )
+            end),
+            State1#state{fused_drain = FD#fused_drain{idle_waiter = MRef}};
+        {error, _} ->
+            %% WAL mid-restart — cannot park a waiter now. The one_for_all
+            %% subtree restart re-runs init and re-kicks `fused_init`.
+            State0
+    end.
+
+%% @private
+fused_cancel_idle_waiter(
+    #state{fused_drain = #fused_drain{idle_waiter = undefined}} = State
+) ->
+    State;
+fused_cancel_idle_waiter(
+    #state{fused_drain = #fused_drain{idle_waiter = MRef} = FD} = State
+) ->
+    _ = erlang:demonitor(MRef, [flush]),
+    State#state{fused_drain = FD#fused_drain{idle_waiter = undefined}};
+fused_cancel_idle_waiter(State) ->
+    State.
+
+%% @private
+%% The REMOTE-path analog of `bondy_oplog_applier:do_replay_cell_events/1`,
+%% run INLINE in the fused instance after a peer merge
+%% (`integrate_peer_root`). A fused instance has no applier, so it folds the
+%% peer-merged events into the projection itself: diff the live MST from the
+%% replay cursor and apply the resulting cell pairs. The cursor advances so
+%% the next replay stays incremental; compaction re-anchors it on the
+%% post-truncate root (`finalize_catalogue_compaction`). Uses the in-process
+%% `State#state.mst` directly (the merged tree), not the registry, so it is
+%% correct before `maybe_publish/2` runs. Local events caught in the diff
+%% were already folded by the WAL drain; re-folding them is idempotent (the
+%% CRDT contract), exactly as in the applier.
+fused_replay_cell_events(#state{fused_drain = undefined} = State) ->
+    State;
+fused_replay_cell_events(
+    #state{fused_drain = #fused_drain{cell_apply_ctx = undefined}} = State
+) ->
+    State;
+fused_replay_cell_events(
+    #state{mst = MST, instance_id = Id, fused_drain = FD} = State
+) ->
+    LastRoot = FD#fused_drain.last_replayed_root,
+    CurrentRoot = bondy_mst:root(MST),
+    case CurrentRoot of
+        LastRoot ->
+            State;
+        _ ->
+            Pairs = bondy_oplog_applier:diff_pairs(MST, LastRoot, Id),
+            _ = bondy_oplog_cell_apply:apply_cell_pairs(
+                FD#fused_drain.cell_apply_ctx, Id, Pairs
+            ),
+            %% Reads of a peer-authored value just became answerable — bump
+            %% the AE-freshness shards so a secondary-index read does not
+            %% refuse as stale.
+            ok = fused_bump_ae_targets(FD#fused_drain.ae_targets),
+            State#state{
+                fused_drain = FD#fused_drain{last_replayed_root = CurrentRoot}
+            }
+    end.
+
+%% @private
+%% Bumps the AE-freshness atomic for every shard in the fused drain's
+%% `ae_targets` with a shared `monotonic_time(millisecond)` so a batch of
+%% shards observes the same "now". Mirrors
+%% `bondy_oplog_applier:bump_ae_targets/1`: the applier bumps on its
+%% `commit_now`; the fused instance has no applier, so it bumps on its own
+%% commit and after a remote replay. `[]` (the common case) is a no-op.
+fused_bump_ae_targets([]) ->
+    ok;
+fused_bump_ae_targets(Targets) ->
+    Now = erlang:monotonic_time(millisecond),
+    _ = bondy_db_core_registry:bump_ae_targets(Targets, Now),
+    ok.
 
 terminate(_Reason, #state{
     mst = MST,
@@ -3457,14 +4058,18 @@ finalize_catalogue_compaction(State, Started, Frontier) ->
     {MST1, TruncateUs} = tc(fun() ->
         truncate_below_or_equal(State#state.mst, Frontier)
     end),
-    %% Re-anchor the applier's replay cursor on the post-truncate (live)
-    %% root so the next `do_replay_cell_events` diff stays incremental (the
-    %% pre-truncate root's pages are freed by the truncate, so a stale
-    %% cursor would force a full `to_list/1` fold every cycle). A cast.
+    NewRoot = bondy_mst:root(MST1),
+    %% Re-anchor the projection replay cursor on the post-truncate (live)
+    %% root so the next replay diff stays incremental (the pre-truncate
+    %% root's pages are freed by the truncate, so a stale cursor would force
+    %% a full `to_list/1` fold every cycle). Non-fused: a cast to the
+    %% applier. Fused: no applier — the cursor lives in `#fused_drain{}` and
+    %% is re-anchored in `State1` below (`fused_reanchor_cursor/2`).
     {ok, WatermarkUs} = tc(fun() ->
-        advance_projection_watermark(
-            State#state.instance_id, bondy_mst:root(MST1)
-        )
+        case State#state.fused of
+            true -> ok;
+            false -> advance_projection_watermark(State#state.instance_id, NewRoot)
+        end
     end),
     %% Derive the removed-event count from the live-size delta over the
     %% *truncated* tree (O(remaining)) rather than folding the whole
@@ -3492,10 +4097,19 @@ finalize_catalogue_compaction(State, Started, Frontier) ->
         cached_checkpoint = {Frontier, projection_managed},
         live_size = LiveSize1,
         remote_events_pending = false,
-        pending_compaction = undefined
+        pending_compaction = undefined,
+        fused_drain = fused_reanchor_cursor(State#state.fused_drain, NewRoot)
     },
     emit_compaction_telemetry(State, Started, Frontier, EventCount),
     {{ok, {compacted, Frontier, EventCount}}, State1}.
+
+%% @private
+%% Re-anchors the fused replay cursor on the post-truncate root. No-op for a
+%% non-fused instance (`fused_drain = undefined`).
+fused_reanchor_cursor(undefined, _NewRoot) ->
+    undefined;
+fused_reanchor_cursor(#fused_drain{} = FD, NewRoot) ->
+    FD#fused_drain{last_replayed_root = NewRoot}.
 
 %% @private
 %% The raw `{Key, Value}` MST pairs whose key falls in the
@@ -3788,7 +4402,8 @@ publish(#state{} = State) ->
         crdt_module => State#state.crdt_module,
         fold_module => State#state.fold_module,
         fold_opts => State#state.fold_opts,
-        live_size => State#state.live_size
+        live_size => State#state.live_size,
+        fused => State#state.fused
     }).
 
 %% @private

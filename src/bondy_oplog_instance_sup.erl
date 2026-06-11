@@ -153,7 +153,19 @@ init({InstanceId, Opts0}) ->
         type => worker,
         modules => [bondy_oplog_wal_scrubber]
     },
-    {ok, {SupFlags, [InstanceSpec, WalSpec, ApplierSpec, ScrubberSpec]}}.
+    %% Ephemeral fused-writer mode (fused-writer rollout, Step 3): the
+    %% instance gen_server drains the WAL + installs inline ITSELF, so a
+    %% separate applier would double-drain the WAL. Omit it. `fused` is
+    %% default-off, so every durable (and non-fused ephemeral) instance
+    %% keeps the full applier+instance pipeline verbatim.
+    Children =
+        case maps:get(fused, Opts, false) of
+            true ->
+                [InstanceSpec, WalSpec, ScrubberSpec];
+            false ->
+                [InstanceSpec, WalSpec, ApplierSpec, ScrubberSpec]
+        end,
+    {ok, {SupFlags, Children}}.
 
 %% =============================================================================
 %% PRIVATE
