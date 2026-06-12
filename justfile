@@ -759,3 +759,30 @@ bench-fly-8x-destroy:
     @read -p "Type 'destroy' to confirm: " confirm && \
       [ "$confirm" = "destroy" ] || (echo "aborted"; exit 1)
     fly apps destroy bondy-mst-bench-8x --yes
+
+# Write→readable latency sampling overhead on perf-8x. Two measurements:
+#   1. microbench (latency_sampling.exs) — the exact per-write cost of the
+#      sampling hot path (disabled gate vs enabled gate+2xmono+record).
+#   2. e2e A/B — ephemeral write_only, LATENCY_SAMPLING off then on, so the
+#      macro throughput delta (expected: within noise) is visible.
+# Tees everything to /data/results; pull with `just bench-fly-8x-results`.
+#
+#   just bench-fly-8x-latency             # micro + 60s/arm e2e, 4 shards
+#   just bench-fly-8x-latency 90 8        # 90s/arm, 8 shards
+bench-fly-8x-latency e2e_duration="60" shards="4":
+    fly ssh console --config fly-8x.toml -C \
+      "bash -c 'set -e; mkdir -p /data/results; cd /opt/bondy_mst; \
+        ts=\$(date +%Y%m%d_%H%M%S); \
+        log=/data/results/latency_8x_\$ts.log; \
+        echo \"=== perf-8x latency sampling overhead — \$ts ===\" | tee \$log; \
+        echo \"--- microbench: per-write sampling cost ---\" | tee -a \$log; \
+        just bench-one latency_sampling 2>&1 | tee /data/results/latency_micro_\$ts.txt | tee -a \$log; \
+        echo \"--- e2e A/B: ephemeral write_only, sampling OFF ---\" | tee -a \$log; \
+        LATENCY_SAMPLING=off SCENARIOS=write_only \
+          just bench-e2e {{e2e_duration}} {{shards}} batched 1 false ephemeral \
+          2>&1 | tee /data/results/latency_e2e_off_\$ts.txt | tee -a \$log; \
+        echo \"--- e2e A/B: ephemeral write_only, sampling ON ---\" | tee -a \$log; \
+        LATENCY_SAMPLING=on SCENARIOS=write_only \
+          just bench-e2e {{e2e_duration}} {{shards}} batched 1 false ephemeral \
+          2>&1 | tee /data/results/latency_e2e_on_\$ts.txt | tee -a \$log; \
+        echo \"Done. Results: /data/results/latency_*_\$ts.*\" | tee -a \$log'"

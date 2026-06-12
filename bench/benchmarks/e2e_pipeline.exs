@@ -524,17 +524,48 @@ build_cell_op = fn ctx, key ->
   {:cell_apply, ctx.bucket, key, event}
 end
 
+# LATENCY_SAMPLING=on wraps each single-event append with the exact
+# write→readable sampling sequence `bondy_db:apply/4` adds when the
+# feature is enabled (two `monotonic_time` reads + one `bondy_metrics`
+# histogram observe via `bondy_oplog_latency:record/2`), using the real
+# per-shard instance_id. Run the same scenario `off` then `on` for the
+# A/B. The bench's native write path is `bondy_oplog:append` (it bypasses
+# the bondy_db facade), so this is the only way to exercise the hook here.
+# Only the single-event (batch_size<=1) path is instrumented — the A/B
+# uses batch=1. Default off keeps existing runs byte-identical.
+latency_sampling? = System.get_env("LATENCY_SAMPLING", "off") in ["1", "true", "on"]
+_ = if latency_sampling?, do: :bondy_oplog_latency.set_enabled(true)
+
 write_op =
-  if batch_size <= 1 do
-    fn ctx ->
-      shard = worker_shard.(ctx)
-      i = :atomics.add_get(ctx.write_cursor, 1, 1)
-      offset = rem(i - 1, keys_per_shard) + 1
-      key = shard_key.(shard, offset)
-      instance_id = ctx.shards[shard].instance_id
-      :bondy_oplog.append(instance_id, build_cell_op.(ctx, key))
-    end
-  else
+  cond do
+    batch_size <= 1 and latency_sampling? ->
+      fn ctx ->
+        shard = worker_shard.(ctx)
+        i = :atomics.add_get(ctx.write_cursor, 1, 1)
+        offset = rem(i - 1, keys_per_shard) + 1
+        key = shard_key.(shard, offset)
+        instance_id = ctx.shards[shard].instance_id
+        t0 = :erlang.monotonic_time(:microsecond)
+        r = :bondy_oplog.append(instance_id, build_cell_op.(ctx, key))
+        _ =
+          :bondy_oplog_latency.record(
+            instance_id,
+            :erlang.monotonic_time(:microsecond) - t0
+          )
+        r
+      end
+
+    batch_size <= 1 ->
+      fn ctx ->
+        shard = worker_shard.(ctx)
+        i = :atomics.add_get(ctx.write_cursor, 1, 1)
+        offset = rem(i - 1, keys_per_shard) + 1
+        key = shard_key.(shard, offset)
+        instance_id = ctx.shards[shard].instance_id
+        :bondy_oplog.append(instance_id, build_cell_op.(ctx, key))
+      end
+
+    true ->
     fn ctx ->
       shard = worker_shard.(ctx)
       base = :atomics.add_get(ctx.write_cursor, 1, batch_size)

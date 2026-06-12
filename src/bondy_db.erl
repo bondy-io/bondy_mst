@@ -127,6 +127,7 @@ it).
 -export([apply_batch/4]).
 -export([map_update/4]).
 -export([counter_inc/4]).
+-export([probe_write/1]).
 -export([read/3]).
 -export([range/5]).
 -export([index_get/5]).
@@ -148,6 +149,15 @@ it).
 -define(DEFAULT_SHARD_COUNT, 8).
 -define(DEFAULT_FOLD, lww_register).
 -define(INDEX, primary).
+
+%% Reserved bucket/key for the latency idle probe. A bucket no user query
+%% targets (reads/ranges scope to a realm-derived bucket via
+%% `Topology:bucket_for/3`), so the probe cell is naturally invisible to
+%% end users without any read-path filtering. The same `(Bucket, Key)` is
+%% reused every probe → one bounded reserved cell per instance.
+-define(PROBE_BUCKET, <<"$probe">>).
+-define(PROBE_KEY, <<"$probe">>).
+-define(PROBE_TOKEN, <<"$probe">>).
 %% Substrate default range cap, mirrored from `bondy_db_core`.
 -define(DEFAULT_RANGE_LIMIT, 1000).
 %% Upper bound on the primary-scan fallback (IDX-4): how many primary
@@ -657,6 +667,30 @@ apply(
 ->
     Bucket = Topology:bucket_for(EntityType, Realm, TableState),
     InstanceId = instance_id_for(Table, Bucket, Key),
+    %% Write→readable latency sampling. The gate is a free `persistent_term`
+    %% read; when enabled we time the whole synchronous write (append +
+    %% `await_apply`, plus the tier_2 context read) — that span is exactly
+    %% the user-perceived time until the value is readable. Only successful
+    %% writes are sampled; telemetry never alters the result.
+    case bondy_oplog_latency:enabled() of
+        false ->
+            do_apply(Table, InstanceId, Bucket, Key, Event);
+        true ->
+            T0 = erlang:monotonic_time(microsecond),
+            Result = do_apply(Table, InstanceId, Bucket, Key, Event),
+            case Result of
+                ok ->
+                    bondy_oplog_latency:record(
+                        InstanceId, erlang:monotonic_time(microsecond) - T0
+                    );
+                _ ->
+                    ok
+            end,
+            Result
+    end.
+
+%% @private
+do_apply(Table, InstanceId, Bucket, Key, Event) ->
     case maps:get(causal_tier, Table, tier_0) of
         tier_2 ->
             apply_with_context(InstanceId, Bucket, Key, Event);
@@ -718,6 +752,130 @@ cell_context(InstanceId, Bucket, Key) ->
         ApplierPid ->
             bondy_oplog_applier:cell_context(ApplierPid, Bucket, Key)
     end.
+
+-doc """
+Write a single benign, type-correct op to the reserved probe cell of
+`InstanceId`, returning `ok` once it is committed and readable — same
+synchronous path (and same write→readable span) as a real user write.
+
+For the latency **idle probe**: it lets an idle instance be measured
+without any real traffic. The op is chosen per the instance's CRDT type
+(`probe_op_for/1`); it is value-stable and overwrites the one reserved
+cell, so the instance's state stays bounded. The reserved bucket
+(`?PROBE_BUCKET`) is one no user query targets, so the cell is invisible
+to end-user reads.
+
+This IS a real, replicated write (anti-entropy ships the reserved cell
+like any other) — appropriate for the occasional heartbeat of an
+otherwise-idle instance, which is why the idle probe is opt-in.
+
+Returns `{skip, Reason}` for instances whose type has no benign probe op
+(e.g. `lww_register` is supported; an unknown/internal type is skipped),
+and `{error, _}` if the instance is unavailable.
+""".
+-spec probe_write(binary()) ->
+    ok | {skip, term()} | {error, term()}.
+
+probe_write(InstanceId) when is_binary(InstanceId) ->
+    case probe_module(InstanceId) of
+        undefined ->
+            {skip, no_crdt_module};
+        Mod ->
+            case probe_op_for(Mod) of
+                skip ->
+                    {skip, {no_probe_op, Mod}};
+                Op ->
+                    probe_dispatch(InstanceId, Mod, Op)
+            end
+    end.
+
+%% @private
+probe_dispatch(InstanceId, Mod, Op) ->
+    case Mod:causal_tier() of
+        tier_2 ->
+            apply_with_context(InstanceId, ?PROBE_BUCKET, ?PROBE_KEY, Op);
+        _ ->
+            append_and_await(
+                InstanceId,
+                {cell_apply, ?PROBE_BUCKET, ?PROBE_KEY, Op},
+                undefined
+            )
+    end.
+
+%% @private
+%% The instance's effective CRDT module — resolved exactly as the applier
+%% does: from its shard's `bondy_db_core_registry` entry via
+%% `from_modules/2` (`crdt_module` wins, else the `fold_module` twin). The
+%% per-instance `bondy_oplog_registry` `crdt_module` field is NOT
+%% authoritative (it can be `undefined` even for a configured CRDT), so we
+%% go through the applier's `cell_apply_target` like the write path does.
+%% `undefined` when the instance has no projection target (not probeable).
+probe_module(InstanceId) ->
+    case bondy_oplog_registry:applier_pid(InstanceId) of
+        undefined ->
+            undefined;
+        ApplierPid ->
+            try bondy_oplog_applier:cell_apply_target(ApplierPid) of
+                {ok, {NS, Index, Shard}} ->
+                    probe_module_from_entry(NS, Index, Shard);
+                _ ->
+                    undefined
+            catch
+                _:_ -> undefined
+            end
+    end.
+
+%% @private
+probe_module_from_entry(NS, Index, Shard) ->
+    case bondy_db_core_registry:lookup(NS, Index, Shard) of
+        {ok, Entry} ->
+            try
+                {crdt, Mod} = bondy_oplog_cell_kernel:from_modules(
+                    bondy_db_core_registry:entry_fold_module(Entry),
+                    bondy_db_core_registry:entry_crdt_module(Entry)
+                ),
+                Mod
+            catch
+                _:_ -> undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+%% @private
+%% A benign, value-stable op per CRDT type for the reserved probe cell.
+%% Repeated application keeps the cell bounded (counters: zero-delta; sets
+%% /maps/flags: a fixed token under a fresh dot that the context-stamp
+%% collapses; registers: a constant). `lww_register` needs a fresh HLC in
+%% the op to overwrite the prior probe. `skip` => not idle-probed.
+probe_op_for(bondy_oplog_crdt_pn_counter) ->
+    {inc, 0};
+probe_op_for(bondy_oplog_crdt_g_counter) ->
+    {inc, 0};
+probe_op_for(bondy_oplog_crdt_g_set) ->
+    {add, ?PROBE_TOKEN};
+probe_op_for(bondy_oplog_crdt_two_p_set) ->
+    {add, ?PROBE_TOKEN};
+probe_op_for(bondy_oplog_crdt_aw_set) ->
+    {add, ?PROBE_TOKEN};
+probe_op_for(bondy_oplog_crdt_rw_set) ->
+    {add, ?PROBE_TOKEN};
+probe_op_for(bondy_oplog_crdt_aw_map) ->
+    {put, ?PROBE_TOKEN, ?PROBE_TOKEN};
+probe_op_for(bondy_oplog_crdt_mv_register) ->
+    {set, ?PROBE_TOKEN};
+probe_op_for(bondy_oplog_crdt_ew_flag) ->
+    enable;
+probe_op_for(bondy_oplog_crdt_dw_flag) ->
+    enable;
+probe_op_for(bondy_oplog_crdt_max_register) ->
+    {set, 0};
+probe_op_for(bondy_oplog_crdt_min_register) ->
+    {set, 0};
+probe_op_for(bondy_oplog_crdt_lww_register) ->
+    {set, bondy_oplog_hlc:now(bondy_oplog_hlc:new()), ?PROBE_TOKEN};
+probe_op_for(_Other) ->
+    skip.
 
 -doc """
 Increment the PN-Counter at `(Realm, Key)` in `Table` by `Delta`.
