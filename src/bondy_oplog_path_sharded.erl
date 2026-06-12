@@ -6,7 +6,7 @@
 -module(bondy_oplog_path_sharded).
 -behaviour(bondy_oplog_path_strategy).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""

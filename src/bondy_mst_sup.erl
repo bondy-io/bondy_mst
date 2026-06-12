@@ -37,19 +37,15 @@ start_link() ->
 init([]) ->
     ok = bondy_mst_config:init(),
     SupFlags = #{
-        strategy => one_for_all,
+        strategy => one_for_one,
         intensity => 5,
         period => 10
     },
-    ChildSpecs = [
-        #{
-            id => bondy_oplog_sup,
-            start => {bondy_oplog_sup, start_link, []},
-            restart => permanent,
-            shutdown => infinity,
-            type => supervisor,
-            modules => [bondy_oplog_sup]
-        }
-    ],
+    %% `bondy_mst` is a library: it has no long-lived processes of its own
+    %% (pack-store workers are started per-store, not globally). This
+    %% supervisor exists only to initialise the library configuration when
+    %% `bondy_mst` is started standalone. The `bondy_oplog`/`bondy_db` layer
+    %% is supervised by `bondy_oplog_sup` (started by `bondy_oplog_app`).
+    ChildSpecs = [],
 
     {ok, {SupFlags, ChildSpecs}}.

@@ -12,7 +12,7 @@
 
 -module(bondy_oplog_peer_source).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 -include("bondy_oplog.hrl").
 
 -moduledoc #{format => "text/markdown"}.

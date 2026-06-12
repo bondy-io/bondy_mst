@@ -6,7 +6,7 @@
 -module(bondy_db_topology_per_entity).
 -behaviour(bondy_db_topology).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""

@@ -5,7 +5,8 @@
 
 -module(bondy_oplog_leveled_tag).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
+-include("bondy_oplog.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""

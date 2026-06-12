@@ -6,7 +6,7 @@
 -module(bondy_oplog_compaction_checkpoint_file).
 -behaviour(bondy_oplog_compaction_checkpoint).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 -include("bondy_oplog.hrl").
 
 -moduledoc #{format => "text/markdown"}.

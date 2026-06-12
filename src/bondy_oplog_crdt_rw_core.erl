@@ -5,7 +5,7 @@
 
 -module(bondy_oplog_crdt_rw_core).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""

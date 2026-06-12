@@ -5,7 +5,7 @@
 
 -module(bondy_oplog_db_overlay).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 -include("bondy_oplog.hrl").
 
 -moduledoc #{format => "text/markdown"}.
@@ -84,6 +84,7 @@ watermark, preserving rows that arrived after the batch was assembled.
 
 -type tid() :: ets:tid().
 -type bucket() :: binary().
+-type key() :: bondy_mst:key().
 -type cell_key() :: binary().
 -type after_hlc() :: bondy_oplog_hlc:hlc().
 

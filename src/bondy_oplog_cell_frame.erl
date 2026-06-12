@@ -5,7 +5,7 @@
 
 -module(bondy_oplog_cell_frame).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""

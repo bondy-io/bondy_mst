@@ -5,7 +5,7 @@
 
 -module(bondy_oplog_wal_key_registry).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 -include("bondy_oplog_wal.hrl").
 
 -moduledoc #{format => "text/markdown"}.

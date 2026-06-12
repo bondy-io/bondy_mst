@@ -5,7 +5,8 @@
 
 -module(bondy_oplog_projection_leveled).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
+-include("bondy_oplog.hrl").
 -include_lib("leveled/include/leveled.hrl").
 
 -moduledoc #{format => "text/markdown"}.

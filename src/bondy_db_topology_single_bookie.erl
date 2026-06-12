@@ -6,7 +6,7 @@
 -module(bondy_db_topology_single_bookie).
 -behaviour(bondy_db_topology).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""

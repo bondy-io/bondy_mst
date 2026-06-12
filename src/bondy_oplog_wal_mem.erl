@@ -20,7 +20,7 @@
 -behaviour(gen_server).
 
 -include_lib("kernel/include/logger.hrl").
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 -include("bondy_oplog.hrl").
 
 ?MODULEDOC("""

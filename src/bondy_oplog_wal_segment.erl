@@ -5,7 +5,7 @@
 
 -module(bondy_oplog_wal_segment).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 -include("bondy_oplog.hrl").
 -include("bondy_oplog_wal.hrl").
 

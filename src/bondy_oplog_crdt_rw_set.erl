@@ -8,7 +8,7 @@
 -behaviour(bondy_oplog_crdt).
 -behaviour(bondy_oplog_crdt_commutative).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 
 -moduledoc #{format => "text/markdown"}.
 ?MODULEDOC("""

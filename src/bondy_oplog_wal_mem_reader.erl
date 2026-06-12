@@ -18,7 +18,7 @@
 
 -module(bondy_oplog_wal_mem_reader).
 
--include("bondy_mst.hrl").
+-include("bondy_doc.hrl").
 
 ?MODULEDOC("""
 Read side of the in-memory ephemeral WAL (`bondy_oplog_wal_mem`).

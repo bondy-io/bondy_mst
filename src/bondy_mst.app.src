@@ -7,7 +7,13 @@
  [{description, "An OTP application"},
   {vsn, "0.4.0"},
   {registered, []},
-  {mod, {bondy_mst_app, []}},
+  %% The repo currently ships both layers as one OTP application. The boot
+  %% entry is `bondy_oplog_app` (it wires leveled + starts the oplog/db
+  %% supervision tree, and initialises the `bondy_mst` library config it
+  %% depends on). When the `bondy_oplog`/`bondy_db` layer is extracted to its
+  %% own repo, this app reverts to `bondy_mst_app` (the pure library app) and
+  %% the new app ships `{mod, {bondy_oplog_app, []}}`.
+  {mod, {bondy_oplog_app, []}},
   {applications,
    [kernel,
     stdlib,
