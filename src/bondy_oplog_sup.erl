@@ -66,6 +66,7 @@ init([]) ->
         bondy_db_core_registry:child_spec(),
         bondy_db_core_dispatcher:child_spec(),
         bondy_db_core_metrics:child_spec(),
+        bondy_oplog_latency:child_spec(),
         bondy_oplog_peer_state:child_spec(#{}),
         bondy_oplog_origin_bans:child_spec(),
         bondy_oplog_quarantine:child_spec(),

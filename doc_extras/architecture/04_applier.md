@@ -399,10 +399,60 @@ moduledoc):
 | `publish_fun`, `publish_ns` | undefined | per-cell publish hook |
 | `ae_targets` | [] | freshness counters to bump per applied event |
 
+## Write→readable latency telemetry
+
+`bondy_oplog_latency` reports, per instance, how long a user write takes
+to become **readable in the projection** — the metric an operator
+actually cares about, across whichever backend the instance uses
+(leveled or the ETS memory topology).
+
+It costs almost nothing because the write path is already synchronous:
+`bondy_db:apply/4` appends to the WAL and then blocks in
+`bondy_oplog:await_apply/1`, which returns only once the applier has
+committed the cell to the projection (read-your-writes). So the elapsed
+time across that one call **is** the write→readable latency. `bondy_db`
+times it on the hot path (two `monotonic_time` reads) and feeds it to a
+wait-free `bondy_metrics` histogram — one `counters` array per instance,
+fixed log-linear buckets. A periodic tick subtracts the previous
+snapshot and emits, per instance that wrote in the window:
+
+| Event | Measurements | Metadata |
+|---|---|---|
+| `[bondy_oplog, instance, write_latency]` | `count`, `mean_us`, `p50_us`, `p95_us`, `p99_us`, `max_us` | `instance_id`, `interval_ms` |
+
+`mean_us` is exact; the percentiles are nearest-rank estimates from the
+bucket bounds (≈6% bucket error). The gate is a `persistent_term` read,
+so when disabled the hot path pays one free read and captures nothing.
+
+Scope is the **local origin node** (write→readable on the node that took
+the write). Cross-node "readable on a replica" latency is out of scope —
+monotonic clocks are not comparable across VMs.
+
+```erlang
+{bondy_mst, [
+    {oplog_latency, #{
+        enabled => true,             %% default: true (sampling is ~free)
+        interval_ms => 10000,        %% default: 10s reporting window
+        probe => #{enabled => false} %% default: idle probe off
+    }}
+]}.
+```
+
+**Idle probe (opt-in).** An instance with no traffic in a window reports
+nothing. When the probe is on, the tick writes one benign, type-correct
+op (`bondy_db:probe_write/1`) to a reserved cell of each idle instance so
+it still reports a heartbeat next window. The reserved cell lives in a
+bucket (`$probe`) no user query targets, so it is invisible to user
+reads, and it is overwritten each time (bounded state). It is a real,
+replicated write — appropriate for the occasional heartbeat of an idle
+instance, which is why it is off by default.
+
 ## Pointers
 
 Implementation:
 
+- `bondy_oplog_latency.erl` — the per-instance sampler/emitter +
+  `bondy_metrics` histogram type (`histogram/1`, `histogram_stats/1`).
 - `bondy_oplog_applier.erl` — gen_server; `drain_loop/1`,
   `apply_batch/2`, `apply_fold_batch/3`, `maybe_commit/1`,
   `enqueue_remote/2`, `forward_remote/2`, `verify_batch/4`,

@@ -198,6 +198,7 @@ table's lifecycle tied to a supervisor child.
 
 %% Reads
 -export([lookup/1]).
+-export([list/0]).
 -export([instance_pid/1]).
 -export([origin/1]).
 -export([mst/1]).
@@ -336,6 +337,16 @@ lookup(InstanceId) when is_binary(InstanceId) ->
         [Entry] -> {ok, to_map(Entry)};
         [] -> not_found
     end.
+
+?DOC("""
+Every live instance id. A single `ets:select` returning just the keys —
+intended for periodic sweeps (e.g. the latency idle probe) that need to
+enumerate all instances without materialising full entries.
+""").
+-spec list() -> [instance_id()].
+
+list() ->
+    ets:select(?TABLE, [{#entry{instance_id = '$1', _ = '_'}, [], ['$1']}]).
 
 -spec instance_pid(instance_id()) -> pid() | undefined.
 
