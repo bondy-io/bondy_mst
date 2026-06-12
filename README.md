@@ -98,7 +98,7 @@ trades them away for availability and partition tolerance.
 For the chapter-style, mermaid-illustrated walkthrough of how
 `bondy_db` (read side), `bondy_mst` (Merkle Search Tree + page store),
 and `bondy_oplog` (write side + sync) fit together, read the docs
-under [`doc_extras/architecture/`](doc_extras/architecture/):
+under `doc_extras/architecture/`:
 
 | # | Doc | Topic |
 |---|---|---|
