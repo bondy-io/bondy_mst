@@ -93,14 +93,6 @@ write (the eager-materialised projection, `architecture_regrounding_plan.md`
   map or a bounded counter). It is a property of the CRDT *module*,
   validated by test — never an arrival-order heuristic. Default `false`.
 
-- `state_to_ops(OldState, NewState) -> [op()]` — for consumers whose
-  external interface accepts state diffs (PUT-style APIs) instead of
-  operations. Not yet wired.
-
-- `merge_values(Key, V1, V2) -> Merged` — for CRDT-valued events
-  where the same MST key may be written with CRDT values that need
-  merging (vs. the strict-uniqueness default).
-
 - `context_of(State) -> term()` — **tier_2 only.** Returns the cell's
   current causal context (a version vector, e.g. `bondy_dvvset:join/1`).
   The substrate reads this at the origin to stamp a new write's observed
@@ -168,15 +160,6 @@ silently diverge.
 
 -callback order_independent() -> boolean().
 
--callback state_to_ops(OldState :: term(), NewState :: term()) ->
-    [bondy_oplog_event:op()].
-
--callback merge_values(
-    Key :: bondy_oplog_event:event_key(),
-    V1 :: term(),
-    V2 :: term()
-) -> Merged :: term().
-
 -callback context_of(State :: term()) -> Context :: term().
 
 -callback reap_origins(
@@ -188,8 +171,6 @@ silently diverge.
     gc_threshold/1,
     value_equals_state/0,
     order_independent/0,
-    state_to_ops/2,
-    merge_values/3,
     context_of/1,
     reap_origins/2
 ]).
