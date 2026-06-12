@@ -31,12 +31,18 @@ start_link() ->
             {"/healthz", bondy_mst_jepsen_http_health, []},
             {"/tables/:table/:realm/:key",
                 bondy_mst_jepsen_http_handler, []},
-            %% OR-set workload (POST add, GET read members). Routes to
-            %% the same per-shard projection as /tables/, but the
-            %% handler applies OR-set events; only meaningful when the
-            %% underlying fold is `orset`.
+            %% Set-convergence workload (POST {add|rmv}, GET read
+            %% members). Routes to the same per-shard projection as
+            %% /tables/, but the handler applies pure set ops; meaningful
+            %% when the table's CRDT is a set (`aw_set`, `rw_set`,
+            %% `two_p_set`, `g_set`) selected via the cluster's
+            %% `crdt_module`.
             {"/sets/:table/:realm/:key",
-                bondy_mst_jepsen_http_set, []}
+                bondy_mst_jepsen_http_set, []},
+            %% Counter-convergence workload (POST {inc, Delta}, GET
+            %% value). Meaningful when the table's CRDT is `pn_counter`.
+            {"/counters/:table/:realm/:key",
+                bondy_mst_jepsen_http_counter, []}
         ]}
     ]),
     Port = application:get_env(bondy_mst_jepsen, http_port, 8080),

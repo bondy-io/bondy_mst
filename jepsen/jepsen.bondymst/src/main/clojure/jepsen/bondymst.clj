@@ -6,9 +6,18 @@
 ;; jepsen.rakvstore: a `db/DB` lifecycle that installs the Erlang
 ;; release on each node, renders sys.config + vm.args with the
 ;; cluster's peer list, boots the node, and tears down at the end;
-;; an HTTP client (delegates to io.leapsight.jepsen.Utils); a
-;; register-style workload backed by the bondy_mst LWW register +
-;; CAS endpoint; the standard suite of partition / kill nemeses.
+;; an HTTP client (delegates to io.leapsight.jepsen.Utils); and the
+;; standard suite of partition / kill nemeses.
+;;
+;; Workloads:
+;;   - `register`  LWW register + CAS — a timeline stress/shape probe.
+;;   - `set`       set-convergence: add-only under nemesis, `set-full`
+;;                 asserts every acked add reaches every replica. The
+;;                 CRDT under test is chosen with `--crdt-module`
+;;                 (aw_set | rw_set | two_p_set | g_set).
+;;   - `counter`   pn_counter convergence: increments + reads under
+;;                 nemesis, `checker/counter` asserts the bounds and the
+;;                 healed total. Use `--crdt-module pn_counter`.
 ;;
 
 (ns jepsen.bondymst
@@ -26,6 +35,7 @@
                     [tests :as tests]]
             [jepsen.checker.timeline :as timeline]
             [jepsen.control.util :as cu]
+            [jepsen.history :as h]
             [jepsen.os.debian :as debian]))
 
 ;; -----------------------------------------------------------------------
@@ -36,11 +46,26 @@
 (defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
 (defn cas [_ _] {:type :invoke, :f :cas, :value [(rand-int 5) (rand-int 5)]})
 
-;; OR-set workload op constructors. `:add` writes an integer; `:read`
+;; Set workload op constructors. `:add` writes an integer; `:read`
 ;; returns the full set so `checker/set-full` can compare add-history
-;; vs final-state.
+;; vs final-state. The underlying CRDT (aw_set / rw_set / two_p_set /
+;; g_set) is selected per run via `--crdt-module`; this add-only
+;; workload checks that *every* acked add converges on *every* replica
+;; under nemesis — the convergence property all of them share. The
+;; add-wins vs remove-wins *conflict* semantics are pinned exhaustively
+;; by the per-type PropEr suites in the lib, not re-derived here.
 (defn add-op  [_ _] {:type :invoke, :f :add,  :value (rand-int 10000)})
 (defn read-op [_ _] {:type :invoke, :f :read, :value nil})
+
+;; Counter workload op constructors. `:add` increments by a small
+;; positive delta; `:read` returns the counter value. Convergence (not
+;; real-time linearizability) is what a CRDT pn_counter promises, so the
+;; verdict is decided by the post-heal `:final?` reads — see
+;; `counter-convergence-checker`. Mid-run reads may be stale under
+;; partition and are not failures.
+(defn counter-add-op   [_ _] {:type :invoke, :f :add,  :value (inc (rand-int 5))})
+(defn counter-read-op  [_ _] {:type :invoke, :f :read, :value nil})
+(defn counter-final-op [_ _] {:type :invoke, :f :read, :value nil, :final? true})
 
 (defn parse-long-nil
   "Parse a string to a Long; pass through `nil`."
@@ -119,6 +144,43 @@
                         :error (str (io.leapsight.jepsen.Utils/node conn)
                                     " "
                                     (.getHeaders result)))))
+      (catch io.leapsight.jepsen.BondyTimeoutException _
+        (assoc op :type :info, :error :timeout))
+      (catch io.leapsight.jepsen.BondyNodeDownException _
+        (assoc op :type :info,
+                  :error (str :nodedown " "
+                              (io.leapsight.jepsen.Utils/node conn))))
+      (catch java.lang.Exception _
+        (assoc op
+               :type  (if (= :read (:f op)) :fail :info)
+               :error :exception))))
+
+  (teardown! [_ _test])
+
+  (close! [_ _test]))
+
+;; A dedicated client for the counter workload. Keeps `:add`/`:read`
+;; semantics distinct from the set/register `Client` (jepsen's
+;; `checker/counter` requires exactly those op `:f` values, which would
+;; otherwise collide with the set workload's add/read).
+(defrecord CounterClient [conn]
+  client/Client
+  (open! [this _test node]
+    (assoc this :conn (io.leapsight.jepsen.Utils/createClient node)))
+
+  (setup! [_ _test])
+
+  (invoke! [_ _test op]
+    (try+
+      (case (:f op)
+        ;; Increment the single shared counter (key 0) by :value.
+        :add  (let [_ (io.leapsight.jepsen.Utils/counterAdd conn 0 (:value op))]
+                (assoc op :type :ok))
+        ;; Read the counter value back as a Long.
+        :read (assoc op
+                     :type :ok
+                     :value (parse-long
+                             (io.leapsight.jepsen.Utils/counterRead conn 0))))
       (catch io.leapsight.jepsen.BondyTimeoutException _
         (assoc op :type :info, :error :timeout))
       (catch io.leapsight.jepsen.BondyNodeDownException _
@@ -223,6 +285,62 @@
                          (gen/stagger (/ (:rate opts))))
    :final-generator (gen/each-thread (gen/once read-op))})
 
+(defn counter-convergence-checker
+  "Convergence checker for a CRDT pn_counter.
+
+   jepsen's stock `checker/counter` models a *linearizable* counter: each
+   read must be ≥ the sum of every increment acked (in real time) before
+   the read began. A partition-tolerant CRDT cannot promise that — a node
+   on one side of a partition simply has not yet observed the other side's
+   increments. So stale mid-partition reads are expected, not anomalies.
+
+   This mirrors `set-full`: tolerate the stale window, then assert that
+   after the heal every replica's `:final?` read is (a) equal to the
+   others (the replicas converged) and (b) within
+   [acked-total, attempted-total] — no acked increment lost, none
+   fabricated beyond the in-flight (unacked) uncertainty window."
+  []
+  (reify checker/Checker
+    (check [_ _test history _opts]
+      (let [ops       (h/client-ops history)
+            add?      (fn [t op] (and (= t (:type op)) (= :add (:f op))))
+            acked     (->> ops (filter (partial add? :ok))
+                           (map :value) (reduce + 0))
+            attempted (->> ops (filter (partial add? :invoke))
+                           (map :value) (reduce + 0))
+            finals    (->> ops
+                           (filter #(and (= :ok (:type %))
+                                         (= :read (:f %))
+                                         (:final? %)))
+                           (map :value))
+            distinct-finals (vec (distinct finals))
+            converged? (<= (count distinct-finals) 1)
+            v          (first distinct-finals)
+            in-bounds? (boolean (and v (<= acked v attempted)))]
+        {:valid?          (and (seq finals) converged? in-bounds?)
+         :acked-total     acked
+         :attempted-total attempted
+         :final-reads     (vec finals)
+         :distinct-finals distinct-finals
+         :converged-value v
+         :converged?      converged?
+         :in-bounds?      in-bounds?}))))
+
+(defn counter-workload
+  "PN-Counter convergence workload: a single shared counter incremented
+   from every node, interleaved with reads, under nemesis. After the
+   cluster heals, every worker (hence every node) does a final read and
+   `counter-convergence-checker` asserts the replicas converged on one
+   value within the acked/attempted increment bounds.
+
+   Provision the run with `--crdt-module pn_counter`."
+  [opts]
+  {:client          (CounterClient. nil)
+   :checker         (counter-convergence-checker)
+   :generator       (->> (gen/mix [counter-add-op counter-read-op])
+                         (gen/stagger (/ (:rate opts))))
+   :final-generator (gen/each-thread (gen/once counter-final-op))})
+
 (defn register-workload
   "Register-shaped workload over independent keys: read, write, CAS.
 
@@ -320,7 +438,8 @@
 
 (def workloads
   {"register" register-workload
-   "set"      set-workload})
+   "set"      set-workload
+   "counter"  counter-workload})
 
 (defn combined-nemesis-generator
   [opts]
@@ -397,6 +516,7 @@
     :validate [pos? "Must be a positive integer."]]
    [nil "--fold-module NAME" "Fold module (lww_register, strict_register, ...)."
     :default  "lww_register"]
+   [nil "--crdt-module NAME" "Native CRDT under test: aw_set, rw_set, two_p_set, g_set, pn_counter. Unset → fold_module drives selection."]
    [nil "--erlang-distribution-url URL" "URL of the Erlang release tarball."
     :default "file:///root/jepsen.bondymst/bondy_mst_jepsen_release-0.4.0.tar.gz"
     :parse-fn read-string]])

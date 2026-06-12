@@ -83,6 +83,13 @@ public class Utils {
     String foldModule = foldObj == null ? "lww_register"
         : foldObj.toString();
 
+    // Optional explicit CRDT module under test (e.g. aw_set, rw_set,
+    // two_p_set, g_set, pn_counter). When unset, render `undefined` so
+    // the Erlang cluster keeps the legacy fold_module-driven behaviour.
+    Object crdtObj = get(test, ":crdt-module");
+    String crdtModule = crdtObj == null ? "undefined"
+        : crdtObj.toString();
+
     Object shardCountObj = get(test, ":shard-count");
     long shardCount = shardCountObj == null ? 16L
         : Long.parseLong(shardCountObj.toString());
@@ -99,6 +106,7 @@ public class Utils {
         "        {tables, [%s]},\n" +
         "        {shard_count, %d},\n" +
         "        {fold_module, %s},\n" +
+        "        {crdt_module, %s},\n" +
         "        {peers, [%s]},\n" +
         "        {data_dir, \"/var/lib/bondy_mst_jepsen\"},\n" +
         "        {reconnect_interval_ms, 1000}\n" +
@@ -108,7 +116,8 @@ public class Utils {
         "        {sync_interval_ms, %d}\n" +
         "    ]}\n" +
         "].",
-        tableList, shardCount, foldModule, peerList, syncIntervalMs);
+        tableList, shardCount, foldModule, crdtModule, peerList,
+        syncIntervalMs);
   }
 
   /** Render vm.args with the per-node sname + shared cookie. */
@@ -176,10 +185,23 @@ public class Utils {
     return client.setAdd(key, value);
   }
 
-  /** OR-set read (GET /sets/...). Returns members as a String like "1 4 7"
+  /** Set read (GET /sets/...). Returns members as a String like "1 4 7"
    *  so the Clojure caller can split on whitespace. Empty set → "". */
   public static String setRead(Client client, Object key) throws Exception {
     return client.setRead(key);
+  }
+
+  /** PN-Counter increment (POST /counters/... with form value=delta). */
+  public static Response counterAdd(Client client, Object key, Object delta)
+      throws Exception {
+    return client.counterAdd(key, delta);
+  }
+
+  /** PN-Counter read (GET /counters/...). Returns the integer value as a
+   *  decimal String (e.g. "42"); absent counter → "0". */
+  public static String counterRead(Client client, Object key)
+      throws Exception {
+    return client.counterRead(key);
   }
 
   static Object get(Map<Object, Object> map, String keyStringValue) {
@@ -215,6 +237,14 @@ public class Utils {
       String realm = realmFor(key);
       String k     = keyFor(key);
       return new URI(String.format("http://%s:8080/sets/%s/%s/%s",
+          node, table, realm, k)).toURL();
+    }
+
+    private URL counterUrl(Object key) throws Exception {
+      String table = tableFor(key);
+      String realm = realmFor(key);
+      String k     = keyFor(key);
+      return new URI(String.format("http://%s:8080/counters/%s/%s/%s",
           node, table, realm, k)).toURL();
     }
 
@@ -313,6 +343,58 @@ public class Utils {
             return "";
           }
           return body(conn.getInputStream());
+        } finally {
+          conn.disconnect();
+        }
+      } catch (ConnectException e) {
+        throw new BondyNodeDownException();
+      }
+    }
+
+    public Response counterAdd(Object key, Object delta) throws Exception {
+      try {
+        URL u = counterUrl(key);
+        HttpURLConnection conn = (HttpURLConnection) u.openConnection();
+        try {
+          conn.setRequestMethod("POST");
+          conn.setDoOutput(true);
+          conn.setConnectTimeout(HTTP_REQUEST_TIMEOUT);
+          conn.setReadTimeout(HTTP_REQUEST_TIMEOUT);
+          try (OutputStreamWriter out =
+                   new OutputStreamWriter(conn.getOutputStream())) {
+            out.write("value=" + delta);
+          }
+          int code = conn.getResponseCode();
+          if (code == 503) {
+            throw new BondyTimeoutException();
+          }
+          conn.getInputStream();
+          return new Response(true, hlcHeaders(conn));
+        } finally {
+          conn.disconnect();
+        }
+      } catch (ConnectException e) {
+        throw new BondyNodeDownException();
+      }
+    }
+
+    public String counterRead(Object key) throws Exception {
+      try {
+        URL u = counterUrl(key);
+        HttpURLConnection conn = (HttpURLConnection) u.openConnection();
+        try {
+          conn.setRequestMethod("GET");
+          conn.setConnectTimeout(HTTP_REQUEST_TIMEOUT);
+          conn.setReadTimeout(HTTP_REQUEST_TIMEOUT);
+          int code = conn.getResponseCode();
+          if (code == 503) {
+            throw new BondyTimeoutException();
+          }
+          if (code == 404) {
+            return "0";
+          }
+          String b = body(conn.getInputStream());
+          return b == null || b.isEmpty() ? "0" : b;
         } finally {
           conn.disconnect();
         }

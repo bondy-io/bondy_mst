@@ -3,31 +3,27 @@
 %% SPDX-License-Identifier: Apache-2.0
 %% =============================================================================
 
--module(bondy_mst_jepsen_http_set).
+-module(bondy_mst_jepsen_http_counter).
 
 -behaviour(cowboy_handler).
 
 -include_lib("kernel/include/logger.hrl").
 
-%% HTTP shim for the set-convergence workload.
+%% HTTP shim for the PN-Counter convergence workload.
 %%
-%%   GET  /sets/:table/:realm/:key
-%%        → 200, body = space-separated decimal members,
+%%   GET  /counters/:table/:realm/:key
+%%        → 200, body = the counter's current integer value (decimal),
 %%          x-bondy-hlc + x-bondy-node headers
 %%
-%%   POST /sets/:table/:realm/:key
-%%        body: value=<binary>           → {add, Value}
-%%        body: value=<binary>&op=rmv    → {rmv, Value}
-%%        → 200 after the applier durably installs the op
+%%   POST /counters/:table/:realm/:key
+%%        body: value=<integer-delta>   → {inc, Delta}
+%%        → 200 after the applier durably installs the increment
 %%
-%% This drives the native operation-based set CRDTs — `aw_set`, `rw_set`,
-%% `two_p_set`, `g_set` — selected per run via the cluster's
-%% `crdt_module`. The op shape is the **pure** `{add, E}` / `{rmv, E}`:
-%% no client-side dot and no HLC in the op. For the tier_2 add-/remove-
-%% wins types the substrate stamps the cell's causal context into the
-%% event meta at single-applier scope; the tier_0 `two_p_set` / `g_set`
-%% need no context. (The legacy OR-set's client-minted `{add,Hlc,V,Dot}`
-%% shape was retired with the `orset` fold.)
+%% Drives the native `pn_counter` CRDT via `bondy_db:counter_inc/4`
+%% (a thin wrapper over `apply/4` with `{inc, Delta}`). `Delta` may be
+%% negative, but the Jepsen `checker/counter` assumes monotonic adds, so
+%% the workload generates positive increments and this handler just
+%% forwards whatever it is given.
 
 -export([init/2]).
 
@@ -48,7 +44,7 @@ init(Req0, State) ->
      State}.
 
 %% =============================================================================
-%% GET — return the live set members as a space-separated string
+%% GET — return the counter's integer value as a decimal string
 %% =============================================================================
 
 handle_get(Req) ->
@@ -57,16 +53,12 @@ handle_get(Req) ->
             Realm = cowboy_req:binding(realm, Req),
             Key   = cowboy_req:binding(key,   Req),
             case bondy_db:read(Table, Realm, Key) of
-                {ok, Members, Hlc} when is_list(Members) ->
-                    %% PR-2 step 2 (2026-05-21): `bondy_db:read/3` now
-                    %% returns the **value** (orset → ordset of element
-                    %% binaries), not the underlying fold state. Encode
-                    %% as a space-separated list for the Jepsen client.
-                    {ok, 200, hlc_headers(Hlc), encode_members(Members)};
+                {ok, N, Hlc} when is_integer(N) ->
+                    {ok, 200, hlc_headers(Hlc), integer_to_binary(N)};
                 {ok, undefined, Hlc} ->
-                    {ok, 200, hlc_headers(Hlc), <<>>};
+                    {ok, 200, hlc_headers(Hlc), <<"0">>};
                 not_found ->
-                    {ok, 200, [], <<>>};
+                    {ok, 200, [], <<"0">>};
                 {error, _} = E ->
                     {error, E}
             end;
@@ -75,7 +67,7 @@ handle_get(Req) ->
     end.
 
 %% =============================================================================
-%% POST — apply an {add, V} (default) or {rmv, V} to the set
+%% POST — increment the counter by a (possibly negative) delta
 %% =============================================================================
 
 handle_post(Req, KeyVals) ->
@@ -83,20 +75,12 @@ handle_post(Req, KeyVals) ->
         {table, Table} ->
             Realm = cowboy_req:binding(realm, Req),
             Key   = cowboy_req:binding(key,   Req),
-            Value = proplists:get_value(<<"value">>, KeyVals, <<>>),
-            Op    = set_op(KeyVals, Value),
-            Hlc   = bondy_db:tick(Table),
-            case bondy_db:apply(Table, Realm, Key, Op) of
+            Delta = parse_int(
+                proplists:get_value(<<"value">>, KeyVals, <<"0">>)
+            ),
+            Hlc = bondy_db:tick(Table),
+            case bondy_db:counter_inc(Table, Realm, Key, Delta) of
                 ok ->
-                    %% PR-J4 audit: record (value -> hlc) on ack so a
-                    %% lost Jepsen value can be traced back to its HLC
-                    %% across the scraped node logs. Tier_2 ops carry no
-                    %% client dot; the cell's stamped context is the
-                    %% authoritative identity (visible in the MST dump).
-                    TableBin = cowboy_req:binding(table, Req),
-                    _ = bondy_mst_jepsen_audit:log_post_ack(
-                        Value, Hlc, node(), 0, TableBin
-                    ),
                     {ok, 200, hlc_headers(Hlc), <<>>};
                 {error, _} = E ->
                     {error, E}
@@ -105,16 +89,14 @@ handle_post(Req, KeyVals) ->
             Reply
     end.
 
-%% The pure set op: `op=rmv` removes, anything else (incl. absent) adds.
-set_op(KeyVals, Value) ->
-    case proplists:get_value(<<"op">>, KeyVals, <<"add">>) of
-        <<"rmv">> -> {rmv, Value};
-        _         -> {add, Value}
-    end.
-
 %% =============================================================================
 %% Helpers (shared shape with bondy_mst_jepsen_http_handler)
 %% =============================================================================
+
+parse_int(Bin) when is_binary(Bin) ->
+    try binary_to_integer(Bin)
+    catch error:badarg -> 0
+    end.
 
 bind_table(Req) ->
     TableBin = cowboy_req:binding(table, Req),
@@ -131,17 +113,6 @@ table_index() ->
     [{atom_to_binary(N, utf8), N}
      || N <- bondy_mst_jepsen_cluster:tables()].
 
-encode_members(Members) ->
-    %% Space-separated members; same wire shape rakvstore's set workload
-    %% uses, so a Clojure `(str/split ...)` recovers the set.
-    case Members of
-        [] -> <<>>;
-        _  ->
-            iolist_to_binary(
-                lists:join(<<" ">>, lists:sort(Members))
-            )
-    end.
-
 hlc_headers(Hlc) when is_integer(Hlc) ->
     [{<<"x-bondy-hlc">>, integer_to_binary(Hlc)},
      {<<"x-bondy-node">>, atom_to_binary(node(), utf8)}].
@@ -150,7 +121,7 @@ reply(Req, {ok, Status, Headers, Body}) ->
     cowboy_req:reply(Status, headers_map(Headers), Body, Req);
 reply(Req, {error, Reason}) ->
     ?LOG_WARNING(#{
-        description => "jepsen set http error",
+        description => "jepsen counter http error",
         reason => Reason
     }),
     cowboy_req:reply(503, #{}, io_lib:format("error: ~p", [Reason]), Req).

@@ -87,6 +87,15 @@ init([]) ->
     TableNames = env(tables, [t0, t1, t2, t3, t4, t5, t6, t7, t8, t9]),
     ShardCount = env(shard_count, 16),
     FoldModule = env(fold_module, lww_register),
+    %% Optional explicit CRDT module under test. When set (e.g.
+    %% `aw_set`, `rw_set`, `two_p_set`, `g_set`, `pn_counter`), every
+    %% table is opened with that native operation-based CRDT so the
+    %% Jepsen convergence checkers run against a real catalogue type
+    %% rather than the default `lww_register`. A short alias is resolved
+    %% to its `bondy_oplog_crdt_*` module via the cell kernel; an
+    %% already-qualified module name passes through. `undefined` keeps
+    %% the legacy behaviour (fold_module drives the kernel).
+    CrdtModule = resolve_crdt(env(crdt_module, undefined)),
     Peers = lists:filter(fun(N) -> N =/= node() end, env(peers, [])),
     DataDir = env(data_dir, "/var/lib/bondy_mst_jepsen"),
     ok = filelib:ensure_dir(filename:join(DataDir, ".keep")),
@@ -117,7 +126,7 @@ init([]) ->
     OplogStoragePath = unicode:characters_to_binary(
         filename:join(DataDir, "oplog")
     ),
-    {ok, Db} = bondy_db:open(DbName, #{
+    {ok, Db} = bondy_db:open(DbName, maybe_crdt(CrdtModule, #{
         topology            => bondy_db_topology_shared_shards,
         topology_opts       => #{sup => LeveledSup, dir => DataDir},
         shard_count         => ShardCount,
@@ -144,13 +153,13 @@ init([]) ->
             %% recovers cleanly.
             origin       => stable_origin()
         }
-    }),
+    })),
     Tables = lists:foldl(
         fun(Name, Acc) ->
-            {ok, T} = bondy_db:open_table(Db, Name, #{
+            {ok, T} = bondy_db:open_table(Db, Name, maybe_crdt(CrdtModule, #{
                 shard_count => ShardCount,
                 fold_module => FoldModule
-            }),
+            })),
             ok = persistent_term:put(?PT_KEY({table, Name}), T),
             Acc#{Name => T}
         end,
@@ -176,7 +185,8 @@ init([]) ->
         db => DbName,
         tables => TableNames,
         shard_count => ShardCount,
-        fold_module => FoldModule
+        fold_module => FoldModule,
+        crdt_module => CrdtModule
     }),
     {ok, #state{
         db          = Db,
@@ -223,6 +233,27 @@ terminate(_Reason, #state{db = Db, tables = Tables}) ->
 
 env(Key, Default) ->
     application:get_env(bondy_mst_jepsen, Key, Default).
+
+%% Resolve a configured `crdt_module` to a concrete `bondy_oplog_crdt_*`
+%% module. Accepts a short catalogue alias (`aw_set`, `pn_counter`, ...)
+%% or an already-qualified module name; `undefined` passes through. An
+%% unknown atom raises so a typo in the run config fails loudly at boot
+%% rather than silently falling back to the default register.
+resolve_crdt(undefined) ->
+    undefined;
+resolve_crdt(Alias) when is_atom(Alias) ->
+    case bondy_oplog_cell_kernel:default_crdt_for_fold(Alias) of
+        undefined -> error({unknown_crdt_module, Alias});
+        Module -> Module
+    end.
+
+%% Inject `crdt_module` into a `bondy_db` open/open_table opts map when
+%% one is configured. When `undefined`, the opts are returned unchanged
+%% so the `fold_module` continues to drive kernel selection.
+maybe_crdt(undefined, Opts) ->
+    Opts;
+maybe_crdt(Module, Opts) when is_atom(Module) ->
+    Opts#{crdt_module => Module}.
 
 %% First 16 bytes of `sha256(node())`. Deterministic per node name —
 %% kill -9 + restart on the same node yields the same origin, which

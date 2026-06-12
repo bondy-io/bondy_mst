@@ -67,21 +67,34 @@ Open a shell in the control container and launch a test:
 ```sh
 docker exec -it jepsen-control bash
 cd /root/jepsen.bondymst
+
+# CRDT set-convergence under partition + kill (the headline check):
 lein run test \
   --nodes n1,n2,n3 \
   --ssh-private-key /root/shared/jepsen-bot \
-  --workload register \
-  --nemesis random-partition-halves \
-  --time-limit 60 \
-  --concurrency 10 \
-  --rate 10
+  --workload set --crdt-module aw_set \
+  --nemesis combined \
+  --time-limit 60 --concurrency 10 --rate 10
+
+# pn_counter convergence:
+lein run test --nodes n1,n2,n3 --ssh-private-key /root/shared/jepsen-bot \
+  --workload counter --crdt-module pn_counter --nemesis combined \
+  --time-limit 60 --concurrency 10 --rate 10
 ```
+
+### Workloads
+
+| `--workload` | What it checks | `--crdt-module` |
+|---|---|---|
+| `set` | **Convergence**: every acked add reaches every replica after the nemesis heals (`set-full`, `lost-count 0` + identical final reads). Add-only — the add-wins/remove-wins/2P *conflict* semantics are pinned by the lib's PropEr suites, not here. | `aw_set`, `rw_set`, `two_p_set`, `g_set` |
+| `counter` | **Convergence**: after heal, every replica's final read is equal and within `[acked, attempted]` increments. Uses a convergence checker, not jepsen's stock `checker/counter` (that one assumes a *linearizable* counter — stale mid-partition reads, which a CRDT permits, would be flagged). | `pn_counter` |
+| `register` | LWW + CAS — a timeline stress/shape probe only (a CRDT register is not linearizable). | — |
 
 Common options:
 
 | Flag | Meaning |
 |---|---|
-| `--workload` | `register` (LWW + CAS). |
+| `--crdt-module` | Native CRDT under test (`aw_set`, `rw_set`, `two_p_set`, `g_set`, `pn_counter`). Threaded into `bondy_db:open_table`. Unset → `--fold-module` drives selection. |
 | `--nemesis` | `kill-erlang-vm`, `random-partition-halves`, `partition-halves`, `partition-majorities-ring`, `partition-random-node`, `combined`. |
 | `--network-partition-nemesis` | Partition variant used by `--nemesis combined`. |
 | `--random-nodes` | How many nodes the kill nemesis hits at once. |
