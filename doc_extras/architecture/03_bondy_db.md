@@ -456,6 +456,13 @@ read/write API here is unchanged.
   `bondy_oplog_secondary_writer`; reads go through `index_get/5` /
   `index_range/6` with a `max_lag` fence. They are never persisted —
   always rebuilt from the primary.
+- **Writes can be packed.** A single write to a Map (or set) cell may
+  carry many commands: `apply_batch/4` packs `[{put, F, V}, {rmv, F},
+  …]` (or the `map_update/4` `#{put => …, rmv => …}` sugar) into one
+  `{batch, Ops}` event — one WAL/MST entry, one projection
+  read-modify-write, applied atomically. Only the dot-store / grow-set
+  CRDTs are batchable; counters and registers are refused. See
+  [The CRDT model](05_crdt_model.md#batched-operations-packing-many-commands).
 
 ## Pointers
 

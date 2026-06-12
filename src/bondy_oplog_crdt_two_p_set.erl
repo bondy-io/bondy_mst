@@ -63,6 +63,7 @@ the substrate stores a value column.
 -export([gc_threshold/1]).
 -export([value_equals_state/0]).
 -export([order_independent/0]).
+-export([batchable/0]).
 -export([encode_state/1]).
 -export([decode_state/1]).
 %% bondy_oplog_crdt_commutative
@@ -144,6 +145,11 @@ value_equals_state() ->
 -spec order_independent() -> boolean().
 
 order_independent() ->
+    true.
+
+-spec batchable() -> boolean().
+
+batchable() ->
     true.
 
 -spec encode_state(state()) -> binary().

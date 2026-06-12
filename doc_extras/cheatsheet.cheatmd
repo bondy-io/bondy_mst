@@ -39,10 +39,17 @@ chapters (see the sidebar) are the narrative version.
 {ok, Value, Hlc} = bondy_db:read(T, Realm, Key),
 ok = bondy_db:apply(T, Realm, Key, Op),
 ok = bondy_db:counter_inc(Counters, Realm, Key, +1).
+
+%% pack many Map/set commands into ONE atomic event:
+ok = bondy_db:apply_batch(T, Realm, Key, [{put, F1, V1}, {rmv, F2}]),
+ok = bondy_db:map_update(T, Realm, Key, #{put => #{F1 => V1}, rmv => [F2]}).
 ```
 
 The op shape is CRDT-specific (e.g. `{set, Hlc, V}` for
-`lww_register`, `{inc, N}` for counters).
+`lww_register`, `{inc, N}` for counters). Batched writes
+(`apply_batch/4` / `map_update/4`) pack many Map/set commands into one
+event (one WAL/MST entry, applied atomically); not available for
+counters/registers (`{error, {not_batchable, _}}`).
 
 ### Secondary indexes
 

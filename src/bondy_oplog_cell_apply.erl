@@ -229,7 +229,7 @@ apply_cell_batch(Ctx, Id, Events) ->
 %% remain (each cell still pays the read + compute cost). The
 %% PR-PS-15a `cell_put` and `cell_side_effects` events are GONE in
 %% PR-PS-15b — the put + side-effects now happen once per batch and
-%% are measured by `batch_cell_put` in `apply_cell_batch/2`.
+%% are measured by `batch_cell_put` in `apply_cell_batch/3`.
 compute_one_cell(
     Id,
     Adapter,
@@ -597,7 +597,7 @@ secondary_saturation_drop(NS, IName, SecShard, Entry, NumOps) ->
 %% Non-cell ops are skipped here — the per-instance fold owns them and
 %% has already seen them via the WAL drain.
 %%
-%% PR-PS-15b: same collect-then-batch shape as `apply_cell_batch/2`.
+%% PR-PS-15b: same collect-then-batch shape as `apply_cell_batch/3`.
 %% Per-key shadow map preserves in-batch read-your-own-writes when
 %% two pairs target the same `{Bucket, Key}`.
 %%

@@ -124,6 +124,8 @@ it).
 -export([close_table/1]).
 -export([tick/1]).
 -export([apply/4]).
+-export([apply_batch/4]).
+-export([map_update/4]).
 -export([counter_inc/4]).
 -export([read/3]).
 -export([range/5]).
@@ -745,6 +747,92 @@ counter_inc(Table, Realm, Key, Delta) when is_integer(Delta) ->
     ?MODULE:apply(Table, Realm, Key, {inc, Delta}).
 
 -doc """
+Apply a list of CRDT commands to a single Map (or set) cell `(Realm, Key)`
+as one atomic, packed operation.
+
+The commands are packed into a single `{batch, Ops}` event — **one** WAL
+entry, **one** MST entry, **one** projection read-modify-write — and
+expanded at the CRDT seam on apply, read and compaction. Compared with N
+separate `apply/4` calls this collapses N WAL fsyncs, N `await`s, N tier_2
+context round-trips and the N successive whole-cell re-serialisations (which
+grow super-linearly as a map is built field-by-field) down to one of each.
+
+All commands share one causal identity (dot) and one observed context, so
+the batch is a single **atomic, mutually-concurrent** causal unit: the
+commands do **not** observe each other (a `{put, K, V}` and a `{rmv, K}` in
+the same batch resolve add-wins — the put survives), and a concurrent
+remote operation either observed the whole batch or none of it.
+
+`Ops` is a list of the table CRDT's own operations, e.g. for an add-wins
+map `[{put, Field, Value}, {rmv, Field}, ...]`. An empty list is a no-op
+(`ok`).
+
+Only CRDTs whose operations are identified per sub-key/value — the
+dot-store and grow-set types (add-wins / remove-wins maps and sets, 2P-set,
+G-set, the flags) — may be batched; they declare the `batchable` callback
+of `bondy_oplog_crdt_commutative`. Counters and scalar registers
+dedup / resolve by the event sequence or HLC, so packing several of their
+ops under one identity would silently collapse them: `apply_batch/4`
+refuses such a table with `{error, {not_batchable, Module}}`. Merge those
+client-side and use `apply/4` / `counter_inc/4`.
+
+Returns `ok` once the WAL append is durable and the applier has committed
+the projection write (read-your-writes holds), or `{error, _}`.
+""".
+-spec apply_batch(
+    Table :: table(),
+    Realm :: realm(),
+    Key :: binary(),
+    Ops :: [term()]
+) -> ok | {error, term()}.
+
+apply_batch(_Table, Realm, Key, []) when is_binary(Realm), is_binary(Key) ->
+    ok;
+apply_batch(Table, Realm, Key, Ops) when
+    is_binary(Realm), is_binary(Key), is_list(Ops)
+->
+    case assert_batchable(Table) of
+        ok ->
+            ?MODULE:apply(Table, Realm, Key, {batch, Ops});
+        {error, _} = Err ->
+            Err
+    end.
+
+-doc """
+Declarative Map-edit sugar over `apply_batch/4`. `Edit` is a map with
+optional `put` and `rmv` keys:
+
+```erlang
+bondy_db:map_update(Users, <<"realm">>, <<"alice">>, #{
+    put => #{<<"name">> => <<"Alice">>, <<"age">> => 30},
+    rmv => [<<"temp">>]
+}).
+```
+
+`put` is a `#{Field => Value}` map of field assignments; `rmv` is a list of
+fields to observed-remove. They are translated to `[{put, Field, Value}]`
+followed by `[{rmv, Field}]` and applied as a single packed batch (see
+`apply_batch/4` for the atomic, mutually-concurrent semantics — order
+between the entries is irrelevant). An unrecognised top-level `Edit` key
+returns `{error, {unknown_map_edit_keys, _}}`; a malformed `put`/`rmv`
+shape returns `{error, {invalid_map_edit, _}}`.
+""".
+-spec map_update(
+    Table :: table(),
+    Realm :: realm(),
+    Key :: binary(),
+    Edit :: map()
+) -> ok | {error, term()}.
+
+map_update(Table, Realm, Key, Edit) when
+    is_binary(Realm), is_binary(Key), is_map(Edit)
+->
+    case edit_to_ops(Edit) of
+        {ok, Ops} -> apply_batch(Table, Realm, Key, Ops);
+        {error, _} = Err -> Err
+    end.
+
+-doc """
 Read the decoded fold state for `(Realm, Key)` from `Table`.
 
 Routes through `bondy_db_core:read/4`, which hits the per-shard cache
@@ -1088,6 +1176,43 @@ namespace_atom(DbName, EntityType) ->
     list_to_atom(
         atom_to_list(DbName) ++ "_" ++ atom_to_list(EntityType)
     ).
+
+%% @private
+%% A table may be packed via `apply_batch/4` only when its CRDT advertises
+%% `batchable/0` — the dot-store / grow-set types, whose ops are identified
+%% per sub-key/value. Counters and scalar registers dedup / resolve by the
+%% event Seq or HLC and would collapse ops sharing one packed identity, so
+%% they are refused here.
+assert_batchable(#{crdt_module := Mod}) when Mod =/= undefined ->
+    case bondy_oplog_crdt_commutative:is_batchable(Mod) of
+        true -> ok;
+        false -> {error, {not_batchable, Mod}}
+    end;
+assert_batchable(_Table) ->
+    {error, {not_batchable, undefined}}.
+
+%% @private
+%% Translate a declarative `#{put => #{F => V}, rmv => [F]}` map edit into
+%% the flat op list `apply_batch/4` consumes. Order is irrelevant — the
+%% packed ops are mutually-concurrent and target distinct map keys.
+edit_to_ops(Edit) ->
+    case maps:keys(Edit) -- [put, rmv] of
+        [] ->
+            Puts = maps:get(put, Edit, #{}),
+            Rmvs = maps:get(rmv, Edit, []),
+            case is_map(Puts) andalso is_list(Rmvs) of
+                true ->
+                    PutOps = maps:fold(
+                        fun(F, V, Acc) -> [{put, F, V} | Acc] end, [], Puts
+                    ),
+                    RmvOps = [{rmv, F} || F <- Rmvs],
+                    {ok, PutOps ++ RmvOps};
+                false ->
+                    {error, {invalid_map_edit, Edit}}
+            end;
+        Unknown ->
+            {error, {unknown_map_edit_keys, Unknown}}
+    end.
 
 %% @private
 %% Provision shards `0 .. Count-1` with rollback. `ProvisionFun(Shard)`

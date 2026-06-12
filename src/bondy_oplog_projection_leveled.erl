@@ -45,8 +45,9 @@ semantics.
 Two material wins over the previous `?BONDY_FOLD_TAG` normal-mode
 setup:
 
-1. **Atomic batched writes via `book_mput/2`**. The applier's
-   `apply_cell_batch/2` collects all per-event writes into a single
+1. **Atomic batched writes via `book_mput/2`**. The cell-apply engine's
+   `bondy_oplog_cell_apply:apply_cell_batch/3` collects all per-event
+   writes into a single
    `put_batch/2` call; the adapter then translates that into one
    `book_mput` ObjectSpec list (two specs per cell — `?SK_STATE` +
    `?SK_VALUE`) and ships it to leveled atomically. Previous setup
@@ -219,7 +220,7 @@ one for `?SK_VALUE`), and ships them all to leveled in a single
 atomic `book_mput/2` call.
 
 The caller is expected to have already coalesced per-batch writes
-(see `bondy_oplog_applier:apply_cell_batch/2`) so this function
+(see `bondy_oplog_cell_apply:apply_cell_batch/3`) so this function
 typically receives N entries and issues ONE gen_server roundtrip.
 """.
 -spec put_batch(

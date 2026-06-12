@@ -1692,7 +1692,8 @@ apply_batch(
 %% `CellApplyEvents` are events whose op matches
 %% `{cell_apply, Bucket, Key, FoldEvent}`; these bypass the per-instance
 %% fold and instead drive a projection read-modify-write through
-%% `apply_cell_batch/2`. Everything else goes through the existing
+%% `bondy_oplog_cell_apply:apply_cell_batch/3`. Everything else goes
+%% through the existing
 %% per-instance fold path.
 partition_by_op(Events) ->
     lists:partition(
@@ -1904,7 +1905,8 @@ vv_merge(A, B) ->
 %% projection. The projection is current here by mailbox ordering: a
 %% cold-start `replay_cell_events` cast (queued in `init/1`) is processed
 %% before any `rebuild_indexes` call, and local writes reach the projection
-%% via `apply_cell_batch/2` before their MST install. A cell present in the
+%% via `bondy_oplog_cell_apply:apply_cell_batch/3` before their MST install.
+%% A cell present in the
 %% MST but not yet in the projection (e.g. a peer cell awaiting
 %% `do_replay_cell_events/1`) is skipped; the replay that lands it in the
 %% projection also dispatches its index ops, so it is self-healing.
@@ -2860,7 +2862,8 @@ commit_now(
     %% `integrate_peer_root/2` can interleave with the WAL drain and
     %% land remote pages in the MST under the same root that this
     %% barrier returns. Those remote events flow through the
-    %% `replay_cell_events` cast — not through `apply_cell_batch/2` —
+    %% `replay_cell_events` cast — not through
+    %% `bondy_oplog_cell_apply:apply_cell_batch/3` —
     %% so the projection has *not* seen them yet. Advancing the
     %% watermark to the live root here would mark them as already
     %% replayed, and `do_replay_cell_events/1` would short-circuit

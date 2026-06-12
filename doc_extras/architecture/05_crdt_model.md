@@ -268,7 +268,7 @@ absorbed and safe to drop.
 | `min_register` | 0 | ✓ | no | monotone min (deadlines, rate floors) |
 | `two_p_set` | 0 | ✓ | no | two-phase set: a pair of grow-only sets (`add`/`rmv`); **removal is permanent** — a removed element can never be re-added |
 | `mv_register` | **2** | ✓ | no | multi-value register on `bondy_dvvset`; concurrent writes surface as siblings, `to_value` returns all of them |
-| `aw_map` | **2** | ✓ | no | add-wins map: dot-store + per-cell context VV; **pure remove** (drops the dots the remover's context observed — a concurrent add survives); per-key sub-values |
+| `aw_map` | **2** | ✓ | no | add-wins map: dot-store + per-cell context VV; **pure remove** (drops the dots the remover's context observed — a concurrent add survives); a key resolves to the set of its concurrent sibling values (no per-key sub-CRDT) |
 | `aw_set` | **2** | ✓ | no | add-wins (observed-remove) set; concurrent add\|remove ⇒ **add wins** |
 | `rw_set` | **2** | ✓ | no | remove-wins set; concurrent add\|remove ⇒ **remove wins** (an add survives only if it observed every remove) |
 | `ew_flag` | **2** | ✓ | no | enable-wins flag; concurrent enable\|disable ⇒ **enable wins** (add-wins over one token) |
@@ -288,11 +288,14 @@ Notes on the tier_2 types:
   tier_2 type, and the simplest exercise of every tier_2 seam.
 - **`aw_map`** — an ORSet-style dot-store map plus one per-cell
   context VV (not a DVVSet per key — avoids per-key sibling
-  explosion). `{put, K, V}` / `{apply, K, SubOp}` place values under
-  fresh dots; `{rmv, K}` adds K's observed dots to the context and
-  drops them from the store, read generically from the state at
-  apply time — there is no server round-trip and no client-supplied
-  observed-dots argument. Add-wins emerges: a concurrent put's dot is
+  explosion). `{put, K, V}` adds the value under a fresh dot (dropping
+  the dots the writer's context already observed, so a sequential
+  overwrite dominates); `{rmv, K}` drops exactly the dots of K the
+  writer observed, read generically from the stamped context at apply
+  time — there is no server round-trip and no client-supplied
+  observed-dots argument. A key resolves to the *set* of its surviving
+  concurrent sibling values; there is no per-key sub-CRDT (and so no
+  `{apply, K, SubOp}` op). Add-wins emerges: a concurrent put's dot is
   not in the remover's context, so it survives.
 
 ### Add-wins vs remove-wins, and the shared cores
@@ -349,6 +352,63 @@ value byte-for-byte without decoding the full state. When
 `value_equals_state` is `true` (g_set, index_entry) the column is
 omitted and the state bytes double as the value; the read side's
 `kernel:decode_value_bytes/2` knows the difference.
+
+## Batched operations (packing many commands)
+
+A single write to a Map (or set) cell can carry **many** commands at
+once. `bondy_db:apply_batch/4` packs a list of the table CRDT's ops into
+one `{batch, Ops}` event:
+
+```erlang
+ok = bondy_db:apply_batch(Users, Realm, <<"alice">>, [
+    {put, <<"name">>, <<"Alice">>},
+    {put, <<"age">>, 30},
+    {rmv, <<"temp">>}
+]),
+
+%% declarative sugar over apply_batch/4:
+ok = bondy_db:map_update(Users, Realm, <<"alice">>, #{
+    put => #{<<"name">> => <<"Alice">>, <<"age">> => 30},
+    rmv => [<<"temp">>]
+}).
+```
+
+**One event, expanded lazily.** The packed op travels as a single opaque
+event — one WAL entry, one MST entry, one projection read-modify-write —
+and the substrate never unpacks it. Expansion happens only where state is
+computed, at the one kernel funnel
+`bondy_oplog_crdt_commutative:apply_op/5` (which both the eager write path
+and `interpret_cog/2` route through): it folds each inner op onto the
+state in list order. So there is no "expand at install" — the MST stays
+compact; install, sync and compaction treat the batch as one entry.
+Against N separate `apply/4` calls this collapses N WAL fsyncs, N
+`await`s, N tier_2 context round-trips, and the N successive whole-cell
+re-serialisations (super-linear as a map grows field-by-field) down to
+one of each.
+
+**Atomic, mutually-concurrent semantics.** Every inner op shares the one
+event's dot `{Origin, Seq}` and one observed context, so the batch is a
+single all-or-nothing causal unit:
+
+- The commands do **not** observe each other. A `{put, K, V}` and a
+  `{rmv, K}` in the *same* batch resolve add-wins — the put survives (the
+  remove's context cannot see the put's dot). For a Map edit (set fields
+  A, remove fields B, A ∩ B = ∅) this is exactly the intended atomic
+  multi-field update.
+- A concurrent **remote** operation either observed the whole batch or
+  none of it.
+- Repeated writes to the *same* field within a batch are resolved by list
+  order (they share the dot, so the later one wins).
+
+**Type scope.** Packing is safe only for CRDTs whose ops are identified
+per sub-key/value — the dot-store and grow-set types: `aw_map`, `aw_set`,
+`rw_set`, `two_p_set`, `g_set`, `ew_flag`, `dw_flag`. They declare the
+optional `batchable/0` callback of `bondy_oplog_crdt_commutative`. Counters and
+scalar registers (`pn_counter`, `g_counter`, `lww_register`,
+`mv_register`, …) dedup or resolve by the event Seq / HLC, so several of
+their ops packed under one identity would silently collapse;
+`apply_batch/4` refuses such a table with `{error, {not_batchable, Mod}}`
+— merge those client-side and use `apply/4` / `counter_inc/4`.
 
 ## Choosing a CRDT for a table
 
@@ -441,6 +501,11 @@ See `bondy_oplog_crdt_aw_map_proper_test.erl`,
   win deterministically; `mv_register` surfaces siblings; `aw_map`
   lets adds win. Either way the decision is in the CRDT module, not
   magic.
+- **Many commands can ride one event.** `apply_batch/4` packs a list
+  of Map/set ops into one `{batch, Ops}` event (one WAL/MST entry),
+  expanded at the kernel funnel; the inner ops are atomic and
+  mutually-concurrent. Only the dot-store / grow-set types are
+  `batchable` — counters and registers are refused.
 
 ## Pointers
 
@@ -450,7 +515,8 @@ Implementation:
   callbacks, tier semantics, determinism invariant).
 - `bondy_oplog_crdt_commutative.erl` — the eager-step companion
   behaviour (`apply_op/3·4`) + the generic sort-and-fold
-  `interpret_cog` helper.
+  `interpret_cog` helper; the `{batch, Ops}` expansion in `apply_op/5`
+  and the `batchable/0` capability (`is_batchable/1`).
 - `bondy_oplog_cell_kernel.erl` — the per-cell seam:
   `from_modules/2` + `default_crdt_for_fold/1` (selection and the
   fold-label alias), `apply/5·6` (eager write step),

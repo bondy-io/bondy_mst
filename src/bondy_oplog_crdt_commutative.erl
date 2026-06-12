@@ -78,6 +78,17 @@ cell wraps the CRDT operation as `{cell_apply, Bucket, Key, Op}`; a
 monolithic single-CRDT instance carries the operation directly. `op_of/1`
 unwraps the former and passes the latter through, so the same helper
 serves both shapes.
+
+## Batched operations
+
+A packed operation `{batch, [Op, ...]}` is expanded by `apply_op/5` — the
+single seam both the eager write path and `interpret_cog/3` route through —
+by folding each inner op onto the state in list order, all sharing the
+packed event's one key (dot) and one observed context. The batch is
+therefore one atomic, mutually-concurrent causal unit. A module that can be
+safely packed this way (its ops are identified per sub-key/value, not by
+the event Seq/HLC) declares `batchable/0`; see `is_batchable/1` and
+`bondy_db:apply_batch/4`.
 """).
 
 -export([interpret_cog/3]).
@@ -85,6 +96,7 @@ serves both shapes.
 -export([apply_op/5]).
 -export([op_of/1]).
 -export([context_of_event/1]).
+-export([is_batchable/1]).
 
 %% A commutative CRDT module is ALSO a `bondy_oplog_crdt` (it inherits
 %% `init/0`, `to_value/1`, `hlc/1`, `encode_state/1`, `decode_state/1`
@@ -107,7 +119,14 @@ serves both shapes.
     Context :: term()
 ) -> NewState :: term().
 
--optional_callbacks([apply_op/3, apply_op/4]).
+%% Declares that the module's operations may be packed into a single
+%% `{batch, Ops}` event (the dot-store / grow-set types: add-wins /
+%% remove-wins maps and sets, 2P-set, G-set, the flags). Absent or `false`
+%% ⇒ not packable (counters and scalar registers, which dedup / resolve by
+%% the event Seq or HLC and would collapse ops sharing one identity).
+-callback batchable() -> boolean().
+
+-optional_callbacks([apply_op/3, apply_op/4, batchable/0]).
 
 %% =============================================================================
 %% API
@@ -169,6 +188,21 @@ Apply a single operation with the write's causal `Context` (the event
     Context :: term()
 ) -> NewState :: term().
 
+apply_op(Mod, State, {batch, Ops}, Key, Context) when is_list(Ops) ->
+    %% Expand a packed batch: fold each inner op onto the state in list
+    %% order, all sharing this one event's key (dot) and observed context.
+    %% This single clause covers the eager write path (called directly by
+    %% the cell kernel) AND the `interpret_cog/3` read/compaction path
+    %% (which folds `apply_op/5` per event), so the substrate stores and
+    %% replicates the batch as one opaque event and expands it identically
+    %% everywhere state is computed. The shared dot/context makes the inner
+    %% ops mutually-concurrent (they do not observe each other); list order
+    %% only disambiguates repeated writes to the same sub-key.
+    lists:foldl(
+        fun(Op, S) -> apply_op(Mod, S, Op, Key, Context) end,
+        State,
+        Ops
+    );
 apply_op(Mod, State, Op, Key, Context) ->
     case erlang:function_exported(Mod, apply_op, 4) of
         true -> Mod:apply_op(State, Op, Key, Context);
@@ -197,6 +231,19 @@ observed version vector the substrate stamped at the origin.
 
 context_of_event(Event) ->
     bondy_oplog_event:meta(Event).
+
+-doc """
+Whether `Mod`'s operations may be packed into a single `{batch, Ops}`
+event — true iff the module exports `batchable/0` returning `true`. The
+substrate write API (`bondy_db:apply_batch/4`) consults this to refuse a
+batch on a type that would collapse ops sharing one identity (counters,
+scalar registers).
+""".
+-spec is_batchable(module()) -> boolean().
+
+is_batchable(Mod) when is_atom(Mod) ->
+    _ = code:ensure_loaded(Mod),
+    erlang:function_exported(Mod, batchable, 0) andalso Mod:batchable().
 
 %% =============================================================================
 %% INTERNAL

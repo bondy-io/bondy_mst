@@ -200,6 +200,7 @@ peer add survives a remove (add-wins).
 -export([gc_threshold/1]).
 -export([value_equals_state/0]).
 -export([order_independent/0]).
+-export([batchable/0]).
 -export([context_of/1]).
 -export([reap_origins/2]).
 -export([encode_state/1]).
@@ -373,6 +374,11 @@ value_equals_state() ->
 -spec order_independent() -> boolean().
 
 order_independent() ->
+    true.
+
+-spec batchable() -> boolean().
+
+batchable() ->
     true.
 
 -spec encode_state(state()) -> binary().
