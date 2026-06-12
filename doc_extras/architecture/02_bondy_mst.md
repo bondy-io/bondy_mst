@@ -94,7 +94,7 @@ classDiagram
       +set_root(Store, Hash) Store
       +get(Store, Hash) Page
       +has(Store, Hash) bool
-      +put(Store, Page) Store
+      +put(Store, Page) {Hash, Store}
       +delete(Store, Hash) Store
       +copy(Store, Store2, Hash) Store
       +free(Store, Hash, Page) Store
@@ -127,8 +127,7 @@ object database, adapted for MST pages.
 {mst_dir}/{instance_id}/
     manifest           # current packs, root pointer (atomic swap)
     tombstones         # logically deleted hashes
-    incoming.pack      # mutable, in-progress
-    incoming.idx       # in-progress companion index
+    incoming.pack      # mutable, in-progress (index kept in memory, not on disk)
     pack-NNNN.pack     # sealed, immutable (NNNN = zero-padded id, e.g. 0001)
     pack-NNNN.idx      # companion sorted-hash index with fanout + bloom
     ...

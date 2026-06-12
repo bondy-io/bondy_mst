@@ -395,7 +395,7 @@ moduledoc):
 | `poll_interval_ms` | 5 | error-fallback backstop only (the hot path long-polls `await_durable/3`) |
 | `max_install_in_flight` | 64 | cap on outstanding install batches at the instance |
 | `cell_apply_target` | (registry-resolved) | which (projection, cache, kernel, overlay) handle to write |
-| `oldstate_cache` | on | write-through frame cache in front of the projection reads |
+| `oldstate_cache` | on for durable (leveled) tables; off for ets/ephemeral (bare applier default `false`) | write-through frame cache in front of the projection reads |
 | `publish_fun`, `publish_ns` | undefined | per-cell publish hook |
 | `ae_targets` | [] | freshness counters to bump per applied event |
 

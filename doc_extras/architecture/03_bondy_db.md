@@ -56,13 +56,14 @@ A projection cell value, on disk:
 
 ```mermaid
 flowchart LR
-    subgraph CELL[Cell value frame]
+    subgraph CELL[Cell value frame · V2]
         H["HlcLen<br/>16-bit"]
-        HLC["Hlc bytes<br/>(8 today)"]
-        BODY["FoldedValue bytes<br/>fold-module-encoded"]
+        HLC["Hlc bytes<br/>(length-prefixed)"]
+        STATE["StateBytes<br/>encode_state/1 of the folded CRDT state<br/>(length-prefixed)"]
+        VAL["ValueBytes<br/>(optional projection value column)"]
     end
 
-    H --> HLC --> BODY
+    H --> HLC --> STATE --> VAL
 ```
 
 The HLC is **always present**. Reads return `{Value, Hlc}`, period.
@@ -115,6 +116,12 @@ The slow path is "one LSM get + one group interpretation" — typically
 a couple of microseconds. The cache hit is sub-microsecond.
 
 ## The overlay, in pictures
+
+> Note: the **`bondy_db` facade** provisions every shard with `overlay =>
+> disabled`, so facade reads do **not** merge an overlay — read-your-writes
+> comes from `apply/4`'s `await_apply` step. The overlay-merge read path
+> described here is a `bondy_db_core` capability used by non-facade consumers
+> (and configs that enable it).
 
 The overlay key shape is the trick:
 
@@ -237,15 +244,16 @@ When the application needs multiple cells at a common point in time:
 
 ```erlang
 bondy_db_core:read_batch(
-    [{users, primary, U1}, {grants, primary, U1}],
+    %% batch keys are {Namespace, Index, Bucket, Key}
+    [{users, primary, Realm, U1}, {grants, primary, Realm, U1}],
     #{fence => hlc:now(),
       max_lag => milliseconds(100),
-      consistency => bounded_stale,
+      consistency => causal,
       require_skew_below => milliseconds(50)}
 ).
 ```
 
-Semantics (`bondy_db_core.erl:180-207`):
+Semantics (`bondy_db_core:read_batch/2`):
 
 ```mermaid
 flowchart LR
@@ -487,8 +495,8 @@ Implementation:
   (in-RAM) projections.
 - `bondy_db_topology_memory.erl` — DB-scoped ETS projection provider
   for ephemeral tables.
-- `bondy_oplog_cell_frame.erl` — `<<HlcLen:16, Hlc:64, Body>>`
-  cell encoding.
+- `bondy_oplog_cell_frame.erl` — V2 cell encoding:
+  `<<HlcLen:16, HlcBin, StateBytes (length-prefixed), ValueBytes>>`.
 
 Secondary indexes:
 

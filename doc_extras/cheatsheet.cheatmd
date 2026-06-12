@@ -13,7 +13,7 @@ chapters (see the sidebar) are the narrative version.
     topology => bondy_db_topology_shared_shards
 }),
 {ok, T} = bondy_db:open_table(Db, users, #{
-    crdt_module => bondy_oplog_crdt_lww_register,
+    fold_module => lww_register,   %% required: the CRDT type label
     shard_count => 8
 }).
 ```
@@ -22,13 +22,13 @@ chapters (see the sidebar) are the narrative version.
 
 ```erlang
 {ok, T} = bondy_db:open_table(Db, registry, #{
-    crdt_module => bondy_oplog_crdt_lww_register,
-    durability => ephemeral,
-    projection_backend => ets,
-    fused => true,
-    oplog_instance_opts => #{
-        backend => ets,
-        wal_backend => mem
+    fold_module => lww_register,        %% required
+    projection_backend => ets,          %% table-level
+    fused => true,                      %% table-level
+    oplog_instance_opts => #{           %% instance-level knobs:
+        backend => ets,                 %%   in-memory MST store
+        wal_backend => mem,             %%   in-memory WAL
+        durability => ephemeral         %%   ack no durable storage
     }
 }).
 ```
@@ -92,8 +92,12 @@ Details: [The CRDT model](05_crdt_model.md).
 ### Bounded staleness (auth paths)
 
 ```erlang
-ok = bondy_db_core:ensure_fresh([users, grants], 1000),
-{ok, Result} = bondy_db_core:read_batch(NS, Keys).
+%% ensure_fresh/2 -> ok | {stale, [Namespace]}
+%% read_batch(BatchKeys, Opts); BatchKeys :: [{NS, Index, Bucket, Key}]
+case bondy_db_core:ensure_fresh([users, grants], 1000) of
+    ok           -> {ok, Result} = bondy_db_core:read_batch(BatchKeys, #{});
+    {stale, NSs} -> too_stale   %% more than max_lag behind
+end.
 ```
 
 ### Write barrier
@@ -108,9 +112,9 @@ ok = bondy_oplog:await_apply(InstanceId, 5000).
 ### Backup / restore (cold)
 
 ```erlang
-ok = bondy_mst_admin:backup(SrcDir, BackupDir),
-ok = bondy_mst_admin:verify(BackupDir),
-ok = bondy_mst_admin:restore(BackupDir, TargetDir).
+{ok, _Manifest} = bondy_mst_admin:backup(SrcDir, BackupDir),
+{ok, _}         = bondy_mst_admin:verify(BackupDir),
+{ok, _}         = bondy_mst_admin:restore(BackupDir, TargetDir).
 ```
 
 ### Compaction & bootstrap

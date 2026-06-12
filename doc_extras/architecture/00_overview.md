@@ -26,8 +26,8 @@ flowchart LR
     MST["bondy_mst<br/>Merkle Search Tree<br/>anti-entropy"]
     DB["bondy_db<br/>read • cache • freshness"]
 
-    App -- "append(NS, Event)" --> OPLOG
-    App -- "read(NS, Idx, Key)" --> DB
+    App -- "append(InstanceId, Op)" --> OPLOG
+    App -- "read(Table, Realm, Key)" --> DB
 
     OPLOG -. "events become<br/>MST pages" .-> MST
     MST  -. "events get<br/>materialised" .-> DB
@@ -55,8 +55,8 @@ this:
 ```mermaid
 flowchart TB
     O["OVERLAY · in-RAM ETS<br/>events between WAL ack and projection commit"]
-    P["PROJECTION · Leveled LSM per shard<br/>materialised cells: HLC + folded value"]
-    SNAP["COMPACTION SNAPSHOT · single file<br/>CRDT state at the compaction watermark"]
+    P["PROJECTION · Leveled LSM per shard (or ETS, ephemeral)<br/>materialised cells: HLC + folded value"]
+    SNAP["COMPACTION CHECKPOINT · single file<br/>CRDT state at the compaction watermark"]
     MST["MST PAGE STORE · packfile + .idx<br/>content-addressed pages, replication substrate"]
     WAL["WAL · append-only segments<br/>source of truth"]
 
@@ -72,7 +72,8 @@ WAL alone can reconstruct the whole stack — that is why the WAL is the
 
 ## Following a write end-to-end
 
-Imagine a client calls `bondy_oplog:append(NS, Event)`. Here is what
+Imagine a client calls `bondy_oplog:append(InstanceId, Op)` (or, through
+the facade, `bondy_db:apply(Table, Realm, Key, Op)`). Here is what
 happens in the happy path:
 
 ```mermaid
@@ -92,7 +93,7 @@ sequenceDiagram
     WAL-->>INST: {Hlc, Segment, Offset}
     INST->>OV: insert(event)
     INST-->>C: ok (caller unblocks)
-    Note over OV,SYNC: Eager-push happens here<br/>(peer that's already syncing<br/>pulls newest pages).
+    Note over OV,SYNC: Replication is pull-only anti-entropy<br/>(a peer's next sync pulls the newest pages).<br/>There is no sending-side eager-push today.
 
     par async install
         APP->>WAL: drain batch
@@ -124,7 +125,8 @@ A few things the diagram is hiding to keep it readable:
 
 ## Following a read end-to-end
 
-Now `bondy_db:read(NS, primary, Key)`:
+Now `bondy_db:read(Table, Realm, Key)` (the facade; `bondy_db_core:read(NS,
+Index, Bucket, Key)` underneath):
 
 ```mermaid
 sequenceDiagram
@@ -136,7 +138,7 @@ sequenceDiagram
     participant PROJ as projection (Leveled)
     participant CRDT as crdt_module
 
-    App->>DB: read(NS, primary, Key)
+    App->>DB: read(Table, Realm, Key)
     DB->>CACHE: get(Key)
     alt cache hit
         CACHE-->>DB: {Value, Hlc}
@@ -183,7 +185,7 @@ flowchart TB
         REG["db_core_registry"]
         OVERLAY["oplog_db_overlay"]
         CACHE["cache_adapter"]
-        PROJ["projection_adapter<br/>leveled"]
+        PROJ["projection_adapter<br/>leveled / ets"]
     end
 
     OPLOG_INST -->|"append + install"| WAL

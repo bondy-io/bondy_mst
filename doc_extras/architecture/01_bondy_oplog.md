@@ -111,8 +111,8 @@ A couple of details to keep in mind:
 
 - **The overlay is staged *before* the WAL append.** The invariant
   is "the applier can never observe a durable event without its
-  overlay row". A failed WAL append rolls the overlay back via
-  `unstage_overlay/2` (`bondy_oplog_instance.erl:1921`).
+  overlay row". A failed WAL append rolls the overlay back via the
+  instance's `unstage_overlay/2`.
 - **The caller unblocks before the applier runs.** The applier is
   the process that materialises the event into the projection
   ([chapter 04](04_applier.md)). The caller's `ok` means "durable + visible in the
@@ -449,8 +449,8 @@ Implementation:
   overlay staging; `fused_apply_batch/2` and the yielding fused
   drain.
 - `bondy_oplog_wal.erl` — WAL gen_server: `append_batch/2`,
-  `await_durable/3`, `set_committed_segment/2`,
-  `write_consumer_offset/2`.
+  `await_durable/3`, `set_committed_segment/2`. (The consumer offset
+  is persisted by `bondy_oplog_wal_state:write_consumer_offset/2`.)
 - `bondy_oplog_wal_mem.erl` + `bondy_oplog_wal_mem_reader.erl` —
   the in-memory (ETS) WAL backend for fused ephemeral instances.
 - `bondy_oplog_origin.erl` — origin persistence under

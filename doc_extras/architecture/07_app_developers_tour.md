@@ -30,7 +30,8 @@ flowchart TB
 Two API surfaces sit above this:
 
 - **`bondy_db`** — the consumer-facing facade. You call
-  `open_table/3`, `read/3`, and `put/4` with table-handle maps. Each
+  `open_table/3`, `read/3`, and `apply/4` (plus `counter_inc/4`,
+  `apply_batch/4`, `map_update/4`) with table-handle maps. Each
   table is a [namespace](05_crdt_model.md).
 - **`bondy_db_core`** — the substrate primitive
   ([chapter 03](03_bondy_db.md)). It takes `(NS, Index, Key)` and
@@ -201,6 +202,20 @@ and the one-line "why".
 > set/map semantics, `pn_counter`/`g_counter` for counters, and
 > `mv_register` where concurrent siblings must survive.
 
+All the tables below live in one DB. Open it once with a **default
+`fold_module`** — the required type label, which every table inherits and
+each table's `crdt_module` overrides:
+
+```erlang
+{ok, Db} = bondy_db:open(bondy, #{
+    topology    => bondy_db_topology_shared_shards,
+    fold_module => lww_register   %% required default; per-table crdt_module wins
+}).
+```
+
+(`open_table/3` requires a `fold_module`; supplying it once at the DB level
+means the per-table calls below need only their `crdt_module`.)
+
 ### 4.1 Registrations and subscriptions
 
 ```erlang
@@ -302,13 +317,11 @@ dedicated add-wins table** than as a list inside an LWW record.
 ```erlang
 {ok, UserGrants} = bondy_db:open_table(Db, security_user_grants, #{
     crdt_module => bondy_oplog_crdt_mv_register,
-    shard_count => 8,
-    topology_hint => isolated
+    shard_count => 8
 }).
 {ok, GroupGrants} = bondy_db:open_table(Db, security_group_grants, #{
     crdt_module => bondy_oplog_crdt_mv_register,
-    shard_count => 4,
-    topology_hint => isolated
+    shard_count => 4
 }).
 ```
 
@@ -332,8 +345,7 @@ touching anything else.
 ```erlang
 {ok, Sources} = bondy_db:open_table(Db, security_sources, #{
     crdt_module => bondy_oplog_crdt_mv_register,
-    shard_count => 4,
-    topology_hint => isolated
+    shard_count => 4
 }).
 ```
 
@@ -477,7 +489,11 @@ When *not* to reach for it:
 
 ### 4.12 Summary table
 
-| Table | CRDT | shard_count | Topology hint |
+Topology is a **per-DB** choice (set once at `bondy_db:open/2`, not a
+per-table opt). The column below is therefore which *DB* each table
+belongs to: tables that want a different topology live in a separate DB.
+
+| Table | CRDT | shard_count | DB topology |
 |---|---|---|---|
 | `bondy_registration` | `lww_register` (structurally-unique keys) | 8 | shared_shards |
 | `bondy_subscription` | `lww_register` (structurally-unique keys) | 8 | shared_shards |
@@ -517,10 +533,10 @@ winner.
   expired value as absent on read; sweep lazily. Count caps also
   stay in app code (no CRDT solves that).
 
-- **Read-your-writes is free.** The overlay
-  ([chapter 03](03_bondy_db.md)) makes a `bondy_db:put` immediately
-  visible to the next `bondy_db:read` on the same node, before the
-  applier has materialised the projection.
+- **Read-your-writes is free.** `bondy_db:apply/4` blocks in
+  `await_apply` until the write is committed to the projection
+  ([chapter 03](03_bondy_db.md)), so the next `bondy_db:read/3` on the
+  same node sees it.
 
 - **Cross-node freshness needs `ensure_fresh/2`.** Auth paths
   should call `bondy_db_core:ensure_fresh([users, grants], 1s)`

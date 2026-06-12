@@ -10,34 +10,51 @@ trading strong consistency for *Strong Eventual Consistency* — replicas
 that have delivered the same operations end up in the same state, with
 no coordination required during writes.
 
-The library has two layers, used independently or together:
+The library is **three cooperating packages behind one facade**, used
+together or independently:
 
-1. **`bondy_mst`** — a Merkle Search Tree (MST) primitive based on Alex
-   Auvolat & François Taïani's 2019 paper [*Merkle Search Trees:
-   Efficient State-Based CRDTs in Open
-   Networks*](https://inria.hal.science/hal-02303490/document). A
-   balanced, content-addressed search tree where the structural shape is
-   determined deterministically by item hashes, so two replicas with
-   the same set of items have the same root hash. Useful as a building
-   block for anti-entropy and integrity verification.
-2. **`bondy_oplog`** — a coordination-free CRDT replication
-   *framework* built on top. The MST is used as the storage substrate
-   for an append-only operation log keyed by `{HLC, Origin, Seq}`.
-   Stable prefixes of the log collapse into snapshots through a
-   consumer-defined `interpret_cog/2` function. The Concurrent
-   Operation Group (COG) abstraction and the operation-log architecture
-   are taken from Preston McCrary's 2022 paper [*Canteen: A
-   Partially-Ordered Log Abstraction for the Emerging CRDT
+1. **`bondy_db`** — the **consumer-facing database** and the recommended
+   entry point for most applications. It gives you typed *tables* over a
+   native **CRDT catalogue** (registers, counters, g/2P/add-wins/remove-wins
+   sets, multi-value register, add-wins map, enable/disable-wins flags), a
+   fast read path (cache + overlay + LSM projection, with bounded staleness
+   if you ask for it), a table-oriented write API (`apply/4`,
+   `counter_inc/4`, `apply_batch/4`, `map_update/4`), pluggable durability
+   (durable Leveled vs ephemeral in-memory), shard topologies, and optional
+   secondary indexes. See [The `bondy_db` facade](#the-bondy_db-facade).
+2. **`bondy_oplog`** — the **write + replication framework** beneath
+   `bondy_db`. It appends events durably to a **local** WAL keyed by
+   `{HLC, Origin, Seq}` (the source of truth, used for crash recovery) and
+   installs them into the MST. Replication is coordination-free
+   anti-entropy: peers converge by exchanging only the differing **MST
+   pages** — the WAL is never shipped. Stable prefixes of the log fold into
+   snapshots through a consumer-defined `interpret_cog/2`. Use it directly
+   when you want the low-level event-log API rather than tables. The Concurrent
+   Operation Group (COG) abstraction and the operation-log architecture are
+   taken from Preston McCrary's 2022 paper [*Canteen: A Partially-Ordered
+   Log Abstraction for the Emerging CRDT
    Datastore*](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2022/EECS-2022-160.html)
    (UC Berkeley); we replace Canteen's hash-chained DAG with the
-   Auvolat & Taïani MST, adapting COG truncation to a tree-shaped log.
-   The framework is agnostic to event payload semantics, transport
-   (Distributed Erlang, Partisan, gRPC, ...), durability (in-memory,
-   file, RocksDB, ...), and trust model (closed cluster,
-   Byzantine-tolerant).
+   Auvolat & Taïani MST, adapting COG truncation to a tree-shaped log. The
+   framework is agnostic to event payload semantics, transport (Distributed
+   Erlang, Partisan, gRPC, ...), durability (in-memory, file, RocksDB, ...),
+   and trust model (closed cluster, Byzantine-tolerant).
+3. **`bondy_mst`** — the **Merkle Search Tree** primitive used as the
+   replication structure, based on Alex Auvolat & François Taïani's 2019
+   paper [*Merkle Search Trees: Efficient State-Based CRDTs in Open
+   Networks*](https://inria.hal.science/hal-02303490/document). A balanced,
+   content-addressed search tree whose shape is determined deterministically
+   by item hashes, so two replicas with the same set of items have the same
+   root hash — two peers compare root hashes and exchange only the differing
+   pages. Usable standalone for anti-entropy and integrity verification.
 
-The replication layer is the modern API and the focus of this README.
-The MST primitive is reused under the hood.
+**Where to start:** application developers should use the **`bondy_db`**
+facade — see the [facade section](#the-bondy_db-facade) below, [chapter
+03](doc_extras/architecture/03_bondy_db.md), the [app developer's
+tour](doc_extras/architecture/07_app_developers_tour.md), and the
+cheatsheet. The bulk of *this* README documents the **`bondy_oplog`**
+framework layer (the event-log API, replication, compaction, validators)
+that `bondy_db` is built on; reach for it when you need the low-level API.
 
 If "MST", "COG", and "CRDT" don't already mean something specific to
 you, read the [Background](#background-msts-and-cogs) section before
@@ -49,6 +66,7 @@ the Quick Start. The rest of this README assumes those concepts.
 
 - [When to use this library](#when-to-use-this-library)
 - [Architecture (tutorial)](#architecture-tutorial)
+- [The `bondy_db` facade](#the-bondy_db-facade)
 - [Background: MSTs and COGs](#background-msts-and-cogs)
 - [Quick start](#quick-start)
 - [Concepts](#concepts)
@@ -105,7 +123,7 @@ under `doc_extras/architecture/`:
 | 00 | [Overview](doc_extras/architecture/00_overview.md) | The three packages and one end-to-end write + read. |
 | 01 | [bondy_oplog](doc_extras/architecture/01_bondy_oplog.md) | Instances, WAL, sync sessions, eager-push vs. anti-entropy. |
 | 02 | [bondy_mst](doc_extras/architecture/02_bondy_mst.md) | The Merkle Search Tree, the pack-store backend, AE protocol. |
-| 03 | [bondy_db](doc_extras/architecture/03_bondy_db.md) | Read side: cache + overlay + projection, freshness fence. |
+| 03 | [bondy_db](doc_extras/architecture/03_bondy_db.md) | The consumer-facing facade: tables, the CRDT catalogue, the read path (cache + overlay + projection, freshness fence), and the table write API. |
 | 04 | [Applier](doc_extras/architecture/04_applier.md) | The reconciler loop that ties writes, the MST, and the projection together. |
 | 05 | [The CRDT model](doc_extras/architecture/05_crdt_model.md) | The pure operation-based CRDT contract: `interpret_cog`, `apply_op`, causal tiers, the native catalogue. |
 | 06 | [Compaction & bootstrap](doc_extras/architecture/06_compaction_and_bootstrap.md) | Why the oplog is bounded; how new replicas join. |
@@ -115,6 +133,65 @@ under `doc_extras/architecture/`:
 The same docs ship in the ex_doc output (see `make docs`). These
 chapters are the authoritative architecture reference; module docs
 carry the implementation-level contracts.
+
+---
+
+## The `bondy_db` facade
+
+Most applications never touch `bondy_oplog` or `bondy_mst` directly —
+they use **`bondy_db`**, a table-oriented database over the native CRDT
+catalogue. You open a DB and typed tables, write CRDT operations to
+`(Realm, Key)` cells, and read the materialised value back; replication,
+durability, compaction, and the MST are handled underneath.
+
+```erlang
+{ok, _} = application:ensure_all_started(bondy_mst),
+
+%% A DB groups tables under a shard topology.
+{ok, Db} = bondy_db:open(my_db, #{
+    topology => bondy_db_topology_shared_shards
+}),
+
+%% A table picks a CRDT from the catalogue by its `fold_module` type
+%% label (required), plus shard count, indexes, durability, ...
+{ok, Users}    = bondy_db:open_table(Db, users,    #{
+    fold_module => lww_register, shard_count => 8
+}),
+{ok, Counters} = bondy_db:open_table(Db, counters, #{
+    fold_module => pn_counter
+}),
+
+%% Write CRDT ops to (Realm, Key) cells. The op shape is CRDT-specific.
+ok = bondy_db:apply(Users, <<"acme">>, <<"alice">>, {set, Hlc, <<"Alice">>}),
+ok = bondy_db:counter_inc(Counters, <<"acme">>, <<"visits">>, +1),
+
+%% Read the materialised value (cache + overlay + projection, HLC-merged).
+{ok, <<"Alice">>, _Hlc} = bondy_db:read(Users, <<"acme">>, <<"alice">>).
+```
+
+What the facade adds on top of the framework:
+
+- **A native CRDT catalogue** — `lww_register`, `max`/`min_register`,
+  `g`/`pn_counter`, `g_set`, `two_p_set`, `aw_set`, `rw_set`,
+  `mv_register`, `aw_map`, `ew_flag`, `dw_flag` — selected per table by its
+  short type label `fold_module` (required); pass a fully-qualified
+  `crdt_module` to override with a custom module. See [The CRDT
+  model](doc_extras/architecture/05_crdt_model.md).
+- **Pluggable durability per table** — durable (Leveled LSM projection +
+  pack-store MST) or `durability => ephemeral` (in-memory ETS projection +
+  in-memory WAL, optionally `fused`) for hot, rebuildable state.
+- **Batched map/set writes** — `apply_batch/4` and `map_update/4` pack
+  many field commands into one atomic event (one WAL/MST entry).
+- **Secondary indexes** — declare `indexes => [...]` on a table and query
+  with `index_get/5` / `index_range/6` (with a `max_lag` freshness fence).
+- **Shard topologies** — `single_bookie`, `per_entity`, `shared_shards`,
+  and an in-memory topology, mapping tables onto shards.
+
+The one-page [cheatsheet](doc_extras/cheatsheet.cheatmd) has the full
+API at a glance; [chapter 03](doc_extras/architecture/03_bondy_db.md) and
+the [app developer's tour](doc_extras/architecture/07_app_developers_tour.md)
+are the narrative reference. The rest of this README covers the
+`bondy_oplog` framework that sits beneath this facade.
 
 ---
 
@@ -300,6 +377,13 @@ interpret_cog(Events, State) ->
 query(value, State) -> State.
 ```
 
+> This is a minimal **event-log** CRDT — the `bondy_oplog` API uses only
+> `causal_tier/0`, `init/0`, `interpret_cog/2`, and `query/2`. A CRDT that
+> backs a `bondy_db` *table* (or durable storage) additionally implements the
+> projection-seam callbacks `to_value/1`, `hlc/1`, `encode_state/1`,
+> `decode_state/1`; see the native catalogue modules and
+> [Defining a CRDT](#defining-a-crdt).
+
 ### 2. Start the application and two replicas
 
 ```erlang
@@ -372,8 +456,20 @@ Implement `bondy_oplog_crdt`:
 | `init/0` | yes | Bottom state — what the CRDT looks like when no events have ever been applied. |
 | `interpret_cog/2` | yes | `(Events, State) -> NewState`. Given a batch of events in key order, return the updated state. **Must be deterministic** — same inputs ⇒ same output on every replica. This is the foundation of convergence. |
 | `query/2` | yes | `(Query, State) -> Result`. Project the state for client queries. Pure. |
-| `state_to_ops/2` | optional | For PUT-style APIs that diff states into op lists. |
-| `merge_values/3` | optional | For CRDT-valued events that need value-level merging (vs. the strict-uniqueness default). |
+| `to_value/1` | yes | `(State) -> Value`. The materialised value for a cell — what `bondy_db:read/3` returns. |
+| `hlc/1` | yes | `(State) -> hlc()`. The state's current HLC (drives projection + merge). |
+| `encode_state/1`, `decode_state/1` | yes | Serialise the folded state to/from a binary (compaction checkpoint + projection storage). |
+| `gc_threshold/1` | optional | `(State) -> hlc() \| undefined`. Frontier below which causal metadata may be reaped. |
+| `value_equals_state/0` | optional | `-> boolean()`. `true` when the projection value *is* the state (skips a re-encode). |
+| `order_independent/0` | optional | `-> boolean()`. `true` for commutative types (enables the eager `apply_op/3` path on `bondy_oplog_crdt_commutative`). |
+| `context_of/1`, `reap_origins/2` | optional (tier_2) | Per-cell causal-context accessor + dead-origin reaping. |
+
+The first four callbacks (`causal_tier/0`, `init/0`, `interpret_cog/2`,
+`query/2`) are all the **event-log** API (`bondy_oplog`) needs — that is what
+the Quick Start `my_counter` implements. The projection-seam callbacks
+(`to_value/1`, `hlc/1`, `encode_state/1`, `decode_state/1`) are additionally
+required when the CRDT backs a **`bondy_db` table** or durable storage; the
+native catalogue modules implement all of them.
 
 ### Determinism is non-negotiable
 
@@ -387,7 +483,7 @@ system will silently diverge. No timestamps from `os:system_time/1`, no
 ## Lifecycle
 
 ```erlang
-%% Start with defaults (in-memory, trust validator, ETS snapshot store).
+%% Start with defaults (in-memory, trust validator, ETS compaction checkpoint).
 {ok, SupPid} = bondy_oplog:start_instance(InstanceId).
 
 %% Or with options:
@@ -773,9 +869,9 @@ Errors are logged and absorbed; one bad instance does not affect others.
 
 ```erlang
 Watermark               = bondy_oplog:current_watermark(Id).
-{ok, Watermark, State}  = bondy_oplog:snapshot(Id).
+{ok, Watermark, State}  = bondy_oplog:compaction_checkpoint(Id).
 %%   or
-not_found               = bondy_oplog:snapshot(Id).
+not_found               = bondy_oplog:compaction_checkpoint(Id).
 ```
 
 ### Retention advice
@@ -844,7 +940,7 @@ Configure via the `backend` opt at start_instance time:
 |---|---|---|
 | `map` | `bondy_mst_map_store` | Pure functional map. Slow but simple; tests only. |
 | `ets` | `bondy_mst_ets_store` | Default. Per-instance anonymous ETS. Read-concurrent. |
-| `pack` | `bondy_mst_pack_store` | Durable packfile-based store (git-style sorted-hash packs + fanout/bloom index). Production backend. See [`doc_extras/architecture/02_bondy_mst.md`](doc_extras/architecture/02_bondy_mst.md). |
+| `bondy_mst_pack_store` | `bondy_mst_pack_store` | Durable packfile-based store (git-style sorted-hash packs + fanout/bloom index). Production backend; selected by the **full module atom** (`map`/`ets` are the only shorthand atoms). See [`doc_extras/architecture/02_bondy_mst.md`](doc_extras/architecture/02_bondy_mst.md). |
 | Custom | (any module) | Implement `bondy_mst_store` behaviour. Pass the module atom as `backend`. |
 
 ```erlang
@@ -1012,7 +1108,8 @@ The library owns several node-shared ETS tables, all owned by the
 | `bondy_oplog_quarantine` | detected equivocations: `{instance_id, event_key} → {E1, E2, Proof}`. |
 | `bondy_oplog_origin_bans` | banned origins: `Origin → {Reason, Proof, BannedAt}`. |
 
-All four expose `info/0` or `list/0` for ops dashboards.
+All four expose a `list*`/`info` accessor for ops dashboards (e.g.
+`bondy_oplog_registry:list/0`, `bondy_oplog_quarantine:list_all/0`).
 
 ### Telemetry events
 
@@ -1020,20 +1117,26 @@ The library emits the following telemetry events:
 
 ```
 [bondy_oplog, instance, append]                       %% local append
-[bondy_oplog, instance, append_remote, ok]            %% accepted remote
+[bondy_oplog, instance, apply_event, ok]              %% event installed (local or accepted remote)
 [bondy_oplog, instance, append_remote, filtered]      %% below watermark
 [bondy_oplog, instance, append_remote, banned]        %% origin banned
 [bondy_oplog, instance, append_remote, equivocation]  %% divergence detected
-[bondy_oplog, instance, backpressure]                 %% working set cap hit
-[bondy_oplog, sync, ok]                               %% sync session success
-[bondy_oplog, sync, error]                            %% sync session failed
+[bondy_oplog, instance, backpressure]                 %% working-set cap hit
+[bondy_oplog, instance, overlay, backpressure_drop]   %% overlay cap hit
+[bondy_oplog, instance, mst_install]                  %% events installed into the MST
+[bondy_oplog, instance, write_latency]                %% per-instance write→readable latency (see ch.04)
+[bondy_oplog, sync, ok | error]                       %% sync session outcome
 [bondy_oplog, compaction, ok]                         %% compaction cycle
 [bondy_oplog, scheduler, sync, tick]
 [bondy_oplog, scheduler, gc, tick]
+[bondy_oplog, applier, ...]                           %% per-batch stage timings (batch_verify/fold/cell_apply/publish/install_cast, applied, …)
 ```
 
-Each carries `instance_id` (and other context) in metadata. Hook a handler
-via `telemetry:attach/4` for metrics, alerting, or debug logging.
+This is the main set; the substrate also emits `[bondy_oplog, sync_scheduler, …]`
+(bootstrap dispatch), `[bondy_oplog, secondary_writer, …]`, and `[bondy_mst,
+page_store, …]` families. Each event carries `instance_id` (and other context)
+in metadata. Attach a handler via `telemetry:attach/4` (or a prefix handler on
+`[bondy_oplog]` / `[bondy_mst]`) for metrics, alerting, or debug logging.
 
 ### Disabling the schedulers
 
@@ -1083,6 +1186,9 @@ quiescent. Trigger manually via `bondy_oplog:sync/2,3` and
 | `hlc_seed` | `0` | Initial HLC value. Auto-seeded from MST/snapshot at init when applicable. |
 | `seq_seed` | `0` | Initial Seq value. Auto-seeded from MST at init. |
 | `applier` | `#{}` | Per-instance applier tuning. Recognised keys: `commit_every` (default `64`), `poll_interval_ms` (default `5`). See [The applier](doc_extras/architecture/04_applier.md). |
+| `wal_backend` | `disk` | `disk` (segment files) or `mem` (in-memory ETS WAL, fused-only) — the ephemeral/fast path. |
+| `fused` | `false` | When `true`, the instance drains its own WAL and installs inline (no separate applier hop) — the ephemeral high-throughput mode. |
+| `install_coalesce_max` | `16` | Max install batches the instance coalesces per cycle. |
 
 ### WAL options (instance-level)
 
@@ -1095,11 +1201,11 @@ production-safe; tune only when you have a workload reason. See
 | `wal_dir` | derived from `storage_path` or `/tmp/bondy_oplog_wal/<os_pid>/` | Base directory under which the WAL writer creates `<InstanceId>/`. |
 | `fsync_mode` | `per_write` | `per_write` (every successful `append` is durable) or `batched` (durability synchronised via `bondy_oplog_wal:await_durable/3`). |
 | `max_segment_bytes` | 64 MiB | Rotate the head segment past this size. |
-| `max_batch_bytes` | 1 MiB | Cap on the body bytes of a single batch frame. |
+| `max_batch_bytes` | 4 MiB | Cap on the body bytes of a single batch frame. |
 | `idx_interval_bytes` | 64 KiB | Sparse `.qidx` granularity. |
 | `batched_fsync_interval` / `batched_fsync_bytes` | — | Fsync trigger thresholds when `fsync_mode = batched`. |
 | `min_live_segments` | 2 | Floor on the number of live segments retained. |
-| `retention_sweep_interval` | 30000 ms | How often retention runs. |
+| `retention_sweep_interval` | 300000 ms (5 min) | How often retention runs. |
 | `max_total_wal_size` / `max_live_segments` | — | Soft caps the retention sweep honours. |
 | `recovery_mode` | `strict` | `strict` (refuse to advance past a corrupt frame; needs operator action) or `rescan` (best-effort drop of corrupt frames during head-segment recovery). |
 | `body_compression` | `disabled` | Per-frame body compression (`zlib` / `lz4`). |
@@ -1136,7 +1242,7 @@ production-safe; tune only when you have a workload reason. See
 | `bondy_mst_store` | MST page-level storage backend. |
 | `bondy_oplog_projection_adapter` | Pluggable materialised-cell store under `bondy_db_core` (the canonical implementation is `bondy_oplog_projection_leveled`). |
 | `bondy_oplog_cache_adapter` | Pluggable read cache under `bondy_db_core` (ETS reference impl: `bondy_oplog_cache_ets`). |
-| `bondy_db_topology` | How `bondy_db` tables map onto Bookie shards. Three ship: `single_bookie`, `per_entity`, `shared_shards`. |
+| `bondy_db_topology` | How `bondy_db` tables map onto shards. Four ship: `single_bookie`, `per_entity`, `shared_shards`, and `memory` (in-memory ETS projection, the ephemeral-table substrate). |
 
 Each behaviour is documented in its source module.
 
@@ -1179,7 +1285,7 @@ with existing keys invoke the configured merger exactly as `put/3`
 would. For `N=1` it falls through to `put/3` with no overhead.
 
 API surface includes `put/3`, `put_batch/2`, `get/2,3`, `delete/2`,
-`merge/2,3`, `missing_set/2`, `fold/3,4`, `first/1,2`, `last/1,2`,
+`merge/2,3`, `missing_set/2`, `fold/3,4`, `first/1`, `last/1`,
 `to_list/1`, `diff_to_list/2`, `gc/1,2`, etc.
 
 This is the building block. The replication layer is built on top.
@@ -1234,7 +1340,7 @@ docker exec -it jepsen-control bash
 cd /root/jepsen.bondymst
 lein run test --nodes n1,n2,n3 \
   --ssh-private-key /root/shared/jepsen-bot \
-  --workload set --fold-module orset \
+  --workload set --crdt-module aw_set \
   --nemesis random-partition-halves \
   --time-limit 60 --concurrency 10 --rate 10
 ```

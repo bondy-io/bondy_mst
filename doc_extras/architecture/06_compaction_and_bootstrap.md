@@ -115,43 +115,47 @@ A few subtle things:
 ## The compaction cycle
 
 `bondy_oplog_gc_scheduler` ticks every `gc_interval_ms` (default 1s)
-and spawns one short-lived worker per instance. The worker runs the
-five-step cycle:
+and spawns one short-lived worker per instance. The worker just **issues
+the compaction call**; the instance gen_server runs the whole five-step
+cycle **synchronously**:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Sched as gc_scheduler
+    participant Worker as per-instance worker
     participant Comp as oplog_compaction
-    participant Inst as oplog_instance
-    participant Worker as compaction worker
+    participant Inst as oplog_instance (gen_server)
     participant Crdt as CRDT module
     participant CK as compaction_checkpoint
 
-    Sched->>Comp: compact(InstanceId)
-    Comp->>Inst: compact(InstanceId, PeerRoots)
-    Inst->>Worker: spawn (off the gen_server)
-    Worker->>Worker: compute_frontier_for(MST, PeerRoots)
+    Sched->>Worker: spawn (so the scheduler never blocks)
+    Worker->>Comp: compact(InstanceId)
+    Comp->>Inst: compact(InstanceId, PeerRoots)  [gen_server:call]
+    Note over Inst: runs SYNCHRONOUSLY inside the gen_server
+    Inst->>Inst: compute_frontier_for(MST, PeerRoots)
     alt catalogue (projection-backed) instance
-        Note over Worker: fast path — no re-fold.<br/>The projection IS the per-cell<br/>interpret_cog checkpoint,<br/>maintained eagerly on write.
+        Note over Inst: fast path — no re-fold.<br/>The projection IS the per-cell<br/>interpret_cog checkpoint,<br/>maintained eagerly on write.
     else bare single-CRDT instance
-        Worker->>Worker: events_in_open_range(MST, watermark, frontier)
-        Worker->>Crdt: interpret_cog(Events, BaseCheckpoint)
-        Crdt-->>Worker: NewCheckpoint
-        Worker->>CK: put_checkpoint(frontier, NewCheckpoint)
+        Inst->>Crdt: interpret_cog(Events, BaseCheckpoint)
+        Crdt-->>Inst: NewCheckpoint
+        Inst->>CK: put_checkpoint(frontier, NewCheckpoint)
     end
-    Worker->>Inst: {compaction_done, Frontier, ...}
-    Note over Inst: atomic commit inside gen_server:<br/>truncate MST + watermark advance + HLC bump
+    Inst->>Inst: truncate MST + watermark advance + HLC bump
     Inst-->>Comp: {ok, {compacted, Frontier, N}}
+    Comp-->>Worker: result
 ```
 
 Three design choices worth noting:
 
-- **The heavy work is off the gen_server.** Frontier computation,
-  event extraction, `interpret_cog`, and checkpoint persistence happen
-  in a monitored worker. The gen_server only executes the atomic
-  commit (truncate + watermark + HLC bump). Local appends and reads
-  proceed throughout.
+- **Compaction runs synchronously inside the instance gen_server.**
+  Frontier computation, `interpret_cog`, checkpoint persistence, and the
+  truncate/watermark/HLC commit all run in the gen_server's `compact`
+  handler. The only off-process actor is the gc_scheduler's per-instance
+  worker, which merely issues the call — so the *scheduler* never blocks.
+  While a compaction runs the instance is busy, but lock-free reads and
+  stateless appends are unaffected (they bypass the gen_server); only the
+  applier's install casts queue behind it.
 - **The cycle is concurrency-guarded.** Only one compaction per
   instance is in flight at a time; overlapping requests reply
   `{ok, no_change}` and the next tick retries. Compaction is
@@ -596,7 +600,7 @@ events it already folded into its snapshot. The mechanism is in
 `bondy_oplog_instance.erl:do_handle_call({integrate_peer_root, _})`:
 
 ```erlang
-%% bondy_oplog_instance.erl  ~line 1724
+%% bondy_oplog_instance.erl — do_handle_call({integrate_peer_root, _})
 MST1 = bondy_mst:merge(MST0, MST0, PeerRoot),
 MST2 = case State#state.watermark of
            undefined -> MST1;
@@ -607,8 +611,8 @@ MST2 = case State#state.watermark of
 The peer's pages are merged in, then `truncate_below_or_equal/2`
 re-runs against the local watermark, dropping any keys X has already
 compacted away. The local-append side uses the same idea via
-`below_or_equal_watermark/2` (line 2350) — appended or peer-supplied
-events whose key is ≤ the local watermark are rejected at the door.
+`below_or_equal_watermark/2` — appended or peer-supplied events whose
+key is ≤ the local watermark are rejected at the door.
 
 ```mermaid
 flowchart LR
@@ -690,9 +694,9 @@ Implementation:
   per-instance worker.
 - `bondy_oplog_instance.erl`:
     - `compute_frontier_for/2` — frontier as longest common prefix.
-    - `do_compact_async/3` + `run_compaction_worker/8` — off-gen_server
-      heavy lifting.
-    - `commit_compaction/2` — atomic truncate + watermark + HLC bump.
+    - `do_compact_sync/2` + `run_compaction/8` — the cycle, run
+      synchronously in the instance gen_server.
+    - `commit_compaction/3` — atomic truncate + watermark + HLC bump.
     - `truncate_below_or_equal/2` — drops keys ≤ watermark.
     - `do_load_snapshot/3` + `apply_loaded_snapshot/3` — bootstrap
       install with monotonicity guard.

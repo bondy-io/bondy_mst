@@ -95,11 +95,19 @@ classDiagram
     bondy_oplog_crdt <|-- g_set
     bondy_oplog_crdt <|-- max_register
     bondy_oplog_crdt <|-- min_register
+    bondy_oplog_crdt <|-- two_p_set
+    bondy_oplog_crdt <|-- bounded_counter
     bondy_oplog_crdt <|-- mv_register
     bondy_oplog_crdt <|-- aw_map
+    bondy_oplog_crdt <|-- aw_set
+    bondy_oplog_crdt <|-- rw_set
+    bondy_oplog_crdt <|-- ew_flag
+    bondy_oplog_crdt <|-- dw_flag
     bondy_oplog_crdt <|-- index_entry
     bondy_oplog_crdt_commutative <|-- lww_register
     bondy_oplog_crdt_commutative <|-- mv_register
+    %% (every catalogue type rides bondy_oplog_crdt_commutative; edges
+    %%  elided for readability — see the table below for the full list)
 ```
 
 (`°` marks optional callbacks.) The required set is `causal_tier/0`,
