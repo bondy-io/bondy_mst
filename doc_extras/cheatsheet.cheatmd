@@ -1,0 +1,118 @@
+# Cheatsheet
+
+A one-page reference for the `bondy_mst` substrate. The architecture
+chapters (see the sidebar) are the narrative version.
+
+## Tables (bondy_db)
+{: .col-2}
+
+### Open a DB and a table
+
+```erlang
+{ok, Db} = bondy_db:open(my_db, #{
+    topology => bondy_db_topology_shared_shards
+}),
+{ok, T} = bondy_db:open_table(Db, users, #{
+    crdt_module => bondy_oplog_crdt_lww_register,
+    shard_count => 8
+}).
+```
+
+### Ephemeral, fused, in-memory WAL
+
+```erlang
+{ok, T} = bondy_db:open_table(Db, registry, #{
+    crdt_module => bondy_oplog_crdt_lww_register,
+    durability => ephemeral,
+    projection_backend => ets,
+    fused => true,
+    oplog_instance_opts => #{
+        backend => ets,
+        wal_backend => mem
+    }
+}).
+```
+
+### Read / write
+
+```erlang
+{ok, Value, Hlc} = bondy_db:read(T, Realm, Key),
+ok = bondy_db:apply(T, Realm, Key, Op),
+ok = bondy_db:counter_inc(Counters, Realm, Key, +1).
+```
+
+The op shape is CRDT-specific (e.g. `{set, Hlc, V}` for
+`lww_register`, `{inc, N}` for counters).
+
+### Secondary indexes
+
+```erlang
+{ok, T} = bondy_db:open_table(Db, users, #{
+    crdt_module => bondy_oplog_crdt_lww_register,
+    indexes => [#{name => by_email,
+                  extract => [email]}]   %% path into the value
+}),
+{ok, Hits} = bondy_db:index_get(T, Realm, by_email, Email, #{}),
+{ok, Hits2} = bondy_db:index_range(T, Realm, by_email, Lo, Hi, #{
+    max_lag => 1000, fallback => primary
+}).
+```
+
+## The CRDT catalogue
+{: .col-1}
+
+| `crdt_module` (`bondy_oplog_crdt_*`) | tier | semantics |
+|---|---|---|
+| `lww_register` | 0 | last-writer-wins register; deterministic same-HLC tie-break |
+| `g_counter` | 0 | grow-only counter |
+| `pn_counter` | 0 | pos/neg counter, per-Origin Seq dedup |
+| `g_set` | 0 | grow-only set |
+| `two_p_set` | 0 | two-phase set; removal is permanent (no re-add) |
+| `max_register` / `min_register` | 0 | monotone integer lattice |
+| `mv_register` | 2 | concurrent writes surface as siblings |
+| `aw_map` | 2 | add-wins map; pure remove; per-key sub-values |
+| `aw_set` | 2 | add-wins set (concurrent add\|remove ⇒ add wins) |
+| `rw_set` | 2 | remove-wins set (concurrent add\|remove ⇒ remove wins) |
+| `ew_flag` | 2 | enable-wins flag |
+| `dw_flag` | 2 | disable-wins flag |
+
+tier_0 = scalar HLC; tier_2 = per-cell causal context (DVV).
+Details: [The CRDT model](05_crdt_model.md).
+
+## Freshness and consistency
+{: .col-2}
+
+### Bounded staleness (auth paths)
+
+```erlang
+ok = bondy_db_core:ensure_fresh([users, grants], 1000),
+{ok, Result} = bondy_db_core:read_batch(NS, Keys).
+```
+
+### Write barrier
+
+```erlang
+ok = bondy_oplog:await_apply(InstanceId, 5000).
+```
+
+## Operations
+{: .col-2}
+
+### Backup / restore (cold)
+
+```erlang
+ok = bondy_mst_admin:backup(SrcDir, BackupDir),
+ok = bondy_mst_admin:verify(BackupDir),
+ok = bondy_mst_admin:restore(BackupDir, TargetDir).
+```
+
+### Compaction & bootstrap
+
+- Compaction runs on the `bondy_oplog_gc_scheduler` tick; the MST is
+  a *window*, not a log.
+- New replicas bootstrap from a checkpoint / catalogue snapshot, then
+  catch the live tail via anti-entropy.
+- Genesis peer: `seed => true`. Lifecycle gate:
+  `pre_bootstrap → live`.
+
+See [Compaction & bootstrap](06_compaction_and_bootstrap.md).

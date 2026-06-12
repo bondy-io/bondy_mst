@@ -3,7 +3,7 @@
 > Audience: anyone designing a schema on top of `bondy_db`.
 > Time to read: ~25 min.
 > Premise: by the end you'll have mapped your domain onto a small
-> set of tables, with a fold per table and a topology per cluster.
+> set of tables, with a CRDT per table and a topology per cluster.
 
 The previous chapters walked through the substrate from the inside.
 This one walks through it from your end of the API. The question we
@@ -12,14 +12,14 @@ turn it into a `bondy_db` table?**
 
 We use the twelve tables Bondy Router maintains today as the worked
 example. By the end, every table will have a one-paragraph
-justification for its fold and its topology.
+justification for its CRDT and its topology.
 
 ## 1. The model, in one picture
 
 ```mermaid
 flowchart TB
     DB["DB · bondy_db:open/2<br/>name, topology, defaults"]
-    TBL["Table · bondy_db:open_table/3<br/>EntityType, fold_module, shard_count"]
+    TBL["Table · bondy_db:open_table/3<br/>EntityType, crdt_module, shard_count"]
     SH["Shard · one oplog_instance<br/>WAL + MST + projection + applier"]
     BK["Bucket · routing label<br/>Topology:bucket_for(EntityType, Realm, ...)"]
     CELL["Cell · {Bucket, Key}<br/>HLC + folded value"]
@@ -31,7 +31,7 @@ Two API surfaces sit above this:
 
 - **`bondy_db`** — the consumer-facing facade. You call
   `open_table/3`, `read/3`, and `put/4` with table-handle maps. Each
-  table is a [namespace](05_fold_strategies.md).
+  table is a [namespace](05_crdt_model.md).
 - **`bondy_db_core`** — the substrate primitive
   ([chapter 03](03_bondy_db.md)). It takes `(NS, Index, Key)` and
   exposes the freshness fence (`ensure_fresh/2`), batch reads
@@ -43,95 +43,96 @@ atomic-as-of-fence reads).
 
 The single most important rule of this tutorial is one sentence:
 
-> **Fold attaches to Table.** Two pieces of data that need
+> **The CRDT attaches to Table.** Two pieces of data that need
 > different merge semantics are two tables.
 
 Everything else in this chapter is a consequence of that rule.
 
 ## 2. Picking a CRDT
 
-> **As-built note (PR-Z).** The decision tree and notes in this section
-> are the original conceptual guide. Several of the types shown
-> (`presence_basic`, `ttl_presence`, `orset`, `strict_register`,
-> `map_of_fields`) were **retired** with no twin (see
-> [chapter 05](05_fold_strategies.md)); the surviving CRDTs are
-> `lww_register`, `g_counter`/`pn_counter`, `g_set`, `max_register`/
-> `min_register`, `mv_register`, and the add-wins map
-> `bondy_oplog_crdt_aw_map`. Map a retired type onto a survivor as the
-> §4 examples below do (e.g. `orset` → add-wins map, `strict_register`
-> → `lww_register` + the strict-uniqueness `merge_strategy`,
-> presence/TTL → `lww_register` with app-level expiry).
-
-`bondy_db` ships a small catalogue of native CRDTs (see
-[chapter 05](05_fold_strategies.md)). Reframed by "what does the data
+`bondy_db` ships a small catalogue of native operation-based CRDTs
+(see [chapter 05](05_crdt_model.md)). Reframed by "what does the data
 look like":
 
 ```mermaid
 flowchart TB
-    Q1{"keys unique<br/>by construction?"}
     QN{"counting events?<br/>(integers that add)"}
+    QGC{"can it ever decrement?"}
     QM{"monotone max/min<br/>over an integer?"}
     QG{"grow-only set?"}
-    Q2{"hard expiry on each cell?"}
-    Q3{"set with observed-remove<br/>semantics?"}
+    QMAP{"map / set with per-key<br/>add + remove semantics?"}
+    QSIB{"must concurrent writes<br/>be visible as siblings?"}
     Q4{"concurrent writes are<br/>an invariant violation?"}
-    Q5{"whole record updated<br/>atomically?"}
 
-    PRES["presence_basic"]
     PNC["pn_counter"]
+    GC["g_counter"]
     MAXR["max_register"]
     MINR["min_register"]
     GSET["g_set"]
-    TTL["ttl_presence"]
-    ORSET["orset"]
-    STRICT["strict_register"]
+    AWM["aw_map (tier_2)"]
+    MVR["mv_register (tier_2)"]
+    STRICT["mv_register<br/>(siblings = the conflict signal)"]
     LWW["lww_register"]
-    MOF["map_of_fields"]
 
-    Q1 -->|yes| PRES
-    Q1 -->|no| QN
-    QN -->|yes| PNC
+    QN -->|yes| QGC
+    QGC -->|yes| PNC
+    QGC -->|no| GC
     QN -->|no| QM
     QM -->|max| MAXR
     QM -->|min| MINR
     QM -->|no| QG
     QG -->|yes| GSET
-    QG -->|no| Q2
-    Q2 -->|yes| TTL
-    Q2 -->|no| Q3
-    Q3 -->|yes| ORSET
-    Q3 -->|no| Q4
+    QG -->|no| QMAP
+    QMAP -->|yes| AWM
+    QMAP -->|no| QSIB
+    QSIB -->|yes| MVR
+    QSIB -->|no| Q4
     Q4 -->|yes| STRICT
-    Q4 -->|no| Q5
-    Q5 -->|yes| LWW
-    Q5 -->|no| MOF
+    Q4 -->|no| LWW
 ```
+
+If you are migrating from a fold-era table, the retired types map
+onto survivors like this (a `fold_module` label with a twin still
+works unchanged — it resolves to the byte-identical native CRDT):
+
+| retired (no twin) | use instead |
+|---|---|
+| `presence_basic` | `lww_register` (presence is a register write) |
+| `ttl_presence` | `lww_register` + application-level expiry |
+| `orset` | `aw_map` (observed-remove, done causally right) |
+| `strict_register` | `mv_register` (concurrent writes surface as siblings the app resolves); same-event-key duplicates already crash loudly via the default strict-uniqueness merge strategy |
+| `map_of_fields` | `aw_map` (per-key sub-values) or one `lww_register` cell per field |
 
 A few practical notes:
 
 - **`lww_register` covers the common case.** If your code already
-  reads-modifies-writes the whole record (which Bondy does today via
-  `plum_db_object` wrapping a DVVSet), `lww_register` matches that
-  shape exactly. Don't reach for `map_of_fields` until concurrent
-  field-level edits are an actual problem.
-- **`strict_register` is for invariants, not for performance.** Use
-  it where two concurrent writes mean someone broke a rule
-  (authorisation grants, single-policy registrations). The substrate
-  surfaces the conflict; your handler decides what to do.
-- **`map_of_fields` is the escape hatch for record-shaped data
-  with mixed semantics**, not the default for records. The cost is
-  one event per field-change instead of one per record-change.
-- **`orset` belongs in its own table.** A set living inside a
-  `lww_register` record is the "members-in-record" anti-pattern —
-  members get clobbered by whole-record LWW.
-- **Tier 1 folds are for *quantities*, not records.** `pn_counter`,
-  `max_register`, `min_register`, and `g_set` each model one value
-  per cell with a single algebraic merge rule. Don't try to encode
-  a record inside one — use a separate cell key per quantity.
+  reads-modifies-writes the whole record, `lww_register` matches
+  that shape exactly. Don't reach for `aw_map` until concurrent
+  per-key edits are an actual problem.
+- **Conflict-surfacing is for invariants, not for performance.**
+  Where two concurrent writes mean someone broke a rule
+  (authorisation grants, single-policy registrations), use
+  `mv_register` — the siblings *are* the conflict signal, and your
+  handler decides what to do. (Same-*event-key* duplicates — which
+  indicate a bug or tampering, not concurrency — already crash
+  loudly via the substrate's default strict-uniqueness merge
+  strategy.)
+- **Sets and maps with removal belong in `aw_map`, in their own
+  table.** A set living inside an `lww_register` record is the
+  "members-in-record" anti-pattern — members get clobbered by
+  whole-record LWW.
+- **`mv_register` is for when losing a concurrent write is worse
+  than seeing two.** Reads return *all* siblings; the application
+  resolves. It is tier_2 — it pays for a causal context per cell.
+- **Quantity CRDTs are for *quantities*, not records.**
+  `pn_counter`, `g_counter`, `max_register`, `min_register`, and
+  `g_set` each model one value per cell with a single algebraic
+  merge rule. Don't encode a record inside one — use a separate
+  cell key per quantity.
 - **Counters use `bondy_db:counter_inc/4`.** It's a thin wrapper
   over `apply/4` that issues `{inc, Delta}` events. Negative deltas
-  decrement. Duplicate delivery is absorbed by the WAL key's
-  per-Origin Seq dedup; the fold sees each event exactly once.
+  decrement. Duplicate delivery is absorbed by the event key's
+  per-Origin Seq dedup; the CRDT sees each event exactly once.
 
 ## 3. Picking `shard_count` and topology
 
@@ -189,8 +190,8 @@ and the one-line "why".
 
 > **As-built note (PR-Z).** The substrate is now native
 > operation-based CRDTs; the state-based **fold** modules were retired
-> (see [chapter 05](05_fold_strategies.md)). The mappings below are
-> illustrative. A `fold_module => lww_register` / `pn_counter` /
+> (see [chapter 05](05_crdt_model.md)). The mappings below are
+> illustrative. A legacy `fold_module => lww_register` / `pn_counter` /
 > `g_set` label still works (it resolves to the byte-identical CRDT
 > twin), but the folds with **no twin** were deleted —
 > `orset`/`strict_register`/`ttl_presence`/`presence_basic`/`map_of_fields`
@@ -204,11 +205,11 @@ and the one-line "why".
 
 ```erlang
 {ok, Regs} = bondy_db:open_table(Db, bondy_registration, #{
-    fold_module => lww_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
     shard_count => 8
 }).
 {ok, Subs} = bondy_db:open_table(Db, bondy_subscription, #{
-    fold_module => lww_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
     shard_count => 8
 }).
 ```
@@ -227,7 +228,7 @@ from disk needed.
 
 ```erlang
 {ok, Realms} = bondy_db:open_table(Db, bondy_realm, #{
-    fold_module => lww_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
     shard_count => 4
 }).
 ```
@@ -240,13 +241,14 @@ deterministically by lex order on the encoded payload, so two
 concurrent realm edits converge to the same winner on every node.
 
 If field-level concurrent edits become a real problem (rare),
-splitting into `map_of_fields` is a one-table refactor.
+splitting into an `aw_map` (one sub-key per field) is a one-table
+refactor.
 
 ### 4.3 Users
 
 ```erlang
 {ok, Users} = bondy_db:open_table(Db, security_users, #{
-    fold_module => lww_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
     shard_count => 8
 }).
 ```
@@ -260,7 +262,7 @@ membership is **not** stored in this record (see 4.4).
 
 ```erlang
 {ok, Groups} = bondy_db:open_table(Db, security_groups, #{
-    fold_module => lww_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
     shard_count => 4
 }).
 {ok, Members} = bondy_db:open_table(Db, security_group_members, #{
@@ -290,7 +292,7 @@ The migration: keep the group record in `security_groups` with
 a new `security_group_members` table with the native add-wins map
 (`bondy_oplog_crdt_aw_map`). Concurrent adds and removes converge via
 its observed-remove (add-wins) semantics — a concurrent add survives a
-remove that did not observe it ([chapter 05](05_fold_strategies.md)).
+remove that did not observe it ([chapter 05](05_crdt_model.md)).
 
 This is the recommendation for Bondy: **memberships scale better as a
 dedicated add-wins table** than as a list inside an LWW record.
@@ -299,27 +301,27 @@ dedicated add-wins table** than as a list inside an LWW record.
 
 ```erlang
 {ok, UserGrants} = bondy_db:open_table(Db, security_user_grants, #{
-    crdt_module => bondy_oplog_crdt_lww_register,
-    merge_strategy => bondy_oplog_merge_strict_uniqueness,
+    crdt_module => bondy_oplog_crdt_mv_register,
     shard_count => 8,
     topology_hint => isolated
 }).
 {ok, GroupGrants} = bondy_db:open_table(Db, security_group_grants, #{
-    crdt_module => bondy_oplog_crdt_lww_register,
-    merge_strategy => bondy_oplog_merge_strict_uniqueness,
+    crdt_module => bondy_oplog_crdt_mv_register,
     shard_count => 4,
     topology_hint => isolated
 }).
 ```
 
-Authorisation grants are the canonical strict-uniqueness case. Two
+Authorisation grants are the canonical conflict-surfacing case. Two
 concurrent grants to the same `(Realm, Principal, Resource)` mean
-someone violated single-writer discipline at the management plane. The
-`bondy_oplog_merge_strict_uniqueness` merge strategy surfaces that
-collision loudly instead of silently picking an LWW winner. (The
-retired `strict_register` fold folded this into a single module; the
-strict-uniqueness behaviour now lives in the separate, surviving
-`merge_strategy`.)
+someone violated single-writer discipline at the management plane.
+With `mv_register` the conflict is *visible*: the read returns both
+siblings and the auth layer refuses/queues/alerts instead of silently
+accepting an LWW winner. (The retired `strict_register` fold raised a
+`conflict` value for same-HLC writes; `mv_register` detects true
+concurrency causally, which is strictly stronger. Same-*event-key*
+duplicates — tampering, not concurrency — already crash loudly via
+the substrate's default strict-uniqueness merge strategy.)
 
 These are the tables where `per_entity` topology pays off: ops can
 quiesce or migrate the grants Bookie for one realm without
@@ -329,8 +331,7 @@ touching anything else.
 
 ```erlang
 {ok, Sources} = bondy_db:open_table(Db, security_sources, #{
-    crdt_module => bondy_oplog_crdt_lww_register,
-    merge_strategy => bondy_oplog_merge_strict_uniqueness,
+    crdt_module => bondy_oplog_crdt_mv_register,
     shard_count => 4,
     topology_hint => isolated
 }).
@@ -338,13 +339,13 @@ touching anything else.
 
 Auth sources pin a `{Realm, Username, CIDR}` to a method. Same
 invariant as grants — concurrent edits to the same source must
-surface as a conflict.
+surface as siblings, not silently resolve.
 
 ### 4.7 API Gateway
 
 ```erlang
 {ok, Gateway} = bondy_db:open_table(Db, api_gateway, #{
-    fold_module => lww_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
     shard_count => 4
 }).
 ```
@@ -395,20 +396,20 @@ Same shape as tickets. Two things worth calling out:
   app-level.** No CRDT can express "keep the N latest" without
   coordination. Your auth handler reads the current token set,
   deletes the oldest if you're at the limit, and then writes the
-  new one. `ttl_presence` handles auto-eviction of *expired*
-  tokens; the count cap stays in your code.
+  new one. Expiry is also app-level (deadline in the value, treated
+  as absent on read); the count cap stays in your code.
 
 ### 4.10 Bridge relays
 
 ```erlang
 {ok, Bridges} = bondy_db:open_table(Db, bondy_bridge_relay, #{
-    fold_module => lww_register,
+    crdt_module => bondy_oplog_crdt_lww_register,
     shard_count => 4
 }).
 ```
 
 Edge bridge config. Whole-record updates, rare writes, `lww` is
-fine. Could be `map_of_fields` if independent per-field updates
+fine. Could be an `aw_map` if independent per-field updates
 become a thing.
 
 ### 4.11 When to use a counter (illustrative)
@@ -420,7 +421,7 @@ The shape:
 
 ```erlang
 {ok, Counters} = bondy_db:open_table(Db, app_counters, #{
-    fold_module => pn_counter,
+    crdt_module => bondy_oplog_crdt_pn_counter,
     shard_count => 8
 }).
 
@@ -459,7 +460,7 @@ When *not* to reach for it:
   If you need provenance, use `g_set` of audit records keyed by
   the contributor identity.
 - **You're counting unique members.** That's set cardinality, not
-  a sum. Use `g_set` (or `orset` if removes are needed) and read
+  a sum. Use `g_set` (or `aw_map` if removes are needed) and read
   the set size.
 
 #### Adjacent shapes
@@ -471,47 +472,50 @@ When *not* to reach for it:
   floors. Once the lattice rises (or falls), it cannot reverse.
 - **G-Set** is the grow-only set of binaries. Suitable for
   append-only catalogues, audit trails, "members ever seen". If
-  membership ever has to *retract*, use `orset` instead — G-Set
-  has no remove event by design.
+  membership ever has to *retract*, use the add-wins map
+  (`aw_map`) instead — G-Set has no remove event by design.
 
 ### 4.12 Summary table
 
-| Table | Fold | shard_count | Topology hint |
+| Table | CRDT | shard_count | Topology hint |
 |---|---|---|---|
-| `bondy_registration` | `presence_basic` | 8 | shared_shards |
-| `bondy_subscription` | `presence_basic` | 8 | shared_shards |
+| `bondy_registration` | `lww_register` (structurally-unique keys) | 8 | shared_shards |
+| `bondy_subscription` | `lww_register` (structurally-unique keys) | 8 | shared_shards |
 | `bondy_realm` | `lww_register` | 4 | shared_shards |
 | `security_users` | `lww_register` | 8 | shared_shards |
 | `security_groups` | `lww_register` | 4 | shared_shards |
-| `security_group_members` | `orset` | 8 | shared_shards |
-| `security_user_grants` | `strict_register` | 8 | **per_entity** |
-| `security_group_grants` | `strict_register` | 4 | **per_entity** |
-| `security_sources` | `strict_register` | 4 | **per_entity** |
+| `security_group_members` | `aw_map` (tier_2) | 8 | shared_shards |
+| `security_user_grants` | `mv_register` (siblings = conflict signal) | 8 | **per_entity** |
+| `security_group_grants` | `mv_register` (siblings = conflict signal) | 4 | **per_entity** |
+| `security_sources` | `mv_register` (siblings = conflict signal) | 4 | **per_entity** |
 | `api_gateway` | `lww_register` | 4 | shared_shards |
-| `bondy_ticket` | `ttl_presence` | 32 | shared_shards |
-| `bondy_oauth_token` | `ttl_presence` | 32 | shared_shards |
+| `bondy_ticket` | `lww_register` + app-level expiry | 32 | shared_shards |
+| `bondy_oauth_token` | `lww_register` + app-level expiry | 32 | shared_shards |
 | `bondy_bridge_relay` | `lww_register` | 4 | shared_shards |
 
 Nine tables on `shared_shards`, three (auth grants and sources) on
-`per_entity`. None of Bondy's tables today use the Tier 1 folds —
-`pn_counter`, `max_register`, `min_register`, and `g_set` are
-available for consumers that need them; the §4.11 example shows
-the typical setup.
+`per_entity`. None of Bondy's tables today use the quantity CRDTs —
+`pn_counter`, `g_counter`, `max_register`, `min_register`, and
+`g_set` are available for consumers that need them; the §4.11
+example shows the typical setup. `mv_register` is available where an
+application would rather resolve siblings itself than accept an LWW
+winner.
 
 ## 5. Patterns you'll keep using
 
-- **New table when fold differs.** Don't try to unify two tables
-  that need different merge semantics. The cost of a table is
-  small; the cost of a wrong fold is silent divergence.
+- **New table when the CRDT differs.** Don't try to unify two
+  tables that need different merge semantics. The cost of a table
+  is small; the cost of a wrong CRDT is silent divergence.
 
-- **Memberships as their own OR-Set table.** Whenever the data
+- **Memberships as their own add-wins table.** Whenever the data
   shape is "X has many Y", and X is not flat config, lift the
-  membership into a dedicated `orset` table. Group members,
+  membership into a dedicated `aw_map` table. Group members,
   subscriptions-per-topic, capabilities-per-role.
 
-- **`ttl_presence` for anything with hard expiry.** Don't track
-  expiry in app code — the substrate already does. Count caps stay
-  in app code (no CRDT solves that).
+- **Expiry lives in the value, eviction in the app.** Store the
+  deadline inside the cell value (`lww_register`) and treat an
+  expired value as absent on read; sweep lazily. Count caps also
+  stay in app code (no CRDT solves that).
 
 - **Read-your-writes is free.** The overlay
   ([chapter 03](03_bondy_db.md)) makes a `bondy_db:put` immediately
@@ -530,20 +534,22 @@ the typical setup.
 
 ## 6. Anti-patterns
 
-- **`map_of_fields` for whole-record-update workloads.** Every
-  write goes through one field at a time. If your app already does
-  read-modify-write, you're paying the cost without using the
-  benefit. Default to `lww_register`; revisit if field-level
-  contention shows up in telemetry.
+- **`aw_map` for whole-record-update workloads.** Every write goes
+  through one key at a time, and each cell pays for a tier_2 causal
+  context. If your app already does read-modify-write, you're
+  paying the cost without using the benefit. Default to
+  `lww_register`; revisit if per-key contention shows up in
+  telemetry.
 
 - **Over-sharding.** Each shard runs its own AE. Doubling
   `shard_count` doubles AE bandwidth at low write rates. Start
   small.
 
-- **App-level TTL eviction.** If you're writing background sweepers
-  to delete expired entries, you've reinvented `ttl_presence`
-  badly. Move the expiry into the cell and let the substrate
-  evict.
+- **Eager TTL sweepers.** If you're writing background jobs that
+  race to delete expired entries cluster-wide, you're generating
+  delete traffic for cells every replica can already judge as
+  expired locally. Put the deadline in the value, treat expired as
+  absent on read, and sweep lazily/locally.
 
 - **Splitting tables that share fold and lifecycle.** Two tables
   that always get written together, with the same fold, are
@@ -557,12 +563,12 @@ the typical setup.
   isolation, that's a per_entity topology question, not a
   schema question.
 
-- **Records inside a counter (or any Tier 1 fold).** PN-Counter,
+- **Records inside a counter (or any quantity CRDT).** PN-Counter,
   Max-Register, Min-Register, and G-Set each model **one value
   per cell.** A `{counter, metadata}` tuple stuffed into a
   pn_counter table will neither be merged nor projected correctly.
-  If the data has shape, it belongs in `lww_register`,
-  `map_of_fields`, or its own table. One cell, one quantity.
+  If the data has shape, it belongs in `lww_register`, an
+  `aw_map`, or its own table. One cell, one quantity.
 
 - **Counters used for set cardinality.** Counting distinct member
   inserts via `counter_inc(_, _, _, +1)` will be off after AE
@@ -570,15 +576,15 @@ the typical setup.
   member: the WAL's per-Origin Seq dedup absorbs the duplicate
   *from that origin*, but two separate origins each contributing
   +1 for the *same logical member* still sum to 2. Use `g_set` (or
-  `orset`) and read its size.
+  `aw_map`) and read its size.
 
 ## Pointers
 
 - [Chapter 03](03_bondy_db.md) — the read side: `bondy_db_core`,
   cache, overlay, projection, `ensure_fresh/2`, `read_batch/2`.
-- [Chapter 05](05_fold_strategies.md) — the ten fold modules in
-  detail, with the same decision tree, plus the Tier 1 fold
-  sections (PN-Counter, Max-Register, Min-Register, G-Set).
+- [Chapter 05](05_crdt_model.md) — the CRDT contract and the full
+  native catalogue (registers, counters, sets, `mv_register`,
+  `aw_map`), with the tier model and the same decision tree.
 - [Chapter 06](06_compaction_and_bootstrap.md) — what happens to
   your events once peers agree they have them.
 - `bondy_db.erl` — the consumer facade

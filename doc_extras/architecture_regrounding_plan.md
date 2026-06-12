@@ -1,12 +1,20 @@
 # Re-grounding bondy_db on Operation-Based CRDTs (Canteen × MST)
 
+> **Status: SHIPPED (2026-06).** This re-grounding is complete — the
+> pure operation-based architecture it prescribes is the as-built
+> system. The authoritative description now lives in the architecture
+> chapters, principally
+> [The CRDT model](architecture/05_crdt_model.md). This document is
+> retained as the historical *rationale*: why the state-based fold
+> design was wrong and how the correction was derived from the
+> reference papers.
+
 > Architectural assessment + correction plan. Grounded **only** in the two
-> reference papers (`reference/canteen.pdf`, `reference/mst.pdf`) and the current
-> source. The `_design/` docs are intentionally **not** used as authority — they
-> describe the drifted (state-based) design.
+> reference papers (`reference/canteen.pdf`, `reference/mst.pdf`) and the
+> source at the time of writing.
 >
 > Companion visual: [`architecture_regrounding.html`](architecture_regrounding.html)
-> (current vs target SVG diagrams).
+> (then-current vs target SVG diagrams).
 
 ---
 

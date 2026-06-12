@@ -14,8 +14,8 @@ behind a tidy facade. They have crisp jobs and crisper interfaces:
 - **`bondy_db`** is the **read side**. It returns the most recent
   value for a key, fast, with bounded staleness if you ask for it.
 
-Everything else (the applier, the projection, the cache, the fold
-strategies) is glue between those three.
+Everything else (the applier, the projection, the cache, the CRDT
+catalogue) is glue between those three.
 
 ## The 30-second picture
 
@@ -115,6 +115,12 @@ A few things the diagram is hiding to keep it readable:
   primitive.
 - The sync session uses **MST root comparison**, not a full event
   exchange. That is the whole point of `bondy_mst` — see [chapter 02](02_bondy_mst.md).
+- **Ephemeral tables have a fused variant** of this picture: the
+  applier collapses into the instance (one process runs
+  drain→verify→apply→install inline) and the WAL can be an
+  in-memory queue (`wal_backend => mem`) — no disk I/O on the write
+  path at all, with durability provided by the cluster via
+  anti-entropy. See [chapter 01](01_bondy_oplog.md).
 
 ## Following a read end-to-end
 
@@ -128,7 +134,7 @@ sequenceDiagram
     participant CACHE as cache_adapter (ETS)
     participant OV as overlay (ETS)
     participant PROJ as projection (Leveled)
-    participant FOLD as fold_module
+    participant CRDT as crdt_module
 
     App->>DB: read(NS, primary, Key)
     DB->>CACHE: get(Key)
@@ -137,19 +143,22 @@ sequenceDiagram
         DB-->>App: {Value, Hlc}
     else cache miss
         DB->>PROJ: get(Key)
-        PROJ-->>DB: {ProjValue, ProjHlc}
+        PROJ-->>DB: {ProjState, ProjHlc}
         DB->>OV: events_after(Key, ProjHlc)
         OV-->>DB: [Event, ...]
-        DB->>FOLD: apply_event(ProjValue, Event)*
-        FOLD-->>DB: {Value, Hlc}
+        DB->>CRDT: interpret_cog([Event, ...], ProjState)
+        CRDT-->>DB: {Value, Hlc}
         DB->>CACHE: put(Key, {Value, Hlc})
         DB-->>App: {Value, Hlc}
     end
 ```
 
 Three storage tiers on the hot path: cache, overlay, projection. The
-**fold module** is the per-namespace merge function ([chapter 05](05_fold_strategies.md)) —
-that's what gives the read its CRDT semantics.
+**CRDT module** is the per-table operation interpreter
+([chapter 05](05_crdt_model.md)) — that's what gives the read its
+CRDT semantics: the overlay's pending events are interpreted as a
+group on top of the projection state, never folded one state at a
+time.
 
 ## How the three packages talk to each other
 
@@ -218,11 +227,15 @@ the chapters that follow make sense:
 2. **Per-cell HLC.** Each projection cell carries its own
    `last_modified_hlc`. Reads return `{Value, Hlc}`; causality is
    *exposed*, not hidden.
-3. **Per-table CRDT.** The substrate is CRDT-agnostic. What "merge"
-   means for `users` is different from what it means for `registry`,
-   and both live as plain Erlang modules implementing the
-   `bondy_oplog_crdt` behaviour. (The earlier state-based *fold*
-   modules were retired in PR-Z; see [chapter 05](05_fold_strategies.md).)
+3. **Per-table CRDT, pure operation-based.** The substrate is
+   CRDT-agnostic: it ships *operations* (opaque terms) and causal
+   metadata; what "merge" means for `users` vs `registry` lives in
+   plain Erlang modules implementing the `bondy_oplog_crdt`
+   behaviour. Commutative types ride the scalar HLC (`tier_0`);
+   concurrency-detecting types (multi-value register, add-wins map)
+   carry a per-cell causal context (`tier_2`). (The earlier
+   state-based *fold* modules were retired; see
+   [chapter 05](05_crdt_model.md).)
 4. **Two-sided API.** `bondy_oplog` for writes, `bondy_db` for reads.
    Applications never read from the oplog.
 5. **No consensus.** Convergence is by anti-entropy over the MST,
@@ -248,7 +261,8 @@ the rest is good engineering around it.
 
 ## Pointers
 
-- Design source: [`_design/STORAGE_ARCHITECTURE.md`](../../_design/STORAGE_ARCHITECTURE.md)
-- Companion sub-designs in [`_design/latest/`](../../_design/latest/).
+- These chapters are the architecture reference; module docs carry
+  the implementation-level contracts (wire formats, options,
+  invariants).
 - Modules to skim before reading further:
   `bondy_oplog.erl`, `bondy_mst.erl`, `bondy_db.erl`.

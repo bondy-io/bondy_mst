@@ -88,7 +88,7 @@ The behaviour is intentionally small:
 classDiagram
     class bondy_mst_store {
       <<behaviour>>
-      +open(InstanceId, Opts) Store
+      +open(HashAlgorithm, Opts) Store
       +close(Store) ok
       +get_root(Store) Hash
       +set_root(Store, Hash) Store
@@ -102,6 +102,7 @@ classDiagram
       +list(Store) [Hash]
       +missing_set(Store, Root) [Hash]
       +page_refs(Page) [Hash]
+      +destroy(Store) ok
       +transaction(Store, Fun) Result
       +capabilities(Store) Caps
     }
@@ -367,9 +368,22 @@ current MST root".
 
 ## Pointers
 
-- Design: [`_design/latest/MST_PAGE_STORE_DESIGN.md`](../../_design/latest/MST_PAGE_STORE_DESIGN.md)
 - Paper: Auvolat & Taïani, *Merkle Search Trees*, SRDS 2019,
   Inria HAL-02303490.
-- Modules: `bondy_mst.erl`, `bondy_mst_store.erl`, `bondy_mst_page.erl`,
-  `bondy_mst_pack_*.erl`, `bondy_oplog_sync_session.erl`,
+- Core: `bondy_mst.erl` (put/put_batch with bulk canonical
+  construction, merge, truncate/2, read-only diff_to_list),
+  `bondy_mst_store.erl` (the behaviour), `bondy_mst_page.erl`.
+- Backends: `bondy_mst_ets_store.erl`, `bondy_mst_map_store.erl`,
+  `bondy_mst_pack_store.erl`.
+- Pack-store internals (each module's doc carries the on-disk
+  format detail): `bondy_mst_pack_writer.erl` (live pack + seal
+  trigger), `bondy_mst_pack_seal.erl` (the seal pipeline),
+  `bondy_mst_pack_reader.erl` + `bondy_mst_pack_sealed_view.erl`
+  (sealed reads), `bondy_mst_pack_index.erl` +
+  `bondy_mst_pack_bloom.erl` (lookups), `bondy_mst_pack_codec.erl`
+  (record format), `bondy_mst_pack_manifest.erl`,
+  `bondy_mst_pack_tombstones.erl`, `bondy_mst_pack_recovery.erl`
+  (crash recovery), `bondy_mst_pack_idx_rebuild.erl` (self-healing
+  `.idx` rebuild).
+- Consumers: `bondy_oplog_sync_session.erl`,
   `bondy_oplog_responder.erl`.

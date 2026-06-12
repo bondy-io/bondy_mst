@@ -267,23 +267,25 @@ pure function of the event set, so this eager step equals the key-sorted
 ) -> state().
 
 apply_op({Entries, CC, Hlc}, {put, K, V}, Key, Context0) when is_binary(K) ->
-    Dot = dot_of(Key),
-    Ctx = normalise_context(Context0),
+    Dot = bondy_oplog_crdt_aw_core:dot_of(Key),
+    Ctx = bondy_oplog_crdt_aw_core:normalise_context(Context0),
     DS0 = maps:get(K, Entries, #{}),
-    DS1 = drop_observed(DS0, Ctx),
+    DS1 = bondy_oplog_crdt_aw_core:drop_observed(DS0, Ctx),
     Entries1 = Entries#{K => DS1#{Dot => V}},
-    {Entries1, cc_absorb(CC, Ctx, Dot), erlang:max(Hlc, key_hlc(Key))};
+    {Entries1, bondy_oplog_crdt_aw_core:cc_absorb(CC, Ctx, Dot),
+        erlang:max(Hlc, key_hlc(Key))};
 apply_op({Entries, CC, Hlc}, {rmv, K}, Key, Context0) when is_binary(K) ->
-    Dot = dot_of(Key),
-    Ctx = normalise_context(Context0),
+    Dot = bondy_oplog_crdt_aw_core:dot_of(Key),
+    Ctx = bondy_oplog_crdt_aw_core:normalise_context(Context0),
     DS0 = maps:get(K, Entries, #{}),
-    DS1 = drop_observed(DS0, Ctx),
+    DS1 = bondy_oplog_crdt_aw_core:drop_observed(DS0, Ctx),
     Entries1 =
         case map_size(DS1) of
             0 -> maps:remove(K, Entries);
             _ -> Entries#{K => DS1}
         end,
-    {Entries1, cc_absorb(CC, Ctx, Dot), erlang:max(Hlc, key_hlc(Key))}.
+    {Entries1, bondy_oplog_crdt_aw_core:cc_absorb(CC, Ctx, Dot),
+        erlang:max(Hlc, key_hlc(Key))}.
 
 %% =============================================================================
 %% projection seam
@@ -403,52 +405,13 @@ live_origins(Entries) ->
     ).
 
 %% @private
-dot_of(Key) ->
-    {bondy_oplog_event:key_origin(Key), bondy_oplog_event:key_seq(Key)}.
-
-%% @private
 key_hlc(Key) ->
     bondy_oplog_event:key_hlc(Key).
 
-%% @private
-%% A tier_2 write always carries a stamped context (a version vector). A
-%% missing context is the empty causal history — a first write to a fresh
-%% cell observes nothing.
-normalise_context(undefined) -> [];
-normalise_context(VV) when is_list(VV) -> VV.
-
-%% @private
-%% Drop from a dot-store every dot the context observed; keep concurrent
-%% (un-observed) dots.
-drop_observed(DS, Ctx) ->
-    maps:filter(fun(Dot, _V) -> not dot_observed(Dot, Ctx) end, DS).
-
-%% @private
-%% `{O, S}` is observed by `Ctx` iff `Ctx[O] >= S`. Exact under causal
-%% (per-origin FIFO) delivery — see the moduledoc.
-dot_observed({O, S}, Ctx) ->
-    case lists:keyfind(O, 1, Ctx) of
-        {O, N} -> N >= S;
-        false -> false
-    end.
-
-%% @private
-%% Fold the writer's observed context and this op's own dot into the
-%% cell-wide context. Monotone: the context only ever grows.
-cc_absorb(CC, Ctx, {O, S}) ->
-    vv_merge(vv_merge(CC, Ctx), [{O, S}]).
-
-%% @private
-%% Pointwise max of two version vectors, sorted by origin (canonical).
-vv_merge(A, B) ->
-    Merged = lists:foldl(
-        fun({O, N}, Acc) ->
-            maps:update_with(O, fun(Old) -> erlang:max(Old, N) end, N, Acc)
-        end,
-        #{},
-        A ++ B
-    ),
-    lists:sort(maps:to_list(Merged)).
+%% The dot/version-vector machinery (`dot_of`, `normalise_context`,
+%% `drop_observed`, `dot_observed`, `cc_absorb`, `vv_merge`) lives in the
+%% shared add-wins core `bondy_oplog_crdt_aw_core`, reused by every tier_2
+%% add-wins type (this map, the add-wins set, the enable-wins flag).
 
 %% @private
 %% Canonical (map-free) encodable form: entries as a key-sorted list of

@@ -10,12 +10,25 @@ If chapters [01](01_bondy_oplog.md) / [02](02_bondy_mst.md) /
 per instance, supervised under `bondy_oplog_instance_sup` alongside
 the instance, the WAL writer, and the WAL scrubber.
 
+> **Fused mode has no applier.** An ephemeral instance opened with
+> `fused => true` collapses this whole pipeline into the instance
+> gen_server itself: the instance drains its WAL inline and runs the
+> same verify → cell-apply → install → publish stages in-process
+> (`fused_apply_batch/2`), yielding back to its mailbox every few
+> batches so calls and casts are serviced under load. There is no
+> applier or scrubber child. Everything in this chapter describes the
+> **durable** (non-fused) path; the fused path reuses the same
+> state-free stages and emits the same telemetry, so observability is
+> uniform. See [chapter 01](01_bondy_oplog.md) for fused mode itself.
+
 It owns four jobs:
 
 1. Drain events from the WAL (via `bondy_oplog_wal_reader`).
 2. Re-verify their signatures (defence-in-depth against WAL
    tampering — locals were signed at append time in the instance).
-3. Fold each event into the projection (`apply_one_cell/9`) and
+3. Apply each event to the projection through the per-cell kernel
+   (`bondy_oplog_cell_apply:apply_cell_batch/3` →
+   `bondy_oplog_cell_kernel:apply/6` → the CRDT's `apply_op`) and
    ask the instance to install the corresponding MST pages
    (`install_local_batch`).
 4. Persist the consumer offset and advance the WAL committed
@@ -84,13 +97,13 @@ The applier loop (`drain_loop/1` in `bondy_oplog_applier.erl`) is:
 ```mermaid
 flowchart TB
     LOOP["drain_loop tick"]
-    SLOT{"install_in_flight<br/>under cap?"}
-    WAIT["wait poll_interval_ms<br/>(default 5 ms)"]
+    SLOT{"install_in_flight<br/>under cap (64)?"}
+    WAIT["long-poll await_durable/3<br/>(poll_interval_ms = 5 is only<br/>the error-fallback backstop)"]
     READ["wal_reader:next/2<br/>(batch from WAL)"]
     EMPTY{"empty batch?"}
     VERIFY["verify_batch · re-check signatures"]
-    FOLD["apply_fold_batch · in-memory fold"]
-    CELL["apply_cell_batch · per-cell put + cache invalidate"]
+    FOLD["apply_fold_batch · bare single-CRDT instances"]
+    CELL["apply_cell_batch · kernel apply_op per cell,<br/>batched put + cache invalidate"]
     PUB["publish_batch · publish_fun + ae_targets"]
     INSTALL["reserve install slot<br/>cast install_local_batch"]
     BUMP["bump_offset"]
@@ -111,46 +124,85 @@ flowchart TB
 Two things to note:
 
 - **`install_in_flight` is a counter atomic** that bounds how many
-  install batches the applier may have outstanding at the instance.
-  When the cap is full the loop simply waits — that is the actual
-  back-pressure mechanism between applier and instance.
+  install batches the applier may have outstanding at the instance
+  (`max_install_in_flight`, default 64). When the cap is full the
+  loop defers reading — that is the actual back-pressure mechanism
+  between applier and instance.
 - **`maybe_commit` is event-count-driven**, not time-driven. After
   every `commit_every` events (default 64) the applier drains its
   install queue, persists the consumer offset, and advances the
   WAL's committed-segment marker so retention can sweep older
   segments.
 
+When the WAL is empty the applier does **not** poll-sleep: it
+long-polls the WAL's durable position via `await_durable/3` and is
+woken by the writer. (`poll_interval_ms` survives only as the
+backstop for the rare error fallback.)
+
 ## What "apply a batch" actually does
 
-For each event in the batch:
+The batch is partitioned by op type. `{cell_apply, …}` events — the
+catalogue common case — go to the shared cell-apply engine,
+`bondy_oplog_cell_apply:apply_cell_batch/3` (the same engine the
+fused instance calls inline):
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Loop as applier loop
-    participant Val as validator
-    participant Fold as fold_module
+    participant CA as cell_apply engine
+    participant K as cell kernel
     participant Adapter as projection_adapter
     participant Cache as cache_adapter
+    participant Sec as secondary writer
 
-    Loop->>Val: verify_event(Event)
-    Note over Loop,Val: Stored signature re-checked<br/>(defence vs WAL tampering)
-    alt invalid signature
-        Val-->>Loop: drop + log + skip
-    else ok
-        Loop->>Adapter: get(Handle, Bucket, Key)
-        Adapter-->>Loop: prior cell frame (or not_found)
-        Loop->>Fold: decode_state · apply_event · hlc · encode_state
-        Fold-->>Loop: NewState, NewHlc
-        Loop->>Adapter: put_batch([{Bucket, Key, NewFrame}])
-        Loop->>Cache: delete(Handle, Bucket, Key)
+    Loop->>CA: apply_cell_batch(Ctx, Id, Events)
+    loop each event (in-batch shadow + old-state cache)
+        CA->>Adapter: get prior frame (cache-miss only)
+        CA->>K: apply/6 (OldState, Op, Key, Context)
+        K-->>CA: {NewState, Hlc, StateBytes, ValueBytes, VES}
+        CA->>Sec: index_entry ops (term-diff old vs new value)
     end
+    CA->>Adapter: put_batch(all new frames, one batched write)
+    CA->>Cache: invalidate touched (Bucket, Key)s
 ```
 
-`apply_one_cell/9` issues **one `put_batch` per event** today, not an
-accumulated batch put. The applier also keeps an in-memory
-`fold_state` (`apply_fold_batch`) for namespaces that don't have a
-projection at all; the per-cell projection path is the common case.
+Three load-bearing details:
+
+- **Writes are batched, not per-event.** All new frames in the batch
+  go to the projection in one `put_batch` (for leveled, one
+  `book_mput`); reads of prior cells are absorbed by a two-level
+  old-state cache — an **in-batch shadow** (a later event in the same
+  batch sees the frame an earlier one just produced) plus a
+  write-through **frame cache** in front of the projection.
+- **The kernel runs the CRDT's `apply_op`**, the eager op-based step
+  ([chapter 05](05_crdt_model.md)) — there is no state-based
+  `apply_event` fold anywhere on this path.
+- **Secondary indexes are fed here.** The engine term-diffs the old
+  and new cell values against the table's index specs and dispatches
+  `index_entry` ops to the per-shard secondary writer
+  ([chapter 03](03_bondy_db.md)).
+
+The applier also keeps an in-memory `fold_state`
+(`apply_fold_batch/3`) for bare single-CRDT instances that have no
+projection at all — it folds the batch through the same
+`apply_op` step; the per-cell projection path is the common case.
+
+### tier_2: the context stamp and the regression guard
+
+For a tier_2 table ([chapter 05](05_crdt_model.md)) two extra things
+happen at this seam, both gated on *locally-minted* events only:
+
+- **Context stamp.** A local write's causal context — the cell's
+  current version vector, read via `context_of/1` inside this
+  single-applier-per-cell scope — is stamped into the event `meta`
+  before the WAL append completes, making the event self-describing
+  forever. Remote events replay their `meta` verbatim, never
+  re-stamped.
+- **`ctx_guard`.** A per-cell context-regression detector: if the
+  context of a locally-stamped cell ever moves backwards (the
+  signature of durable-state loss), the write is refused loudly
+  instead of silently forking causality.
 
 After the whole WAL batch has been folded:
 
@@ -186,10 +238,12 @@ chosen so that:
   same effect on restart; the segment-advance only gates WAL
   retention, not correctness.
 - Per-cell `put_batch` writes go to Leveled with
-  `sync_strategy = strict` (see the projection_adapter init); each
-  cell is fsynced before the cache invalidate.
+  `sync_strategy = none` — the projection is deliberately **not**
+  fsynced per write. The WAL is the only locally-durable store;
+  anything the projection loses in a crash is reconstructed by
+  replay from `resume_position/2`.
 
-Idempotency in the fold is the linchpin. Without it, no crash path
+Idempotency in the CRDT is the linchpin. Without it, no crash path
 is safe.
 
 ## Two kinds of input: WAL and peer events
@@ -315,11 +369,12 @@ projection stale until the next sync tick.
 
 ## Things to keep in mind
 
-- **The applier owns the per-cell projection write.** The MST page
-  store is written by the **instance**; the applier `cast`s
+- **The applier owns the per-cell projection write** (on the durable
+  path; in fused mode the instance runs the same engine inline). The
+  MST page store is written by the **instance**; the applier `cast`s
   install batches and the instance serialises them under its own
   lock.
-- **Idempotency in the fold is non-negotiable.** Every crash path
+- **Idempotency in the CRDT is non-negotiable.** Every crash path
   relies on it.
 - **The consumer offset + committed segment are the commit point.**
   Everything before is recoverable; everything after is durable.
@@ -331,13 +386,16 @@ projection stale until the next sync tick.
   (`max_overlay_events`, `max_overlay_bytes`) translate writer
   pressure into `{error, backpressure}` from the instance.
 
-The tunables that matter today (`bondy_oplog_applier.erl:251-265`):
+The tunables that matter today (see the `bondy_oplog_applier.erl`
+moduledoc):
 
 | Opt | Default | Purpose |
 |---|---|---|
 | `commit_every` | 64 | events between `write_consumer_offset` + `set_committed_segment` |
-| `poll_interval_ms` | 5 | sleep when WAL is empty / install slot full |
-| `cell_apply_target` | (registry-resolved) | which (projection, cache, fold_module, overlay) handle to write |
+| `poll_interval_ms` | 5 | error-fallback backstop only (the hot path long-polls `await_durable/3`) |
+| `max_install_in_flight` | 64 | cap on outstanding install batches at the instance |
+| `cell_apply_target` | (registry-resolved) | which (projection, cache, kernel, overlay) handle to write |
+| `oldstate_cache` | on | write-through frame cache in front of the projection reads |
 | `publish_fun`, `publish_ns` | undefined | per-cell publish hook |
 | `ae_targets` | [] | freshness counters to bump per applied event |
 
@@ -346,20 +404,28 @@ The tunables that matter today (`bondy_oplog_applier.erl:251-265`):
 Implementation:
 
 - `bondy_oplog_applier.erl` — gen_server; `drain_loop/1`,
-  `apply_fold_batch/3`, `apply_cell_batch/2`, `apply_one_cell/9`,
-  `maybe_commit/1`, `enqueue_remote/2`, `forward_remote/2`,
-  `verify_batch/4`, `resume_position/2`, `invalidate_cache/4`.
+  `apply_batch/2`, `apply_fold_batch/3`, `maybe_commit/1`,
+  `enqueue_remote/2`, `forward_remote/2`, `verify_batch/4`,
+  `resume_position/2`.
+- `bondy_oplog_cell_apply.erl` — the shared per-cell engine
+  (`apply_cell_batch/3`, `compute_one_cell/12`,
+  `invalidate_cache/4`, secondary-index dispatch); called by the
+  applier here and by the fused instance inline.
+- `bondy_oplog_cell_kernel.erl` — the CRDT seam the engine drives
+  ([chapter 05](05_crdt_model.md)).
 - `bondy_oplog_instance.erl` — `install_local_batch` handler,
-  `evict_overlay_batch/2`, `sign_event/2`, `backpressure_admit/2`.
+  `evict_overlay_batch/2`, `sign_event/2`, `backpressure_admit/2`;
+  `fused_apply_batch/2` (the fused inline twin of this chapter).
 - `bondy_oplog_wal_reader.erl` — the WAL drain cursor.
 - `bondy_oplog_wal.erl` — `write_consumer_offset/2`,
-  `set_committed_segment/2`.
+  `set_committed_segment/2`, `await_durable/3`.
 - `bondy_oplog_db_overlay.erl` — overlay key shape and per-row
   delete.
 - `bondy_oplog_validator.erl` (+ `_crypto` / `_trust` variants) —
   verifier callbacks.
 - `bondy_oplog_instance_sup.erl` — the supervisor wiring (instance,
-  WAL writer, applier, WAL scrubber as children).
+  WAL writer, applier, WAL scrubber as children — applier and
+  scrubber omitted in fused mode).
 
 Background: see [chapter 06](06_compaction_and_bootstrap.md) for how
 the applier's writes feed compaction.

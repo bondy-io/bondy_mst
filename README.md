@@ -107,11 +107,14 @@ under [`doc_extras/architecture/`](doc_extras/architecture/):
 | 02 | [bondy_mst](doc_extras/architecture/02_bondy_mst.md) | The Merkle Search Tree, the pack-store backend, AE protocol. |
 | 03 | [bondy_db](doc_extras/architecture/03_bondy_db.md) | Read side: cache + overlay + projection, freshness fence. |
 | 04 | [Applier](doc_extras/architecture/04_applier.md) | The reconciler loop that ties writes, the MST, and the projection together. |
-| 05 | [Fold strategies](doc_extras/architecture/05_fold_strategies.md) | The pluggable per-namespace CRDT merge contract. |
+| 05 | [The CRDT model](doc_extras/architecture/05_crdt_model.md) | The pure operation-based CRDT contract: `interpret_cog`, `apply_op`, causal tiers, the native catalogue. |
+| 06 | [Compaction & bootstrap](doc_extras/architecture/06_compaction_and_bootstrap.md) | Why the oplog is bounded; how new replicas join. |
+| 07 | [App developer's tour](doc_extras/architecture/07_app_developers_tour.md) | Mapping a domain onto tables, CRDTs and topologies. |
+| 08 | [Backup & restore](doc_extras/architecture/08_backup_and_restore.md) | Operator runbook for `bondy_mst_admin`. |
 
-The same docs ship in the ex_doc output (see `make docs`). The
-source-of-truth design notes live under `_design/latest/` in the
-repository; the chapters above are the friendly read.
+The same docs ship in the ex_doc output (see `make docs`). These
+chapters are the authoritative architecture reference; module docs
+carry the implementation-level contracts.
 
 ---
 
@@ -126,9 +129,12 @@ This library combines two ideas from the literature:
   storage cost is bounded by churn rather than history.
 
 We adapt both: Canteen's COG abstraction is layered over an MST
-instead of Canteen's hash-chained DAG. See `_design/1_mst_cogs_idea.md`
-in this repository for the full design rationale on why we made that
-choice and what we trade off.
+instead of Canteen's hash-chained DAG — the MST gives the same
+deterministic, content-addressed event ordering while adding
+efficient set-reconciliation anti-entropy, which a hash-chained DAG
+cannot offer. See
+[chapter 06](doc_extras/architecture/06_compaction_and_bootstrap.md)
+for how the COG/compaction machinery rides the MST.
 
 ### Merkle Search Trees (MSTs)
 
@@ -202,8 +208,9 @@ hash-chained DAG and exposes COGs as a partially-ordered log
 abstraction; CRDT semantics layer on top.
 
 This library adopts the COG abstraction but uses an MST as the
-underlying log substrate instead of Canteen's DAG — see
-`_design/1_mst_cogs_idea.md` for the rationale.
+underlying log substrate instead of Canteen's DAG — the MST's
+content-addressed, history-independent structure provides the same
+deterministic ordering plus efficient anti-entropy.
 
 A **Concurrent Operation Group** is a maximal contiguous batch of
 events that is *stable* — no event with a key inside the batch's range
@@ -361,7 +368,7 @@ Implement `bondy_oplog_crdt`:
 
 | Callback | Required | Purpose |
 |---|---|---|
-| `causal_tier/0` | yes | Return `tier_0`, `tier_1`, or `tier_2` (informational; see _design/2_mst_causal_clocks.md). |
+| `causal_tier/0` | yes | Return `tier_0`, `tier_1`, or `tier_2` — selects the causal metadata the substrate provisions (tier_0 = scalar HLC; tier_2 = per-cell causal context). See [The CRDT model](doc_extras/architecture/05_crdt_model.md). |
 | `init/0` | yes | Bottom state — what the CRDT looks like when no events have ever been applied. |
 | `interpret_cog/2` | yes | `(Events, State) -> NewState`. Given a batch of events in key order, return the updated state. **Must be deterministic** — same inputs ⇒ same output on every replica. This is the foundation of convergence. |
 | `query/2` | yes | `(Query, State) -> Result`. Project the state for client queries. Pure. |
@@ -607,12 +614,12 @@ Result = bondy_oplog:query_stable(Id, MyQuery).
 
 Query semantics are entirely defined by your CRDT module's `query/2`.
 
-### Per-cell fold projection
+### Per-cell projection
 
-When the instance is started with a `fold_module` (see [Fold
-strategies](doc_extras/architecture/05_fold_strategies.md)), the
-substrate also maintains a per-instance materialised projection
-fed by the applier:
+When the instance is configured with a CRDT module (see [The CRDT
+model](doc_extras/architecture/05_crdt_model.md)), the substrate
+also maintains a per-instance materialised projection fed by the
+applier:
 
 ```erlang
 %% Drains the applier first, then returns the current fold projection.
@@ -837,7 +844,7 @@ Configure via the `backend` opt at start_instance time:
 |---|---|---|
 | `map` | `bondy_mst_map_store` | Pure functional map. Slow but simple; tests only. |
 | `ets` | `bondy_mst_ets_store` | Default. Per-instance anonymous ETS. Read-concurrent. |
-| `pack` | `bondy_mst_pack_store` | Durable packfile-based store (git-style sorted-hash packs + fanout/bloom index). Production backend. See [`doc_extras/architecture/02_bondy_mst.md`](doc_extras/architecture/02_bondy_mst.md) and `_design/latest/MST_PAGE_STORE_DESIGN.md`. |
+| `pack` | `bondy_mst_pack_store` | Durable packfile-based store (git-style sorted-hash packs + fanout/bloom index). Production backend. See [`doc_extras/architecture/02_bondy_mst.md`](doc_extras/architecture/02_bondy_mst.md). |
 | Custom | (any module) | Implement `bondy_mst_store` behaviour. Pass the module atom as `backend`. |
 
 ```erlang
@@ -858,24 +865,27 @@ Configure via the `backend` opt at start_instance time:
 For other durable backends (RocksDB, custom KVs, …) implement
 `bondy_mst_store` yourself; the framework treats it as opaque.
 
-### Snapshot stores
+### Compaction checkpoints
 
-Configure via the `snapshot_store` opt:
+Configure via the `compaction_checkpoint` opt (default is
+context-sensitive: file-backed when `storage_path` is set, ETS
+otherwise):
 
 | Module | Durability |
 |---|---|
-| `bondy_oplog_snapshot_store_ets` | In-memory. Default. |
-| `bondy_oplog_snapshot_store_file` | File-backed. Atomic rename on every write. |
+| `bondy_oplog_compaction_checkpoint_ets` | In-memory. |
+| `bondy_oplog_compaction_checkpoint_file` | File-backed. tmp + datasync + rename + fsync-dir on every write. |
 
 ```erlang
 {ok, _} = bondy_oplog:start_instance(Id, #{
-    crdt_module         => my_counter,
-    snapshot_store      => bondy_oplog_snapshot_store_file,
-    snapshot_store_opts => #{path => <<"/var/lib/bondy_mst/snapshots">>}
+    crdt_module                => my_counter,
+    compaction_checkpoint      => bondy_oplog_compaction_checkpoint_file,
+    compaction_checkpoint_opts => #{path => <<"/var/lib/bondy_mst/checkpoints">>}
 }).
 ```
 
-The file-backed store uses `file:write_file → file:rename` (POSIX-atomic).
+A corrupted checkpoint surfaces as `{error, {corrupted, _}}` and the
+instance refuses to start.
 Crash-safe: a partial write produced by a VM crash leaves the previous
 good file in place.
 
@@ -1060,12 +1070,12 @@ quiescent. Trigger manually via `bondy_oplog:sync/2,3` and
 | `hash_algorithm` | `sha256` | MST page hashing. |
 | `validator` | `bondy_oplog_validator_trust` | Event signer/verifier. |
 | `validator_opts` | `#{}` | Opts passed to the validator's `init/2`. |
-| `fold_module` | `undefined` | Per-namespace fold strategy. Either an atom shorthand (`presence_basic`, `lww_register`, `strict_register`, `orset`, `ttl_presence`, `map_of_fields`) or a module implementing `bondy_oplog_fold`. See [Fold strategies](doc_extras/architecture/05_fold_strategies.md). |
-| `fold_opts` | `#{}` | Opaque options threaded through to the fold module. Shape is fold-specific. |
-| `merge_strategy` | `bondy_oplog_merge_strict_uniqueness` | **Legacy** MST page-merge collision resolver. Superseded by `fold_module`; still honoured for backward compatibility (emits a one-shot deprecation warning at instance start). |
+| `fold_module` | `undefined` | **Legacy alias** for `crdt_module`. An atom shorthand with a native twin (`lww_register`, `g_counter`, `pn_counter`, `g_set`, `max_register`, `min_register`, `index_entry`) resolves to its byte-identical CRDT. Shorthands with no twin (`presence_basic`, `strict_register`, `orset`, `ttl_presence`, `map_of_fields`) were retired and now error. See [The CRDT model](doc_extras/architecture/05_crdt_model.md). |
+| `fold_opts` | `#{}` | Opaque options threaded through with the legacy label. |
+| `merge_strategy` | `bondy_oplog_merge_strict_uniqueness` | MST same-event-key collision resolver (default: crash loudly — duplicates indicate a bug or tampering). Passing the opt explicitly is deprecated but honoured (one-shot warning at instance start). |
 | `crdt_module` | `undefined` | Required for `compact/1` and `query/2`. |
-| `snapshot_store` | `bondy_oplog_snapshot_store_ets` | In-memory or `_file`. |
-| `snapshot_store_opts` | `#{}` | E.g. `#{path => <<"...">>}` for `_file`. |
+| `compaction_checkpoint` | context-sensitive | `_file` when `storage_path` is set, `_ets` otherwise. |
+| `compaction_checkpoint_opts` | `#{}` | E.g. `#{path => <<"...">>}` for `_file`. |
 | `max_working_set` | `infinity` | Cap on live events; `append` returns `working_set_full` past it. |
 | `max_overlay_events` | `10_000` | Overlay backpressure cap (events). `append*` returns `{error, backpressure}` past it. |
 | `max_overlay_bytes` | `5 * 1024 * 1024` | Overlay backpressure cap (bytes). `append*` returns `{error, backpressure}` past it. |
@@ -1115,13 +1125,13 @@ production-safe; tune only when you have a workload reason. See
 
 | Behaviour | Purpose |
 |---|---|
-| `bondy_oplog_crdt` | Consumer-defined CRDT semantics (instance-wide; `interpret_cog/2` + `query/2`). |
-| `bondy_oplog_fold` | Per-namespace cell fold strategy (idempotent, HLC-monotonic). The modern alternative to `merge_strategy` for `bondy_db`-backed reads. Six reference implementations ship (`presence_basic`, `lww_register`, `strict_register`, `map_of_fields`, `orset`, `ttl_presence`). |
+| `bondy_oplog_crdt` | Consumer-defined operation-based CRDT semantics (`interpret_cog/2` + `query/2` + the projection seam). The full pure op-based catalogue ships natively (registers, counters, g/2P/add-wins/remove-wins sets, multi-value register, add-wins map, enable/disable-wins flags) — see [The CRDT model](doc_extras/architecture/05_crdt_model.md). |
+| `bondy_oplog_crdt_commutative` | The eager single-operation step (`apply_op/3·4`) + a generic sort-and-fold `interpret_cog` for commutative CRDTs. |
 | `bondy_oplog_validator` | Sign local events; verify remote events; detect equivocation. |
-| `bondy_oplog_merge_strategy` | **Legacy** MST page-merge collision resolver. Kept for backward compatibility; new code uses `bondy_oplog_fold`. |
+| `bondy_oplog_merge_strategy` | MST same-event-key collision resolver (default `bondy_oplog_merge_strict_uniqueness`: crash loudly). |
 | `bondy_oplog_peer_source` | Per-instance peer discovery. |
 | `bondy_oplog_transport` | Network transport for sync sessions. |
-| `bondy_oplog_snapshot_store` | Durable storage of CRDT snapshots. |
+| `bondy_oplog_compaction_checkpoint` | Durable storage of compaction checkpoints. |
 | `bondy_oplog_path_strategy` | On-disk layout for durable backends. |
 | `bondy_mst_store` | MST page-level storage backend. |
 | `bondy_oplog_projection_adapter` | Pluggable materialised-cell store under `bondy_db_core` (the canonical implementation is `bondy_oplog_projection_leveled`). |
@@ -1252,8 +1262,9 @@ not exist without them:
   This is the source of the COG abstraction, the operation-log
   framing, and the Byzantine-fault-tolerance approach via
   hash-chaining used by `bondy_oplog`. We replace Canteen's DAG with
-  an MST as the underlying log substrate; see
-  `_design/1_mst_cogs_idea.md` for the rationale and trade-offs.
+  an MST as the underlying log substrate, trading the DAG's explicit
+  causal edges for the MST's deterministic key order plus efficient
+  set-reconciliation anti-entropy.
 
 Any errors in this library's interpretation or adaptation of the above
 work are ours, not theirs.

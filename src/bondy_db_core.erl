@@ -105,9 +105,10 @@ overlay, fold_module}` for each `(NS, Index, Shard)` they manage.
 -type read_batch_result() :: #{batch_key() := read_result()}.
 
 -type range_spec() :: {Low :: term(), High :: term() | infinity}.
-%% `High` may be the atom `infinity` for an open-ended scan (every key
-%% `>= Low` in the bucket). Used by the secondary-index primary-scan
-%% fallback (IDX-4); supported by the ETS and leveled projection adapters.
+%% `High' may be the atom `infinity' for an open-ended scan (every key
+%% greater than or equal to `Low' in the bucket). Used by the
+%% secondary-index primary-scan fallback; supported by the ETS and
+%% leveled projection adapters.
 -type range_opts() :: #{
     limit => pos_integer(),
     direction => asc | desc,

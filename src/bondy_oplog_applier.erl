@@ -285,10 +285,10 @@ configured; defaults are no-ops so existing instances are unaffected.
     (bondy_oplog_event:t()) -> {Key :: term(), Op :: term()} | skip
 ).
 %% The projection-write engine's per-shard context and secondary-index
-%% descriptor were factored out into `bondy_oplog_cell_apply` (the shared
+%% descriptor were factored out into `bondy_oplog_cell_apply' (the shared
 %% cell-apply module). The applier keeps these as aliases so its own
-%% `-type opts()` and `#state{cell_apply_ctx :: cell_apply_ctx() |
-%% undefined}` still resolve against the single source of truth.
+%% opts() and state record fields still resolve against the single
+%% source of truth.
 -type cell_apply_ctx() :: bondy_oplog_cell_apply:cell_apply_ctx().
 -type index_descriptor() :: bondy_oplog_cell_apply:index_descriptor().
 
@@ -1863,19 +1863,19 @@ vv_merge(A, B) ->
         B
     ).
 
-%% @private
-%% Re-fold the `cell_apply` events that landed in the MST since the
-%% last replay through `apply_one_cell/11`. Called from the instance
-%% after a sync session merges peer events. Without this, remote events
-%% sit in the MST but never reach the projection — `bondy_db:read/3`
-%% would only see events authored locally.
+%% NOTE (cell-event replay): re-applies the cell events that landed in
+%% the MST since the last replay. Called from the instance after a sync
+%% session merges peer events. Without this, remote events sit in the
+%% MST but never reach the projection — reads would only see events
+%% authored locally.
 %%
-%% The walk is incremental: `bondy_mst:diff_to_list/3` prunes subtrees
-%% whose root hash is shared between the current MST and
-%% `last_replayed_root`, so the cost is O(events since last sync) rather
-%% than O(events in MST). A cold start (`last_replayed_root = undefined`)
-%% does one full fold so any peer-authored events present in the MST at
-%% boot time are observed; subsequent replays use the diff.
+%% The walk is incremental: the MST diff prunes subtrees whose root
+%% hash is shared between the current MST and the last replayed root,
+%% so the cost is O(events since last sync) rather than O(events in
+%% MST). A cold start (no last replayed root) does one full fold so any
+%% peer-authored events present in the MST at boot time are observed;
+%% subsequent replays use the diff.
+
 %% @private
 %% Full secondary-index rebuild (IDX-4).
 %%

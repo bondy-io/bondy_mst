@@ -15,9 +15,9 @@ single compacted state snapshot. At full convergence the live MST is
 The mechanism in this codebase is the COG (Concurrent Operation
 Group) idea — `bondy_oplog_compaction` orchestrates;
 `bondy_oplog_instance` runs the cycle; `bondy_oplog_gc_scheduler`
-fires it on a timer; `bondy_mst:delete/2` does the physical
-deletion; `bondy_oplog_sync_session:bootstrap/3` carries the
-snapshot to new replicas.
+fires it on a timer; `bondy_mst:truncate/2` does the physical
+deletion; `bondy_oplog_sync_session` (`bootstrap/3` /
+`bootstrap_catalogue/3`) carries the snapshot to new replicas.
 
 ## The intuition: the MST is not a log, it's a *window*
 
@@ -126,25 +126,29 @@ sequenceDiagram
     participant Inst as oplog_instance
     participant Worker as compaction worker
     participant Crdt as CRDT module
-    participant SS as snapshot_store
+    participant CK as compaction_checkpoint
 
     Sched->>Comp: compact(InstanceId)
     Comp->>Inst: compact(InstanceId, PeerRoots)
     Inst->>Worker: spawn (off the gen_server)
     Worker->>Worker: compute_frontier_for(MST, PeerRoots)
-    Worker->>Worker: events_in_open_range(MST, watermark, frontier)
-    Worker->>Crdt: interpret_cog(Events, BaseSnapshot)
-    Crdt-->>Worker: NewSnapshot
-    Worker->>SS: put_snapshot(frontier, NewSnapshot)
-    Worker->>Inst: {compaction_done, Frontier, NewSnapshot, N}
+    alt catalogue (projection-backed) instance
+        Note over Worker: fast path — no re-fold.<br/>The projection IS the per-cell<br/>interpret_cog checkpoint,<br/>maintained eagerly on write.
+    else bare single-CRDT instance
+        Worker->>Worker: events_in_open_range(MST, watermark, frontier)
+        Worker->>Crdt: interpret_cog(Events, BaseCheckpoint)
+        Crdt-->>Worker: NewCheckpoint
+        Worker->>CK: put_checkpoint(frontier, NewCheckpoint)
+    end
+    Worker->>Inst: {compaction_done, Frontier, ...}
     Note over Inst: atomic commit inside gen_server:<br/>truncate MST + watermark advance + HLC bump
     Inst-->>Comp: {ok, {compacted, Frontier, N}}
 ```
 
-Two design choices worth noting:
+Three design choices worth noting:
 
 - **The heavy work is off the gen_server.** Frontier computation,
-  event extraction, `interpret_cog`, and snapshot persistence happen
+  event extraction, `interpret_cog`, and checkpoint persistence happen
   in a monitored worker. The gen_server only executes the atomic
   commit (truncate + watermark + HLC bump). Local appends and reads
   proceed throughout.
@@ -152,6 +156,14 @@ Two design choices worth noting:
   instance is in flight at a time; overlapping requests reply
   `{ok, no_change}` and the next tick retries. Compaction is
   idempotent, so a missed tick is not a problem.
+- **No overlay-drain barrier.** The frontier derives from peer-synced
+  roots, which only ever reflect installed, published events — it is
+  always at or below the installed watermark, strictly below anything
+  still pending in the overlay. `compact/1` therefore runs safely
+  under sustained write load; in fused mode the yielding drain
+  guarantees the compact request is actually serviced between drain
+  slices. (`truncate_prefix/2`, whose watermark is caller-supplied
+  and arbitrary, keeps its barrier.)
 
 The cycle yields `{ok, no_change}` (no fresh peers, empty
 intersection, or frontier ≤ current watermark) far more often than
@@ -161,73 +173,88 @@ that just confirm there is nothing new to compact.
 ## "Truncate" means **delete pages**, not tombstone events
 
 The MST truncation step is the load-bearing one. It is not a
-soft-delete: `bondy_oplog_instance:truncate_below_or_equal/2` calls
-`bondy_mst:delete/2` for each event key ≤ the watermark, and
-`bondy_mst:delete/2` performs **structural page-level deletion**.
+soft-delete: the instance calls `bondy_mst:truncate/2` with the
+watermark, a **structural prefix-truncate** that removes every key
+`≤ Watermark` in one pass.
 
 ```mermaid
 flowchart TB
-    DEL["bondy_mst:delete(Key)"]
-    LOC["locate page containing Key"]
-    FREE["bondy_mst_store:free(Hash, Page)"]
-    REWRITE["rewrite parent page<br/>without Key"]
-    MERGE["merge orphan sibling subtrees<br/>(merge_subtrees)"]
+    TR["bondy_mst:truncate(MST, Watermark)"]
+    SPINE["walk the LEFT spine only<br/>(the prefix lives there — keys are HLC-ordered)"]
+    DROP["drop entries ≤ W together with<br/>their left subtrees (freed for GC)"]
+    REBUILD["rewrite the O(log N) spine pages<br/>that straddle W"]
     NEWROOT[new root hash]
 
-    DEL --> LOC --> FREE
-    LOC --> REWRITE --> MERGE --> NEWROOT
+    TR --> SPINE --> DROP --> REBUILD --> NEWROOT
 ```
 
-The page that held the key is **freed** (added to the page store's
-free set / tombstones file), the parent page is rewritten without the
-entry, and the orphaned sibling subtree on the right is merged into
-the previous entry's subtree on the left. The result is a smaller
-tree, with a new root hash.
+Unlike calling `bondy_mst:delete/2` once per stale key — `O(P·log N)`
+in the prefix size, one spine rebuild per key — `truncate/2` walks the
+left spine **once**, rewrites only the `O(log N)` pages that straddle
+the watermark, and leaves the dropped subtrees unreferenced for the
+store's GC. Because the MST is history-independent, the result is
+**byte-identical** (same root hash) to the equivalent sequence of
+deletes and to a fresh tree built from the surviving keys — a
+property pinned by equivalence tests.
 
 This matters because:
 
 - **No tombstones to ship over AE.** Sync sessions exchange only
   pages that exist; truncated keys are simply gone.
-- **GC reclaims the disk.** The pack-store rewrite GC reads only
+- **GC reclaims the space.** The pack-store rewrite GC reads only
   pages reachable from the live root; freed pages are not written
-  to the new pack and the old packs are unlinked.
+  to the new pack and the old packs are unlinked. (The ETS store
+  prunes freed pages by epoch.)
 - **Truncation is deterministic.** Every replica that truncates the
   same prefix arrives at the same tree (same pages, same root hash).
 
-`bondy_mst:delete/2` is implemented in `bondy_mst.erl` at
-`delete_below_level/5` / `delete_from_level/4` / `merge_subtrees/3`.
+`bondy_mst:truncate/2` is implemented in `bondy_mst.erl`
+(`truncate_at` / `truncate_scan` / `rebuild_truncated`);
+`bondy_mst:delete/2` remains for single-key structural deletion.
 
-## The snapshot
+## The compaction checkpoint
 
-A snapshot is the output of `CrdtMod:interpret_cog(Events, BaseState)`
-folded over every event in the stable prefix since the last
-compaction. The substrate stores it via the
-`bondy_oplog_snapshot_store` behaviour:
+For a **bare single-CRDT instance**, the checkpoint is the output of
+`CrdtMod:interpret_cog(Events, BaseState)` folded over every event in
+the stable prefix since the last compaction. For a **catalogue
+(projection-backed) instance** no separate fold is needed — the
+projection, maintained eagerly on write through the cell kernel, *is*
+the per-cell `interpret_cog` checkpoint; compaction only truncates
+the MST.
+
+The substrate stores the single-CRDT checkpoint via the
+`bondy_oplog_compaction_checkpoint` behaviour (named to disambiguate
+it from the *catalogue snapshot* used by bootstrap, below):
 
 ```mermaid
 classDiagram
-    class bondy_oplog_snapshot_store {
+    class bondy_oplog_compaction_checkpoint {
       <<behaviour>>
       +init(InstanceId, Opts)
-      +put_snapshot(State, Watermark, Snapshot)
-      +get_snapshot(State)
+      +put_checkpoint(State, Watermark, Checkpoint)
+      +get_checkpoint(State)
       +current_watermark(State)
       +close(State)
     }
-    bondy_oplog_snapshot_store <|-- bondy_oplog_snapshot_store_ets
-    bondy_oplog_snapshot_store <|-- bondy_oplog_snapshot_store_file
+    bondy_oplog_compaction_checkpoint <|-- bondy_oplog_compaction_checkpoint_ets
+    bondy_oplog_compaction_checkpoint <|-- bondy_oplog_compaction_checkpoint_file
 ```
 
-Two storage implementations ship:
+Two storage implementations ship; the default is **context-sensitive**
+— file-backed when `storage_path` is set, ETS otherwise:
 
 | Backend | Durability | Use |
 |---|---|---|
-| `bondy_oplog_snapshot_store_ets` | in-memory | tests, ephemeral instances |
-| `bondy_oplog_snapshot_store_file` | atomic rename, fsync | production |
+| `bondy_oplog_compaction_checkpoint_ets` | in-memory | tests, ephemeral instances |
+| `bondy_oplog_compaction_checkpoint_file` | tmp + datasync + rename + fsync-dir, at `<storage_path>/<shard>/<InstanceId>/checkpoint.etf` | production |
 
-The library policy is **one snapshot per instance** — the most recent
-one. Older snapshots are not retained. The live MST plus the latest
-snapshot fully reconstruct the application state.
+The file backend treats a decode failure as `{error, {corrupted, _}}`
+and the instance **refuses to start** on a corrupted checkpoint —
+loud, not silent.
+
+The library policy is **one checkpoint per instance** — the most
+recent one. Older checkpoints are not retained. The live MST plus the
+latest checkpoint fully reconstruct the application state.
 
 ## The CRDT module (the COG interpreter)
 
@@ -335,6 +362,45 @@ whole history.
 - If the peer's watermark is strictly greater, install and advance.
 - Otherwise refuse with `{error, watermark_not_advancing}` and fall
   through to plain AE.
+
+> **Terminology.** The sequence above is the **single-CRDT** (bare
+> instance) bootstrap: what travels is the instance's *compaction
+> checkpoint* (the wire request is still named `get_snapshot`).
+> Catalogue instances — the `bondy_db` common case, where state is a
+> per-cell projection rather than one CRDT state — use the
+> **catalogue snapshot** protocol below. Same lifecycle gate, a
+> different payload.
+
+### Catalogue-mode bootstrap (multi-cell snapshot)
+
+A catalogue's state is millions of cells, not one term, so the
+transfer is a **cursor-paginated cell stream**
+(`bondy_oplog_sync_session:bootstrap_catalogue/3`):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant New as new replica
+    participant Peer as established peer
+    participant Local as local instance
+
+    New->>Peer: get_catalogue_snapshot_init
+    Peer-->>New: {Watermark, Cursor, first cell chunk}
+    loop until cursor exhausted
+        New->>Local: install_catalogue_batch(Cells, Mode)
+        New->>Peer: {get_catalogue_snapshot_next, Cursor}
+        Peer-->>New: next chunk
+    end
+    New->>Local: finalize (watermark advance + truncate + mark_live)
+    Note over New,Peer: plain AE picks up the live tail
+```
+
+`install_catalogue_batch` has two modes: **replace** (fresh replica —
+cells written as-is; uses the projection adapter's `head/3` fast path
+when exported) and **merge** (recovering replica with surviving local
+state — each incoming cell is merged through the CRDT). The
+finalize step performs the same monotonic watermark advance and
+`mark_live/1` ordering as the single-CRDT path.
 
 ## Bootstrap lifecycle: gating the applier
 
@@ -636,12 +702,18 @@ Implementation:
 - `bondy_oplog_peer_state.erl` — per-(peer, instance) root cache;
   `get_instance_peer_states/1` filters by `peer_timeout_ms` (default
   30 000 ms).
-- `bondy_oplog_snapshot_store.erl` + `_ets.erl` + `_file.erl` —
-  one-snapshot-per-instance behaviour and implementations.
+- `bondy_oplog_compaction_checkpoint.erl` + `_ets.erl` + `_file.erl` —
+  one-checkpoint-per-instance behaviour and implementations
+  (context-sensitive default: file when `storage_path` is set).
 - `bondy_oplog_sync_session.erl:bootstrap/3` — fetch peer snapshot
   then pull live tail; falls back to plain AE on `no_snapshot`.
   Calls `mark_live/1` *after* the snapshot install succeeds — the
   durable barrier that flips the lifecycle.
+- `bondy_oplog_sync_session.erl:bootstrap_catalogue/3` — the
+  catalogue (multi-cell) bootstrap: cursor-paginated cell stream
+  (`get_catalogue_snapshot_init` / `..._next`),
+  `install_catalogue_batch` replace/merge modes, finalize +
+  `mark_live/1` last.
 - `bondy_oplog_bootstrap_lifecycle.erl` — the `<instance_dir>/lifecycle.live`
   flag file + atomics mirror; `open/2`, `is_live/1`, `mark_live/1`.
 - `bondy_oplog_sync_scheduler.erl`:
@@ -674,14 +746,13 @@ Implementation:
       the pid and translates its exit reason into the backoff
       decision.
 - `bondy_oplog_crdt.erl` — `interpret_cog/2` callback.
-- `bondy_mst.erl:delete/2`, `delete_below_level/5`,
-  `delete_from_level/4`, `merge_subtrees/3` — physical page deletion
-  with sibling-subtree merge.
+- `bondy_mst.erl:truncate/2` (`truncate_at` / `truncate_scan` /
+  `rebuild_truncated`) — the structural prefix-truncate; `delete/2`
+  + `merge_subtrees/3` for single-key structural deletion.
 
-Design rationale for the dispatch-policy chain lives in
-`_design/catalogue_expansion_plan.md` §§4.13–4.16 (PR-D3
-auto-bootstrap, PR-D4 peer strategy, PR-D5 in-flight cap, PR-D6
-retry backoff).
+The dispatch-policy chain (auto-bootstrap routing, peer strategy,
+in-flight cap, retry backoff) is documented in the auto-bootstrap
+section above; the scheduler module docs carry the option tables.
 
 Tests:
 

@@ -92,12 +92,19 @@ from_modules(FoldModule, undefined) ->
     end.
 
 -doc """
-Map a former `fold_module` label to its native operation-based CRDT twin,
-or `undefined` when none exists. Every former commutative fold has a
-byte-identical CRDT twin, so this is a zero-migration alias: a table opened
-with `fold_module => lww_register` (or the fully-qualified
-`bondy_oplog_fold_lww_register`) resolves to `bondy_oplog_crdt_lww_register`
-and durable cells decode unchanged.
+Map a short label to its native operation-based CRDT module, or
+`undefined` when none exists. Two kinds of label resolve here:
+
+- **Legacy fold names** — every former commutative fold has a
+  byte-identical CRDT twin, so `fold_module => lww_register` (or the
+  fully-qualified `bondy_oplog_fold_lww_register`) resolves to
+  `bondy_oplog_crdt_lww_register` and durable cells decode unchanged.
+- **Convenience aliases** for CRDTs that never had a fold — e.g.
+  `two_p_set`, `aw_set`, `rw_set`, `ew_flag`, `dw_flag` resolve to their
+  `bondy_oplog_crdt_*` modules.
+
+A fully-qualified native CRDT module name passed directly resolves to
+itself (the pass-through clause).
 """.
 -spec default_crdt_for_fold(atom() | module() | undefined) ->
     module() | undefined.
@@ -130,6 +137,16 @@ default_crdt_for_fold(index_entry) ->
     bondy_oplog_crdt_index_entry;
 default_crdt_for_fold(bondy_oplog_fold_index_entry) ->
     bondy_oplog_crdt_index_entry;
+default_crdt_for_fold(two_p_set) ->
+    bondy_oplog_crdt_two_p_set;
+default_crdt_for_fold(aw_set) ->
+    bondy_oplog_crdt_aw_set;
+default_crdt_for_fold(rw_set) ->
+    bondy_oplog_crdt_rw_set;
+default_crdt_for_fold(ew_flag) ->
+    bondy_oplog_crdt_ew_flag;
+default_crdt_for_fold(dw_flag) ->
+    bondy_oplog_crdt_dw_flag;
 default_crdt_for_fold(Mod) when is_atom(Mod), Mod =/= undefined ->
     %% A native CRDT module name passed directly (e.g. via `fold_module =>
     %% bondy_oplog_crdt_lww_register`) resolves to itself. An unknown atom

@@ -1238,7 +1238,6 @@ provision_shard(
     end.
 
 %% @private
-%% @private
 %% A CRDT module's declared causal tier, or `tier_0` when no native CRDT
 %% is configured (the legacy fold path). `tier_2` provisions the per-cell
 %% DVV causal-context stamp for the table's writes.
@@ -1332,16 +1331,16 @@ release_cache(Topology, TableState, CacheHandle) ->
             ok
     end.
 
-%% @private
-%% `OplogOpts` is merged into the per-shard instance opts. `fold_module`
-%% and the applier's *routing* keys (`cell_apply_target`,
-%% `secondary_indexes`) are pinned — they carry per-shard routing the
-%% caller cannot meaningfully provide — and override any caller value.
-%% Caller-provided applier *tuning* (e.g. `apply_batch_max_events`,
-%% `oldstate_cache`) is merged in *under* the pinned routing keys, so it
-%% reaches the applier instead of being dropped. Everything else
-%% (`backend`, `storage_path`, `fsync_mode`, `max_install_in_flight`,
-%% etc.) is forwarded verbatim.
+%% NOTE (oplog opts merge): `OplogOpts` is merged into the per-shard
+%% instance opts. `fold_module` and the applier's *routing* keys
+%% (`cell_apply_target`, `secondary_indexes`) are pinned — they carry
+%% per-shard routing the caller cannot meaningfully provide — and
+%% override any caller value. Caller-provided applier *tuning* (e.g.
+%% `apply_batch_max_events`, `oldstate_cache`) is merged in *under* the
+%% pinned routing keys, so it reaches the applier instead of being
+%% dropped. Everything else (`backend`, `storage_path`, `fsync_mode`,
+%% `max_install_in_flight`, etc.) is forwarded verbatim.
+
 %% @private
 %% A3 — context-sensitive default for the applier's OldValue frame-cache:
 %% ON for durable (leveled) projections, OFF for ephemeral (ets). A

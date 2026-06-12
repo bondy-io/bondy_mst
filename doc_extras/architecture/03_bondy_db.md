@@ -42,10 +42,13 @@ flowchart TB
 - **Projection** is the materialised state — one cell per
   `(Bucket, Key)`, value is `<<HlcLen:16, Hlc/binary, FoldedValue>>`.
 
-The **fold module** is what gives the read CRDT semantics.
-[Chapter 05](05_fold_strategies.md) covers folds in detail; here,
-just note that the fold is what merges the projection's snapshot
-with the overlay's tail.
+The **CRDT module** is what gives the read its semantics.
+[Chapter 05](05_crdt_model.md) covers the contract in detail; here,
+just note that the read path interprets the overlay's live group of
+pending events *on top of* the projection state through the CRDT's
+own `interpret_cog/2` (via
+`bondy_oplog_cell_kernel:interpret_overlay/4`) — a group
+interpretation, never a per-event state fold.
 
 ## What a cell looks like
 
@@ -78,11 +81,11 @@ sequenceDiagram
     participant Cache
     participant Proj as projection
     participant Ov as overlay
-    participant Fold as fold_module
+    participant K as cell kernel / CRDT
 
     App->>Core: read(NS, Idx, Bucket, Key)
     Core->>Reg: lookup(NS, Idx, shard_for(Bucket,Key))
-    Reg-->>Core: {cache, proj, fold, ...}
+    Reg-->>Core: {cache, proj, kernel, ...}
 
     Core->>Cache: get(Key)
     alt cache hit
@@ -92,25 +95,24 @@ sequenceDiagram
         Core->>Proj: get(Key)
         alt no projection cell
             Proj-->>Core: not_found
-            Note over Core,Fold: ProjValue = fold:initial_value()<br/>ProjHlc = 0
+            Note over Core,K: State = CrdtMod:init()<br/>ProjHlc = 0
         else cell exists
-            Proj-->>Core: <<HlcLen, Hlc, Body>>
-            Core->>Fold: decode_state(Body)
-            Fold-->>Core: ProjValue
+            Proj-->>Core: V2 frame (Hlc · StateBytes · [ValueBytes])
+            Core->>K: decode_state(StateBytes)
+            K-->>Core: State
         end
         Core->>Ov: events_for(Key, after=ProjHlc)
         Ov-->>Core: [Event1, Event2, ...]
-        loop each overlay event
-            Core->>Fold: apply_event(state, Event)
-            Fold-->>Core: state'
-        end
+        Core->>K: interpret_overlay(State, [Event1, ...])
+        Note over K: CrdtMod:interpret_cog — the live group<br/>interpreted on top of the projection state
+        K-->>Core: {Value, Hlc}
         Core->>Cache: put(Key, {Value, Hlc})
         Core-->>App: {Value, Hlc}
     end
 ```
 
-The slow path is "one LSM get + a tiny fold" — typically a couple of
-microseconds. The cache hit is sub-microsecond.
+The slow path is "one LSM get + one group interpretation" — typically
+a couple of microseconds. The cache hit is sub-microsecond.
 
 ## The overlay, in pictures
 
@@ -373,7 +375,8 @@ The registry entry per `(NS, Index, Shard)` carries:
   open time, not by the applier itself.
 - `cache_adapter` + `cache_handle` — same.
 - `overlay` — the per-instance ETS overlay tid.
-- `fold_module` — the per-namespace fold ([chapter 05](05_fold_strategies.md)).
+- `crdt_module` — the per-table CRDT ([chapter 05](05_crdt_model.md));
+  a legacy `fold_module` label resolves to its native twin.
 - `ae_atomics` — the wait-free freshness ref read by
   `ensure_fresh/2` and bumped by `bump_ae/3` after each AE round.
 - For secondary-index shards, additionally a `writer_pid` and an
@@ -421,6 +424,19 @@ Backends can be mixed within one DB — a durable `leveled` table and an
 ephemeral `ets` table coexist under the same topology
 (`bondy_db_topology_memory` is itself a DB-scoped ETS provider for the
 ephemeral case).
+
+### Fused ephemeral tables
+
+An ephemeral table can additionally opt into **fused mode** —
+`open_table(Db, Name, #{fused => true, …})` — which collapses each
+shard's applier into its instance gen_server, and optionally swap the
+WAL for the in-memory backend
+(`oplog_instance_opts => #{wal_backend => mem}`), eliminating disk
+I/O from the write path entirely. This is the high-throughput
+configuration for registration/subscription-style tables; durability
+is cluster-provided via anti-entropy exactly as for any ephemeral
+table. The mechanics live in [chapter 01](01_bondy_oplog.md); the
+read/write API here is unchanged.
 
 ## Things to keep in mind
 
@@ -473,8 +489,9 @@ Secondary indexes:
   normalize, projects, `max_lag`, `max_inflight`).
 - `bondy_oplog_index_key.erl` — order-preserving `(Term, PrimaryKey)`
   composite-key codec.
-- `bondy_oplog_fold_index_entry.erl` — the `index_entry` fold
-  (LWW-over-presence keyed by the primary HLC).
+- `bondy_oplog_crdt_index_entry.erl` — the `index_entry` CRDT
+  (apply ≡ merge LWW keyed by the primary HLC;
+  `value_equals_state`).
 - `bondy_oplog_secondary_writer.erl` + `bondy_oplog_secondary_sup.erl`
   — per-(NS, Index, Shard) async writer and its supervisor.
 - `bondy_oplog_index_rebuild.erl` — serialised MST-replay rebuild /

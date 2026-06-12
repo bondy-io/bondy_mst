@@ -1,8 +1,10 @@
 # Backup & restore — operator runbook
 
 This page is the **operator's runbook** for taking a backup of a Bondy MST
-data tree and restoring it. The architecture context for why each step
-exists lives in `_design/STORAGE_ARCHITECTURE.md` §13.3.
+data tree and restoring it. The architecture context for what each
+store contains lives in [chapter 00](00_overview.md) (the layered
+storage model) and [chapter 01](01_bondy_oplog.md) (the WAL and
+recovery).
 
 The Erlang API for these operations is in `bondy_mst_admin`.
 

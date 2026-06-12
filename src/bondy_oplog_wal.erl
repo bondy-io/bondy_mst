@@ -1528,10 +1528,10 @@ bootstrap(#state{} = State) ->
 segment_path(Dir, SegId) ->
     filename:join(Dir, bondy_oplog_wal_segment:filename(SegId)).
 
-%% @private
-%% Encode the batch body, validate against `max_batch_bytes`, pre-rotate
-%% if the frame won't fit in the current segment, then write the frame
-%% and bind the per-event return entries.
+%% NOTE (append-batch encoding): the batch body is encoded and
+%% validated against `max_batch_bytes`, pre-rotating if the frame won't
+%% fit in the current segment, then the frame is written and the
+%% per-event return entries bound.
 %%
 %% Pre-rotation is the atomicity guarantee: a batch is either fully in
 %% segment N or fully in segment N+1, never split. `max_batch_bytes` is
@@ -1540,6 +1540,7 @@ segment_path(Dir, SegId) ->
 %% to hold their last frame, then the next append rotates). Callers
 %% that want strict segment sizing should set `max_batch_bytes =<
 %% max_segment_bytes - SEG_HEADER_BYTES - FRAME_HEADER_BYTES`.
+
 %% @private
 %% Group commit applies only to `per_write` mode (the durable-on-return
 %% mode). `batched` already coalesces by size/time and replies before the
