@@ -339,16 +339,17 @@ a twin — tables using them must move to a surviving type:
 | `presence_basic` | `lww_register` (presence is a register write) |
 | `ttl_presence` | `lww_register` + application-level expiry |
 | `orset` | `aw_set` (the dedicated add-wins / observed-remove set) |
-| `strict_register` | `lww_register` — the substrate's default strict-uniqueness merge strategy already crashes loudly on same-event-key collisions; surface concurrent-writer conflicts with `mv_register` if they must be visible |
+| `strict_register` | `lww_register` — the substrate already crashes loudly on same-event-key collisions; surface concurrent-writer conflicts with `mv_register` if they must be visible |
 | `map_of_fields` | `aw_map` (per-key sub-values) or one `lww_register` cell per field |
 
-> **Adjacent behaviour.** `bondy_oplog_merge_strategy` — a
-> one-callback behaviour (`merge/3`) — resolves the rare case where
-> the MST sees two values for the same *event key*. The default is
-> `bondy_oplog_merge_strict_uniqueness`: crash loudly (event keys
-> are unique by construction, so a duplicate is a bug or an attack).
-> It is unrelated to the CRDT catalogue; overriding it via the
-> `merge_strategy` instance opt is deprecated but honoured.
+> **MST page-merge collisions.** When the MST sees two values for the
+> same *event key*, the instance resolves them with a fixed internal
+> rule (`bondy_oplog_instance:merge_page_value/3`): identical values
+> pass through (idempotent peer re-receive), divergent values crash
+> loudly — event keys are unique by construction, so a duplicate is a
+> bug or an attack. This is unrelated to the CRDT catalogue: CRDT
+> tables converge via their `fold_module`/`crdt_module`, not this
+> hook.
 
 ## The projection-value seam
 
@@ -551,10 +552,9 @@ Implementation:
 
 Related but separate:
 
-- **`bondy_oplog_merge_strategy.erl`** +
-  `bondy_oplog_merge_strict_uniqueness.erl` — one-callback `merge/3`
-  behaviour for MST same-key duplicate resolution. Unrelated to
-  operation interpretation.
+- **`bondy_oplog_instance:merge_page_value/3`** — the fixed internal
+  rule for MST same-key duplicate resolution (identical passes,
+  divergent crashes). Unrelated to operation interpretation.
 - [Chapter 04](04_applier.md) — how the applier (and the fused
   instance) drive `kernel:apply/6` per batch.
 - [Chapter 06](06_compaction_and_bootstrap.md) — `interpret_cog` at

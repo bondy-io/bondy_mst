@@ -93,7 +93,7 @@ per_entity, since the Bookie already partitions by shard.
 -export([close_table/2]).
 -export([shutdown/1]).
 
--define(PROJECTION_ADAPTER, bondy_oplog_projection_leveled).
+-define(COMMON, bondy_db_topology_leveled_common).
 
 %% =============================================================================
 %% bondy_db_topology callbacks
@@ -107,12 +107,12 @@ init(DbName, Opts) when is_atom(DbName), is_map(Opts) ->
                     BookOpts = maps:get(
                         book_opts_fun,
                         Opts,
-                        fun default_book_opts/1
+                        fun ?COMMON:default_book_opts/1
                     ),
                     State = #{
                         db_name => DbName,
                         sup => Sup,
-                        dir => normalise_dir(Dir),
+                        dir => ?COMMON:normalise_dir(Dir),
                         book_opts_fun => BookOpts,
                         %% Resolved on first `open_table/4`.
                         shard_count => undefined,
@@ -141,14 +141,9 @@ open_table(EntityType, ShardCount, _TableOpts, State0) when
             Err
     end.
 
-route(Shard, #{shards := Shards}) when is_integer(Shard) ->
-    case maps:find(Shard, Shards) of
-        {ok, Bookie} ->
-            Handle = #{bookie => Bookie},
-            {ok, ?PROJECTION_ADAPTER, Handle};
-        error ->
-            {error, {unknown_shard, Shard}}
-    end.
+route(Shard, State) when is_integer(Shard) ->
+    %% Shared with `bondy_db_topology_per_entity` via the common helper.
+    ?COMMON:route(Shard, State).
 
 -doc """
 Shared-shards topology disambiguates EntityType by Bucket (the Bookie
@@ -215,7 +210,7 @@ start_shards(
     Acc
 ) ->
     ShardDir = shard_dir(Dir, I),
-    case ensure_dir(ShardDir) of
+    case ?COMMON:ensure_dir(ShardDir) of
         ok ->
             BookOpts = BookOptsFun(ShardDir),
             case bondy_db_leveled_sup:start_bookie(Sup, BookOpts) of
@@ -223,43 +218,13 @@ start_shards(
                     start_shards(I + 1, N, State, Acc#{I => Bookie});
                 {error, _} = Err ->
                     %% Best-effort rollback of already-started Bookies.
-                    [stop_bookie_safe(B) || B <- maps:values(Acc)],
+                    [?COMMON:stop_bookie_safe(B) || B <- maps:values(Acc)],
                     Err
             end;
         {error, _} = Err ->
-            [stop_bookie_safe(B) || B <- maps:values(Acc)],
+            [?COMMON:stop_bookie_safe(B) || B <- maps:values(Acc)],
             Err
     end.
 
 shard_dir(Dir, Shard) ->
     filename:join([Dir, integer_to_list(Shard)]).
-
-ensure_dir(Dir) ->
-    filelib:ensure_dir(filename:join(Dir, ".keep")).
-
-normalise_dir(Dir) when is_binary(Dir) -> binary_to_list(Dir);
-normalise_dir(Dir) when is_list(Dir) -> Dir.
-
-default_book_opts(Dir) ->
-    %% `head_only=with_lookup` required by `bondy_oplog_projection_leveled`
-    %% (PR-PS-15b) — enables `book_mput/2` + `book_headonly/4`. See
-    %% `bondy_db_topology_single_bookie:default_book_opts/1` for the
-    %% rationale.
-    [
-        {root_path, Dir},
-        {cache_size, 2000},
-        {max_journalsize, 100_000_000},
-        {sync_strategy, none},
-        {head_only, with_lookup}
-    ].
-
-stop_bookie_safe(Bookie) when is_pid(Bookie) ->
-    case is_process_alive(Bookie) of
-        true ->
-            _ = catch leveled_bookie:book_close(Bookie),
-            ok;
-        false ->
-            ok
-    end;
-stop_bookie_safe(_) ->
-    ok.

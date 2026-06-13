@@ -23,7 +23,7 @@ lifecycle_test_() ->
         fun crash_isolated_between_instances/0,
         fun discover_flat/0,
         fun discover_sharded/0,
-        fun path_strategies_round_trip/0
+        fun path_layouts_round_trip/0
     ]}.
 
 start_stop() ->
@@ -69,7 +69,7 @@ discover_flat() ->
     Ids = [<<"alpha">>, <<"beta">>, <<"gamma">>],
     [ok = file:make_dir(filename:join(Tmp, Id)) || Id <- Ids],
     Found = bondy_oplog:discover_instances(
-        Tmp, bondy_oplog_path_flat
+        Tmp, flat
     ),
     ?assertEqual(lists:sort(Ids), lists:sort(Found)),
     ok = del_tree(Tmp).
@@ -79,7 +79,7 @@ discover_sharded() ->
     Ids = [<<"foo">>, <<"bar">>, <<"baz">>],
     [
         begin
-            P = bondy_oplog_path_sharded:storage_path(Id, Tmp),
+            P = bondy_oplog_path:storage_path(Id, Tmp, sharded),
             %% `ensure_dir/1` ensures the *parent* exists; passing a
             %% sentinel filename inside `P` makes `P` itself the parent
             %% to be created.
@@ -88,16 +88,16 @@ discover_sharded() ->
      || Id <- Ids
     ],
     Found = bondy_oplog:discover_instances(
-        Tmp, bondy_oplog_path_sharded
+        Tmp, sharded
     ),
     ?assertEqual(lists:sort(Ids), lists:sort(Found)),
     ok = del_tree(Tmp).
 
-path_strategies_round_trip() ->
+path_layouts_round_trip() ->
     Id = <<"hello">>,
     Base = <<"/tmp/bondy_mst_data">>,
-    Flat = bondy_oplog_path_flat:storage_path(Id, Base),
-    Sharded = bondy_oplog_path_sharded:storage_path(Id, Base),
+    Flat = bondy_oplog_path:storage_path(Id, Base, flat),
+    Sharded = bondy_oplog_path:storage_path(Id, Base, sharded),
     ?assertEqual(
         <<"/tmp/bondy_mst_data/hello">>,
         unicode:characters_to_binary(Flat)

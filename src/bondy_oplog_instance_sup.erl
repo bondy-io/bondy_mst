@@ -274,10 +274,9 @@ wal_base_dir(InstanceId, Opts) ->
         error ->
             case maps:find(storage_path, Opts) of
                 {ok, BaseDir} ->
-                    Strategy = maps:get(
-                        path_strategy, Opts, bondy_oplog_path_sharded
+                    Base = bondy_oplog_path:instance_dir(
+                        InstanceId, BaseDir, Opts
                     ),
-                    Base = Strategy:storage_path(InstanceId, BaseDir),
                     filename:join(
                         unicode:characters_to_binary(Base), <<"wal">>
                     );
@@ -367,10 +366,7 @@ resolve_origin_opt(InstanceId, Opts) ->
 origin_persist_path(InstanceId, Opts) ->
     case maps:find(storage_path, Opts) of
         {ok, BaseDir} ->
-            Strategy = maps:get(
-                path_strategy, Opts, bondy_oplog_path_sharded
-            ),
-            Base = Strategy:storage_path(InstanceId, BaseDir),
+            Base = bondy_oplog_path:instance_dir(InstanceId, BaseDir, Opts),
             filename:join(
                 unicode:characters_to_binary(Base), <<"origin">>
             );

@@ -42,7 +42,7 @@ persistent_no_flag_no_seed_starts_pre_bootstrap_test() ->
     try
         H = ?MODL:open(<<"p1">>, #{
             storage_path => Tmp,
-            path_strategy => bondy_oplog_path_flat
+            path_layout => flat
         }),
         ?assertEqual(pre_bootstrap, ?MODL:state(H)),
         Path = ?MODL:flag_path(H),
@@ -57,7 +57,7 @@ persistent_seed_true_starts_live_and_persists_flag_test() ->
     try
         H = ?MODL:open(<<"p2">>, #{
             storage_path => Tmp,
-            path_strategy => bondy_oplog_path_flat,
+            path_layout => flat,
             seed => true
         }),
         ?assertEqual(live, ?MODL:state(H)),
@@ -80,7 +80,7 @@ persistent_existing_flag_overrides_seed_false_test() ->
         ok = file:write_file(Flag, <<>>),
         H = ?MODL:open(Id, #{
             storage_path => Tmp,
-            path_strategy => bondy_oplog_path_flat,
+            path_layout => flat,
             seed => false
         }),
         ?assertEqual(live, ?MODL:state(H))
@@ -97,7 +97,7 @@ mark_live_persists_flag_test() ->
     try
         H = ?MODL:open(<<"p4">>, #{
             storage_path => Tmp,
-            path_strategy => bondy_oplog_path_flat
+            path_layout => flat
         }),
         ?assertEqual(pre_bootstrap, ?MODL:state(H)),
         ok = ?MODL:mark_live(H),
@@ -112,7 +112,7 @@ mark_live_idempotent_test() ->
     try
         H = ?MODL:open(<<"p5">>, #{
             storage_path => Tmp,
-            path_strategy => bondy_oplog_path_flat
+            path_layout => flat
         }),
         ok = ?MODL:mark_live(H),
         %% Calling again must not error.
@@ -128,7 +128,7 @@ restart_after_mark_live_sees_live_test() ->
     try
         Opts = #{
             storage_path => Tmp,
-            path_strategy => bondy_oplog_path_flat
+            path_layout => flat
         },
         H1 = ?MODL:open(Id, Opts),
         ?assertEqual(pre_bootstrap, ?MODL:state(H1)),
@@ -150,7 +150,7 @@ restart_without_mark_live_sees_pre_bootstrap_test() ->
     try
         Opts = #{
             storage_path => Tmp,
-            path_strategy => bondy_oplog_path_flat
+            path_layout => flat
         },
         _H1 = ?MODL:open(Id, Opts),
         %% Drop the handle without calling mark_live, then "restart".
@@ -164,15 +164,15 @@ restart_without_mark_live_sees_pre_bootstrap_test() ->
 %% Path strategy honoured
 %% =============================================================================
 
-uses_configured_path_strategy_test() ->
+uses_configured_path_layout_test() ->
     Tmp = mk_tmp_dir(),
     Id = <<"p8">>,
     try
         H = ?MODL:open(Id, #{
             storage_path => Tmp,
-            path_strategy => bondy_oplog_path_flat
+            path_layout => flat
         }),
-        ExpectedDir = bondy_oplog_path_flat:storage_path(Id, Tmp),
+        ExpectedDir = bondy_oplog_path:storage_path(Id, Tmp, flat),
         ExpectedPath = filename:join(
             unicode:characters_to_binary(ExpectedDir),
             "lifecycle.live"
@@ -182,12 +182,12 @@ uses_configured_path_strategy_test() ->
         rm_rf(Tmp)
     end.
 
-defaults_to_sharded_path_strategy_test() ->
+defaults_to_sharded_path_layout_test() ->
     Tmp = mk_tmp_dir(),
     Id = <<"p9">>,
     try
         H = ?MODL:open(Id, #{storage_path => Tmp}),
-        ExpectedDir = bondy_oplog_path_sharded:storage_path(Id, Tmp),
+        ExpectedDir = bondy_oplog_path:storage_path(Id, Tmp, sharded),
         ExpectedPath = filename:join(
             unicode:characters_to_binary(ExpectedDir),
             "lifecycle.live"

@@ -23,7 +23,8 @@ Bookie lifecycle (start, stop, supervision, path layout, refcounting)
 is the caller's concern — the consumer-facing `bondy_db` layer above
 the substrate is where those decisions live. The Bookie **must** be
 opened with `{head_only, with_lookup}` for this adapter to function;
-see `bondy_db_topology_*:default_book_opts/1` for the canonical opts.
+see `bondy_db_topology_leveled_common:default_book_opts/1` for the
+canonical opts.
 
 ## SubKey split
 

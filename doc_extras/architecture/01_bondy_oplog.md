@@ -455,6 +455,8 @@ Implementation:
   the in-memory (ETS) WAL backend for fused ephemeral instances.
 - `bondy_oplog_origin.erl` — origin persistence under
   `storage_path` (`load_or_create/1`).
+- `bondy_oplog_path.erl` — per-instance on-disk directory layout
+  (`flat` | `sharded`, selected by the `path_layout` option).
 - `bondy_oplog_compaction_checkpoint.erl` (+ `_ets` / `_file`) —
   the compaction checkpoint behaviour and backends.
 - `bondy_oplog_wal_recovery.erl` — boot-time tail scan + manifest

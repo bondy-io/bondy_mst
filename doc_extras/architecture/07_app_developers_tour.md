@@ -101,7 +101,7 @@ works unchanged — it resolves to the byte-identical native CRDT):
 | `presence_basic` | `lww_register` (presence is a register write) |
 | `ttl_presence` | `lww_register` + application-level expiry |
 | `orset` | `aw_map` (observed-remove, done causally right) |
-| `strict_register` | `mv_register` (concurrent writes surface as siblings the app resolves); same-event-key duplicates already crash loudly via the default strict-uniqueness merge strategy |
+| `strict_register` | `mv_register` (concurrent writes surface as siblings the app resolves); same-event-key duplicates already crash loudly via the substrate's fixed strict-uniqueness collision rule |
 | `map_of_fields` | `aw_map` (per-key sub-values) or one `lww_register` cell per field |
 
 A few practical notes:
@@ -334,7 +334,8 @@ accepting an LWW winner. (The retired `strict_register` fold raised a
 `conflict` value for same-HLC writes; `mv_register` detects true
 concurrency causally, which is strictly stronger. Same-*event-key*
 duplicates — tampering, not concurrency — already crash loudly via
-the substrate's default strict-uniqueness merge strategy.)
+the substrate's fixed strict-uniqueness collision rule
+(`bondy_oplog_instance:merge_page_value/3`).)
 
 These are the tables where `per_entity` topology pays off: ops can
 quiesce or migrate the grants Bookie for one realm without
@@ -610,4 +611,6 @@ winner.
   (`read/3`, `read_batch/2`, `ensure_fresh/2`, `range/4`).
 - `bondy_db_topology_shared_shards.erl`,
   `bondy_db_topology_per_entity.erl`,
-  `bondy_db_topology_single_bookie.erl` — the three topologies.
+  `bondy_db_topology_single_bookie.erl` — the three topologies; they
+  share their leveled/Bookie plumbing via
+  `bondy_db_topology_leveled_common.erl`.

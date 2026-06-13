@@ -20,13 +20,16 @@ clean: clean-data
 	rm -rf _build
 	$(REBAR) clean
 
-test: eunit cover ct
+test: eunit cover ct proper
 
 ct: clean-data
 	${REBAR} as test ct
 
 eunit:
 	${REBAR} as test eunit
+
+proper:
+	${REBAR} as test proper
 
 cover:
 	${REBAR} cover

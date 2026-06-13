@@ -90,7 +90,7 @@ encoding.
 -export([close_table/2]).
 -export([shutdown/1]).
 
--define(PROJECTION_ADAPTER, bondy_oplog_projection_leveled).
+-define(COMMON, bondy_db_topology_leveled_common).
 
 %% =============================================================================
 %% bondy_db_topology callbacks
@@ -104,12 +104,12 @@ init(DbName, Opts) when is_atom(DbName), is_map(Opts) ->
                     BookOpts = maps:get(
                         book_opts_fun,
                         Opts,
-                        fun default_book_opts/1
+                        fun ?COMMON:default_book_opts/1
                     ),
                     State = #{
                         db_name => DbName,
                         sup => Sup,
-                        dir => normalise_dir(Dir),
+                        dir => ?COMMON:normalise_dir(Dir),
                         book_opts_fun => BookOpts
                     },
                     {ok, State};
@@ -135,16 +135,11 @@ open_table(EntityType, ShardCount, _TableOpts, State) when
             Err
     end.
 
-route(Shard, #{shards := Shards}) when is_integer(Shard) ->
-    case maps:find(Shard, Shards) of
-        {ok, Bookie} ->
-            %% Bookie-only handle: Bucket is per-call, supplied by the
-            %% facade via `bucket_for/3` on every adapter invocation.
-            Handle = #{bookie => Bookie},
-            {ok, ?PROJECTION_ADAPTER, Handle};
-        error ->
-            {error, {unknown_shard, Shard}}
-    end.
+route(Shard, State) when is_integer(Shard) ->
+    %% Bookie-only handle: Bucket is per-call, supplied by the facade
+    %% via `bucket_for/3` on every adapter invocation. Shared with
+    %% `bondy_db_topology_shared_shards` via the common helper.
+    ?COMMON:route(Shard, State).
 
 -doc """
 Per-entity topology disambiguates EntityType by the Bookie itself —
@@ -159,7 +154,7 @@ close_table(#{shards := Shards}, State) ->
     %% them all. State is unchanged — this topology keeps no per-table
     %% bookkeeping at the DB level.
     lists:foreach(
-        fun({_Shard, Bookie}) -> stop_bookie_safe(Bookie) end,
+        fun({_Shard, Bookie}) -> ?COMMON:stop_bookie_safe(Bookie) end,
         maps:to_list(Shards)
     ),
     {ok, State}.
@@ -188,7 +183,7 @@ start_shards(
     Acc
 ) ->
     ShardDir = shard_dir(Dir, EntityType, I),
-    case ensure_dir(ShardDir) of
+    case ?COMMON:ensure_dir(ShardDir) of
         ok ->
             BookOpts = BookOptsFun(ShardDir),
             case bondy_db_leveled_sup:start_bookie(Sup, BookOpts) of
@@ -203,11 +198,11 @@ start_shards(
                 {error, _} = Err ->
                     %% Best-effort: stop already-started shards so the
                     %% caller is not left with a partial table.
-                    [stop_bookie_safe(B) || B <- maps:values(Acc)],
+                    [?COMMON:stop_bookie_safe(B) || B <- maps:values(Acc)],
                     Err
             end;
         {error, _} = Err ->
-            [stop_bookie_safe(B) || B <- maps:values(Acc)],
+            [?COMMON:stop_bookie_safe(B) || B <- maps:values(Acc)],
             Err
     end.
 
@@ -217,38 +212,3 @@ shard_dir(Dir, EntityType, Shard) ->
         atom_to_list(EntityType),
         integer_to_list(Shard)
     ]).
-
-ensure_dir(Dir) ->
-    filelib:ensure_dir(filename:join(Dir, ".keep")).
-
-normalise_dir(Dir) when is_binary(Dir) -> binary_to_list(Dir);
-normalise_dir(Dir) when is_list(Dir) -> Dir.
-
-default_book_opts(Dir) ->
-    %% Mirrors the parameters the adapter eunit + PropEr suites use; the
-    %% defaults are tuned for fast tests, not for production. Production
-    %% deployments should override `book_opts_fun` in `topology_opts`.
-    %% `head_only=with_lookup` required by `bondy_oplog_projection_leveled`
-    %% (PR-PS-15b) — enables `book_mput/2` + `book_headonly/4`. See
-    %% `bondy_db_topology_single_bookie:default_book_opts/1` for the
-    %% rationale.
-    [
-        {root_path, Dir},
-        {cache_size, 2000},
-        {max_journalsize, 100_000_000},
-        {sync_strategy, none},
-        {head_only, with_lookup}
-    ].
-
-stop_bookie_safe(Bookie) when is_pid(Bookie) ->
-    case is_process_alive(Bookie) of
-        true ->
-            %% Tell leveled to flush + close. The supervisor will reap
-            %% the now-dead child without restarting it (`temporary`).
-            _ = catch leveled_bookie:book_close(Bookie),
-            ok;
-        false ->
-            ok
-    end;
-stop_bookie_safe(_) ->
-    ok.

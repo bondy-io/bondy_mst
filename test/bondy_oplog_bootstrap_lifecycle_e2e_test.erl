@@ -146,7 +146,7 @@ seed_true_starts_live() ->
         ?assertEqual(2, bondy_oplog:size(Id)),
         %% Flag file materialised.
         FlagPath = filename:join([
-            bondy_oplog_path_sharded:storage_path(Id, Tmp),
+            bondy_oplog_path:storage_path(Id, Tmp, sharded),
             "lifecycle.live"
         ]),
         ?assert(filelib:is_regular(FlagPath))

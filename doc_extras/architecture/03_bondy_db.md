@@ -365,7 +365,9 @@ Ranges respect the same fold contract as point reads, only batched.
 - **Topologies** — pluggable strategies for which Bookie owns which
   shard. Three ship: `bondy_db_topology_single_bookie`,
   `bondy_db_topology_per_entity`,
-  `bondy_db_topology_shared_shards`.
+  `bondy_db_topology_shared_shards`. The leveled-backed three share
+  their Bookie/directory plumbing via
+  `bondy_db_topology_leveled_common`.
 
 ```mermaid
 flowchart LR
@@ -484,7 +486,8 @@ Implementation:
 - `bondy_db_topology_single_bookie.erl`,
   `bondy_db_topology_per_entity.erl`,
   `bondy_db_topology_shared_shards.erl` — three ship-with
-  topologies.
+  topologies; shared leveled/Bookie plumbing lives in
+  `bondy_db_topology_leveled_common.erl`.
 - `bondy_oplog_db_overlay.erl` — `{{Bucket, Key}, EventHlc, EventKey}`
   ETS overlay with match-spec range reads.
 - `bondy_oplog_cache_adapter.erl` + `bondy_oplog_cache_ets.erl`

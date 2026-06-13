@@ -225,20 +225,21 @@ list_instances() ->
 
 ?DOC("""
 Discovers instances on disk under `BaseDir`, using the sharded path
-strategy (the library default). Suitable for boot-time enumeration.
+layout (the library default). Suitable for boot-time enumeration.
 """).
 -spec discover_instances(BaseDir :: binary()) -> [instance_id()].
 
 discover_instances(BaseDir) ->
-    discover_instances(BaseDir, bondy_oplog_path_sharded).
+    discover_instances(BaseDir, sharded).
 
--spec discover_instances(BaseDir :: binary(), Strategy :: module()) ->
-    [instance_id()].
+-spec discover_instances(
+    BaseDir :: binary(), Layout :: bondy_oplog_path:layout()
+) -> [instance_id()].
 
-discover_instances(BaseDir, Strategy) when
-    is_binary(BaseDir), is_atom(Strategy)
+discover_instances(BaseDir, Layout) when
+    is_binary(BaseDir), is_atom(Layout)
 ->
-    Strategy:discover(BaseDir).
+    bondy_oplog_path:discover(BaseDir, Layout).
 
 %% =============================================================================
 %% PER-INSTANCE API

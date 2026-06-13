@@ -355,7 +355,7 @@ default_file_when_storage_path() ->
         bondy_oplog_peer_state:sync(),
         {ok, {compacted, _, _}} = bondy_oplog:compact(Id),
         %% Expected on-disk path: same sharded instance dir as MST/WAL.
-        Sharded = bondy_oplog_path_sharded:storage_path(Id, Tmp),
+        Sharded = bondy_oplog_path:storage_path(Id, Tmp, sharded),
         ExpectedFile = filename:join(Sharded, "checkpoint.etf"),
         ?assert(filelib:is_regular(ExpectedFile))
     after

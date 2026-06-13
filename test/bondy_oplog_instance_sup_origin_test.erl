@@ -47,7 +47,7 @@ explicit_origin_wins() ->
     try
         {ok, _} = bondy_oplog:start_instance(Id, #{
             storage_path => unicode:characters_to_binary(Dir),
-            path_strategy => bondy_oplog_path_flat,
+            path_layout => flat,
             seed => true,
             origin => Explicit
         }),
@@ -70,7 +70,7 @@ storage_path_origin_persists() ->
     try
         {ok, _} = bondy_oplog:start_instance(Id, #{
             storage_path => unicode:characters_to_binary(Dir),
-            path_strategy => bondy_oplog_path_flat,
+            path_layout => flat,
             seed => true
         }),
         Origin = bondy_oplog:origin(Id),
@@ -93,7 +93,7 @@ storage_path_origin_survives_restart() ->
     Id = unique_id(<<"restart">>),
     Opts = #{
         storage_path => unicode:characters_to_binary(Dir),
-        path_strategy => bondy_oplog_path_flat,
+        path_layout => flat,
         seed => true
     },
     try

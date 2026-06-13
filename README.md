@@ -954,7 +954,7 @@ Configure via the `backend` opt at start_instance time:
 {ok, _} = bondy_oplog:start_instance(Id, #{
     backend         => bondy_mst_pack_store,
     storage_path    => <<"/var/lib/bondy_mst">>,
-    path_strategy   => bondy_oplog_path_sharded
+    path_layout     => sharded
 }).
 ```
 
@@ -1168,14 +1168,13 @@ quiescent. Trigger manually via `bondy_oplog:sync/2,3` and
 | `origin` | `bondy_oplog_origin:default()` | Per-replica binary id. Override for stable cross-restart identity. |
 | `backend` | `ets` | `map` \| `ets` \| custom module implementing `bondy_mst_store`. |
 | `backend_options` | `#{}` | Backend-specific options. |
-| `storage_path` | `undefined` | Base dir for durable backends; combined with `path_strategy`. |
-| `path_strategy` | `bondy_oplog_path_sharded` | `_flat` (small fixed sets) or `_sharded` (millions of instances). |
+| `storage_path` | `undefined` | Base dir for durable backends; combined with `path_layout`. |
+| `path_layout` | `sharded` | `flat` (small fixed sets) or `sharded` (millions of instances). See `bondy_oplog_path`. |
 | `hash_algorithm` | `sha256` | MST page hashing. |
 | `validator` | `bondy_oplog_validator_trust` | Event signer/verifier. |
 | `validator_opts` | `#{}` | Opts passed to the validator's `init/2`. |
 | `fold_module` | `undefined` | **Legacy alias** for `crdt_module`. An atom shorthand with a native twin (`lww_register`, `g_counter`, `pn_counter`, `g_set`, `max_register`, `min_register`, `index_entry`) resolves to its byte-identical CRDT. Shorthands with no twin (`presence_basic`, `strict_register`, `orset`, `ttl_presence`, `map_of_fields`) were retired and now error. See [The CRDT model](doc_extras/architecture/05_crdt_model.md). |
 | `fold_opts` | `#{}` | Opaque options threaded through with the legacy label. |
-| `merge_strategy` | `bondy_oplog_merge_strict_uniqueness` | MST same-event-key collision resolver (default: crash loudly — duplicates indicate a bug or tampering). Passing the opt explicitly is deprecated but honoured (one-shot warning at instance start). |
 | `crdt_module` | `undefined` | Required for `compact/1` and `query/2`. |
 | `compaction_checkpoint` | context-sensitive | `_file` when `storage_path` is set, `_ets` otherwise. |
 | `compaction_checkpoint_opts` | `#{}` | E.g. `#{path => <<"...">>}` for `_file`. |
@@ -1234,11 +1233,9 @@ production-safe; tune only when you have a workload reason. See
 | `bondy_oplog_crdt` | Consumer-defined operation-based CRDT semantics (`interpret_cog/2` + `query/2` + the projection seam). The full pure op-based catalogue ships natively (registers, counters, g/2P/add-wins/remove-wins sets, multi-value register, add-wins map, enable/disable-wins flags) — see [The CRDT model](doc_extras/architecture/05_crdt_model.md). |
 | `bondy_oplog_crdt_commutative` | The eager single-operation step (`apply_op/3·4`) + a generic sort-and-fold `interpret_cog` for commutative CRDTs. |
 | `bondy_oplog_validator` | Sign local events; verify remote events; detect equivocation. |
-| `bondy_oplog_merge_strategy` | MST same-event-key collision resolver (default `bondy_oplog_merge_strict_uniqueness`: crash loudly). |
 | `bondy_oplog_peer_source` | Per-instance peer discovery. |
 | `bondy_oplog_transport` | Network transport for sync sessions. |
 | `bondy_oplog_compaction_checkpoint` | Durable storage of compaction checkpoints. |
-| `bondy_oplog_path_strategy` | On-disk layout for durable backends. |
 | `bondy_mst_store` | MST page-level storage backend. |
 | `bondy_oplog_projection_adapter` | Pluggable materialised-cell store under `bondy_db_core` (the canonical implementation is `bondy_oplog_projection_leveled`). |
 | `bondy_oplog_cache_adapter` | Pluggable read cache under `bondy_db_core` (ETS reference impl: `bondy_oplog_cache_ets`). |

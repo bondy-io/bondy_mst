@@ -82,6 +82,7 @@ Bookie.
 -export([shutdown/1]).
 
 -define(PROJECTION_ADAPTER, bondy_oplog_projection_leveled).
+-define(COMMON, bondy_db_topology_leveled_common).
 
 %% =============================================================================
 %% bondy_db_topology callbacks
@@ -92,13 +93,13 @@ init(DbName, Opts) when is_atom(DbName), is_map(Opts) ->
         {ok, Sup} when is_pid(Sup) ->
             case maps:find(dir, Opts) of
                 {ok, Dir0} ->
-                    Dir = normalise_dir(Dir0),
+                    Dir = ?COMMON:normalise_dir(Dir0),
                     BookOptsFun = maps:get(
                         book_opts_fun,
                         Opts,
-                        fun default_book_opts/1
+                        fun ?COMMON:default_book_opts/1
                     ),
-                    case ensure_dir(Dir) of
+                    case ?COMMON:ensure_dir(Dir) of
                         ok ->
                             case
                                 bondy_db_leveled_sup:start_bookie(
@@ -166,33 +167,7 @@ close_table(_TableState, State) ->
 
 shutdown(#{sup := Sup, bookie := Bookie}) ->
     %% Tell leveled to flush + close before bringing the supervisor
-    %% down. `book_close` is a synchronous call; if the Bookie is
-    %% already dead it raises, which we discard — `stop/1` will reap
+    %% down, tolerating an already-dead Bookie. `stop/1` then reaps
     %% whatever supervisor children remain.
-    _ = catch leveled_bookie:book_close(Bookie),
+    ok = ?COMMON:stop_bookie_safe(Bookie),
     bondy_db_leveled_sup:stop(Sup).
-
-%% =============================================================================
-%% PRIVATE
-%% =============================================================================
-
-ensure_dir(Dir) ->
-    filelib:ensure_dir(filename:join(Dir, ".keep")).
-
-normalise_dir(Dir) when is_binary(Dir) -> binary_to_list(Dir);
-normalise_dir(Dir) when is_list(Dir) -> Dir.
-
-default_book_opts(Dir) ->
-    %% `head_only=with_lookup` enables `book_mput/2` (atomic batched
-    %% writes) and `book_headonly/4` (ledger-only point reads) — both
-    %% required by `bondy_oplog_projection_leveled` (PR-PS-15b).
-    %% Per the leveled head_only contract, `book_get` and `book_put`
-    %% are NOT supported once this flag is on; the adapter uses
-    %% `book_headonly` + `book_mput` exclusively.
-    [
-        {root_path, Dir},
-        {cache_size, 2000},
-        {max_journalsize, 100_000_000},
-        {sync_strategy, none},
-        {head_only, with_lookup}
-    ].

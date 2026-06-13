@@ -333,10 +333,6 @@ info_returns_diagnostic() ->
         #{validator := bondy_oplog_validator_trust},
         Info
     ),
-    ?assertMatch(
-        #{merge_strategy := bondy_oplog_merge_strict_uniqueness},
-        Info
-    ),
     %% F7: fold_module defaults to undefined; fold_opts to #{}.
     ?assertMatch(#{fold_module := undefined, fold_opts := #{}}, Info),
     ok = bondy_oplog:stop_instance(Id).
@@ -660,8 +656,7 @@ fold_config_test_() ->
         fun fold_module_non_atom_crashes_init/0,
         fun fold_opts_non_map_crashes_init/0,
         fun fold_opts_passed_through_verbatim/0,
-        fun registry_exposes_fold_fields/0,
-        fun legacy_merge_strategy_still_works/0
+        fun registry_exposes_fold_fields/0
     ]}.
 
 fold_module_defaults_to_undefined() ->
@@ -749,24 +744,6 @@ registry_exposes_fold_fields() ->
     {ok, Entry} = bondy_oplog_registry:lookup(Id),
     ?assertMatch(#{fold_module := lww_register}, Entry),
     ?assertMatch(#{fold_opts := #{tag := abc}}, Entry),
-    ok = bondy_oplog:stop_instance(Id).
-
-legacy_merge_strategy_still_works() ->
-    %% Configuring the deprecated merge_strategy emits a warning at
-    %% init but the instance still starts and the value is recorded.
-    %% (We don't assert on the log line — the warning is best-effort
-    %% and capturing logger output across test runs is brittle.)
-    Id = mk_id(),
-    {ok, _} = bondy_oplog:start_instance(Id, #{
-        merge_strategy => bondy_oplog_merge_strict_uniqueness
-    }),
-    Info = bondy_oplog:info(Id),
-    ?assertEqual(
-        bondy_oplog_merge_strict_uniqueness,
-        maps:get(merge_strategy, Info)
-    ),
-    %% fold_module stays at its default.
-    ?assertEqual(undefined, maps:get(fold_module, Info)),
     ok = bondy_oplog:stop_instance(Id).
 
 %% Supervisor start_instance wraps init/1 errors. The actual nesting

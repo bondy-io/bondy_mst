@@ -111,7 +111,7 @@ can serve fold-driven reads.
 Opens a lifecycle handle for `InstanceId`.
 
 `Opts` is the same map passed to `bondy_oplog_instance:init/1`;
-recognised keys are `storage_path`, `path_strategy`, and `seed`.
+recognised keys are `storage_path`, `path_layout`, and `seed`.
 
 The handle is cheap to copy and safe to share between processes: the
 atomics ref is shared by reference; the flag-path binary is
@@ -229,11 +229,10 @@ instance_id(#handle{instance_id = Id}) ->
 compute_flag_path(InstanceId, Opts) ->
     case maps:find(storage_path, Opts) of
         {ok, BaseDir} when is_binary(BaseDir); is_list(BaseDir) ->
-            Strategy = maps:get(
-                path_strategy, Opts, bondy_oplog_path_sharded
-            ),
             BaseBin = unicode:characters_to_binary(BaseDir),
-            InstanceDir = Strategy:storage_path(InstanceId, BaseBin),
+            InstanceDir = bondy_oplog_path:instance_dir(
+                InstanceId, BaseBin, Opts
+            ),
             filename:join(
                 unicode:characters_to_binary(InstanceDir),
                 ?FLAG_FILENAME

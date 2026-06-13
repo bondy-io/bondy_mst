@@ -145,7 +145,6 @@ without protocol changes.
     backend :: backend(),
     validator_module :: module(),
     validator_state :: term(),
-    merge_strategy :: module(),
     %% Per-namespace fold strategy (FOLD_STRATEGY_DESIGN §6/§7). The
     %% applier consumes WAL events and folds them into per-cell
     %% projection state via this module's callbacks. `undefined`
@@ -315,20 +314,13 @@ without protocol changes.
     backend => backend(),
     backend_options => map() | list(),
     storage_path => binary(),
-    path_strategy => module(),
+    path_layout => bondy_oplog_path:layout(),
     hash_algorithm => sha256 | sha512,
     origin => bondy_oplog_origin:t(),
     hlc_seed => non_neg_integer(),
     seq_seed => non_neg_integer(),
     validator => module(),
     validator_opts => map(),
-    %% Legacy MST page-merge collision resolver. Deprecated in
-    %% favour of `fold_module` (FOLD_STRATEGY_DESIGN §6/§7) — still
-    %% honoured for backward compatibility. Defaults to
-    %% `bondy_oplog_merge_strict_uniqueness`, which crashes on
-    %% divergent values for the same event key. Configuring this
-    %% emits a one-shot deprecation warning at instance start.
-    merge_strategy => module(),
     %% Per-table CRDT, named by a `fold_module` label for backward
     %% compatibility. Resolves to its native `bondy_oplog_crdt` twin via
     %% `bondy_oplog_cell_kernel:default_crdt_for_fold/1` (PR-Z): a
@@ -1697,25 +1689,6 @@ init({InstanceId, Opts}) ->
     ),
     {ok, ValidatorState} =
         ValidatorMod:init(InstanceId, maps:get(validator_opts, Opts, #{})),
-    MergeMod = maps:get(
-        merge_strategy,
-        Opts,
-        bondy_oplog_merge_strict_uniqueness
-    ),
-    case maps:is_key(merge_strategy, Opts) of
-        true ->
-            ?LOG_WARNING(#{
-                description =>
-                    "`merge_strategy` opt is deprecated; configure "
-                    "`fold_module` per FOLD_STRATEGY_DESIGN §6/§7 "
-                    "instead. The legacy value is still honoured for "
-                    "MST page-merge collisions",
-                instance_id => InstanceId,
-                merge_strategy => MergeMod
-            });
-        false ->
-            ok
-    end,
     {FoldMod, FoldOpts} = resolve_fold_config(InstanceId, Opts),
     Backend = maps:get(backend, Opts, ets),
     CrdtModForWarn = maps:get(crdt_module, Opts, undefined),
@@ -1733,7 +1706,7 @@ init({InstanceId, Opts}) ->
         false ->
             ok
     end,
-    MST = open_mst(InstanceId, Backend, MergeMod, Opts),
+    MST = open_mst(InstanceId, Backend, Opts),
     %% Stage 5: compaction checkpoint + watermark recovery.
     %% Default backend resolution: prefer the file backend when the
     %% instance has any durable storage configured (`storage_path` or
@@ -1831,7 +1804,6 @@ init({InstanceId, Opts}) ->
         backend = Backend,
         validator_module = ValidatorMod,
         validator_state = ValidatorState,
-        merge_strategy = MergeMod,
         fold_module = FoldMod,
         fold_opts = FoldOpts,
         crdt_module = CrdtMod,
@@ -2269,7 +2241,6 @@ do_handle_call(info, _From, State) ->
         origin => State#state.origin,
         backend => State#state.backend,
         validator => State#state.validator_module,
-        merge_strategy => State#state.merge_strategy,
         fold_module => State#state.fold_module,
         fold_opts => State#state.fold_opts,
         last_event_key => State#state.last_event_key
@@ -4434,7 +4405,7 @@ events_in_open_range(MST, W0, Frontier) ->
 
 %% @private
 %% Builds the underlying MST struct.
-open_mst(InstanceId, Backend, MergeMod, Opts) ->
+open_mst(InstanceId, Backend, Opts) ->
     StoreMod = backend_module(Backend),
     StoreOpts = backend_opts(Backend, InstanceId, Opts),
     HashAlgo = maps:get(hash_algorithm, Opts, sha256),
@@ -4442,8 +4413,30 @@ open_mst(InstanceId, Backend, MergeMod, Opts) ->
         store => StoreMod,
         store_opts => StoreOpts,
         hash_algorithm => HashAlgo,
-        merger => fun(K, V1, V2) -> MergeMod:merge(K, V1, V2) end
+        merger => fun merge_page_value/3
     }).
+
+%% @private
+%% Default MST page-merge collision resolver.
+%%
+%% Event keys are globally unique by construction (`{HLC, Origin, Seq}`),
+%% so the only legitimate caller is an idempotent peer re-receive, where
+%% the two values must be equal. A divergent merge for the same key is a
+%% system-invariant violation and is surfaced loudly rather than silently
+%% absorbed. CRDT-valued tables converge via their `fold_module`
+%% (FOLD_STRATEGY_DESIGN §6/§7), not through this hook.
+merge_page_value(_Key, V, V) ->
+    V;
+merge_page_value(Key, V1, V2) ->
+    ?LOG_ERROR(#{
+        description =>
+            "MST merger invoked with divergent values; "
+            "system invariant violated",
+        key => Key,
+        v1 => V1,
+        v2 => V2
+    }),
+    erlang:error({divergent_value, Key, V1, V2}).
 
 %% @private
 backend_module(map) -> bondy_mst_map_store;
@@ -4465,10 +4458,9 @@ backend_opts(bondy_mst_pack_store, InstanceId, Opts) ->
     Defaults =
         case maps:find(storage_path, Opts) of
             {ok, BaseDir} ->
-                Strategy = maps:get(
-                    path_strategy, Opts, bondy_oplog_path_sharded
+                Path = bondy_oplog_path:instance_dir(
+                    InstanceId, BaseDir, Opts
                 ),
-                Path = Strategy:storage_path(InstanceId, BaseDir),
                 Defaults0#{dir => unicode:characters_to_binary(Path)};
             error ->
                 Defaults0
@@ -4478,10 +4470,7 @@ backend_opts(_, InstanceId, Opts) ->
     Base = maps:get(backend_options, Opts, #{}),
     case maps:find(storage_path, Opts) of
         {ok, BaseDir} ->
-            Strategy = maps:get(
-                path_strategy, Opts, bondy_oplog_path_sharded
-            ),
-            Path = Strategy:storage_path(InstanceId, BaseDir),
+            Path = bondy_oplog_path:instance_dir(InstanceId, BaseDir, Opts),
             Base#{storage_path => unicode:characters_to_binary(Path)};
         error ->
             Base
@@ -4495,13 +4484,13 @@ backend_opts(_, InstanceId, Opts) ->
 %%      are passed through unchanged.
 %%   2. Otherwise, if a `path` is set in `compaction_checkpoint_opts`
 %%      OR `storage_path` is set on the instance, default to the file
-%%      backend, deriving `path` from `storage_path` (via
-%%      `path_strategy`) when not explicit.
+%%      backend, deriving `path` from `storage_path` (via the configured
+%%      `path_layout`) when not explicit.
 %%   3. Otherwise default to the in-memory ETS backend (ephemeral).
 %%
-%% Path derivation when deriving from `storage_path`: the
-%% `path_strategy` returns the per-instance dir (terminates in
-%% `<InstanceId>`); the file backend then appends `<InstanceId>` again.
+%% Path derivation when deriving from `storage_path`: the path layout
+%% returns the per-instance dir (terminates in `<InstanceId>`); the
+%% file backend then appends `<InstanceId>` again.
 %% Pass the parent (the shard dir) so the final file lands at
 %% `<storage_path>/<shard>/<InstanceId>/checkpoint.etf` alongside the
 %% other per-instance artefacts (WAL, MST, projection).
@@ -4516,13 +4505,8 @@ resolve_checkpoint_backend(InstanceId, Opts, CkptOpts) ->
                 false ->
                     case maps:find(storage_path, Opts) of
                         {ok, BaseDir} ->
-                            Strategy = maps:get(
-                                path_strategy,
-                                Opts,
-                                bondy_oplog_path_sharded
-                            ),
-                            InstanceDir = Strategy:storage_path(
-                                InstanceId, BaseDir
+                            InstanceDir = bondy_oplog_path:instance_dir(
+                                InstanceId, BaseDir, Opts
                             ),
                             ShardDir = filename:dirname(InstanceDir),
                             {
