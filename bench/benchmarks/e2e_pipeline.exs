@@ -2,7 +2,7 @@ Bench.setup()
 
 # End-to-end pipeline benchmark.
 #
-# Provisions a multi-shard `bondy_db_core` substrate against
+# Provisions a multi-shard `bondy_oplog_core` substrate against
 # `Bench.ProjectionEts` (in-memory) and `:bondy_oplog_cache_ets`,
 # then starts a `bondy_oplog` instance per shard with the substrate
 # wired as the applier's `cell_apply_target`. Writes flow:
@@ -273,7 +273,7 @@ open_projection = fn
         {:max_journalsize, 1_000_000_000},
         {:cache_size, 2_000},
         {:sync_strategy, :none},
-        # head_only=with_lookup required by bondy_oplog_projection_leveled
+        # head_only=with_lookup required by bondy_db_projection_leveled
         # (PR-PS-15b). Enables book_mput (atomic batched writes) and
         # book_headonly (ledger-only point reads).
         {:head_only, :with_lookup}
@@ -324,7 +324,7 @@ make_ctx = fn prefix, profile ->
         owner: self()
       }
 
-      :ok = :bondy_db_core_registry.register(ns, :primary, shard, config)
+      :ok = :bondy_oplog_core_registry.register(ns, :primary, shard, config)
 
       instance_id = inst_prefix <> "-" <> Integer.to_string(shard)
 
@@ -470,7 +470,7 @@ cleanup = fn ctx ->
     # applier while we tear down its sinks. Then close the cache /
     # projection / leveled bookie, then drop the overlay ETS table.
     _ = :bondy_oplog.stop_instance(id)
-    _ = :bondy_db_core_registry.unregister(ctx.ns, :primary, shard)
+    _ = :bondy_oplog_core_registry.unregister(ctx.ns, :primary, shard)
     _ = close_projection.(adapter, ph, bookie)
     _ = cache_adapter.close(ch)
     _ = :bondy_oplog_db_overlay.delete(ov)
@@ -587,7 +587,7 @@ read_op = fn ctx ->
   i = :atomics.add_get(ctx.read_cursor, 1, 1)
   offset = rem(i - 1, keys_per_shard) + 1
   key = shard_key.(shard, offset)
-  :bondy_db_core.read(ctx.ns, :primary, ctx.bucket, key)
+  :bondy_oplog_core.read(ctx.ns, :primary, ctx.bucket, key)
 end
 
 mixed_op = fn ctx ->

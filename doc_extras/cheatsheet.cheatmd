@@ -94,8 +94,8 @@ Details: [The CRDT model](05_crdt_model.md).
 ```erlang
 %% ensure_fresh/2 -> ok | {stale, [Namespace]}
 %% read_batch(BatchKeys, Opts); BatchKeys :: [{NS, Index, Bucket, Key}]
-case bondy_db_core:ensure_fresh([users, grants], 1000) of
-    ok           -> {ok, Result} = bondy_db_core:read_batch(BatchKeys, #{});
+case bondy_oplog_core:ensure_fresh([users, grants], 1000) of
+    ok           -> {ok, Result} = bondy_oplog_core:read_batch(BatchKeys, #{});
     {stale, NSs} -> too_stale   %% more than max_lag behind
 end.
 ```

@@ -2,7 +2,7 @@ defmodule Bench.ProjectionLeveled do
   @moduledoc """
   Leveled-backed `bondy_oplog_projection_adapter` for benchmarks.
 
-  Mirrors `src/bondy_oplog_projection_leveled.erl` (Erlang) but lives
+  Mirrors `src/bondy_db_projection_leveled.erl` (Erlang) but lives
   in the bench app so we don't pull test code into the bench code path.
 
   The adapter is a **pure mapper**: the Bookie pid is supplied via

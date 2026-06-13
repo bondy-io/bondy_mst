@@ -125,14 +125,14 @@ A few things the diagram is hiding to keep it readable:
 
 ## Following a read end-to-end
 
-Now `bondy_db:read(Table, Realm, Key)` (the facade; `bondy_db_core:read(NS,
+Now `bondy_db:read(Table, Realm, Key)` (the facade; `bondy_oplog_core:read(NS,
 Index, Bucket, Key)` underneath):
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant App as Application
-    participant DB as bondy_db / bondy_db_core
+    participant DB as bondy_db / bondy_oplog_core
     participant CACHE as cache_adapter (ETS)
     participant OV as overlay (ETS)
     participant PROJ as projection (Leveled)
@@ -181,7 +181,7 @@ flowchart TB
     end
     subgraph BONDY_DB["bondy_db"]
         FACADE["bondy_db"]
-        CORE["bondy_db_core"]
+        CORE["bondy_oplog_core"]
         REG["db_core_registry"]
         OVERLAY["oplog_db_overlay"]
         CACHE["cache_adapter"]
@@ -212,9 +212,9 @@ Most of the arrows here are obvious from chapters
 flagging:
 
 - The **applier is the only writer to the projection.** Reads share
-  the same projection handle through `bondy_db_core_registry`.
+  the same projection handle through `bondy_oplog_core_registry`.
 - The **overlay is shared** between the writer (oplog_instance) and
-  the reader (`bondy_db_core`) — that's how reads see events before
+  the reader (`bondy_oplog_core`) — that's how reads see events before
   the applier has folded them in.
 - The **pack_store** is one of several `bondy_mst_store`
   implementations; tests use `ets_store` / `map_store`.

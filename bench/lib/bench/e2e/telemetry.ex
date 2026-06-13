@@ -2,12 +2,12 @@ defmodule Bench.E2E.Telemetry do
   @moduledoc """
   Pipeline-stage telemetry collector for the E2E benchmark.
 
-  Attaches handlers to the substrate's `bondy_db_core` reads/ranges
+  Attaches handlers to the substrate's `bondy_oplog_core` reads/ranges
   and the oplog's WAL + applier events, accumulates per-stage latency
   histograms and counters under `:counters`, and exposes the result as
   the JSON the dashboard consumes.
 
-  Handlers filter by the bench's namespace (`bondy_db_core` events) or
+  Handlers filter by the bench's namespace (`bondy_oplog_core` events) or
   by instance_id prefix (`bondy_oplog_*` events). Any event from
   unrelated traffic running in the same VM is dropped — important
   when the bench shares the application with leftover instances from a
@@ -37,9 +37,9 @@ defmodule Bench.E2E.Telemetry do
   # `applier_published` is the narrower path-specific count emitted
   # only when a `publish_fun` / `publish_ns` is configured.
   @stages [
-    {[:bondy_db_core, :read], :db_core_read, :duration_us, nil},
-    {[:bondy_db_core, :range], :db_core_range, :duration_us, nil},
-    {[:bondy_db_core, :range_all], :db_core_range_all, :duration_us, nil},
+    {[:bondy_oplog_core, :read], :db_core_read, :duration_us, nil},
+    {[:bondy_oplog_core, :range], :db_core_range, :duration_us, nil},
+    {[:bondy_oplog_core, :range_all], :db_core_range_all, :duration_us, nil},
     {[:bondy_oplog, :wal, :append], :wal_append, nil, :batch_size},
     {[:bondy_oplog, :wal, :fsync], :wal_fsync, :duration_us, nil},
     {[:bondy_oplog, :applier, :applied], :applier_applied, nil, :count},
@@ -132,7 +132,7 @@ defmodule Bench.E2E.Telemetry do
 
   - `name` — used in handler IDs (must be unique across concurrent
     benchmark runs).
-  - `ns` — atom; bench's namespace. `bondy_db_core` events with a
+  - `ns` — atom; bench's namespace. `bondy_oplog_core` events with a
     different `namespace` are dropped.
   - `instance_prefix` — binary; `bondy_oplog_*` events whose
     `instance_id` does not start with this are dropped.

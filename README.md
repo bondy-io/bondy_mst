@@ -724,7 +724,7 @@ applier:
 ```
 
 For full cell-level reads (cache + overlay + projection merge with
-HLC), use the `bondy_db` / `bondy_db_core` read facade documented in
+HLC), use the `bondy_db` / `bondy_oplog_core` read facade documented in
 [`doc_extras/architecture/03_bondy_db.md`](doc_extras/architecture/03_bondy_db.md).
 
 ---
@@ -1237,8 +1237,8 @@ production-safe; tune only when you have a workload reason. See
 | `bondy_oplog_transport` | Network transport for sync sessions. |
 | `bondy_oplog_compaction_checkpoint` | Durable storage of compaction checkpoints. |
 | `bondy_mst_store` | MST page-level storage backend. |
-| `bondy_oplog_projection_adapter` | Pluggable materialised-cell store under `bondy_db_core` (the canonical implementation is `bondy_oplog_projection_leveled`). |
-| `bondy_oplog_cache_adapter` | Pluggable read cache under `bondy_db_core` (ETS reference impl: `bondy_oplog_cache_ets`). |
+| `bondy_oplog_projection_adapter` | Pluggable materialised-cell store under `bondy_oplog_core` (the canonical implementation is `bondy_db_projection_leveled`). |
+| `bondy_oplog_cache_adapter` | Pluggable read cache under `bondy_oplog_core` (ETS reference impl: `bondy_oplog_cache_ets`). |
 | `bondy_db_topology` | How `bondy_db` tables map onto shards. Four ship: `single_bookie`, `per_entity`, `shared_shards`, and `memory` (in-memory ETS projection, the ephemeral-table substrate). |
 
 Each behaviour is documented in its source module.

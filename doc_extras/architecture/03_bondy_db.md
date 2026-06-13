@@ -9,7 +9,7 @@ the oplog directly — they go through `bondy_db`, which composes three
 storage tiers (cache, overlay, projection) and a per-namespace fold
 strategy into a single, predictable read API.
 
-The substrate-level primitive is `bondy_db_core`; `bondy_db` is the
+The substrate-level primitive is `bondy_oplog_core`; `bondy_db` is the
 thin facade that adds Bondy-style tables, realms, and topology. Both
 live in this package.
 
@@ -22,7 +22,7 @@ flowchart TB
         OV["overlay<br/>ETS, ordered_set"]
     end
     subgraph WARM["Warm, on-disk"]
-        PROJ["projection_adapter<br/>bondy_oplog_projection_leveled per shard"]
+        PROJ["projection_adapter<br/>bondy_db_projection_leveled per shard"]
     end
 
     CACHE -. "miss → read" .-> PROJ
@@ -77,7 +77,7 @@ coordination.
 sequenceDiagram
     autonumber
     participant App
-    participant Core as bondy_db_core
+    participant Core as bondy_oplog_core
     participant Reg as registry
     participant Cache
     participant Proj as projection
@@ -120,7 +120,7 @@ a couple of microseconds. The cache hit is sub-microsecond.
 > Note: the **`bondy_db` facade** provisions every shard with `overlay =>
 > disabled`, so facade reads do **not** merge an overlay — read-your-writes
 > comes from `apply/4`'s `await_apply` step. The overlay-merge read path
-> described here is a `bondy_db_core` capability used by non-facade consumers
+> described here is a `bondy_oplog_core` capability used by non-facade consumers
 > (and configs that enable it).
 
 The overlay key shape is the trick:
@@ -180,7 +180,7 @@ sequenceDiagram
 ```
 
 There is also an optional **write-through warmth** path,
-`bondy_db_core:write_through/5`, that an application can call to
+`bondy_oplog_core:write_through/5`, that an application can call to
 populate the cache directly for known hot keys. It only touches the
 cache; the projection itself is still written by the applier.
 Today's `bondy_db` facade does not use it.
@@ -188,14 +188,14 @@ Today's `bondy_db` facade does not use it.
 ## The freshness fence
 
 Reads can be **causal** when they need to be. The substrate exposes a
-wall-clock predicate on `bondy_db_core`:
+wall-clock predicate on `bondy_oplog_core`:
 
 ```erlang
-bondy_db_core:ensure_fresh([users, grants], milliseconds(1000)).
+bondy_oplog_core:ensure_fresh([users, grants], milliseconds(1000)).
 ```
 
 Each `(NS, Index, Shard)` triple registers an **`ae_atomics`** ref
-(a one-element atomics array; see `bondy_db_core_registry.erl`),
+(a one-element atomics array; see `bondy_oplog_core_registry.erl`),
 bumped to a monotonic-ms timestamp every time the applier completes
 an AE round for that shard (`bump_ae/3`). The predicate is
 wait-free: read the atomic, subtract from `now`, compare to MaxLag.
@@ -216,19 +216,19 @@ auth path is:
 sequenceDiagram
     participant Client
     participant Auth
-    participant Core as bondy_db_core
+    participant Core as bondy_oplog_core
     participant FRESH as ensure_fresh
 
     Client->>Auth: present JWT
     Auth->>Auth: verify signature + expiry (local)
-    Auth->>FRESH: bondy_db_core:ensure_fresh([users, grants], 1s)
+    Auth->>FRESH: bondy_oplog_core:ensure_fresh([users, grants], 1s)
     alt stale
         FRESH-->>Auth: {stale, [...]}
         Auth-->>Client: wamp.error.security_unavailable
     else fresh
         FRESH-->>Auth: ok
-        Auth->>Core: bondy_db_core:read(users, primary, Subject)
-        Auth->>Core: bondy_db_core:read(grants, primary, Subject)
+        Auth->>Core: bondy_oplog_core:read(users, primary, Subject)
+        Auth->>Core: bondy_oplog_core:read(grants, primary, Subject)
         Auth-->>Client: proceed
     end
 ```
@@ -243,7 +243,7 @@ a full anti-entropy round with its peers.
 When the application needs multiple cells at a common point in time:
 
 ```erlang
-bondy_db_core:read_batch(
+bondy_oplog_core:read_batch(
     %% batch keys are {Namespace, Index, Bucket, Key}
     [{users, primary, Realm, U1}, {grants, primary, Realm, U1}],
     #{fence => hlc:now(),
@@ -253,7 +253,7 @@ bondy_db_core:read_batch(
 ).
 ```
 
-Semantics (`bondy_db_core:read_batch/2`):
+Semantics (`bondy_oplog_core:read_batch/2`):
 
 ```mermaid
 flowchart LR
@@ -340,7 +340,7 @@ needs_rebuild}`.
 ```mermaid
 sequenceDiagram
     participant App
-    participant Core as bondy_db_core
+    participant Core as bondy_oplog_core
     participant Proj
     participant Ov as overlay
 
@@ -359,7 +359,7 @@ Ranges respect the same fold contract as point reads, only batched.
 
 ## Topology and the registry
 
-`bondy_db` (the consumer facade, above `bondy_db_core`) introduces:
+`bondy_db` (the consumer facade, above `bondy_oplog_core`) introduces:
 
 - **Tables** — like SQL tables but realm-scoped.
 - **Topologies** — pluggable strategies for which Bookie owns which
@@ -373,7 +373,7 @@ Ranges respect the same fold contract as point reads, only batched.
 flowchart LR
     APP[Application] --> FACADE[bondy_db]
     FACADE --> TOPO["topology<br/>route+bucket_for"]
-    FACADE --> CORE[bondy_db_core]
+    FACADE --> CORE[bondy_oplog_core]
     CORE   --> REG[db_core_registry]
     REG    --> SHARDS["one entry per<br/>(NS, Index, Shard)"]
 ```
@@ -479,9 +479,9 @@ read/write API here is unchanged.
 Implementation:
 
 - `bondy_db.erl` — the consumer facade (tables, realms, topology).
-- `bondy_db_core.erl` — substrate read API: `read/3`,
+- `bondy_oplog_core.erl` — substrate read API: `read/3`,
   `read_batch/2`, `ensure_fresh/2`, `range/4`, `write_through/5`.
-- `bondy_db_core_registry.erl` — per-(NS, Index, Shard) handle
+- `bondy_oplog_core_registry.erl` — per-(NS, Index, Shard) handle
   store + `bump_ae/3`.
 - `bondy_db_topology_single_bookie.erl`,
   `bondy_db_topology_per_entity.erl`,
@@ -493,7 +493,7 @@ Implementation:
 - `bondy_oplog_cache_adapter.erl` + `bondy_oplog_cache_ets.erl`
   — cache behaviour and the single ETS implementation.
 - `bondy_oplog_projection_adapter.erl` +
-  `bondy_oplog_projection_leveled.erl` /
+  `bondy_db_projection_leveled.erl` /
   `bondy_oplog_projection_ets.erl` — durable (Leveled) and ephemeral
   (in-RAM) projections.
 - `bondy_db_topology_memory.erl` — DB-scoped ETS projection provider

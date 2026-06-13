@@ -33,12 +33,12 @@ Two API surfaces sit above this:
   `open_table/3`, `read/3`, and `apply/4` (plus `counter_inc/4`,
   `apply_batch/4`, `map_update/4`) with table-handle maps. Each
   table is a [namespace](05_crdt_model.md).
-- **`bondy_db_core`** — the substrate primitive
+- **`bondy_oplog_core`** — the substrate primitive
   ([chapter 03](03_bondy_db.md)). It takes `(NS, Index, Key)` and
   exposes the freshness fence (`ensure_fresh/2`), batch reads
   (`read_batch/2`), and the registry.
 
-App code mostly uses `bondy_db`. `bondy_db_core` shows up when you
+App code mostly uses `bondy_db`. `bondy_oplog_core` shows up when you
 need `ensure_fresh/2` (auth paths) or `read_batch/2` (multi-cell
 atomic-as-of-fence reads).
 
@@ -540,12 +540,12 @@ winner.
   same node sees it.
 
 - **Cross-node freshness needs `ensure_fresh/2`.** Auth paths
-  should call `bondy_db_core:ensure_fresh([users, grants], 1s)`
+  should call `bondy_oplog_core:ensure_fresh([users, grants], 1s)`
   before reading. The wall-clock predicate is wait-free; it costs
   one atomic read.
 
 - **`read_batch/2` when multiple cells must be consistent.**
-  `bondy_db_core:read_batch/2` gives you "all of these as-of HLC
+  `bondy_oplog_core:read_batch/2` gives you "all of these as-of HLC
   F", with skew detection. Use it when (e.g.) authorisation
   combines a user row and a grants row.
 
@@ -597,7 +597,7 @@ winner.
 
 ## Pointers
 
-- [Chapter 03](03_bondy_db.md) — the read side: `bondy_db_core`,
+- [Chapter 03](03_bondy_db.md) — the read side: `bondy_oplog_core`,
   cache, overlay, projection, `ensure_fresh/2`, `read_batch/2`.
 - [Chapter 05](05_crdt_model.md) — the CRDT contract and the full
   native catalogue (registers, counters, sets, `mv_register`,
@@ -607,7 +607,7 @@ winner.
 - `bondy_db.erl` — the consumer facade
   (`open/2`, `open_table/3`, `read/3`, `apply/4`,
   `counter_inc/4`).
-- `bondy_db_core.erl` — substrate primitives
+- `bondy_oplog_core.erl` — substrate primitives
   (`read/3`, `read_batch/2`, `ensure_fresh/2`, `range/4`).
 - `bondy_db_topology_shared_shards.erl`,
   `bondy_db_topology_per_entity.erl`,
