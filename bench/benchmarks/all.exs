@@ -1,6 +1,10 @@
-# Top-level runner — loads every benchmark script in sequence so a
-# single `mix run benchmarks/all.exs` produces the full HTML report
+# Top-level runner — loads every MST-library benchmark script in sequence
+# so a single `mix run benchmarks/all.exs` produces the full HTML report
 # tree under `bench/_output/<name>/index.html`.
+#
+# The oplog/db-layer benchmarks (primitives, folds, mst_db, oplog, wal,
+# e2e pipeline, concurrency, projections) live in the bondy umbrella's
+# `bench/` alongside the bondy_oplog/bondy_db apps they exercise.
 
 scripts = ~w(
   mst_put.exs
@@ -12,11 +16,7 @@ scripts = ~w(
   mst_pack_seal.exs
   mst_pack_get.exs
   mst_store_get.exs
-  primitives.exs
-  folds.exs
-  mst_db.exs
-  oplog.exs
-  wal.exs
+  pack_store_pending_memory.exs
 )
 
 base = Path.dirname(__ENV__.file)

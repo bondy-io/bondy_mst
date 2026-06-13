@@ -4,16 +4,17 @@
 %% =============================================================================
 
 {application, bondy_mst,
- [{description, "An OTP application"},
+ [{description,
+    "Merkle Search Tree replication-structure library. The bondy_oplog "
+    "write/replication framework and the bondy_db consumer facade that build "
+    "on it live in the bondy umbrella and depend on this library."},
   {vsn, "0.4.0"},
   {registered, []},
-  %% The repo currently ships both layers as one OTP application. The boot
-  %% entry is `bondy_oplog_app` (it wires leveled + starts the oplog/db
-  %% supervision tree, and initialises the `bondy_mst` library config it
-  %% depends on). When the `bondy_oplog`/`bondy_db` layer is extracted to its
-  %% own repo, this app reverts to `bondy_mst_app` (the pure library app) and
-  %% the new app ships `{mod, {bondy_oplog_app, []}}`.
-  {mod, {bondy_oplog_app, []}},
+  %% Pure library app: `bondy_mst_app`/`bondy_mst_sup` only initialise the
+  %% library configuration (no long-lived processes of their own). The
+  %% `bondy_oplog`/`bondy_db` layer that builds on this library is booted by
+  %% `bondy_oplog_app`/`bondy_db_app` in the bondy umbrella.
+  {mod, {bondy_mst_app, []}},
   {applications,
    [kernel,
     stdlib,
@@ -21,9 +22,7 @@
     utils,
     resulto,
     memory,
-    %% rocksdb,
     bloomfi,
-    leveled,
     telemetry
    ]},
   {env,[]},

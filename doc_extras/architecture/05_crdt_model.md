@@ -158,7 +158,7 @@ flowchart LR
   fused instance — calls `kernel:apply/6`, which dispatches the
   CRDT's `apply_op`, then composes everything the V2 cell frame
   needs: `{NewState, Hlc, StateBytes, ValueBytes, ValueEqualsState}`.
-- **Read**: `bondy_db_core` reads the projection frame and calls
+- **Read**: `bondy_oplog_core` reads the projection frame and calls
   `kernel:interpret_overlay/4` to interpret the cell's *live group*
   of pending overlay events on top of the projection state — the
   CRDT's own `interpret_cog/2`, never a per-event state fold.

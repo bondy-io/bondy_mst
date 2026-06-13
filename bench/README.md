@@ -67,16 +67,16 @@ project under `bench/` reuses the rebar3-built beams from
 
 ### End-to-end pipeline (ECharts dashboard, not Benchee)
 
-The `Bench.E2E` harness provisions a multi-shard `bondy_db_core`
+The `Bench.E2E` harness provisions a multi-shard `bondy_oplog_core`
 substrate (per-shard projection + cache + overlay) and starts one
 `bondy_oplog` instance per shard with the substrate wired as the
 applier's `cell_apply_target`. Writes flow through the full pipeline
 (`append → WAL → applier → projection`); reads go through
-`bondy_db_core.read/4` (cache-fast, projection on miss).
+`bondy_oplog_core.read/4` (cache-fast, projection on miss).
 
 Per-stage telemetry is collected via handlers on
 `[bondy_oplog, wal, append|fsync]`, `[bondy_oplog, applier, *]` and
-`[bondy_db_core, read|range|range_all]`. Each scenario emits JSON +
+`[bondy_oplog_core, read|range|range_all]`. Each scenario emits JSON +
 a self-contained ECharts dashboard with:
 
 - **Pipeline Sankey** — event flow between substrate sinks.

@@ -115,7 +115,7 @@ collapsed Layer 2 into a second state-based layer; the fix restores it.
 - `bondy_oplog_crdt` — extend the contract with the projection-seam callbacks the folds used to provide: `to_value/1`, `hlc/1`, `encode_state/1`, `decode_state/1` (+ optional `value_equals_state/0`, `order_independent/0` as a *commutativity marker*, `gc_threshold/1`). **No `encode_event/decode_event`** — ops travel as opaque terms in the WAL/MST (`bondy_oplog_wal_codec` does not call the fold), the single biggest simplification.
 - `bondy_oplog_applier` — redirect the seam (`compute_one_cell`, `:1714`) from `apply_event` to `interpret_cog`; drop the `apply_value_delta` delta-plumbing (`compose_value_bytes`, `:2268`) — value becomes `to_value(state)`.
 - `bondy_oplog_instance` — catalogue compaction. ✅ **DONE (step 4, reinterpreted)** — the per-cell `interpret_cog` checkpoint **is** the durable projection (maintained by the applier kernel since 3/3b), so compaction only bounds the MST; `projection_managed` retained (a separate checkpoint would duplicate the projection). *Replay-before-truncate* safety kept. The monolithic-CRDT path (`:3007`) already folds via `interpret_cog`.
-- `bondy_db_core` — read/overlay path projects via `to_value` / interprets overlay via `interpret_cog`. ✅ **DONE (step 3b)** — all read helpers go through `bondy_oplog_cell_kernel` (`interpret_overlay/4` + `decode_value_bytes/2`); the CRDT read path calls `interpret_cog`, never `apply_event`.
+- `bondy_oplog_core` — read/overlay path projects via `to_value` / interprets overlay via `interpret_cog`. ✅ **DONE (step 3b)** — all read helpers go through `bondy_oplog_cell_kernel` (`interpret_overlay/4` + `decode_value_bytes/2`); the CRDT read path calls `interpret_cog`, never `apply_event`.
 - `bondy_oplog_sync_session` — `install_mode/1` (`:359`) collapses `merge`→ checkpoint-install + op-replay.
 
 ### REMOVE (end state)
@@ -226,7 +226,7 @@ module; the new kernel calls `interpret_cog` exclusively.**
    is the O(1) `apply_op/3` step (== `interpret_cog`), value = `to_value(state)`, no
    delta; the **non-commutative** branch is refused with a clear error (its live-log
    path is step 5). New native `bondy_oplog_crdt_lww_register` wired end-to-end:
-   `crdt_module` threaded through `bondy_db_core_registry` (entry/config/accessor)
+   `crdt_module` threaded through `bondy_oplog_core_registry` (entry/config/accessor)
    and `bondy_db:open_table` (`provision_shards`/`provision_shard` + `info/1`), into
    the applier `cell_apply_ctx`. e2e tests (`bondy_oplog_crdt_lww_e2e_test`, 8):
    real applier → projection → read on the CRDT kernel + the public `open_table`
@@ -238,7 +238,7 @@ module; the new kernel calls `interpret_cog` exclusively.**
    the step-6 default-flip on Fly/Linux (macOS is storage-bound/unrepresentative; the
    fold path is byte-identical so existing tables carry zero regression risk);
    (c) compaction checkpoint for CRDT cell instances is step 4.
-   - **3b. Kernel-ify the `bondy_db_core` read/overlay path.** ✅ **LANDED
+   - **3b. Kernel-ify the `bondy_oplog_core` read/overlay path.** ✅ **LANDED
      (2026-06-09, uncommitted).** The symmetric other half of the seam: the **read**
      path now interprets the COG instead of folding events. Added
      `bondy_oplog_cell_kernel:interpret_overlay/4` (the operation-based overlay merge
@@ -246,7 +246,7 @@ module; the new kernel calls `interpret_cog` exclusively.**
      the projection state, **not** `apply_event`; `{fold,Mod}` is byte-identical to
      the old `fold_state/4`) and `decode_value_bytes/2` (kernel-aware value-slot
      decode). Threaded `Kernel` (via new `kernel_for/1` = `from_modules(fold,crdt)`)
-     through **every** read helper in `bondy_db_core` — `read_state`, the
+     through **every** read helper in `bondy_oplog_core` — `read_state`, the
      `slow_read_*` chain, `read_projection_state[_with_hlc]`, `fenced_read` (batch),
      `do_range`/`merge_range`/`emit_range_cell`, `do_read_at_hlc` — removing all
      direct `bondy_oplog_fold:*` calls (the only `entry_fold_module` left is inside
