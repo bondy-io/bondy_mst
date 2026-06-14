@@ -2,8 +2,8 @@
 
 This page is the **operator's runbook** for taking a backup of a Bondy MST
 data tree and restoring it. The architecture context for what each
-store contains lives in [chapter 00](00_overview.md) (the layered
-storage model) and [chapter 01](01_bondy_oplog.md) (the WAL and
+store contains lives in chapter 00 (in the bondy umbrella docs) (the layered
+storage model) and chapter 01 (in the bondy umbrella docs) (the WAL and
 recovery).
 
 The Erlang API for these operations is in `bondy_mst_admin`.

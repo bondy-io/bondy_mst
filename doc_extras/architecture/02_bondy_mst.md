@@ -279,7 +279,7 @@ peer side is `bondy_oplog_responder.erl`. The transport is pluggable.
 
 ## Where do MST pages come from?
 
-The MST is **derived from events**. The applier ([chapter 04](04_applier.md)) is the
+The MST is **derived from events**. The applier (chapter 04 (in the bondy umbrella docs)) is the
 process that:
 
 1. Takes events from the WAL drain (or from peer integration).
@@ -300,7 +300,7 @@ flowchart LR
 Compaction snapshots the **stable prefix** of events into a single
 file, then truncates the MST. The frontier between "snapshotted" and
 "live" is the **compaction watermark**, advanced by
-`bondy_oplog_compaction` (not by the applier) — see [chapter 06](06_compaction_and_bootstrap.md).
+`bondy_oplog_compaction` (not by the applier) — see chapter 06 (in the bondy umbrella docs).
 
 ## Truncation is physical page deletion
 

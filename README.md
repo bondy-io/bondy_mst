@@ -49,9 +49,9 @@ together or independently:
    pages. Usable standalone for anti-entropy and integrity verification.
 
 **Where to start:** application developers should use the **`bondy_db`**
-facade — see the [facade section](#the-bondy_db-facade) below, [chapter
-03](doc_extras/architecture/03_bondy_db.md), the [app developer's
-tour](doc_extras/architecture/07_app_developers_tour.md), and the
+facade — see the [facade section](#the-bondy_db-facade) below, chapter
+03 (in the bondy umbrella docs), the app developer's
+tour (in the bondy umbrella docs), and the
 cheatsheet. The bulk of *this* README documents the **`bondy_oplog`**
 framework layer (the event-log API, replication, compaction, validators)
 that `bondy_db` is built on; reach for it when you need the low-level API.
@@ -120,14 +120,14 @@ under `doc_extras/architecture/`:
 
 | # | Doc | Topic |
 |---|---|---|
-| 00 | [Overview](doc_extras/architecture/00_overview.md) | The three packages and one end-to-end write + read. |
-| 01 | [bondy_oplog](doc_extras/architecture/01_bondy_oplog.md) | Instances, WAL, sync sessions, eager-push vs. anti-entropy. |
+| 00 | Overview (in the bondy umbrella docs) | The three packages and one end-to-end write + read. |
+| 01 | bondy_oplog (in the bondy umbrella docs) | Instances, WAL, sync sessions, eager-push vs. anti-entropy. |
 | 02 | [bondy_mst](doc_extras/architecture/02_bondy_mst.md) | The Merkle Search Tree, the pack-store backend, AE protocol. |
-| 03 | [bondy_db](doc_extras/architecture/03_bondy_db.md) | The consumer-facing facade: tables, the CRDT catalogue, the read path (cache + overlay + projection, freshness fence), and the table write API. |
-| 04 | [Applier](doc_extras/architecture/04_applier.md) | The reconciler loop that ties writes, the MST, and the projection together. |
-| 05 | [The CRDT model](doc_extras/architecture/05_crdt_model.md) | The pure operation-based CRDT contract: `interpret_cog`, `apply_op`, causal tiers, the native catalogue. |
-| 06 | [Compaction & bootstrap](doc_extras/architecture/06_compaction_and_bootstrap.md) | Why the oplog is bounded; how new replicas join. |
-| 07 | [App developer's tour](doc_extras/architecture/07_app_developers_tour.md) | Mapping a domain onto tables, CRDTs and topologies. |
+| 03 | bondy_db (in the bondy umbrella docs) | The consumer-facing facade: tables, the CRDT catalogue, the read path (cache + overlay + projection, freshness fence), and the table write API. |
+| 04 | Applier (in the bondy umbrella docs) | The reconciler loop that ties writes, the MST, and the projection together. |
+| 05 | The CRDT model (in the bondy umbrella docs) | The pure operation-based CRDT contract: `interpret_cog`, `apply_op`, causal tiers, the native catalogue. |
+| 06 | Compaction & bootstrap (in the bondy umbrella docs) | Why the oplog is bounded; how new replicas join. |
+| 07 | App developer's tour (in the bondy umbrella docs) | Mapping a domain onto tables, CRDTs and topologies. |
 | 08 | [Backup & restore](doc_extras/architecture/08_backup_and_restore.md) | Operator runbook for `bondy_mst_admin`. |
 
 The same docs ship in the ex_doc output (see `make docs`). These
@@ -175,8 +175,8 @@ What the facade adds on top of the framework:
   `g`/`pn_counter`, `g_set`, `two_p_set`, `aw_set`, `rw_set`,
   `mv_register`, `aw_map`, `ew_flag`, `dw_flag` — selected per table by its
   short type label `fold_module` (required); pass a fully-qualified
-  `crdt_module` to override with a custom module. See [The CRDT
-  model](doc_extras/architecture/05_crdt_model.md).
+  `crdt_module` to override with a custom module. See The CRDT
+  model (in the bondy umbrella docs).
 - **Pluggable durability per table** — durable (Leveled LSM projection +
   pack-store MST) or `durability => ephemeral` (in-memory ETS projection +
   in-memory WAL, optionally `fused`) for hot, rebuildable state.
@@ -187,9 +187,9 @@ What the facade adds on top of the framework:
 - **Shard topologies** — `single_bookie`, `per_entity`, `shared_shards`,
   and an in-memory topology, mapping tables onto shards.
 
-The one-page [cheatsheet](doc_extras/cheatsheet.cheatmd) has the full
-API at a glance; [chapter 03](doc_extras/architecture/03_bondy_db.md) and
-the [app developer's tour](doc_extras/architecture/07_app_developers_tour.md)
+The one-page cheatsheet (in the bondy umbrella docs) has the full
+API at a glance; chapter 03 (in the bondy umbrella docs) and
+the app developer's tour (in the bondy umbrella docs)
 are the narrative reference. The rest of this README covers the
 `bondy_oplog` framework that sits beneath this facade.
 
@@ -210,7 +210,7 @@ instead of Canteen's hash-chained DAG — the MST gives the same
 deterministic, content-addressed event ordering while adding
 efficient set-reconciliation anti-entropy, which a hash-chained DAG
 cannot offer. See
-[chapter 06](doc_extras/architecture/06_compaction_and_bootstrap.md)
+chapter 06 (in the bondy umbrella docs)
 for how the COG/compaction machinery rides the MST.
 
 ### Merkle Search Trees (MSTs)
@@ -452,7 +452,7 @@ Implement `bondy_oplog_crdt`:
 
 | Callback | Required | Purpose |
 |---|---|---|
-| `causal_tier/0` | yes | Return `tier_0`, `tier_1`, or `tier_2` — selects the causal metadata the substrate provisions (tier_0 = scalar HLC; tier_2 = per-cell causal context). See [The CRDT model](doc_extras/architecture/05_crdt_model.md). |
+| `causal_tier/0` | yes | Return `tier_0`, `tier_1`, or `tier_2` — selects the causal metadata the substrate provisions (tier_0 = scalar HLC; tier_2 = per-cell causal context). See The CRDT model (in the bondy umbrella docs). |
 | `init/0` | yes | Bottom state — what the CRDT looks like when no events have ever been applied. |
 | `interpret_cog/2` | yes | `(Events, State) -> NewState`. Given a batch of events in key order, return the updated state. **Must be deterministic** — same inputs ⇒ same output on every replica. This is the foundation of convergence. |
 | `query/2` | yes | `(Query, State) -> Result`. Project the state for client queries. Pure. |
@@ -712,8 +712,8 @@ Query semantics are entirely defined by your CRDT module's `query/2`.
 
 ### Per-cell projection
 
-When the instance is configured with a CRDT module (see [The CRDT
-model](doc_extras/architecture/05_crdt_model.md)), the substrate
+When the instance is configured with a CRDT module (see The CRDT
+model (in the bondy umbrella docs)), the substrate
 also maintains a per-instance materialised projection fed by the
 applier:
 
@@ -725,7 +725,7 @@ applier:
 
 For full cell-level reads (cache + overlay + projection merge with
 HLC), use the `bondy_db` / `bondy_oplog_core` read facade documented in
-[`doc_extras/architecture/03_bondy_db.md`](doc_extras/architecture/03_bondy_db.md).
+`doc_extras/architecture/03_bondy_db.md` (in the bondy umbrella docs).
 
 ---
 
@@ -1173,7 +1173,7 @@ quiescent. Trigger manually via `bondy_oplog:sync/2,3` and
 | `hash_algorithm` | `sha256` | MST page hashing. |
 | `validator` | `bondy_oplog_validator_trust` | Event signer/verifier. |
 | `validator_opts` | `#{}` | Opts passed to the validator's `init/2`. |
-| `fold_module` | `undefined` | **Legacy alias** for `crdt_module`. An atom shorthand with a native twin (`lww_register`, `g_counter`, `pn_counter`, `g_set`, `max_register`, `min_register`, `index_entry`) resolves to its byte-identical CRDT. Shorthands with no twin (`presence_basic`, `strict_register`, `orset`, `ttl_presence`, `map_of_fields`) were retired and now error. See [The CRDT model](doc_extras/architecture/05_crdt_model.md). |
+| `fold_module` | `undefined` | **Legacy alias** for `crdt_module`. An atom shorthand with a native twin (`lww_register`, `g_counter`, `pn_counter`, `g_set`, `max_register`, `min_register`, `index_entry`) resolves to its byte-identical CRDT. Shorthands with no twin (`presence_basic`, `strict_register`, `orset`, `ttl_presence`, `map_of_fields`) were retired and now error. See The CRDT model (in the bondy umbrella docs). |
 | `fold_opts` | `#{}` | Opaque options threaded through with the legacy label. |
 | `crdt_module` | `undefined` | Required for `compact/1` and `query/2`. |
 | `compaction_checkpoint` | context-sensitive | `_file` when `storage_path` is set, `_ets` otherwise. |
@@ -1184,7 +1184,7 @@ quiescent. Trigger manually via `bondy_oplog:sync/2,3` and
 | `overlay_throttle` | `drop` | Behaviour on overlay-cap breach. Only `drop` is currently supported. |
 | `hlc_seed` | `0` | Initial HLC value. Auto-seeded from MST/snapshot at init when applicable. |
 | `seq_seed` | `0` | Initial Seq value. Auto-seeded from MST at init. |
-| `applier` | `#{}` | Per-instance applier tuning. Recognised keys: `commit_every` (default `64`), `poll_interval_ms` (default `5`). See [The applier](doc_extras/architecture/04_applier.md). |
+| `applier` | `#{}` | Per-instance applier tuning. Recognised keys: `commit_every` (default `64`), `poll_interval_ms` (default `5`). See The applier (in the bondy umbrella docs). |
 | `wal_backend` | `disk` | `disk` (segment files) or `mem` (in-memory ETS WAL, fused-only) — the ephemeral/fast path. |
 | `fused` | `false` | When `true`, the instance drains its own WAL and installs inline (no separate applier hop) — the ephemeral high-throughput mode. |
 | `install_coalesce_max` | `16` | Max install batches the instance coalesces per cycle. |
@@ -1230,7 +1230,7 @@ production-safe; tune only when you have a workload reason. See
 
 | Behaviour | Purpose |
 |---|---|
-| `bondy_oplog_crdt` | Consumer-defined operation-based CRDT semantics (`interpret_cog/2` + `query/2` + the projection seam). The full pure op-based catalogue ships natively (registers, counters, g/2P/add-wins/remove-wins sets, multi-value register, add-wins map, enable/disable-wins flags) — see [The CRDT model](doc_extras/architecture/05_crdt_model.md). |
+| `bondy_oplog_crdt` | Consumer-defined operation-based CRDT semantics (`interpret_cog/2` + `query/2` + the projection seam). The full pure op-based catalogue ships natively (registers, counters, g/2P/add-wins/remove-wins sets, multi-value register, add-wins map, enable/disable-wins flags) — see The CRDT model (in the bondy umbrella docs). |
 | `bondy_oplog_crdt_commutative` | The eager single-operation step (`apply_op/3·4`) + a generic sort-and-fold `interpret_cog` for commutative CRDTs. |
 | `bondy_oplog_validator` | Sign local events; verify remote events; detect equivocation. |
 | `bondy_oplog_peer_source` | Per-instance peer discovery. |
