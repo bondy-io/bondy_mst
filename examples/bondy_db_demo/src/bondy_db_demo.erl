@@ -62,10 +62,10 @@ counter integer, or the set as an ordset).
 -spec info() -> map().
 info() ->
     #{
-        node   => node(),
-        db     => persistent_term:get(?PT(db_name), undefined),
+        node => node(),
+        db => persistent_term:get(?PT(db_name), undefined),
         tables => tables(),
-        peers  => peers(),
+        peers => peers(),
         scheduler => bondy_oplog_sync_scheduler:info()
     }.
 
@@ -101,8 +101,9 @@ Read `(Realm, Key)` from `Table`. Returns the fold's user-facing value.
 """.
 -spec get(atom(), binary(), binary()) ->
     {ok, term(), bondy_oplog_hlc:hlc()} | not_found | {error, term()}.
-get(Table, Realm, Key)
-        when is_atom(Table), is_binary(Realm), is_binary(Key) ->
+get(Table, Realm, Key) when
+    is_atom(Table), is_binary(Realm), is_binary(Key)
+->
     bondy_db:read(table(Table), Realm, Key).
 
 -doc """
@@ -117,8 +118,9 @@ Other fold modules return `{error, {unsupported_fold_for_demo, Fold}}`
 (use `bondy_db:apply/4` directly for those).
 """.
 -spec write(atom(), binary(), binary(), term()) -> ok | {error, term()}.
-write(TableName, Realm, Key, Value)
-        when is_atom(TableName), is_binary(Realm), is_binary(Key) ->
+write(TableName, Realm, Key, Value) when
+    is_atom(TableName), is_binary(Realm), is_binary(Key)
+->
     T = table(TableName),
     case maps:get(fold_module, T) of
         lww_register ->
@@ -163,9 +165,10 @@ dispatch(InstanceId, Peers) ->
     lists:foreach(
         fun(Peer) ->
             _ = bondy_oplog_sync_session:start(
-                InstanceId, Peer,
+                InstanceId,
+                Peer,
                 #{
-                    transport      => bondy_oplog_transport_disterl,
+                    transport => bondy_oplog_transport_disterl,
                     transport_opts => #{timeout => 5_000}
                 }
             )

@@ -24,18 +24,18 @@ start_link() ->
 
 init([]) ->
     SupFlags = #{
-        strategy  => one_for_one,
+        strategy => one_for_one,
         intensity => 5,
-        period    => 10
+        period => 10
     },
     ChildSpecs = [
         #{
-            id       => bondy_db_demo_cluster,
-            start    => {bondy_db_demo_cluster, start_link, []},
-            restart  => permanent,
+            id => bondy_db_demo_cluster,
+            start => {bondy_db_demo_cluster, start_link, []},
+            restart => permanent,
             shutdown => 30_000,
-            type     => worker,
-            modules  => [bondy_db_demo_cluster]
+            type => worker,
+            modules => [bondy_db_demo_cluster]
         }
     ],
     {ok, {SupFlags, ChildSpecs}}.

@@ -50,9 +50,9 @@ On `init/1` this gen_server, driven entirely by app env
 -define(PT(K), {bondy_db_demo, K}).
 
 -record(state, {
-    db          :: map(),
-    tables      :: #{atom() := map()},
-    peers       :: [node()],
+    db :: map(),
+    tables :: #{atom() := map()},
+    peers :: [node()],
     leveled_sup :: pid()
 }).
 
@@ -92,21 +92,21 @@ init([]) ->
     {ok, LeveledSup} = bondy_db_leveled_sup:start_link(),
 
     {ok, Db} = bondy_db:open(DbName, #{
-        topology      => bondy_db_topology_shared_shards,
+        topology => bondy_db_topology_shared_shards,
         topology_opts => #{sup => LeveledSup, dir => LeveledDir},
-        shard_count   => ShardCount,
+        shard_count => ShardCount,
         %% DB-level default fold; each table overrides it below.
-        fold_module   => lww_register,
+        fold_module => lww_register,
         oplog_instance_opts => #{
             storage_path => OplogPath,
             %% Each demo node is a seed: it starts `live` immediately
             %% rather than holding appends in `pre_bootstrap` waiting
             %% for a catalogue snapshot from a peer.
-            seed         => true,
+            seed => true,
             %% Deterministic per-node origin so a restart of the same
             %% node recovers its own WAL instead of being rejected as
             %% an orphan segment.
-            origin       => stable_origin()
+            origin => stable_origin()
         }
     }),
 
@@ -141,18 +141,18 @@ init([]) ->
 
     ?LOG_NOTICE(#{
         description => "bondy_db_demo cluster ready",
-        node        => node(),
-        peers       => Peers,
-        db          => DbName,
-        tables      => TableSpecs,
+        node => node(),
+        peers => Peers,
+        db => DbName,
+        tables => TableSpecs,
         shard_count => ShardCount,
-        data_dir    => DataDir
+        data_dir => DataDir
     }),
 
     {ok, #state{
-        db          = Db,
-        tables      = Tables,
-        peers       = Peers,
+        db = Db,
+        tables = Tables,
+        peers = Peers,
         leveled_sup = LeveledSup
     }}.
 

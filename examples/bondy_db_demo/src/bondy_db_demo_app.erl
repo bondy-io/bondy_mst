@@ -17,8 +17,8 @@
 start(_StartType, _StartArgs) ->
     ?LOG_NOTICE(#{
         description => "bondy_db_demo starting",
-        node        => node(),
-        nodes       => application:get_env(bondy_db_demo, nodes, [])
+        node => node(),
+        nodes => application:get_env(bondy_db_demo, nodes, [])
     }),
     bondy_db_demo_sup:start_link().
 
